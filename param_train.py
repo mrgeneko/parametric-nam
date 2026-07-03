@@ -289,14 +289,15 @@ class ParamDataset(torch.utils.data.Dataset):
         self._scale = target_rms / (rms + 1e-8)
         self.inp = inp_raw * self._scale
 
-        # Load combined outputs (mmap — avoids loading all into RAM)
+        # Load combined outputs fully into RAM for fast random access
         out_path = self.dir / "outputs.npy"
         if not out_path.exists():
             raise FileNotFoundError(
                 f"outputs.npy not found. Run first:\n"
                 f"  python batch_harness.py --combine {self.dir}"
             )
-        self.outputs = np.load(str(out_path), mmap_mode="r")
+        print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
+        self.outputs = np.load(str(out_path))
 
         # Load params.csv — successful rows only, ordered by permutation idx
         rows = []
@@ -631,7 +632,7 @@ def main():
         lr_now = scheduler.get_last_lr()[0]
 
         # Print every epoch for production monitoring
-        eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch) if epoch > start_epoch else 0
+        eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
         print(f"  [{epoch:3d}/{args.epochs}]  "
               f"train={train_loss:.6f}  val_loss={val_loss:.6f}  "
               f"val_ESR={val_esr:.6f}  lr={lr_now:.2e}  "
