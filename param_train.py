@@ -10,7 +10,7 @@ Usage:
   python param_train.py --dataset /path/to/dataset --output model.param.nam
 """
 
-import argparse, json, math, os, sys, time, warnings
+import argparse, csv, json, math, os, sys, time, warnings
 from pathlib import Path
 
 import numpy as np
@@ -259,102 +259,98 @@ class SlimmableParametricA2(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ParamDataset(torch.utils.data.Dataset):
-    """Loads paired sweep + output dataset from batch_generate.py output.
+    """Loads dataset produced by batch_harness.py (livespice backend).
 
-    Directory structure:
+    Expected directory structure:
         dataset/
-            input_-12dBFS.wav
-            input_-6dBFS.wav
-            params.csv
-            config.json
-            samples/
-                000000/
-                    params.json
-                    output_-12dBFS.wav
-                    output_-6dBFS.wav
-                000001/
-                    ...
+            sweep.wav        — input audio used during capture
+            outputs.npy      — float32 [N_perms, N_samples] (run --combine first)
+            params.csv       — idx, knob1, ..., ok, error columns
+            config.json      — must contain a "knobs" list
     """
-    def __init__(self, dataset_dir: str, crop_len: int = 48000, repeats: int = 1):
+    def __init__(self, dataset_dir: str, crop_len: int = 48000, repeats: int = 1,
+                 target_dbfs: float = -18.0):
         self.dir = Path(dataset_dir)
         with open(self.dir / "config.json") as f:
             self.config = json.load(f)
-        self.param_names = self.config["param_names"]
+        self.param_names = self.config["knobs"]
+        self.config["param_names"] = self.param_names  # alias for export_nam
         self.num_params = len(self.param_names)
-        self.levels = self.config["input_levels_dbfs"]
+        self.crop_len = crop_len
         self.repeats = repeats
 
-        # Load input sweeps
-        self.inputs: dict[float, np.ndarray] = {}
-        for db in self.levels:
-            path = self.dir / f"input_{db:.0f}dBFS.wav"
-            data, sr = sf.read(str(path))
-            if data.ndim > 1:
-                data = data.mean(axis=1)
-            self.inputs[db] = data
+        # Load input sweep and normalize to target_dbfs RMS
+        inp_raw, _ = sf.read(str(self.dir / "sweep.wav"))
+        if inp_raw.ndim > 1:
+            inp_raw = inp_raw.mean(axis=1)
+        inp_raw = inp_raw.astype(np.float32)
+        rms = float(np.sqrt(np.mean(inp_raw ** 2)))
+        target_rms = 10 ** (target_dbfs / 20.0)
+        self._scale = target_rms / (rms + 1e-8)
+        self.inp = inp_raw * self._scale
 
-        # Enumerate all samples and pre-load outputs into memory
-        samples_dir = self.dir / "samples"
-        self.samples: list[tuple[int, dict]] = []
-        self.outputs: dict[tuple[int, float], np.ndarray] = {}
-        for d in sorted(samples_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            with open(d / "params.json") as f:
-                p = json.load(f)
-            sid = int(d.name)
-            self.samples.append((sid, p))
-            for db in self.levels:
-                out, _ = sf.read(str(d / f"output_{db:.0f}dBFS.wav"))
-                if out.ndim > 1:
-                    out = out.mean(axis=1)
-                self.outputs[(sid, db)] = out
+        # Load combined outputs (mmap — avoids loading all into RAM)
+        out_path = self.dir / "outputs.npy"
+        if not out_path.exists():
+            raise FileNotFoundError(
+                f"outputs.npy not found. Run first:\n"
+                f"  python batch_harness.py --combine {self.dir}"
+            )
+        self.outputs = np.load(str(out_path), mmap_mode="r")
 
-        self.crop_len = crop_len
-        self._base_len = len(self.samples) * len(self.levels)
+        # Load params.csv — successful rows only, ordered by permutation idx
+        rows = []
+        with open(self.dir / "params.csv", newline="") as f:
+            for row in csv.DictReader(f):
+                if int(row["ok"]) == 1:
+                    rows.append(row)
+        rows.sort(key=lambda r: int(r["idx"]))
+        self.samples = [
+            (int(r["idx"]), {n: float(r[n]) for n in self.param_names})
+            for r in rows
+        ]
+
         self._check_output_diversity()
 
     def _check_output_diversity(self) -> None:
-        """Warn if any two output files are identical — indicates a dataset bug
-        (e.g. parameter names in batch_harness.py param_map don't match the circuit)."""
-        keys = list(self.outputs.keys())
-        for i in range(len(keys)):
-            for j in range(i + 1, len(keys)):
-                a, b = self.outputs[keys[i]], self.outputs[keys[j]]
-                n = min(len(a), len(b))
-                max_diff = np.abs(a[:n] - b[:n]).max()
-                if max_diff < 1e-7:
+        """Spot-check a sample of output pairs for accidental duplicates."""
+        if len(self.samples) < 2:
+            return
+        rng = np.random.default_rng(42)
+        check = rng.choice(len(self.samples), size=min(20, len(self.samples)), replace=False)
+        for i in range(len(check)):
+            for j in range(i + 1, len(check)):
+                idx_i = self.samples[int(check[i])][0]
+                idx_j = self.samples[int(check[j])][0]
+                if np.abs(self.outputs[idx_i] - self.outputs[idx_j]).max() < 1e-7:
                     warnings.warn(
-                        f"Outputs {keys[i]} and {keys[j]} are identical "
-                        f"(max_diff={max_diff:.2e}) — dataset is likely invalid. "
-                        "Check that param_map names in batch_harness.py exactly match "
-                        "the circuit component names (case and spaces matter)."
+                        f"Outputs {idx_i} and {idx_j} are identical "
+                        f"— dataset may be invalid. Check param_map names "
+                        "in batch_harness.py match circuit component names."
                     )
 
     def __len__(self):
-        return self._base_len * self.repeats
+        return len(self.samples) * self.repeats
 
     def __getitem__(self, idx):
-        real_idx = idx % self._base_len
-        sidx, level_idx = divmod(real_idx, len(self.levels))
-        sample_id, params = self.samples[sidx]
-        db = self.levels[level_idx]
+        real_idx = idx % len(self.samples)
+        perm_idx, params = self.samples[real_idx]
 
-        inp = self.inputs[db]
-        out = self.outputs[(sample_id, db)]
+        inp = self.inp
+        out = (self.outputs[perm_idx] * self._scale).astype(np.float32)
 
-        # Random crop
-        if len(inp) > self.crop_len:
-            start = np.random.randint(0, len(inp) - self.crop_len)
+        sig_len = min(len(inp), len(out))
+        if sig_len > self.crop_len:
+            start = np.random.randint(0, sig_len - self.crop_len)
             inp = inp[start:start + self.crop_len]
             out = out[start:start + self.crop_len]
         else:
-            pad = self.crop_len - len(inp)
-            inp = np.pad(inp, (0, pad))
-            out = np.pad(out, (0, pad))
+            pad = self.crop_len - sig_len
+            inp = np.pad(inp[:sig_len], (0, pad))
+            out = np.pad(out[:sig_len], (0, pad))
 
-        inp_t = torch.from_numpy(inp).float().unsqueeze(0)
-        out_t = torch.from_numpy(out).float().unsqueeze(0)
+        inp_t = torch.from_numpy(inp.copy()).float().unsqueeze(0)
+        out_t = torch.from_numpy(out.copy()).float().unsqueeze(0)
         params_t = torch.tensor([params[n] for n in self.param_names]).float()
         return inp_t, out_t, params_t
 
@@ -403,11 +399,12 @@ class ParamLoss(nn.Module):
 # Training
 # ---------------------------------------------------------------------------
 
-def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0):
+def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
+                epoch: int = 0, total_epochs: int = 0, log_interval: int = 50):
     model.train()
     slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
-    for inp, out, params in loader:
+    for step, (inp, out, params) in enumerate(loader):
         inp, out, params = inp.to(device), out.to(device), params.to(device)
         optimizer.zero_grad()
         if slimmable:
@@ -421,6 +418,9 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0):
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
         optimizer.step()
         total_loss += loss.item()
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            print(f"  [{epoch:3d}/{total_epochs}] step {step+1}/{len(loader)}  "
+                  f"loss={total_loss/(step+1):.6f}", file=sys.stderr, flush=True)
     return total_loss / len(loader)
 
 
@@ -611,15 +611,15 @@ def main():
     # ------------------------------------------------------------------
     print(f"\nTraining {args.epochs} epochs ...", file=sys.stderr)
     if log_csv is not None:
-        import csv as csv_mod
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
-        log_w = csv_mod.writer(log_f)
+        log_w = csv.writer(log_f)
         if not args.resume:
             log_w.writerow(["epoch", "train_loss", "val_loss", "val_esr", "lr", "elapsed_s"])
 
     t0 = time.time()
     for epoch in range(start_epoch, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
+                                 epoch=epoch, total_epochs=args.epochs)
         val_loss, val_esr = validate(model, val_loader, criterion, device)
         scheduler.step()
 
@@ -688,7 +688,7 @@ def main():
     # ------------------------------------------------------------------
     if args.param_sensitivity:
         print(f"\nParameter sensitivity check ...", file=sys.stderr)
-        sweep_audio, _ = sf.read(str(dataset.dir / "input_-12dBFS.wav"))
+        sweep_audio, _ = sf.read(str(dataset.dir / "sweep.wav"))
         if sweep_audio.ndim > 1:
             sweep_audio = sweep_audio.mean(axis=1)
         sweep_audio = sweep_audio[:48000]
