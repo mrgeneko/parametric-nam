@@ -24,18 +24,33 @@ from param_train import ParametricA2
 CHUNK = 131072  # process in chunks to avoid MPS memory pressure
 
 
-def load_model(nam_path: str, device: torch.device):
+def load_model(nam_path: str, device: torch.device, quality: str = "full"):
     data = json.loads(Path(nam_path).read_text())
-    assert data["architecture"] == "ParametricWaveNet", \
-        f"Expected ParametricWaveNet, got {data['architecture']}"
-    cfg = data["config"]
+    arch = data["architecture"]
+
+    if arch == "SlimmableParametricContainer":
+        # Pick submodel by quality: "lite" → max_value<=0.5, "full" → max_value>0.5
+        submodels = data["config"]["submodels"]
+        if quality == "lite":
+            sm = next(s for s in submodels if s["max_value"] <= 0.5)
+        else:
+            sm = next(s for s in reversed(submodels) if s["max_value"] > 0.5)
+        model_data = sm["model"]
+        print(f"Loaded: SlimmableParametricContainer [{quality}] "
+              f"(max_value={sm['max_value']})", file=sys.stderr)
+    elif arch == "ParametricWaveNet":
+        model_data = data
+    else:
+        raise ValueError(f"Unsupported architecture: {arch}")
+
+    cfg = model_data["config"]
     channels = cfg["layers"]
     num_params = cfg["parametric"]["condition_size"]
     model = ParametricA2(channels, num_params)
-    model.load_weights(data["weights"])
+    model.load_weights(model_data["weights"])
     model.to(device).eval()
     param_defs = cfg["parametric"]["parameters"]
-    print(f"Loaded: A2 {channels}ch, params={[p['name'] for p in param_defs]}", file=sys.stderr)
+    print(f"  A2 {channels}ch, params={[p['name'] for p in param_defs]}", file=sys.stderr)
     return model, param_defs
 
 
@@ -68,10 +83,12 @@ def main():
     ap.add_argument("--output",  default=None)
     ap.add_argument("--sweep",   default=None, help="Comma-separated gain_2 values")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--quality", choices=["lite", "full"], default="full",
+                    help="For SlimmableParametricContainer: which submodel to use (default: full)")
     args = ap.parse_args()
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    model, param_defs = load_model(args.model, device)
+    model, param_defs = load_model(args.model, device, quality=args.quality)
 
     audio, sr = sf.read(args.input, dtype="float32")
     if audio.ndim > 1:

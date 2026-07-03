@@ -214,6 +214,47 @@ class ParametricA2(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Slimmable model (A2 Lite 3ch + A2 Full 8ch, trained jointly)
+# ---------------------------------------------------------------------------
+
+K_LITE_CHANNELS = 3
+K_FULL_CHANNELS = 8
+
+
+class SlimmableParametricA2(nn.Module):
+    """Two independent ParametricA2 models trained simultaneously.
+
+    Exports as SlimmableParametricContainer with:
+      max_value=0.5 → lite (3ch)
+      max_value=1.0 → full (8ch)
+    """
+    def __init__(self, num_params: int):
+        super().__init__()
+        self.lite = ParametricA2(K_LITE_CHANNELS, num_params)
+        self.full = ParametricA2(K_FULL_CHANNELS, num_params)
+        self.num_params = num_params
+
+    def forward(self, audio: torch.Tensor, params: torch.Tensor):
+        return self.lite(audio, params), self.full(audio, params)
+
+    def export_nam(self, config: dict, metadata: dict, sample_rate: int) -> dict:
+        lite_nam = self.lite.export_nam(config, metadata, sample_rate)
+        full_nam = self.full.export_nam(config, metadata, sample_rate)
+        return {
+            "version": metadata.get("version", "0.7.0"),
+            "architecture": "SlimmableParametricContainer",
+            "config": {
+                "submodels": [
+                    {"max_value": 0.5, "model": lite_nam},
+                    {"max_value": 1.0, "model": full_nam},
+                ]
+            },
+            "weights": [],
+            "sample_rate": sample_rate,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
 
@@ -271,6 +312,24 @@ class ParamDataset(torch.utils.data.Dataset):
 
         self.crop_len = crop_len
         self._base_len = len(self.samples) * len(self.levels)
+        self._check_output_diversity()
+
+    def _check_output_diversity(self) -> None:
+        """Warn if any two output files are identical — indicates a dataset bug
+        (e.g. parameter names in batch_harness.py param_map don't match the circuit)."""
+        keys = list(self.outputs.keys())
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                a, b = self.outputs[keys[i]], self.outputs[keys[j]]
+                n = min(len(a), len(b))
+                max_diff = np.abs(a[:n] - b[:n]).max()
+                if max_diff < 1e-7:
+                    warnings.warn(
+                        f"Outputs {keys[i]} and {keys[j]} are identical "
+                        f"(max_diff={max_diff:.2e}) — dataset is likely invalid. "
+                        "Check that param_map names in batch_harness.py exactly match "
+                        "the circuit component names (case and spaces matter)."
+                    )
 
     def __len__(self):
         return self._base_len * self.repeats
@@ -346,12 +405,17 @@ class ParamLoss(nn.Module):
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0):
     model.train()
+    slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
     for inp, out, params in loader:
         inp, out, params = inp.to(device), out.to(device), params.to(device)
         optimizer.zero_grad()
-        pred = model(inp, params)
-        loss = criterion(pred, out)
+        if slimmable:
+            pred_lite, pred_full = model(inp, params)
+            loss = criterion(pred_lite, out) + criterion(pred_full, out)
+        else:
+            pred = model(inp, params)
+            loss = criterion(pred, out)
         loss.backward()
         if clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
@@ -362,15 +426,22 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0):
 
 def validate(model, loader, criterion, device):
     model.eval()
+    slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
     total_esr = 0
     n = 0
     with torch.no_grad():
         for inp, out, params in loader:
             inp, out, params = inp.to(device), out.to(device), params.to(device)
-            pred = model(inp, params)
-            total_loss += criterion(pred, out).item()
-            total_esr += esr(pred, out).item()
+            if slimmable:
+                pred_lite, pred_full = model(inp, params)
+                total_loss += (criterion(pred_lite, out) + criterion(pred_full, out)).item()
+                # Report ESR of the full model as the primary metric
+                total_esr += esr(pred_full, out).item()
+            else:
+                pred = model(inp, params)
+                total_loss += criterion(pred, out).item()
+                total_esr += esr(pred, out).item()
             n += 1
     return total_loss / n, total_esr / n
 
@@ -440,6 +511,9 @@ def main():
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
+    ap.add_argument("--slimmable", action="store_true",
+                    help="Train A2 Lite (3ch) + A2 Full (8ch) jointly and export as "
+                         "SlimmableParametricContainer (ignores --channels)")
     ap.add_argument("--param-sensitivity", action="store_true",
                     help="Run parameter sensitivity check after training")
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
@@ -494,11 +568,18 @@ def main():
     # Build model
     # ------------------------------------------------------------------
     num_params = dataset.num_params
-    model = ParametricA2(args.channels, num_params)
+    if args.slimmable:
+        model = SlimmableParametricA2(num_params)
+        lite_w = model.lite.weight_count()
+        full_w = model.full.weight_count()
+        print(f"\nModel: SlimmableParametricA2  lite={K_LITE_CHANNELS}ch ({lite_w}w) + "
+              f"full={K_FULL_CHANNELS}ch ({full_w}w), {num_params} params", file=sys.stderr)
+    else:
+        model = ParametricA2(args.channels, num_params)
+        n_weights = model.weight_count()
+        print(f"\nModel: A2 {args.channels}-channel, {num_params} params, "
+              f"{n_weights} weights", file=sys.stderr)
     model.to(device)
-    n_weights = model.weight_count()
-    print(f"\nModel: A2 {args.channels}-channel, {num_params} params, "
-          f"{n_weights} weights", file=sys.stderr)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
@@ -607,17 +688,24 @@ def main():
     # ------------------------------------------------------------------
     if args.param_sensitivity:
         print(f"\nParameter sensitivity check ...", file=sys.stderr)
-        sweep, sr = sf.read(str(dataset.dir / "input_-12dBFS.wav"))
-        if sweep.ndim > 1:
-            sweep = sweep.mean(axis=1)
-        sweep = sweep[:48000]
-        sens = param_sensitivity(model, device, sweep)
-        for k, v in sens.items():
-            label = dataset.param_names[int(k.split("_")[-1])] if "_" in k else k
-            print(f"  {label}: max_diff = {v:.6f}", file=sys.stderr)
-            if v < 1e-6:
-                warnings.warn(f"  {label}: output doesn't change with this param "
-                              f"(max_diff={v:.2e}) — model may be ignoring knobs")
+        sweep_audio, _ = sf.read(str(dataset.dir / "input_-12dBFS.wav"))
+        if sweep_audio.ndim > 1:
+            sweep_audio = sweep_audio.mean(axis=1)
+        sweep_audio = sweep_audio[:48000]
+        targets = [model.full] if args.slimmable else [model]
+        labels = ["full"] if args.slimmable else [""]
+        if args.slimmable:
+            targets.append(model.lite)
+            labels.append("lite")
+        for m, lbl in zip(targets, labels):
+            prefix = f"[{lbl}] " if lbl else ""
+            sens = param_sensitivity(m, device, sweep_audio)
+            for k, v in sens.items():
+                pname = dataset.param_names[int(k.split("_")[-1])] if "_" in k else k
+                print(f"  {prefix}{pname}: max_diff = {v:.6f}", file=sys.stderr)
+                if v < 1e-6:
+                    warnings.warn(f"  {prefix}{pname}: output doesn't change with this param "
+                                  f"(max_diff={v:.2e}) — model may be ignoring knobs")
 
     # ------------------------------------------------------------------
     # Export .param.nam
@@ -625,24 +713,44 @@ def main():
     print(f"\nExporting to {args.output} ...", file=sys.stderr)
     nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000)
     args.output.write_text(json.dumps(nam_data, separators=(",", ":")))
-    n_exported = len(nam_data["weights"])
-    print(f"  Exported {n_exported} weights to {args.output}", file=sys.stderr)
+    print(f"  Architecture: {nam_data['architecture']}", file=sys.stderr)
+    if args.slimmable:
+        for sm in nam_data["config"]["submodels"]:
+            w = len(sm["model"]["weights"])
+            ch = sm["model"]["config"]["layers"]
+            print(f"    max_value={sm['max_value']}  {ch}ch  {w} weights", file=sys.stderr)
+    else:
+        print(f"  Exported {len(nam_data['weights'])} weights", file=sys.stderr)
 
-    # Verify round-trip: export → reload in Python → compare forward pass
+    # Verify round-trip
     print(f"  Verifying round-trip ...", file=sys.stderr)
-    model2 = ParametricA2(args.channels, num_params)
-    model2.load_weights(nam_data["weights"])
-    model2.to(device)
     test_inp = torch.randn(1, 1, 8192, device=device)
     test_params = torch.rand(1, num_params, device=device)
-    with torch.no_grad():
-        out1 = model(test_inp, test_params)
-        out2 = model2(test_inp, test_params)
-    max_diff = (out1 - out2).abs().max().item()
-    if max_diff > 1e-6:
-        warnings.warn(f"Round-trip max diff = {max_diff:.2e} — weight export may be corrupt")
+    if args.slimmable:
+        for sm_data, lbl in zip(nam_data["config"]["submodels"], ["lite", "full"]):
+            ch = sm_data["model"]["config"]["layers"]
+            m2 = ParametricA2(ch, num_params)
+            m2.load_weights(sm_data["model"]["weights"])
+            m2.to(device)
+            src = model.lite if lbl == "lite" else model.full
+            with torch.no_grad():
+                o1 = src(test_inp, test_params)
+                o2 = m2(test_inp, test_params)
+            md = (o1 - o2).abs().max().item()
+            status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
+            print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
     else:
-        print(f"  Round-trip OK (max diff = {max_diff:.2e})", file=sys.stderr)
+        model2 = ParametricA2(args.channels, num_params)
+        model2.load_weights(nam_data["weights"])
+        model2.to(device)
+        with torch.no_grad():
+            o1 = model(test_inp, test_params)
+            o2 = model2(test_inp, test_params)
+        md = (o1 - o2).abs().max().item()
+        if md > 1e-6:
+            warnings.warn(f"Round-trip max diff = {md:.2e} — weight export may be corrupt")
+        else:
+            print(f"  Round-trip OK (max diff = {md:.2e})", file=sys.stderr)
 
     print(f"\nDone. Model saved to {args.output}", file=sys.stderr)
 
