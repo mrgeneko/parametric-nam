@@ -149,8 +149,8 @@ pip install torch numpy scipy soundfile auraloss
 brew install dotnet@8   # or download from dotnet.microsoft.com/download/dotnet/8.0
 
 cd livespice-emitter/livespice_cli
-dotnet publish -c Release -r osx-arm64 -o publish/
-# Use osx-x64 for Intel Mac
+dotnet publish -c Release -r osx-arm64 -o publish/   # Apple Silicon
+# dotnet publish -c Release -r osx-x64 -o publish/   # Intel Mac
 ```
 
 ### NeuralAmpModelerCore (for C++ inference validation — Phase 3 only)

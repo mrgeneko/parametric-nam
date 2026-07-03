@@ -24,6 +24,8 @@ The two active repos:
 pip install torch numpy scipy soundfile auraloss
 ```
 
+PyTorch uses MPS (Metal Performance Shaders) automatically on Apple Silicon — both `param_train.py` and `infer.py` detect `torch.backends.mps.is_available()` at runtime and use it. No extra configuration needed.
+
 `auraloss` provides the Multi-Resolution STFT loss used in training.
 
 ### .NET SDK (required for livespice-emitter)
@@ -41,7 +43,6 @@ Then rebuild `livespice_cli` from the `livespice-emitter` repo:
 ```bash
 cd livespice-emitter/livespice_cli
 dotnet publish -c Release -r osx-arm64 -o publish/
-# Use osx-x64 for Intel Mac
 ```
 
 The `batch_harness.py` expects the binary at `livespice-emitter/livespice_cli/publish/livespice_cli`.
