@@ -80,13 +80,24 @@ PyTorch uses MPS automatically on Apple Silicon — no extra config.
 ### .NET SDK (for dataset generation)
 
 ```bash
-brew install dotnet@8
+brew install dotnet          # csproj targets net10.0
 
-cd livespice-emitter/livespice_cli
+# Recursive init is REQUIRED (see note below):
+git submodule update --init --recursive extern/LiveSPICE
+
+cd livespice_cli
 dotnet publish -c Release -r osx-arm64 -o publish/
 ```
 
-`batch_harness.py` expects the binary at `livespice-emitter/livespice_cli/publish/livespice_cli`. `livespice_cli.csproj` references `../../LiveSPICE_upstream/` — that directory must be a sibling of `livespice-emitter`.
+`batch_harness.py` expects the binary at `livespice_cli/publish/livespice_cli`.
+
+**ComputerAlgebra.csproj gotcha**: `livespice_cli.csproj` references LiveSPICE's
+`Circuit.csproj`, which in turn `ProjectReference`s
+`extern/LiveSPICE/ComputerAlgebra/ComputerAlgebra/ComputerAlgebra.csproj`.
+`ComputerAlgebra` is a submodule *of the LiveSPICE submodule*, so a plain
+`git submodule update --init extern/LiveSPICE` leaves it empty and the build fails with
+dozens of `CS0246` errors (missing `Expression`, `Arrow`, `Variable`, `SolutionSet` —
+all ComputerAlgebra types). Always init with `--recursive`.
 
 ### Repos to clone
 

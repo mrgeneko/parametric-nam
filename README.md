@@ -170,12 +170,26 @@ pip install torch numpy scipy soundfile auraloss
 
 ### .NET SDK (for dataset generation via livespice backend)
 
-```bash
-brew install dotnet@8
+`livespice_cli` builds against LiveSPICE, which is vendored as the `extern/LiveSPICE`
+submodule. **You must initialize submodules recursively** — LiveSPICE itself nests a
+`ComputerAlgebra` submodule, and `Circuit.csproj` has a `ProjectReference` to
+`extern/LiveSPICE/ComputerAlgebra/ComputerAlgebra/ComputerAlgebra.csproj`. Without the
+recursive init that path is empty and the build fails with dozens of `CS0246` errors
+(`Expression`, `Arrow`, `Variable`, `SolutionSet` not found — those types live in
+ComputerAlgebra).
 
-cd livespice-emitter/livespice_cli
+```bash
+brew install dotnet          # csproj targets net10.0
+
+# Recursive is required — plain `--init` leaves ComputerAlgebra empty:
+git submodule update --init --recursive extern/LiveSPICE
+
+cd livespice_cli
 dotnet publish -c Release -r osx-arm64 -o publish/
 ```
+
+The binary lands at `livespice_cli/publish/livespice_cli`, which is where
+`batch_harness.py` expects it.
 
 ### NeuralAmpModelerCore (Phase 3 only)
 
