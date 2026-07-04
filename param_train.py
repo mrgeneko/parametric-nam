@@ -637,6 +637,15 @@ def main():
                     "best_esr": best_esr,
                     "args_dict": dict(vars(args)),
                 }, ckpt_dir / "best.pt")
+            # Export best .param.nam — swap in best weights, export, restore current weights
+            current_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            model.load_state_dict(best_state)
+            model.to(device)
+            nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000)
+            nam_path = args.output.parent / (args.output.stem + "_best" + args.output.suffix)
+            nam_path.write_text(json.dumps(nam_data, separators=(",", ":")))
+            model.load_state_dict(current_state)
+            model.to(device)
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
