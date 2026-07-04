@@ -11,3 +11,5 @@ livespice_cli/bin/
 livespice_cli/obj/
 extern/LiveSPICE/**/bin/
 extern/LiveSPICE/**/obj/
+.DS_Store
+**/.DS_Store
