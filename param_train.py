@@ -624,19 +624,30 @@ def main():
         val_loss, val_esr = validate(model, val_loader, criterion, device)
         scheduler.step()
 
-        if val_esr < best_esr:
+        new_best = val_esr < best_esr
+        if new_best:
             best_esr = val_esr
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if ckpt_dir is not None:
+                torch.save({
+                    "epoch": epoch,
+                    "model": best_state,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler_last_epoch": scheduler.last_epoch,
+                    "best_esr": best_esr,
+                    "args_dict": dict(vars(args)),
+                }, ckpt_dir / "best.pt")
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
 
         # Print every epoch for production monitoring
         eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
+        best_marker = " *" if new_best else ""
         print(f"  [{epoch:3d}/{args.epochs}]  "
               f"train={train_loss:.6f}  val_loss={val_loss:.6f}  "
               f"val_ESR={val_esr:.6f}  lr={lr_now:.2e}  "
-              f"({elapsed:.0f}s, ETA {eta:.0f}s)",
+              f"({elapsed:.0f}s, ETA {eta:.0f}s){best_marker}",
               file=sys.stderr, flush=True)
 
         # Log CSV
