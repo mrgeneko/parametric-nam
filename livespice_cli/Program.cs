@@ -199,8 +199,14 @@ namespace livespice_cli
 
             if (data == null) throw new Exception("No data chunk found");
 
+            // Snapshot the data chunk to an array ONCE. Previously the 16- and 32-bit
+            // branches called data.ToArray() per sample, copying the whole ~MB chunk on
+            // every iteration — O(N^2), which made large 16/32-bit-float WAVs appear to
+            // hang inside ReadWav (the 24-bit branch indexed directly and was unaffected).
+            byte[] buf = data.ToArray();
+
             int bytesPerSample = bitsPerSample / 8;
-            int totalSamples = data.Count / bytesPerSample / channels;
+            int totalSamples = buf.Length / bytesPerSample / channels;
             double[] samples = new double[totalSamples];
 
             for (int i = 0; i < totalSamples; i++)
@@ -210,18 +216,18 @@ namespace livespice_cli
 
                 if (bitsPerSample == 16)
                 {
-                    short val = BitConverter.ToInt16(data.ToArray(), byteOffset);
+                    short val = BitConverter.ToInt16(buf, byteOffset);
                     sample = val / 32768.0;
                 }
                 else if (bitsPerSample == 24)
                 {
-                    int val = data[byteOffset] | (data[byteOffset + 1] << 8) | (data[byteOffset + 2] << 16);
+                    int val = buf[byteOffset] | (buf[byteOffset + 1] << 8) | (buf[byteOffset + 2] << 16);
                     if ((val & 0x800000) != 0) val |= unchecked((int)0xFF000000);
                     sample = val / 8388608.0;
                 }
                 else if (bitsPerSample == 32)
                 {
-                    float val = BitConverter.ToSingle(data.ToArray(), byteOffset);
+                    float val = BitConverter.ToSingle(buf, byteOffset);
                     sample = val;
                 }
                 else
