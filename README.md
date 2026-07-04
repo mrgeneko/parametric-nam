@@ -45,7 +45,13 @@ dataset/
     params.csv       # idx, knob1, knob2, ..., ok, error
 ```
 
-**Important**: Use `limelight.wav` (real guitar, 21.6s) as the training sweep, not sine sweeps or chromatic MIDI audio — LiveSPICE's nonlinear solver hangs indefinitely on those inputs.
+**Note on input formats**: Earlier guidance claimed LiveSPICE "hangs" on sine
+sweeps / broadband signals. That was a misdiagnosis — the real cause was an
+O(N²) bug in `livespice_cli`'s WAV reader that stalled on 16-bit and 32-bit-float
+inputs (24-bit PCM took a different code path and was unaffected). Fixed in
+commit `fa90d57`. Any WAV format (16/24/32-bit) and any content — including sine
+sweeps — now reads correctly. `limelight.wav` is still a fine choice, but it is
+no longer a constraint.
 
 Checkpoints written every epoch to `latest.pt`; best ESR checkpoint to `best.pt`; best weights exported immediately to `<output_stem>_best.param.nam`. Metrics logged to `metrics.csv`.
 

@@ -110,7 +110,22 @@ git clone https://github.com/Yahiake/LiveSPICE-Amp-Collection
 
 ### Training input audio
 
-Use `limelight.wav` (real guitar, 21.6s, 48kHz mono, ~-25.7 dBFS RMS). **Do not use sine sweeps, chromatic MIDI audio, or any sustained/broadband signal** — LiveSPICE's nonlinear solver hangs indefinitely on those inputs (confirmed with sweep120s.wav and a NAM studio sample file).
+`limelight.wav` (real guitar, 21.6s, 48kHz mono, ~-25.7 dBFS RMS) works well, but
+is **not** a hard requirement.
+
+**Correction (previously believed a solver limitation):** the earlier claim that
+"LiveSPICE's nonlinear solver hangs indefinitely on sine sweeps / sustained /
+broadband signals (confirmed with sweep120s.wav and a NAM studio sample file)"
+was a **misdiagnosis**. The real cause was an **O(N²) bug in `livespice_cli`'s
+`ReadWav`**: it called `data.ToArray()` inside the per-sample loop for 16-bit and
+32-bit-float inputs, copying the whole data chunk on every sample. Large
+16/32-bit-float files therefore stalled *inside the reader, before the simulation
+even started*. 24-bit PCM used a direct-indexing path and was unaffected — which
+is exactly why `limelight.wav` and the PCM_24 [redacted] sweep worked while the 32-bit
+float `sweep120s.wav` "hung." Fixed in commit `fa90d57`; `sweep120s.wav`
+(bit-identical to the first 120s of the [redacted] sweep) went from an 8-minute hang to
+23.5s, matching its PCM_24 twin. **Any format/content is fine now** — sine sweeps
+included.
 
 `limelight.wav` is at `/Users/USER2/Downloads/limelight.wav` on the current machine.
 
