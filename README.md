@@ -95,6 +95,16 @@ python batch_harness.py --combine /path/to/dataset
 
 Knob order in `--knobs` becomes the knob order in the `.param.nam` file and in all downstream UIs.
 
+### Ganged (multi-section) pots
+
+`livespice_cli` sets **every** pot (or switch) whose `Name` matches the swept knob, not
+just the first one. To model a mechanically-ganged control — e.g. the Klon Centaur's
+dual-gang Gain (a 100 kΩ section and a 1 kΩ section that turn together) — give **both**
+`Circuit.Potentiometer` components the **same `Name`** (e.g. `Gain`) in the `.schx`. A
+single `--knobs Gain` / `Gain=0.5` then drives both wipers in lockstep, and the knob still
+appears once in the dataset and `.param.nam`. (Before this behavior, only the first
+matching section moved, so ganged pots tracked incorrectly.)
+
 ## .param.nam Format
 
 The file is a standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a new architecture that Phase 3 registers.

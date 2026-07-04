@@ -53,22 +53,30 @@ namespace livespice_cli
                     var name = parts[0].Trim();
                     var value = double.Parse(parts[1].Trim());
 
-                    var pot = circuit.Components
+                    // Set ALL pots whose name matches, not just the first. This lets a
+                    // ganged (multi-section) pot be modeled as several Potentiometer
+                    // components sharing one Name — e.g. the Klon Centaur's dual-gang
+                    // Gain (a 100k + a 1k section) both track a single "Gain" knob value.
+                    var pots = circuit.Components
                         .OfType<IPotControl>()
                         .Cast<Component>()
-                        .FirstOrDefault(c => c.Name.Trim() == name);
+                        .Where(c => c.Name.Trim() == name)
+                        .ToList();
 
-                    if (pot != null)
+                    if (pots.Count > 0)
                     {
-                        ((IPotControl)pot).PotValue = value;
+                        foreach (var p in pots)
+                            ((IPotControl)p).PotValue = value;
                         continue;
                     }
 
-                    var sw = circuit.Components
+                    // Same for switches: set every matching section (ganged switches).
+                    var switches = circuit.Components
                         .OfType<SinglePoleSwitch>()
-                        .FirstOrDefault(c => c.Name.Trim() == name);
+                        .Where(c => c.Name.Trim() == name)
+                        .ToList();
 
-                    if (sw != null)
+                    foreach (var sw in switches)
                         sw.Position = (int)value;
                 }
             }
