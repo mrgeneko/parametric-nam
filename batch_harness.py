@@ -97,9 +97,18 @@ def list_circuits():
 
 def fmt_params(params: dict, param_map: dict = None) -> str:
     """Serialize params dict to 'Name=val,...' string.
-    param_map translates user-friendly keys → exact circuit component names."""
+    param_map translates user-friendly keys → exact circuit component names. A
+    mapped value may be a list of Names (a ganged control, e.g. a dual-gang pot):
+    the single knob value is written to every Name in the list."""
     if param_map:
-        return ",".join(f"{param_map.get(k, k)}={v}" for k, v in params.items())
+        parts = []
+        for k, v in params.items():
+            target = param_map.get(k, k)
+            if isinstance(target, (list, tuple)):
+                parts.extend(f"{n}={v}" for n in target)
+            else:
+                parts.append(f"{target}={v}")
+        return ",".join(parts)
     return ",".join(f"{k}={v}" for k, v in params.items())
 
 
@@ -249,6 +258,10 @@ def main():
     ap.add_argument("--values",  help="comma-separated sweep values applied to all knobs (default: 0.1,0.3,0.5,0.7)")
     ap.add_argument("--range",        action="append", metavar="KNOB=v1,v2,...",
                                       help="per-knob value override; repeatable (e.g. --range od_master=0.0,0.5,1.0)")
+    ap.add_argument("--gang", action="append", metavar="KNOB=Name1,Name2,...",
+                    help="map one swept knob to several ganged pot Names (e.g. a dual-gang "
+                         "pot): --gang gain=Gain_A,Gain_B . The knob is one column in the "
+                         "dataset; its value is written to every listed pot. Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
@@ -282,7 +295,34 @@ def main():
             sys.exit(0)
 
         knob_keys = [k.strip() for k in args.knobs.split(",")]
-        param_map = resolve_knobs(knob_keys, control_map)
+
+        # Parse --gang: map a swept knob -> list of exact ganged pot Names.
+        def _norm(s):
+            return re.sub(r'_+', '_', s.strip().lower().replace(" ", "_").replace("-", "_"))
+        exact_names = set(control_map.values())
+        gang_map = {}
+        for spec in (args.gang or []):
+            key, _, names = spec.partition("=")
+            key = key.strip()
+            targets = []
+            for t in (n.strip() for n in names.split(",") if n.strip()):
+                if t in exact_names:
+                    targets.append(t)
+                elif _norm(t) in control_map:
+                    targets.append(control_map[_norm(t)])
+                else:
+                    ap.error(f"--gang target '{t}' not found in schx {args.schx.name}")
+            if not targets:
+                ap.error(f"--gang '{spec}' lists no valid pot Names")
+            gang_map[key] = targets
+
+        # Build param_map: ganged knobs -> list of Names; others -> single exact Name.
+        param_map = {}
+        for k in knob_keys:
+            if k in gang_map:
+                param_map[k] = gang_map[k]
+            else:
+                param_map[k] = resolve_knobs([k], control_map)[k]
         knobs = knob_keys
         circuit_label = args.schx.stem
 
