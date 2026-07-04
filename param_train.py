@@ -665,9 +665,9 @@ def main():
                             f"{val_esr:.8f}", f"{lr_now:.2e}", f"{elapsed:.1f}"])
             log_f.flush()
 
-        # Save periodic checkpoint
-        if ckpt_dir is not None and (epoch == 1 or epoch % 10 == 0 or epoch == args.epochs):
-            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.pt"
+        # Save checkpoint every epoch (overwrite previous to save disk space)
+        if ckpt_dir is not None:
+            ckpt_path = ckpt_dir / "latest.pt"
             torch.save({
                 "epoch": epoch,
                 "model": model.state_dict(),
