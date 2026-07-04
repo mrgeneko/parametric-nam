@@ -242,7 +242,7 @@ class SlimmableParametricA2(nn.Module):
         full_nam = self.full.export_nam(config, metadata, sample_rate)
         return {
             "version": metadata.get("version", "0.7.0"),
-            "architecture": "SlimmableParametricContainer",
+            "architecture": "SlimmableContainer",
             "config": {
                 "submodels": [
                     {"max_value": 0.5, "model": lite_nam},
