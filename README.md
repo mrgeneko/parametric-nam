@@ -9,11 +9,11 @@ Toolchain for converting SPICE circuit schematics (`.schx`) into parametric Neur
     ↓  batch_harness.py (in livespice-emitter repo)
 Paired audio dataset: input sweep × N knob permutations
     ↓  param_train.py
-.param.nam  (ParametricWaveNet: A2 architecture + FiLM conditioning)
-    ↓  infer.py
-Output WAVs at arbitrary knob positions
-    ↓  sweep_report.py
-Self-contained HTML analysis report
+.param.nam  (SlimmableContainer: A2 Lite 3ch + Full 8ch, FiLM knob conditioning)
+    ↓  param_infer.py
+Output WAVs at arbitrary knob positions (Python/PyTorch, no C++ required)
+    ↓  Phase 3: NeuralAmpModelerCore ParametricWaveNet factory
+Real-time inference in [redacted]
 ```
 
 ## Scripts
@@ -21,58 +21,47 @@ Self-contained HTML analysis report
 ### `param_train.py` — Train a parametric NAM
 
 ```bash
-python param_train.py \
-    --data-dir /path/to/dataset \
-    --checkpoint-dir /tmp/checkpoints \
-    --epochs 500 \
-    --channels 8 \
-    --lr 1e-3 \
-    --batch-size 16 \
-    --repeats 1000
-
-# Slimmable (trains A2 Lite 3ch + Full 8ch jointly, exports both):
-python param_train.py --data-dir /path/to/dataset --slimmable ...
+# Slimmable (trains A2 Lite 3ch + Full 8ch jointly — always use this):
+caffeinate -i python param_train.py \
+    --dataset /path/to/dataset \
+    --output /path/to/model.param.nam \
+    --slimmable \
+    --epochs 500 --batch-size 64 --repeats 50 \
+    --lr 3e-4 --crop-len 48000 \
+    --checkpoint-dir /path/to/checkpoints
 ```
 
-The dataset directory must contain the format written by `batch_harness.py`:
+Resume from a checkpoint:
+```bash
+caffeinate -i python param_train.py ... --resume /path/to/checkpoints/latest.pt
+```
+
+The dataset directory must contain the format written by `batch_harness.py --combine`:
 ```
 dataset/
-    config.json          # circuit name, param_names, sample_rate
-    input_-12dBFS.wav    # dry input sweep
-    samples/
-        000000/
-            params.json  # {"gain_2": 0.1}
-            output_-12dBFS.wav
-        000001/
-            ...
+    config.json      # {"knobs": ["knob1", "knob2", ...], ...}
+    sweep.wav        # dry input audio (limelight.wav or similar real guitar)
+    outputs.npy      # [N_perms, N_samples] float32 array
+    params.csv       # idx, knob1, knob2, ..., ok, error
 ```
 
-Exports `<circuit>.param.nam` on completion. Best checkpoint is saved as `best.pt`; training metrics are in `metrics.csv`.
+**Important**: Use `limelight.wav` (real guitar, 21.6s) as the training sweep, not sine sweeps or chromatic MIDI audio — LiveSPICE's nonlinear solver hangs indefinitely on those inputs.
 
-### `infer.py` — Run inference
+Checkpoints written every epoch to `latest.pt`; best ESR checkpoint to `best.pt`; best weights exported immediately to `<output_stem>_best.param.nam`. Metrics logged to `metrics.csv`.
+
+### `param_infer.py` — Run inference (Python, no C++ required)
+
+Loads `best.pt` directly and runs PyTorch inference. Use this to preview models before Phase 3 C++ integration.
 
 ```bash
-# Single pass
-python infer.py --model my.param.nam --input dry.wav --output wet.wav --gain2 0.7
-
-# Sweep multiple values
-python infer.py --model my.param.nam --input dry.wav \
-    --sweep 0.1,0.3,0.5,0.7,0.9 --out-dir /tmp/sweep_out
-
-# Slimmable model: pick quality tier
-python infer.py --model my.param.nam --input dry.wav --sweep 0.5 --quality lite
+python param_infer.py \
+    --checkpoint /path/to/checkpoints/best.pt \
+    --input /path/to/dry.wav \
+    --output-dir /path/to/output/ \
+    --params "knob1=0.5,knob2=0.7,knob3=0.3,..."
 ```
 
-### `sweep_report.py` — Generate HTML analysis report
-
-```bash
-python sweep_report.py /tmp/sweep_out/limelight_gain2_*.wav \
-    --model "ParametricA2 8ch ESR=0.00307" \
-    --param-name "gain_2" \
-    -o report.html
-```
-
-Produces a self-contained HTML file with overlaid waveforms, frequency spectra, and per-file stats (RMS, peak, DC, spectral centroid, phase correlation). No external dependencies at render time.
+Multiple `--params` flags produce multiple output files. Knob names and order come from the dataset `config.json`.
 
 ### `batch_harness.py` (in `livespice-emitter` repo)
 
@@ -81,55 +70,95 @@ Generates the training dataset by sweeping the circuit simulation across knob pe
 ```bash
 # List pots in a schx:
 python batch_harness.py --backend livespice \
-    --schx "/path/to/Overdrive Special Preamp.schx"
+    --schx "/path/to/circuit.schx"
 
-# Generate a dataset (5 values × 3 knobs = 125 permutations):
+# Generate a dataset:
 python batch_harness.py --backend livespice \
-    --schx "/path/to/Overdrive Special Preamp.schx" \
-    --knobs od_master,level,treble \
-    --values 0.0,0.25,0.5,0.75,1.0 \
-    --input /path/to/sweep120s.wav \
-    --output ./dumble_dataset
+    --schx "/path/to/circuit.schx" \
+    --knobs knob1,knob2,knob3 \
+    --values 0.2,0.4,0.6,0.8 \
+    --fixed-params "Rock=1,Mid=0" \
+    --speaker S2 \
+    --input /path/to/limelight.wav \
+    --output /path/to/dataset \
+    --dry-run   # check permutation count and disk estimate first
+
+# Combine per-permutation WAVs into outputs.npy for training:
+python batch_harness.py --combine /path/to/dataset
 ```
 
 Knob order in `--knobs` becomes the knob order in the `.param.nam` file and in all downstream UIs.
 
 ## .param.nam Format
 
+The file is a standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a new architecture that Phase 3 registers.
+
 ```json
 {
   "version": "0.7.0",
-  "architecture": "ParametricWaveNet",
+  "architecture": "SlimmableContainer",
   "config": {
-    "layers": 8,
-    "head_scale": 0.448,
-    "parametric": {
-      "type": "film",
-      "condition_size": 1,
-      "film_layers": ["layer_0", "layer_1", ...],
-      "parameters": [
-        {"name": "gain_2", "min": 0.0, "max": 1.0, "default": 0.5}
-      ]
-    }
+    "submodels": [
+      {
+        "max_value": 0.5,
+        "model": {
+          "architecture": "ParametricWaveNet",
+          "config": {
+            "layers": 3,
+            "head_scale": 0.448,
+            "parametric": {
+              "type": "film",
+              "condition_size": 6,
+              "film_layers": ["layer_0", "layer_1", ...],
+              "parameters": [
+                {"name": "volume",       "min": 0.0, "max": 1.0, "default": 0.5},
+                {"name": "treble",       "min": 0.0, "max": 1.0, "default": 0.5},
+                {"name": "middle",       "min": 0.0, "max": 1.0, "default": 0.5},
+                {"name": "bass",         "min": 0.0, "max": 1.0, "default": 0.5},
+                {"name": "mid",          "min": 0.0, "max": 1.0, "default": 0.5},
+                {"name": "clean_master", "min": 0.0, "max": 1.0, "default": 0.5}
+              ]
+            }
+          },
+          "weights": [...]
+        }
+      },
+      {
+        "max_value": 1.0,
+        "model": { "architecture": "ParametricWaveNet", "config": {"layers": 8, ...}, "weights": [...] }
+      }
+    ]
   },
-  "weights": [...],
   "sample_rate": 48000
 }
 ```
 
-`config.parametric.parameters` is the authoritative knob list. Array order = UI presentation order. All values are normalized 0.0–1.0.
+`config.parametric.parameters` is the authoritative knob list. Array order = UI presentation order. All values normalized 0.0–1.0. `"layers"` is the **channel count** (3 or 8), not a layer count — there are always 23 layers.
 
-Slimmable models use `architecture: "SlimmableParametricContainer"` with two submodels at `max_value` thresholds (0.5 = lite, 1.0 = full).
+**Key design point**: `condition_size` in the JSON is the number of knobs fed to FiLM. Audio flows through `input_mixin` separately (always 1-dim). These are two independent conditioning paths — knobs never mix with audio.
 
 ## Architecture
 
-The model is A2 (23-layer WaveNet with LeakyReLU, mixed kernel sizes, and a 6.3k-sample receptive field) with FiLM conditioning injected on every layer. FiLM is initialized to identity (gamma=1, beta=0) so training starts from a well-behaved unconditional baseline.
+A2 is a WaveNet variant: 23-layer dilated causal convnet with LeakyReLU and a Conv1D head. `ParametricWaveNet` adds FiLM (Feature-wise Linear Modulation) on every layer, conditioned on the knob vector. FiLM is initialized to identity (gamma=1, beta=0) so training starts from a well-behaved unconditional baseline.
 
 Key constants (must match NeuralAmpModelerCore's A2 fast path exactly):
 - 23 layers: 14 × kernel=6, then 2 × kernel=15, then 7 × kernel=6
 - Dilations: repeating [1,3,7,17,41,101,239] with {1,13} degridding insert
 - LeakyReLU(0.01) on every layer
 - Head: Conv1D kernel=16
+
+Weight layout per layer (for C++ `set_weights_` compatibility):
+```
+conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → film.weight → film.bias
+```
+Then after all 23 layers: `head.weight → head.bias → head_scale`.
+
+## NAM Ecosystem Compatibility
+
+- **`"SlimmableContainer"`** — standard, already registered in NeuralAmpModelerCore ✓
+- **`"ParametricWaveNet"`** — custom; requires Phase 3 factory registration
+- Official NAM tools deliberately removed user-controllable knob parameters in 2023–2024; parametric inference requires custom C++ work
+- Old parametric C++ code recoverable from NAM git history at commit `ae86979` (before PR #367 removed it)
 
 ## Dependencies
 
@@ -139,37 +168,21 @@ Key constants (must match NeuralAmpModelerCore's A2 fast path exactly):
 pip install torch numpy scipy soundfile auraloss
 ```
 
-`auraloss` provides Multi-Resolution STFT loss. `soundfile` handles WAV I/O. Everything else is standard.
-
 ### .NET SDK (for dataset generation via livespice backend)
 
-`batch_harness.py` calls `livespice_cli`, a .NET 8 application that runs the SPICE simulation. Install .NET 8 and build the CLI from the `livespice-emitter` repo:
-
 ```bash
-brew install dotnet@8   # or download from dotnet.microsoft.com/download/dotnet/8.0
+brew install dotnet@8
 
 cd livespice-emitter/livespice_cli
-dotnet publish -c Release -r osx-arm64 -o publish/   # Apple Silicon
-# dotnet publish -c Release -r osx-x64 -o publish/   # Intel Mac
+dotnet publish -c Release -r osx-arm64 -o publish/
 ```
 
-### NeuralAmpModelerCore (for C++ inference validation — Phase 3 only)
+### NeuralAmpModelerCore (Phase 3 only)
 
-Not required for training or inference via Python. Needed when validating the exported `.param.nam` against the C++ inference engine. Clone from:
-`https://github.com/sdatkinson/NeuralAmpModelerCore`
-
-Use the same version already in `~/work/[redacted]/NeuralAmpModelerCore_v050/`.
-
-### NAM Python trainer (reference only)
-
-Not used directly — this repo has its own `param_train.py`. Install to reference the sweep file format:
-
-```bash
-pip install neural-amp-modeler
-```
+Not required for training or Python inference. Needed for C++ inference validation and [redacted] integration. Already present in `~/work/[redacted]/NeuralAmpModelerCore_v050ko/`.
 
 ## Related Repos
 
 - `livespice-emitter` — SPICE circuit simulation backend + `batch_harness.py`
-- `LiveSPICE-Amp-Collection` — `.schx` circuit library (cloned from Yahiake/LiveSPICE-Amp-Collection)
+- `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - `[redacted]` — Target host for the trained `.param.nam` models
