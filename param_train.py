@@ -183,8 +183,25 @@ class ParametricA2(nn.Module):
     def load_weights(self, weights: list[float]):
         self._load_weight_block(iter(weights))
 
-    def export_nam(self, config: dict, metadata: dict, sample_rate: int) -> dict:
+    def export_nam(self, config: dict, metadata: dict, sample_rate: int,
+                   input_audio: "np.ndarray | None" = None) -> dict:
         weights = self.export_weights()
+
+        # Compute gain: run at default knobs (all 0.5), target -18 dBFS output.
+        # gain is the scalar the plugin multiplies output by for level normalisation.
+        gain = 1.0
+        if input_audio is not None:
+            device = next(self.parameters()).device
+            clip = input_audio[:sample_rate * 10]  # 10 s is enough for RMS
+            with torch.no_grad():
+                inp = torch.from_numpy(clip).float().unsqueeze(0).unsqueeze(0).to(device)
+                params = torch.full((1, self.num_params), 0.5, device=device)
+                out = self(inp, params)
+            out_rms = float(out.squeeze().cpu().pow(2).mean().sqrt().item())
+            target_rms = 10 ** (-18.0 / 20.0)
+            if out_rms > 1e-8:
+                gain = float(target_rms / out_rms)
+
         param_defs = [
             {"name": name, "min": 0.0, "max": 1.0, "default": 0.5}
             for name in config.get("param_names", [])
@@ -206,8 +223,8 @@ class ParametricA2(nn.Module):
             "weights": weights,
             "metadata": {
                 "source_circuit": config.get("circuit", ""),
-                "source_schx": config.get("circuit", "") + ".schx",
                 "loudness": -18.0,
+                "gain": gain,
             },
             "sample_rate": sample_rate,
         }
@@ -237,9 +254,10 @@ class SlimmableParametricA2(nn.Module):
     def forward(self, audio: torch.Tensor, params: torch.Tensor):
         return self.lite(audio, params), self.full(audio, params)
 
-    def export_nam(self, config: dict, metadata: dict, sample_rate: int) -> dict:
-        lite_nam = self.lite.export_nam(config, metadata, sample_rate)
-        full_nam = self.full.export_nam(config, metadata, sample_rate)
+    def export_nam(self, config: dict, metadata: dict, sample_rate: int,
+                   input_audio: "np.ndarray | None" = None) -> dict:
+        lite_nam = self.lite.export_nam(config, metadata, sample_rate, input_audio)
+        full_nam = self.full.export_nam(config, metadata, sample_rate, input_audio)
         return {
             "version": metadata.get("version", "0.7.0"),
             "architecture": "SlimmableContainer",
@@ -250,6 +268,10 @@ class SlimmableParametricA2(nn.Module):
                 ]
             },
             "weights": [],
+            "metadata": {
+                "loudness": -18.0,
+                "gain": full_nam["metadata"]["gain"],
+            },
             "sample_rate": sample_rate,
         }
 
@@ -641,7 +663,8 @@ def main():
             current_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             model.load_state_dict(best_state)
             model.to(device)
-            nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000)
+            nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000,
+                                        input_audio=dataset.inp)
             nam_path = args.output.parent / (args.output.stem + "_best" + args.output.suffix)
             nam_path.write_text(json.dumps(nam_data, separators=(",", ":")))
             model.load_state_dict(current_state)
@@ -732,7 +755,8 @@ def main():
     # Export .param.nam
     # ------------------------------------------------------------------
     print(f"\nExporting to {args.output} ...", file=sys.stderr)
-    nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000)
+    nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000,
+                                input_audio=dataset.inp)
     args.output.write_text(json.dumps(nam_data, separators=(",", ":")))
     print(f"  Architecture: {nam_data['architecture']}", file=sys.stderr)
     if args.slimmable:
