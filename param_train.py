@@ -10,7 +10,7 @@ Usage:
   python param_train.py --dataset /path/to/dataset --output model.param.nam
 """
 
-import argparse, csv, json, math, os, sys, time, warnings
+import argparse, csv, datetime, json, math, os, sys, time, warnings
 from pathlib import Path
 
 import numpy as np
@@ -216,16 +216,29 @@ class ParametricA2(nn.Module):
                 "parameters": param_defs,
             },
         }
+        now = datetime.datetime.now()
+        nam_metadata = {
+            "date": {
+                "year": now.year, "month": now.month, "day": now.day,
+                "hour": now.hour, "minute": now.minute, "second": now.second,
+            },
+            "loudness": -18.0,
+            "gain": gain,
+            "name": config.get("name", config.get("circuit", "")),
+            "modeled_by": config.get("modeled_by", ""),
+            "gear_make": config.get("gear_make", ""),
+            "gear_model": config.get("gear_model", config.get("circuit", "")),
+            "gear_type": config.get("gear_type", "amp"),
+            "tone_type": config.get("tone_type", ""),
+        }
+        # Strip empty strings so absent fields don't clutter the file
+        nam_metadata = {k: v for k, v in nam_metadata.items() if v != ""}
         return {
             "version": metadata.get("version", "0.7.0"),
             "architecture": "ParametricWaveNet",
             "config": layer_config,
             "weights": weights,
-            "metadata": {
-                "source_circuit": config.get("circuit", ""),
-                "loudness": -18.0,
-                "gain": gain,
-            },
+            "metadata": nam_metadata,
             "sample_rate": sample_rate,
         }
 
@@ -269,7 +282,8 @@ class SlimmableParametricA2(nn.Module):
             },
             "weights": [],
             "metadata": {
-                "loudness": -18.0,
+                **{k: v for k, v in full_nam["metadata"].items()
+                   if k not in ("gain",)},
                 "gain": full_nam["metadata"]["gain"],
             },
             "sample_rate": sample_rate,
