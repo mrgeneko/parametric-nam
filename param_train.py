@@ -620,7 +620,7 @@ def main():
     t0 = time.time()
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
-                                 epoch=epoch, total_epochs=args.epochs)
+                                 epoch=epoch, total_epochs=args.epochs, log_interval=10)
         val_loss, val_esr = validate(model, val_loader, criterion, device)
         scheduler.step()
 
