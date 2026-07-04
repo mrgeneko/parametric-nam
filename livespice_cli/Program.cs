@@ -1,0 +1,268 @@
+using Circuit;
+using ComputerAlgebra;
+using Util;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+
+namespace livespice_cli
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string inputPath = null, outputPath = null, circuitPath = null, paramsStr = null, speakerName = null;
+            int sampleRate = 48000, oversample = 2, iterations = 8;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                switch (args[i])
+                {
+                    case "--input": inputPath = args[++i]; break;
+                    case "--output": outputPath = args[++i]; break;
+                    case "--circuit": circuitPath = args[++i]; break;
+                    case "--params": paramsStr = args[++i]; break;
+                    case "--speaker": speakerName = args[++i]; break;
+                    case "--sr": sampleRate = int.Parse(args[++i]); break;
+                    case "--oversample": oversample = int.Parse(args[++i]); break;
+                    case "--iterations": iterations = int.Parse(args[++i]); break;
+                }
+            }
+
+            if (inputPath == null || outputPath == null || circuitPath == null)
+            {
+                Console.Error.WriteLine("Usage: livespice_cli --input in.wav --output out.wav --circuit circuit.schx [--params k=v,...] [--speaker S1] [--sr 48000] [--oversample 2] [--iterations 8]");
+                Environment.Exit(1);
+            }
+
+            var log = new ConsoleLog { Verbosity = MessageType.Warning };
+
+            // load circuit
+            var schematic = Schematic.Load(circuitPath, log);
+            var circuit = schematic.Build(log);
+
+            // set knob parameters
+            if (paramsStr != null)
+            {
+                foreach (var kv in paramsStr.Split(','))
+                {
+                    var parts = kv.Split('=');
+                    if (parts.Length != 2) continue;
+                    var name = parts[0].Trim();
+                    var value = double.Parse(parts[1].Trim());
+
+                    var pot = circuit.Components
+                        .OfType<IPotControl>()
+                        .Cast<Component>()
+                        .FirstOrDefault(c => c.Name.Trim() == name);
+
+                    if (pot != null)
+                    {
+                        ((IPotControl)pot).PotValue = value;
+                        continue;
+                    }
+
+                    var sw = circuit.Components
+                        .OfType<SinglePoleSwitch>()
+                        .FirstOrDefault(c => c.Name.Trim() == name);
+
+                    if (sw != null)
+                        sw.Position = (int)value;
+                }
+            }
+
+            // find input component
+            var inputExpr = circuit.Components
+                .OfType<Input>()
+                .Select(i => i.In)
+                .DefaultIfEmpty("V[t]")
+                .Single();
+
+            // find speaker output(s)
+            var allSpeakers = circuit.Components.OfType<Speaker>().ToList();
+            List<Speaker> speakers;
+            if (speakerName != null)
+            {
+                speakers = allSpeakers.Where(s => s.Name == speakerName).ToList();
+                if (speakers.Count == 0)
+                {
+                    var names = string.Join(", ", allSpeakers.Select(s => s.Name));
+                    Console.Error.WriteLine($"Speaker '{speakerName}' not found. Available: {names}");
+                    Environment.Exit(1);
+                }
+            }
+            else
+            {
+                speakers = allSpeakers;
+            }
+
+            Expression outputExpr;
+            if (speakers.Count == 0)
+            {
+                // fallback: use first node voltage
+                outputExpr = circuit.Nodes.Select(n => n.V).FirstOrDefault() ?? 0;
+            }
+            else
+            {
+                var sum = (Expression)0;
+                foreach (var s in speakers)
+                    sum += s.Out;
+                outputExpr = sum;
+            }
+
+            // read input WAV
+            var (inSamples, inSampleRate) = ReadWav(inputPath);
+            int N = inSamples.Length;
+            int outSampleRate = sampleRate > 0 ? sampleRate : inSampleRate;
+
+            // build simulation
+            var ts = TransientSolution.Solve(
+                circuit.Analyze(),
+                (Real)1 / (outSampleRate * oversample),
+                log);
+
+            var sim = new Simulation(ts)
+            {
+                Oversample = oversample,
+                Iterations = iterations,
+                Input = new[] { inputExpr },
+                Output = new[] { outputExpr },
+            };
+
+            // process in chunks
+            double[] outputBuffer = new double[N];
+            int chunk = 4096;
+            int offset = 0;
+            while (offset < N)
+            {
+                int n = Math.Min(chunk, N - offset);
+                double[] chunkIn = new double[n];
+                Array.Copy(inSamples, offset, chunkIn, 0, n);
+                double[] chunkOut = new double[n];
+                sim.Run(chunkIn, chunkOut);
+                Array.Copy(chunkOut, 0, outputBuffer, offset, n);
+                offset += n;
+            }
+
+            // write output WAV
+            WriteWavFloat(outputPath, outputBuffer, outSampleRate);
+
+            double dur = (double)N / outSampleRate;
+            Console.Error.WriteLine($"Input:    {inputPath}");
+            Console.Error.WriteLine($"Format:   {outSampleRate} Hz, 1 ch, 32-bit float  →  {dur:F3} sec mono");
+            Console.Error.WriteLine($"Circuit:  {circuit.Name}  (oversample {oversample}x)");
+            Console.Error.WriteLine($"Output:   {outputPath}  ({N} samples, 32-bit float mono)");
+        }
+
+        static (double[] samples, int sampleRate) ReadWav(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+            using var br = new BinaryReader(fs);
+
+            // RIFF header
+            var riff = Encoding.ASCII.GetString(br.ReadBytes(4));
+            if (riff != "RIFF") throw new Exception("Not a RIFF file");
+            br.ReadInt32(); // file size
+            var wave = Encoding.ASCII.GetString(br.ReadBytes(4));
+            if (wave != "WAVE") throw new Exception("Not a WAVE file");
+
+            int channels = 0, sampleRate = 0, bitsPerSample = 0;
+            List<byte> data = null;
+
+            while (fs.Position < fs.Length)
+            {
+                var chunkId = Encoding.ASCII.GetString(br.ReadBytes(4));
+                int chunkSize = br.ReadInt32();
+
+                if (chunkId == "fmt ")
+                {
+                    var audioFormat = br.ReadInt16(); // 1=PCM, 3=IEEE float
+                    channels = br.ReadInt16();
+                    sampleRate = br.ReadInt32();
+                    br.ReadInt32(); // byte rate
+                    br.ReadInt16(); // block align
+                    bitsPerSample = br.ReadInt16();
+                    if (chunkSize > 16)
+                        br.ReadBytes(chunkSize - 16);
+                }
+                else if (chunkId == "data")
+                {
+                    data = new List<byte>(br.ReadBytes(chunkSize));
+                }
+                else
+                {
+                    br.ReadBytes(chunkSize);
+                }
+            }
+
+            if (data == null) throw new Exception("No data chunk found");
+
+            int bytesPerSample = bitsPerSample / 8;
+            int totalSamples = data.Count / bytesPerSample / channels;
+            double[] samples = new double[totalSamples];
+
+            for (int i = 0; i < totalSamples; i++)
+            {
+                double sample = 0;
+                int byteOffset = i * channels * bytesPerSample;
+
+                if (bitsPerSample == 16)
+                {
+                    short val = BitConverter.ToInt16(data.ToArray(), byteOffset);
+                    sample = val / 32768.0;
+                }
+                else if (bitsPerSample == 24)
+                {
+                    int val = data[byteOffset] | (data[byteOffset + 1] << 8) | (data[byteOffset + 2] << 16);
+                    if ((val & 0x800000) != 0) val |= unchecked((int)0xFF000000);
+                    sample = val / 8388608.0;
+                }
+                else if (bitsPerSample == 32)
+                {
+                    float val = BitConverter.ToSingle(data.ToArray(), byteOffset);
+                    sample = val;
+                }
+                else
+                {
+                    throw new Exception($"Unsupported bits per sample: {bitsPerSample}");
+                }
+
+                samples[i] = sample;
+            }
+
+            return (samples, sampleRate);
+        }
+
+        static void WriteWavFloat(string path, double[] samples, int sampleRate)
+        {
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+            using var bw = new BinaryWriter(fs);
+
+            int dataSize = samples.Length * 4;
+            int fileSize = 36 + dataSize;
+
+            // RIFF header
+            bw.Write(Encoding.ASCII.GetBytes("RIFF"));
+            bw.Write(fileSize);
+            bw.Write(Encoding.ASCII.GetBytes("WAVE"));
+
+            // fmt chunk
+            bw.Write(Encoding.ASCII.GetBytes("fmt "));
+            bw.Write(16); // chunk size
+            bw.Write((short)3); // IEEE float
+            bw.Write((short)1); // mono
+            bw.Write(sampleRate);
+            bw.Write(sampleRate * 4); // byte rate
+            bw.Write((short)4); // block align
+            bw.Write((short)32); // bits per sample
+
+            // data chunk
+            bw.Write(Encoding.ASCII.GetBytes("data"));
+            bw.Write(dataSize);
+            foreach (var s in samples)
+                bw.Write((float)s);
+        }
+    }
+}

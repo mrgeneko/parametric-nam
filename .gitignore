@@ -4,3 +4,10 @@ __pycache__/
 *.param.nam
 *.pt
 /checkpoints/
+
+# livespice_cli build artifacts
+livespice_cli/publish/
+livespice_cli/bin/
+livespice_cli/obj/
+extern/LiveSPICE/**/bin/
+extern/LiveSPICE/**/obj/
