@@ -28,7 +28,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
 """
 
-import argparse, csv, json, os, re, shutil, subprocess, sys, time
+import atexit, argparse, csv, json, os, re, shutil, signal, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,6 +48,34 @@ CPP_CIRCUIT_KNOBS = {
     "marshall_jcm800_2203_preamp_modded": ["gain_1", "gain_2", "bass", "middle", "treble", "volume"],
     "marshall_jcm800_2203_preamp":        ["gain", "middle", "treble", "bass1", "volume"],
 }
+
+# ---------------------------------------------------------------------------
+# Orphan-process safeguard
+# Track all live Popen objects so an atexit / SIGTERM handler can kill them.
+# Without this, killing the Python process leaves livespice_cli workers
+# running as orphans indefinitely.
+# ---------------------------------------------------------------------------
+
+_procs_lock = threading.Lock()
+_active_procs: set = set()
+
+
+def _kill_active_procs():
+    with _procs_lock:
+        for p in list(_active_procs):
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+def _sigterm_handler(*_):
+    sys.exit(1)  # triggers atexit
+
+
+atexit.register(_kill_active_procs)
+signal.signal(signal.SIGTERM, _sigterm_handler)
+
 
 # ---------------------------------------------------------------------------
 # schx discovery (livespice backend)
@@ -137,6 +165,8 @@ class Result:
     proc_time: float = -1.0
     ok: bool = False
     error: str = ""
+    rms: float = 0.0
+    peak: float = 0.0
 
 
 def sig_path(out_dir: Path, idx: int) -> Path:
@@ -146,7 +176,8 @@ def sig_path(out_dir: Path, idx: int) -> Path:
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
-                speaker: str = None, expected_frames: int = 0) -> Result:
+                speaker: str = None, expected_frames: int = 0,
+                timeout_s: int = 1200) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
@@ -175,33 +206,59 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
     else:
         return Result(idx, error=f"unknown backend: {backend}")
 
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with _procs_lock:
+        _active_procs.add(proc)
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=1200)
-        if r.returncode != 0:
-            return Result(idx, error=r.stderr[:500])
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return Result(idx, error=f"timeout after {timeout_s}s")
 
-        dsp = proc = -1.0
-        for line in r.stdout.splitlines():
+        if proc.returncode != 0:
+            return Result(idx, error=stderr[:500])
+
+        dsp = proc_t = -1.0
+        for line in stdout.splitlines():
             if "DSP load:" in line:
                 dsp = float(line.split()[2].rstrip("%"))
             if "Processing time" in line:
-                proc = float(line.split()[2])
+                proc_t = float(line.split()[2])
 
-        sig, _sr = sf.read(str(path.with_suffix(".wav")))
+        out_wav = path.with_suffix(".wav")
+        sig, _sr = sf.read(str(out_wav))
+        sig = sig.astype(np.float32)
+
+        # --- WAV integrity checks (delete bad file so --resume re-runs it) ---
+        if not np.isfinite(sig).all():
+            out_wav.unlink(missing_ok=True)
+            return Result(idx, error="NaN/Inf in output — solver may have diverged")
 
         if expected_frames and len(sig) < expected_frames * 0.99:
-            Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
-            return Result(idx, error=f"truncated WAV: {len(sig)} samples, expected {expected_frames}")
+            out_wav.unlink(missing_ok=True)
+            return Result(idx, error=f"truncated: {len(sig)} of {expected_frames} samples")
+
         rms = float(np.sqrt(np.mean(sig ** 2)))
+        peak = float(np.max(np.abs(sig)))
+
         if rms < 1e-6:
-            Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
+            out_wav.unlink(missing_ok=True)
             return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
 
+        clip_frac = float(np.mean(np.abs(sig) > 0.999))
+        warning = f"clipping:{clip_frac*100:.1f}%" if clip_frac > 0.01 else ""
+
         np.save(str(path), sig)
-        Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
-        return Result(idx, dsp, proc, True)
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, dsp, proc_t, True, warning, rms, peak)
+
     except Exception as e:
         return Result(idx, error=str(e)[:500])
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -222,14 +279,30 @@ def combine(out_dir: Path):
     sample = np.load(str(npy_paths[0]))
     n_perms, n_samples = len(npy_paths), len(sample)
 
+    # Cross-check .npy count against params.csv OK rows
+    with open(csv_path) as f:
+        ok_rows = sum(1 for r in csv.DictReader(f) if r.get("ok") == "1")
+    if n_perms != ok_rows:
+        print(f"WARNING: {n_perms} .npy files but {ok_rows} OK rows in params.csv — "
+              f"some permutations may have failed", file=sys.stderr)
+
     out_path = out_dir / "outputs.npy"
     arr = np.lib.format.open_memmap(str(out_path), mode="w+",
                                     dtype=np.float32,
                                     shape=(n_perms, n_samples))
+    bad_lengths = []
     for i, p in enumerate(npy_paths):
-        arr[i] = np.load(str(p))
+        sig = np.load(str(p))
+        if len(sig) != n_samples:
+            bad_lengths.append((str(p), len(sig)))
+        arr[i] = sig
         p.unlink()
     arr.flush()
+
+    if bad_lengths:
+        print(f"WARNING: {len(bad_lengths)} files had unexpected length:", file=sys.stderr)
+        for path, count in bad_lengths[:5]:
+            print(f"  {path}: {count} samples (expected {n_samples})", file=sys.stderr)
 
     for d in sorted((out_dir / "sig").iterdir()):
         try: d.rmdir()
@@ -238,6 +311,76 @@ def combine(out_dir: Path):
     except OSError: pass
 
     print(f"Wrote {n_perms} × {n_samples} = {n_perms * n_samples // 1_000_000:.0f}M samples → {out_path}")
+    print(f"Shape: ({n_perms}, {n_samples}) — {'OK' if not bad_lengths else 'WARNING: length mismatches above'}")
+
+
+# ---------------------------------------------------------------------------
+# post-generation dataset quality checks
+# ---------------------------------------------------------------------------
+
+def run_post_generation_checks(out_dir: Path, knobs: List[str],
+                                perms: List[dict], values_per_knob: dict):
+    csv_path = out_dir / "params.csv"
+    if not csv_path.exists():
+        return
+
+    rows = []
+    with open(csv_path) as f:
+        for row in csv.DictReader(f):
+            if row.get("ok") == "1" and row.get("rms"):
+                try:
+                    rows.append({**row, "_rms": float(row["rms"])})
+                except ValueError:
+                    pass
+
+    if not rows:
+        print("\nPost-generation checks: no OK rows with RMS data — skipping")
+        return
+
+    print("\nPost-generation checks:")
+    any_warn = False
+
+    # 1. Extreme-value audio check: each knob at its min and max must produce audio.
+    print("  Extreme-value audio (RMS at min/max of each knob range):")
+    for k in knobs:
+        if k not in values_per_knob:
+            continue
+        vals = sorted(values_per_knob[k])
+        if len(vals) < 2:
+            continue
+        for v, label in [(vals[0], "min"), (vals[-1], "max")]:
+            group_rms = [r["_rms"] for r in rows if abs(float(r[k]) - v) < 1e-6]
+            if not group_rms:
+                continue
+            median_rms = sorted(group_rms)[len(group_rms) // 2]
+            if median_rms < 1e-3:
+                print(f"    WARNING {k}={v} ({label}): median RMS={median_rms:.2e} — silent or near-silent")
+                any_warn = True
+            else:
+                print(f"    {k}={v} ({label}): median RMS={median_rms:.4f}  OK")
+
+    # 2. Knob sensitivity check: varying each knob should change the output RMS.
+    print("  Knob sensitivity (RMS spread across knob range):")
+    for k in knobs:
+        if k not in values_per_knob or len(values_per_knob[k]) < 2:
+            continue
+        by_val: dict = {}
+        for r in rows:
+            v = round(float(r[k]), 4)
+            by_val.setdefault(v, []).append(r["_rms"])
+        mean_by_val = {v: sum(rms_list) / len(rms_list) for v, rms_list in by_val.items()}
+        overall_mean = sum(mean_by_val.values()) / len(mean_by_val)
+        rms_range = max(mean_by_val.values()) - min(mean_by_val.values())
+        rel_range = rms_range / overall_mean if overall_mean > 1e-9 else 0.0
+        if rel_range < 0.01:
+            print(f"    WARNING {k}: RMS varies only {rel_range*100:.2f}% — knob may have no effect "
+                  f"(check param_map name)")
+            any_warn = True
+        else:
+            print(f"    {k}: RMS spread {rel_range*100:.1f}%  OK")
+
+    if not any_warn:
+        print("  All checks passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -394,15 +537,11 @@ def main():
             ap.error(f"--steps count must be >= 2 (got: {n})")
         steps_map[kname] = n
 
-    print(f"Backend:      {args.backend}")
-    print(f"Circuit:      {circuit_label}")
-    print(f"Knobs:        {', '.join(knobs)}")
-    if steps_map:
-        print(f"Stepped:      {steps_map}")
-    if param_map:
-        for k, v in param_map.items():
-            print(f"  {k} → {v!r}")
-    audio_frames = sf.info(str(in_wav)).frames
+    wav_info = sf.info(str(in_wav))
+    audio_frames = wav_info.frames
+    sr = wav_info.samplerate
+    timeout_s = max(120, int(audio_frames / sr * 10))
+
     bytes_per_perm = audio_frames * 4  # float32
     total_bytes = bytes_per_perm * len(perms) + in_wav.stat().st_size  # npy + sweep.wav copy
     avail_bytes = shutil.disk_usage(args.output.parent if not args.output.exists() else args.output).free
@@ -413,6 +552,14 @@ def main():
                 return f"{n:.1f} {unit}"
             n /= 1024
 
+    print(f"Backend:      {args.backend}")
+    print(f"Circuit:      {circuit_label}")
+    print(f"Knobs:        {', '.join(knobs)}")
+    if steps_map:
+        print(f"Stepped:      {steps_map}")
+    if param_map:
+        for k, v in param_map.items():
+            print(f"  {k} → {v!r}")
     print(f"Input:        {in_wav}")
     if args.fixed_params:
         print(f"Fixed params: {args.fixed_params}")
@@ -424,6 +571,7 @@ def main():
             vals = values_per_knob[k]
             print(f"  {k}: {vals}")
     print(f"Workers:      {args.workers}")
+    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10)")
     print(f"Disk est:     {fmt_bytes(total_bytes)} needed  ({fmt_bytes(avail_bytes)} free on target)")
     print()
 
@@ -469,7 +617,7 @@ def main():
     csv_fh = open(csv_path, "a", newline="")
     csv_w = csv.writer(csv_fh)
     if fresh:
-        csv_w.writerow(["idx"] + knobs + ["dsp_load", "proc_time", "ok", "error"])
+        csv_w.writerow(["idx"] + knobs + ["dsp_load", "proc_time", "rms", "peak", "ok", "error"])
 
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
     to_run = [(i, p) for i, p in enumerate(perms) if i not in existing]
@@ -481,7 +629,7 @@ def main():
         futs = {
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
-                        args.fixed_params, args.speaker, audio_frames): i
+                        args.fixed_params, args.speaker, audio_frames, timeout_s): i
             for i, p in to_run
         }
         for f in as_completed(futs):
@@ -492,18 +640,24 @@ def main():
             eta = (len(to_run) - done) * elapsed / done
             finish = time.strftime("%H:%M", time.localtime(time.time() + eta))
             p = perms[idx]
-            row = [idx] + [p[k] for k in knobs] + [r.dsp_load, r.proc_time, int(r.ok), r.error]
+            row = ([idx] + [p[k] for k in knobs] +
+                   [r.dsp_load, r.proc_time, f"{r.rms:.6f}", f"{r.peak:.6f}", int(r.ok), r.error])
             csv_w.writerow(row)
             csv_fh.flush()
+            status = "OK" if r.ok else "FAIL"
+            extra = f"  [{r.error}]" if r.error else ""
             print(f"[{done:>4}/{len(to_run)}] {done/len(to_run)*100:>5.1f}%  "
-                  f"perm_{idx:06d}  {'OK' if r.ok else 'FAIL'}  "
-                  f"DSP={r.dsp_load:.1f}%  elapsed={elapsed:.0f}s  ETA ~{finish}")
+                  f"perm_{idx:06d}  {status}  "
+                  f"DSP={r.dsp_load:.1f}%  elapsed={elapsed:.0f}s  ETA ~{finish}{extra}")
 
     csv_fh.close()
     total = time.time() - t0
     ok = len(list((out_dir / "sig").rglob("*.npy"))) if (out_dir / "sig").exists() else 0
     print(f"\nDone: {ok}/{len(perms)} files in {total:.0f}s "
           f"({total / max(len(perms), 1) * 1000:.0f} ms/perm)")
+
+    run_post_generation_checks(out_dir, knobs, perms, values_per_knob if not args.random else {})
+
     print(f"\nPost-process with:  python batch_harness.py --combine {out_dir}")
 
 
