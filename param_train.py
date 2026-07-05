@@ -202,22 +202,10 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
-        # Per-knob defs. A knob listed in config["steps"] is a discrete N-position
-        # switch: emit a "steps" hint so the host renders a stepped control and
-        # quantizes the value to N positions {0, 1/(N-1), ..., 1}. Absent = continuous.
-        steps_map = config.get("steps", {}) or {}
-        def _default_for(name):
-            n = steps_map.get(name)
-            if not n:
-                return 0.5
-            positions = [i / (n - 1) for i in range(n)]
-            return min(positions, key=lambda p: abs(p - 0.5))  # nearest step to 0.5
-        param_defs = []
-        for name in config.get("param_names", []):
-            d = {"name": name, "min": 0.0, "max": 1.0, "default": _default_for(name)}
-            if name in steps_map:
-                d["steps"] = int(steps_map[name])
-            param_defs.append(d)
+        param_defs = [
+            {"name": name, "min": 0.0, "max": 1.0, "default": 0.5}
+            for name in config.get("param_names", [])
+        ]
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),
@@ -337,10 +325,7 @@ class ParamDataset(torch.utils.data.Dataset):
         self._scale = target_rms / (rms + 1e-8)
         self.inp = inp_raw * self._scale
 
-        # Load combined outputs. Default: fully into RAM for fastest random
-        # access (dataset must fit in RAM). With mmap=True: memory-map from disk
-        # so the dataset can exceed RAM — __getitem__ touches one perm row at a
-        # time and the OS page-caches hot rows, at some random-access I/O cost.
+        # Load combined outputs — fully into RAM (fast, high memory) or mmap (low memory, SSD-speed)
         out_path = self.dir / "outputs.npy"
         if not out_path.exists():
             raise FileNotFoundError(
@@ -348,8 +333,7 @@ class ParamDataset(torch.utils.data.Dataset):
                 f"  python batch_harness.py --combine {self.dir}"
             )
         if mmap:
-            print(f"  Memory-mapping outputs.npy (--mmap; disk-bound, not RAM) ...",
-                  file=sys.stderr, flush=True)
+            print(f"  Memory-mapping outputs.npy (mmap mode) ...", file=sys.stderr, flush=True)
             self.outputs = np.load(str(out_path), mmap_mode="r")
         else:
             print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
@@ -560,10 +544,6 @@ def main():
     ap.add_argument("--repeats", type=int, default=1,
                     help="Virtual dataset multiplier — increases steps/epoch without "
                          "changing the audio data (default: %(default)s)")
-    ap.add_argument("--mmap", action="store_true",
-                    help="Memory-map outputs.npy from disk instead of loading it fully "
-                         "into RAM. Use for datasets larger than RAM (disk-bound; slower "
-                         "random access but the OS page-caches hot rows).")
     ap.add_argument("--val-split", type=float, default=0.1,
                     help="Fraction of samples for validation (default: %(default)s)")
     ap.add_argument("--mrstft-weight", type=float, default=0.1,
@@ -583,6 +563,9 @@ def main():
                     help="Checkpoint .pt to resume from")
     ap.add_argument("--log-csv", type=Path, default=None,
                     help="Path for metrics CSV (default: --checkpoint-dir/metrics.csv)")
+    ap.add_argument("--mmap", action="store_true",
+                    help="Memory-map outputs.npy instead of loading into RAM (~3.5 GB freed; "
+                         "use when memory pressure is high and dataset is on SSD)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
