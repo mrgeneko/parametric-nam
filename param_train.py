@@ -202,10 +202,14 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
-        param_defs = [
-            {"name": name, "min": 0.0, "max": 1.0, "default": 0.5}
-            for name in config.get("param_names", [])
-        ]
+        param_map = config.get("param_map", {})
+        param_defs = []
+        for name in config.get("param_names", []):
+            entry = {"name": name, "min": 0.0, "max": 1.0, "default": 0.5}
+            label = param_map.get(name, "").strip()
+            if label and label != name:
+                entry["label"] = label
+            param_defs.append(entry)
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),
