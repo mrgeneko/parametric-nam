@@ -305,7 +305,7 @@ class ParamDataset(torch.utils.data.Dataset):
             config.json      — must contain a "knobs" list
     """
     def __init__(self, dataset_dir: str, crop_len: int = 48000, repeats: int = 1,
-                 target_dbfs: float = -18.0):
+                 target_dbfs: float = -18.0, mmap: bool = False):
         self.dir = Path(dataset_dir)
         with open(self.dir / "config.json") as f:
             self.config = json.load(f)
@@ -325,15 +325,23 @@ class ParamDataset(torch.utils.data.Dataset):
         self._scale = target_rms / (rms + 1e-8)
         self.inp = inp_raw * self._scale
 
-        # Load combined outputs fully into RAM for fast random access
+        # Load combined outputs. Default: fully into RAM for fastest random
+        # access (dataset must fit in RAM). With mmap=True: memory-map from disk
+        # so the dataset can exceed RAM — __getitem__ touches one perm row at a
+        # time and the OS page-caches hot rows, at some random-access I/O cost.
         out_path = self.dir / "outputs.npy"
         if not out_path.exists():
             raise FileNotFoundError(
                 f"outputs.npy not found. Run first:\n"
                 f"  python batch_harness.py --combine {self.dir}"
             )
-        print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
-        self.outputs = np.load(str(out_path))
+        if mmap:
+            print(f"  Memory-mapping outputs.npy (--mmap; disk-bound, not RAM) ...",
+                  file=sys.stderr, flush=True)
+            self.outputs = np.load(str(out_path), mmap_mode="r")
+        else:
+            print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
+            self.outputs = np.load(str(out_path))
 
         # Load params.csv — successful rows only, ordered by permutation idx
         rows = []
@@ -540,6 +548,10 @@ def main():
     ap.add_argument("--repeats", type=int, default=1,
                     help="Virtual dataset multiplier — increases steps/epoch without "
                          "changing the audio data (default: %(default)s)")
+    ap.add_argument("--mmap", action="store_true",
+                    help="Memory-map outputs.npy from disk instead of loading it fully "
+                         "into RAM. Use for datasets larger than RAM (disk-bound; slower "
+                         "random access but the OS page-caches hot rows).")
     ap.add_argument("--val-split", type=float, default=0.1,
                     help="Fraction of samples for validation (default: %(default)s)")
     ap.add_argument("--mrstft-weight", type=float, default=0.1,
@@ -579,7 +591,8 @@ def main():
     # Load dataset
     # ------------------------------------------------------------------
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
-    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats)
+    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats,
+                           mmap=args.mmap)
     n_total = len(dataset)
     n_val = max(1, int(n_total * args.val_split))
     n_train = n_total - n_val
