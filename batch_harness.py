@@ -146,7 +146,7 @@ def sig_path(out_dir: Path, idx: int) -> Path:
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
-                speaker: str = None) -> Result:
+                speaker: str = None, expected_frames: int = 0) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
@@ -188,6 +188,15 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 proc = float(line.split()[2])
 
         sig, _sr = sf.read(str(path.with_suffix(".wav")))
+
+        if expected_frames and len(sig) < expected_frames * 0.99:
+            Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
+            return Result(idx, error=f"truncated WAV: {len(sig)} samples, expected {expected_frames}")
+        rms = float(np.sqrt(np.mean(sig ** 2)))
+        if rms < 1e-6:
+            Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
+            return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
+
         np.save(str(path), sig)
         Path(str(path.with_suffix(".wav"))).unlink(missing_ok=True)
         return Result(idx, dsp, proc, True)
@@ -472,7 +481,7 @@ def main():
         futs = {
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
-                        args.fixed_params, args.speaker): i
+                        args.fixed_params, args.speaker, audio_frames): i
             for i, p in to_run
         }
         for f in as_completed(futs):
