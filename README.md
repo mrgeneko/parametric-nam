@@ -6,7 +6,7 @@ Toolchain for converting SPICE circuit schematics (`.schx`) into parametric Neur
 
 ```
 .schx schematic
-    ↓  batch_harness.py (in livespice-emitter repo)
+    ↓  batch_harness.py
 Paired audio dataset: input sweep × N knob permutations
     ↓  param_train.py
 .param.nam  (SlimmableContainer: A2 Lite 3ch + Full 8ch, FiLM knob conditioning)
@@ -69,7 +69,7 @@ python param_infer.py \
 
 Multiple `--params` flags produce multiple output files. Knob names and order come from the dataset `config.json`.
 
-### `batch_harness.py` (in `livespice-emitter` repo)
+### `batch_harness.py`
 
 Generates the training dataset by sweeping the circuit simulation across knob permutations.
 
@@ -213,6 +213,5 @@ Not required for training or Python inference. Needed for C++ inference validati
 
 ## Related Repos
 
-- `livespice-emitter` — SPICE circuit simulation backend + `batch_harness.py`
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - `[redacted]` — Target host for the trained `.param.nam` models
