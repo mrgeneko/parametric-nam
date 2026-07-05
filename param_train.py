@@ -202,10 +202,22 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
-        param_defs = [
-            {"name": name, "min": 0.0, "max": 1.0, "default": 0.5}
-            for name in config.get("param_names", [])
-        ]
+        # Per-knob defs. A knob listed in config["steps"] is a discrete N-position
+        # switch: emit a "steps" hint so the host renders a stepped control and
+        # quantizes the value to N positions {0, 1/(N-1), ..., 1}. Absent = continuous.
+        steps_map = config.get("steps", {}) or {}
+        def _default_for(name):
+            n = steps_map.get(name)
+            if not n:
+                return 0.5
+            positions = [i / (n - 1) for i in range(n)]
+            return min(positions, key=lambda p: abs(p - 0.5))  # nearest step to 0.5
+        param_defs = []
+        for name in config.get("param_names", []):
+            d = {"name": name, "min": 0.0, "max": 1.0, "default": _default_for(name)}
+            if name in steps_map:
+                d["steps"] = int(steps_map[name])
+            param_defs.append(d)
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),

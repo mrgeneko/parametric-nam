@@ -262,6 +262,11 @@ def main():
                     help="map one swept knob to several ganged pot Names (e.g. a dual-gang "
                          "pot): --gang gain=Gain_A,Gain_B . The knob is one column in the "
                          "dataset; its value is written to every listed pot. Repeatable.")
+    ap.add_argument("--steps", action="append", metavar="KNOB=N",
+                    help="mark a knob as a discrete N-position switch (e.g. --steps a_sym=2). "
+                         "Recorded in config.json and exported as a 'steps' hint in the .nam so "
+                         "the host renders a stepped control and quantizes to N positions. Set "
+                         "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
@@ -363,9 +368,28 @@ def main():
                 values_per_knob[kname] = [float(v) for v in vstr.split(",")]
         perms = grid_permutations(knobs, values_per_knob)
 
+    # Parse --steps: mark knobs as discrete N-position switches (metadata for exporter/host).
+    steps_map = {}
+    for spec in (args.steps or []):
+        if "=" not in spec:
+            ap.error(f"--steps must be KNOB=N (got: {spec!r})")
+        kname, nstr = spec.split("=", 1)
+        kname = kname.strip()
+        if kname not in knobs:
+            ap.error(f"--steps knob '{kname}' not in knobs list: {knobs}")
+        try:
+            n = int(nstr)
+        except ValueError:
+            ap.error(f"--steps count must be an integer (got: {nstr!r})")
+        if n < 2:
+            ap.error(f"--steps count must be >= 2 (got: {n})")
+        steps_map[kname] = n
+
     print(f"Backend:      {args.backend}")
     print(f"Circuit:      {circuit_label}")
     print(f"Knobs:        {', '.join(knobs)}")
+    if steps_map:
+        print(f"Stepped:      {steps_map}")
     if param_map:
         for k, v in param_map.items():
             print(f"  {k} → {v!r}")
@@ -419,6 +443,7 @@ def main():
         "circuit": circuit_label,
         "schx": schx,
         "knobs": knobs,
+        "steps": steps_map,
         "param_map": param_map,
         "fixed_params": args.fixed_params,
         "speaker": args.speaker,
