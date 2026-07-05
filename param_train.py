@@ -470,7 +470,8 @@ def validate(model, loader, criterion, device):
     model.eval()
     slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
-    total_esr = 0
+    total_esr_full = 0
+    total_esr_lite = 0
     n = 0
     with torch.no_grad():
         for inp, out, params in loader:
@@ -478,14 +479,14 @@ def validate(model, loader, criterion, device):
             if slimmable:
                 pred_lite, pred_full = model(inp, params)
                 total_loss += (criterion(pred_lite, out) + criterion(pred_full, out)).item()
-                # Report ESR of the full model as the primary metric
-                total_esr += esr(pred_full, out).item()
+                total_esr_full += esr(pred_full, out).item()
+                total_esr_lite += esr(pred_lite, out).item()
             else:
                 pred = model(inp, params)
                 total_loss += criterion(pred, out).item()
-                total_esr += esr(pred, out).item()
+                total_esr_full += esr(pred, out).item()
             n += 1
-    return total_loss / n, total_esr / n
+    return total_loss / n, total_esr_full / n, total_esr_lite / n
 
 
 # ---------------------------------------------------------------------------
@@ -660,13 +661,13 @@ def main():
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
         log_w = csv.writer(log_f)
         if not args.resume:
-            log_w.writerow(["epoch", "train_loss", "val_loss", "val_esr", "lr", "elapsed_s"])
+            log_w.writerow(["epoch", "train_loss", "val_loss", "val_esr_full", "val_esr_lite", "lr", "elapsed_s"])
 
     t0 = time.time()
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
-        val_loss, val_esr = validate(model, val_loader, criterion, device)
+        val_loss, val_esr, val_esr_lite = validate(model, val_loader, criterion, device)
         scheduler.step()
 
         new_best = val_esr < best_esr
@@ -699,16 +700,17 @@ def main():
         # Print every epoch for production monitoring
         eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
         best_marker = " *" if new_best else ""
+        lite_str = f"  ESR_lite={val_esr_lite:.6f}" if val_esr_lite > 0 else ""
         print(f"  [{epoch:3d}/{args.epochs}]  "
               f"train={train_loss:.6f}  val_loss={val_loss:.6f}  "
-              f"val_ESR={val_esr:.6f}  lr={lr_now:.2e}  "
+              f"ESR_full={val_esr:.6f}{lite_str}  lr={lr_now:.2e}  "
               f"({elapsed:.0f}s, ETA {eta:.0f}s){best_marker}",
               file=sys.stderr, flush=True)
 
         # Log CSV
         if log_csv is not None:
             log_w.writerow([epoch, f"{train_loss:.8f}", f"{val_loss:.8f}",
-                            f"{val_esr:.8f}", f"{lr_now:.2e}", f"{elapsed:.1f}"])
+                            f"{val_esr:.8f}", f"{val_esr_lite:.8f}", f"{lr_now:.2e}", f"{elapsed:.1f}"])
             log_f.flush()
 
         # Save checkpoint every epoch (overwrite previous to save disk space)
