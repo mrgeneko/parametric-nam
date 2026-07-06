@@ -177,7 +177,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
                 speaker: str = None, expected_frames: int = 0,
-                timeout_s: int = 1200) -> Result:
+                timeout_s: int = 1200, oversample: int = 2) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
@@ -203,6 +203,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         ]
         if speaker:
             args += ["--speaker", speaker]
+        if oversample and oversample != 2:
+            args += ["--oversample", str(oversample)]
     else:
         return Result(idx, error=f"unknown backend: {backend}")
 
@@ -420,6 +422,10 @@ def main():
                          "the host renders a stepped control and quantizes to N positions. Set "
                          "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
+    ap.add_argument("--oversample", type=int, default=2,
+                    help="livespice_cli oversampling (default 2). High-gain end-to-end amps "
+                         "need more to stay numerically stable (e.g. EVH 5150 Lead full = 32); "
+                         "preamps are fine at 2. Higher = proportionally slower.")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
     ap.add_argument("--seed",    type=int,  default=0)
@@ -540,7 +546,9 @@ def main():
     wav_info = sf.info(str(in_wav))
     audio_frames = wav_info.frames
     sr = wav_info.samplerate
-    timeout_s = max(120, int(audio_frames / sr * 10))
+    # 10x realtime at the default 2x oversample; scale up with oversample since
+    # sim cost is ~proportional to it (e.g. 32x -> ~160x audio length).
+    timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2)))
 
     bytes_per_perm = audio_frames * 4  # float32
     total_bytes = bytes_per_perm * len(perms) + in_wav.stat().st_size  # npy + sweep.wav copy
@@ -571,7 +579,7 @@ def main():
             vals = values_per_knob[k]
             print(f"  {k}: {vals}")
     print(f"Workers:      {args.workers}")
-    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10)")
+    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10 × os/2, oversample={args.oversample})")
     print(f"Disk est:     {fmt_bytes(total_bytes)} needed  ({fmt_bytes(avail_bytes)} free on target)")
     print()
 
@@ -601,6 +609,7 @@ def main():
         "schx": schx,
         "knobs": knobs,
         "steps": steps_map,
+        "oversample": args.oversample,
         "param_map": param_map,
         "fixed_params": args.fixed_params,
         "speaker": args.speaker,
@@ -629,7 +638,8 @@ def main():
         futs = {
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
-                        args.fixed_params, args.speaker, audio_frames, timeout_s): i
+                        args.fixed_params, args.speaker, audio_frames, timeout_s,
+                        args.oversample): i
             for i, p in to_run
         }
         for f in as_completed(futs):
