@@ -148,10 +148,37 @@ def grid_permutations(knobs: List[str], values_per_knob: dict) -> List[dict]:
     return [dict(zip(knobs, vs)) for vs in product(*[values_per_knob[k] for k in knobs])]
 
 
-def random_permutations(knobs: List[str], n: int, seed: int = 0) -> List[dict]:
+def random_permutations(knobs: List[str], n: int, seed: int = 0,
+                        bounds: dict = None, anchors: bool = True) -> List[dict]:
+    """N points in the knob hypercube.
+
+    bounds:  {knob: (lo, hi)} per-knob sample range (default (0.0, 1.0)). Lets
+             you keep a knob out of a divergent regime (e.g. cap a high-gain
+             pot) without dropping it as a variable.
+    anchors: if True, deterministically PREPEND boundary points so the extremes
+             players actually use are covered (uniform random essentially never
+             lands on them): the all-min and all-max corners, plus each knob
+             solo at its lo/hi with the others centered. Uniform-random points
+             then fill the remainder up to n. Anchors respect `bounds`.
+    """
     import random as rng
     rng.seed(seed)
-    return [dict(zip(knobs, [rng.random() for _ in knobs])) for _ in range(n)]
+    bounds = bounds or {}
+    lo = {k: float(bounds.get(k, (0.0, 1.0))[0]) for k in knobs}
+    hi = {k: float(bounds.get(k, (0.0, 1.0))[1]) for k in knobs}
+
+    perms: List[dict] = []
+    if anchors:
+        perms.append({k: lo[k] for k in knobs})            # all-min corner
+        perms.append({k: hi[k] for k in knobs})            # all-max corner
+        for k in knobs:                                    # each knob solo at its extremes
+            mid = {kk: (lo[kk] + hi[kk]) / 2 for kk in knobs}
+            p_lo = dict(mid); p_lo[k] = lo[k]; perms.append(p_lo)
+            p_hi = dict(mid); p_hi[k] = hi[k]; perms.append(p_hi)
+
+    while len(perms) < n:                                  # uniform-random fill within bounds
+        perms.append({k: lo[k] + (hi[k] - lo[k]) * rng.random() for k in knobs})
+    return perms[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +455,13 @@ def main():
                          "preamps are fine at 2. Higher = proportionally slower.")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
+    ap.add_argument("--bounds",  action="append", metavar="KNOB=lo,hi",
+                    help="per-knob sample range under --random (repeatable; default 0,1). "
+                         "e.g. --bounds LeadPre=0,0.9 to keep a hot gain pot out of a "
+                         "divergent regime.")
+    ap.add_argument("--no-anchors", action="store_true",
+                    help="under --random, skip the deterministic boundary/corner anchor "
+                         "points (by default they are prepended so knob extremes are covered)")
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -511,7 +545,20 @@ def main():
     # Generate permutations
     # ------------------------------------------------------------------
     if args.random:
-        perms = random_permutations(knobs, args.random, args.seed)
+        bounds = {}
+        for b in (args.bounds or []):
+            if "=" not in b:
+                ap.error(f"--bounds must be KNOB=lo,hi (got: {b!r})")
+            kname, vstr = b.split("=", 1)
+            kname = kname.strip()
+            if kname not in knobs:
+                ap.error(f"--bounds knob '{kname}' not in --knobs list: {knobs}")
+            parts = vstr.split(",")
+            if len(parts) != 2:
+                ap.error(f"--bounds must be KNOB=lo,hi (got: {b!r})")
+            bounds[kname] = (float(parts[0]), float(parts[1]))
+        perms = random_permutations(knobs, args.random, args.seed,
+                                    bounds=bounds, anchors=not args.no_anchors)
     else:
         global_vals = [float(v) for v in args.values.split(",")] if args.values else [0.1, 0.3, 0.5, 0.7]
         values_per_knob = {k: global_vals for k in knobs}
@@ -603,12 +650,20 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Effective per-knob sampled range (min/max actually seen across perms).
+    # Recorded so the exported .nam declares the true trained domain per knob
+    # — e.g. a tone pot swept only 0.15..0.85 must not advertise 0..1 to the
+    # host, or it would send out-of-domain values the model never saw.
+    knob_bounds = {k: [min(p[k] for p in perms), max(p[k] for p in perms)]
+                   for k in knobs}
+
     (out_dir / "config.json").write_text(json.dumps({
         "backend": args.backend,
         "circuit": circuit_label,
         "schx": schx,
         "knobs": knobs,
         "steps": steps_map,
+        "bounds": knob_bounds,
         "oversample": args.oversample,
         "param_map": param_map,
         "fixed_params": args.fixed_params,
