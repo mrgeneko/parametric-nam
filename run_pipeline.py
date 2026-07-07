@@ -223,8 +223,12 @@ def reproduce_command(args):
     if args.schx:          c.append(f'    --schx "{args.schx}" \\')
     if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
     if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
+    if args.oversample != 2: c.append(f'    --oversample {args.oversample} \\')
+    if args.random:        c.append(f'    --random {args.random} \\')
+    if args.no_anchors:    c.append('    --no-anchors \\')
     if args.values:        c.append(f'    --values {args.values} \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
+    for b in (args.bounds or []):  c.append(f'    --bounds "{b}" \\')
     for g in (args.gang or []):    c.append(f'    --gang "{g}" \\')
     for s in (args.steps or []):   c.append(f'    --steps "{s}" \\')
     if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
@@ -427,6 +431,15 @@ def main():
     g.add_argument("--values",       help="Default sweep values for all knobs")
     g.add_argument("--range",        action="append", metavar="KNOB=v1,v2,...",
                    dest="ranges",    help="Per-knob value list (repeatable)")
+    g.add_argument("--oversample",   type=int, default=2,
+                   help="livespice_cli oversampling (default 2; high-gain amps need "
+                        "more for stability, e.g. EVH 5150 Lead full = 32)")
+    g.add_argument("--random",       type=int, metavar="N",
+                   help="N random permutations instead of a grid (for high knob counts)")
+    g.add_argument("--bounds",       action="append", metavar="KNOB=lo,hi",
+                   dest="bounds", help="Per-knob sample range under --random (repeatable)")
+    g.add_argument("--no-anchors",   action="store_true",
+                   help="Under --random, skip the boundary/corner anchor points")
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
@@ -500,8 +513,13 @@ def main():
             if args.values:        gen_cmd += ["--values",       args.values]
             if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
             if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
+            if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
+            if args.random:        gen_cmd += ["--random",       args.random]
+            if args.no_anchors:    gen_cmd += ["--no-anchors"]
             for r in (args.ranges or []):
                 gen_cmd += ["--range", r]
+            for b in (args.bounds or []):
+                gen_cmd += ["--bounds", b]
             for g in (args.gang or []):
                 gen_cmd += ["--gang", g]
             for s in (args.steps or []):
