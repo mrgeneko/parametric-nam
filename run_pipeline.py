@@ -226,6 +226,10 @@ def reproduce_command(args):
     if args.oversample != 2: c.append(f'    --oversample {args.oversample} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
+    if getattr(args, "koren", False): c.append('    --koren \\')
+    if getattr(args, "ot_damp", "47k") != "47k": c.append(f'    --ot-damp {args.ot_damp} \\')
+    if getattr(args, "ot_snub", "10n") != "10n": c.append(f'    --ot-snub {args.ot_snub} \\')
+    if getattr(args, "nfb_comp", None): c.append(f'    --nfb-comp {args.nfb_comp} \\')
     if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
     if args.values:        c.append(f'    --values {args.values} \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
@@ -426,7 +430,12 @@ def main():
 
     # --- generation (batch_harness.py) ---
     g = ap.add_argument_group("generation")
-    g.add_argument("--backend",      choices=["cpp", "livespice"], default="livespice")
+    g.add_argument("--backend",      choices=["cpp", "livespice", "ngspice"], default="livespice")
+    g.add_argument("--koren",        action="store_true",
+                   help="ngspice: Koren triode model (softer, for stiff amps)")
+    g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
+    g.add_argument("--ot-snub",      default="10n", help="ngspice: OT snubber C")
+    g.add_argument("--nfb-comp",     default=None, help="ngspice: NFB compensation cap NODE=value")
     g.add_argument("--schx",         type=Path, help="Path to .schx (livespice)")
     g.add_argument("--circuit",      help="Circuit name (cpp)")
     g.add_argument("--knobs",        help="Comma-separated knob names")
@@ -525,6 +534,10 @@ def main():
             if args.values:        gen_cmd += ["--values",       args.values]
             if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
             if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
+            if args.koren:         gen_cmd += ["--koren"]
+            if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
+            if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
+            if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
             if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
