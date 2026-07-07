@@ -171,18 +171,25 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         elif ty == 'Pentode':
             s = tube_sub('PEN', p); body.append('X%s %s %s %s %s %s' % (nm, t['P'], t['G2'], t['G'], t['K'], s))
         elif ty == 'CenterTapTransformer':
-            # coupled-inductor OT approx. Center-tapped winding = SA/ST/SC (plate side,
-            # high L); PA/PC = the other winding. Lp:Ls scaled by turns^2 + realistic
-            # DCR/snubber/damper so the ideal-ish OT + NFB doesn't force dt->0.
-            r = str(c['value']).split(':'); ratio = float(r[1]) / float(r[0]) if len(r) == 2 else 1.0
+            # IDEAL center-tapped transformer via controlled sources — matches
+            # LiveSPICE's exact model (no inductance to guess). LiveSPICE:
+            #   Vp = 2*turns*V(SA,ST) = 2*turns*V(ST,SC)   (turns = Np/Ns_full)
+            #   Ip*turns = Isa + Isc                        (ampere-turns)
+            # Realized as: two VCVS set the half-secondary voltages from Vp, two
+            # CCCS reflect each half-secondary current back into the primary.
+            r = str(c['value']).split(':')
+            turns = float(r[0]) / float(r[1]) if len(r) == 2 else 1.0
             SA, ST, SC, PA, PC = t['SA'], t['ST'], t['SC'], t['PA'], t['PC']
-            Lp, Ls = 10.0, 10.0 / (ratio * ratio)
-            body += ['Rp1 %s n%s_a 60' % (SA, nm), 'Lp1 n%s_a %s %s' % (nm, ST, sp(Lp)),
-                     'Rp2 %s n%s_b 60' % (SC, nm), 'Lp2 n%s_b %s %s' % (nm, ST, sp(Lp)),
-                     'Rs %s n%s_s 0.5' % (PA, nm), 'Ls n%s_s %s %s' % (nm, PC, sp(Ls)),
-                     'K1 Lp1 Lp2 0.999', 'K2 Lp1 Ls 0.999', 'K3 Lp2 Ls 0.999',
-                     'Rsnub %s n%s_sn 10' % (PA, nm), 'Csnub n%s_sn %s 47n' % (nm, PC),
-                     'Rppd %s %s 22k' % (SA, SC)]
+            gv = sp(1.0 / (2 * turns))   # V(SA,ST) = V(PA,PC)/(2*turns)
+            gi = sp(1.0 / turns)         # Ip = (Isa+Isc)/turns
+            body += ['E%s_a %s %s %s %s %s' % (nm, SA, ST, PA, PC, gv),
+                     'E%s_c %s %s %s %s %s' % (nm, ST, SC, PA, PC, gv),
+                     'F%s_a %s %s E%s_a %s' % (nm, PA, PC, nm, gi),
+                     'F%s_c %s %s E%s_c %s' % (nm, PA, PC, nm, gi),
+                     # bleeders: give the (otherwise ideal) windings a DC path so the
+                     # matrix isn't singular / floating.
+                     'R%s_a %s %s 1meg' % (nm, SA, ST),
+                     'R%s_c %s %s 1meg' % (nm, ST, SC)]
         else:
             print('WARN: unhandled component %s (%s)' % (nm, ty), file=sys.stderr)
 
