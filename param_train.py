@@ -523,6 +523,35 @@ def param_sensitivity(model: ParametricA2, device: str,
 
 
 # ---------------------------------------------------------------------------
+# Export helpers
+# ---------------------------------------------------------------------------
+
+def nam_variant(output: Path, tag: str) -> Path:
+    """Sibling .param.nam path carrying a tag.
+
+    model.param.nam + "best_lite" -> model.best_lite.param.nam
+    """
+    name = output.name
+    if name.endswith(".param.nam"):
+        base = name[: -len(".param.nam")]
+        return output.with_name(f"{base}.{tag}.param.nam")
+    return output.with_name(f"{output.stem}_{tag}{output.suffix}")
+
+
+def export_nam_state(model, state, dataset, path: Path, device):
+    """Export `state`'s weights to a .param.nam at `path`, then restore the
+    model's current weights (so training can continue untouched)."""
+    current = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    model.load_state_dict(state)
+    model.to(device)
+    nam = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000,
+                           input_audio=dataset.inp)
+    path.write_text(json.dumps(nam, separators=(",", ":")))
+    model.load_state_dict(current)
+    model.to(device)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -633,8 +662,10 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     start_epoch = 1
-    best_esr = float("inf")
+    best_esr = float("inf")           # best FULL-tier val ESR (primary; drives args.output + resume)
     best_state = None
+    best_lite_esr = float("inf")      # best LITE-tier val ESR (slimmable only)
+    best_lite_state = None
 
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
@@ -644,6 +675,8 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         best_esr = ckpt.get("best_esr", float("inf"))
         best_state = ckpt.get("best_state", None)
+        best_lite_esr = ckpt.get("best_lite_esr", float("inf"))
+        best_lite_state = ckpt.get("best_lite_state", None)
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR {best_esr:.6f}", file=sys.stderr)
 
     scheduler_last = start_epoch - 2
@@ -672,6 +705,7 @@ def main():
         val_loss, val_esr, val_esr_lite = validate(model, val_loader, criterion, device)
         scheduler.step()
 
+        # --- best FULL-tier model (primary; drives args.output + resume) ---
         new_best = val_esr < best_esr
         if new_best:
             best_esr = val_esr
@@ -685,23 +719,35 @@ def main():
                     "best_esr": best_esr,
                     "args_dict": dict(vars(args)),
                 }, ckpt_dir / "best.pt")
-            # Export best .param.nam — swap in best weights, export, restore current weights
-            current_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            model.load_state_dict(best_state)
-            model.to(device)
-            nam_data = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000,
-                                        input_audio=dataset.inp)
-            nam_path = args.output.parent / (args.output.stem + "_best" + args.output.suffix)
-            nam_path.write_text(json.dumps(nam_data, separators=(",", ":")))
-            model.load_state_dict(current_state)
-            model.to(device)
+            export_nam_state(model, best_state, dataset,
+                             nam_variant(args.output, "best_full"), device)
+
+        # --- best LITE-tier model (slimmable only; the lite optimum often lands
+        #     at a different epoch than the full one, so preserve it separately
+        #     rather than losing it) ---
+        new_best_lite = args.slimmable and val_esr_lite > 0 and val_esr_lite < best_lite_esr
+        if new_best_lite:
+            best_lite_esr = val_esr_lite
+            best_lite_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if ckpt_dir is not None:
+                torch.save({
+                    "epoch": epoch,
+                    "model": best_lite_state,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler_last_epoch": scheduler.last_epoch,
+                    "best_esr": best_esr,
+                    "best_lite_esr": best_lite_esr,
+                    "args_dict": dict(vars(args)),
+                }, ckpt_dir / "best_lite.pt")
+            export_nam_state(model, best_lite_state, dataset,
+                             nam_variant(args.output, "best_lite"), device)
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
 
         # Print every epoch for production monitoring
         eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
-        best_marker = " *" if new_best else ""
+        best_marker = (" *" if new_best else "") + (" L" if new_best_lite else "")
         lite_str = f"  ESR_lite={val_esr_lite:.6f}" if val_esr_lite > 0 else ""
         print(f"  [{epoch:3d}/{args.epochs}]  "
               f"train={train_loss:.6f}  val_loss={val_loss:.6f}  "
@@ -725,6 +771,8 @@ def main():
                 "scheduler_last_epoch": scheduler.last_epoch,
                 "best_esr": best_esr,
                 "best_state": best_state,
+                "best_lite_esr": best_lite_esr,
+                "best_lite_state": best_lite_state,
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
 
@@ -734,14 +782,22 @@ def main():
 
     print(f"\nTraining finished ({elapsed:.0f}s, {elapsed/args.epochs:.1f}s/epoch)",
           file=sys.stderr)
-    print(f"Best validation ESR: {best_esr:.6f}", file=sys.stderr)
+    lite_best_str = (f", lite {best_lite_esr:.6f}"
+                     if best_lite_state is not None else "")
+    print(f"Best validation ESR: full {best_esr:.6f}{lite_best_str}", file=sys.stderr)
 
-    # Restore best state
+    # Finalize the best-lite .param.nam (its weights differ from the full-best,
+    # so it must be written from best_lite_state, not the restored full model).
+    if best_lite_state is not None:
+        export_nam_state(model, best_lite_state, dataset,
+                         nam_variant(args.output, "best_lite"), device)
+
+    # Restore best (full) state — this is what args.output is exported from below.
     if best_state:
         model.load_state_dict(best_state)
         model.to(device)
 
-    # Save best checkpoint
+    # Save best checkpoint(s)
     if ckpt_dir is not None:
         best_path = ckpt_dir / "best.pt"
         torch.save({
@@ -753,6 +809,17 @@ def main():
             "args_dict": dict(vars(args)),
         }, best_path)
         print(f"  Best model saved to {best_path}", file=sys.stderr)
+        if best_lite_state is not None:
+            torch.save({
+                "epoch": epoch,
+                "model": best_lite_state,
+                "optimizer": optimizer.state_dict(),
+                "scheduler_last_epoch": scheduler.last_epoch,
+                "best_esr": best_esr,
+                "best_lite_esr": best_lite_esr,
+                "args_dict": dict(vars(args)),
+            }, ckpt_dir / "best_lite.pt")
+            print(f"  Best-lite model saved to {ckpt_dir / 'best_lite.pt'}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Parameter sensitivity check
