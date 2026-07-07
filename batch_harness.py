@@ -204,7 +204,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
                 speaker: str = None, expected_frames: int = 0,
-                timeout_s: int = 1200, oversample: int = 2) -> Result:
+                timeout_s: int = 1200, oversample: int = 2,
+                max_crest: float = 0.0) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
@@ -276,8 +277,25 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
             out_wav.unlink(missing_ok=True)
             return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
 
-        clip_frac = float(np.mean(np.abs(sig) > 0.999))
-        warning = f"clipping:{clip_frac*100:.1f}%" if clip_frac > 0.01 else ""
+        # Crest factor (peak/RMS) is a scale-invariant divergence detector: clean
+        # audio sits <~10, numerical runaway (solver overshoot on high-gain amps)
+        # produces isolated spikes → crest of tens–thousands. Fail those so they
+        # never enter the dataset (unlike the 'clipping' heuristic below, which is
+        # meaningless for amps whose raw output peaks in the hundreds of volts).
+        crest = peak / (rms + 1e-9)
+        if max_crest > 0 and crest > max_crest:
+            out_wav.unlink(missing_ok=True)
+            return Result(idx, error=f"unstable: crest={crest:.0f} > --max-crest {max_crest:g} "
+                                     f"(peak={peak:.1f} rms={rms:.2f}) — likely numerical divergence")
+
+        warn = []
+        if crest > 15:
+            warn.append(f"crest:{crest:.0f}")
+        if peak <= 2.0:  # clipping% only meaningful for ~normalized output
+            clip_frac = float(np.mean(np.abs(sig) > 0.999))
+            if clip_frac > 0.01:
+                warn.append(f"clipping:{clip_frac*100:.1f}%")
+        warning = " ".join(warn)
 
         np.save(str(path), sig)
         out_wav.unlink(missing_ok=True)
@@ -462,6 +480,11 @@ def main():
     ap.add_argument("--no-anchors", action="store_true",
                     help="under --random, skip the deterministic boundary/corner anchor "
                          "points (by default they are prepended so knob extremes are covered)")
+    ap.add_argument("--max-crest", type=float, default=50.0,
+                    help="fail (exclude) any permutation whose output crest factor "
+                         "(peak/RMS) exceeds this — catches numerical divergence that "
+                         "RMS/length checks miss. Clean audio is <~10; high-gain solver "
+                         "runaway is tens–thousands. 0 disables. (default: %(default)s)")
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -694,7 +717,7 @@ def main():
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
-                        args.oversample): i
+                        args.oversample, args.max_crest): i
             for i, p in to_run
         }
         for f in as_completed(futs):

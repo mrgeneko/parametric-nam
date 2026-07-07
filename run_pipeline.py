@@ -226,6 +226,7 @@ def reproduce_command(args):
     if args.oversample != 2: c.append(f'    --oversample {args.oversample} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
+    if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
     if args.values:        c.append(f'    --values {args.values} \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
     for b in (args.bounds or []):  c.append(f'    --bounds "{b}" \\')
@@ -443,6 +444,9 @@ def main():
                    dest="bounds", help="Per-knob sample range under --random (repeatable)")
     g.add_argument("--no-anchors",   action="store_true",
                    help="Under --random, skip the boundary/corner anchor points")
+    g.add_argument("--max-crest",    type=float, default=50.0,
+                   help="Fail perms whose output crest factor exceeds this "
+                        "(catches numerical divergence; 0 disables)")
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
@@ -524,6 +528,7 @@ def main():
             if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
+            if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
             for r in (args.ranges or []):
                 gen_cmd += ["--range", r]
             for b in (args.bounds or []):
