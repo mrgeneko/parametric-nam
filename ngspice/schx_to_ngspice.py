@@ -17,6 +17,7 @@ Not a real-time backend: ngspice adaptive-timestep offline generation, for the
 stiff/high-gain circuits where LiveSPICE's fixed step diverges.
 """
 import json
+import os
 import re
 import sys
 
@@ -124,7 +125,8 @@ def pentode_subckt(name, p):
 # main translation
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
-              method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None):
+              method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None,
+              input_mode='filesource'):
     pots = pots or {}
     comps = netlist['components']
     lines = ['* schx -> ngspice (%s triodes, Koren pentodes, baked pots)'
@@ -160,35 +162,40 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         elif ty == 'Rail':
             body.append('V%s %s 0 DC %s' % (nm, list(t.values())[0], sp(qty(p['Voltage']))))
         elif ty == 'Input':
-            # Inline PWL (portable across ngspice builds; PWL file= is unsupported
-            # here). For long inputs a real backend should use an XSPICE filesource
-            # — see README. V0dBFS scaling is expected to be baked into the PWL.
+            # Input file is time,raw-sample pairs (sample in [-1,1]); the Input's
+            # V0dBFS scales it to volts. filesource (default) reads the file at
+            # sim time -> scales to any length. Inline PWL is a portable fallback
+            # for short inputs.
             src, cat = t['Anode'], t['Cathode']
-            pairs = []
-            with open(input_pwl) as f:
-                for ln in f:
-                    ln = ln.split()
-                    if len(ln) >= 2:
-                        pairs.append(ln[0] + ' ' + ln[1])
-            # continuation-line wrapped so we don't hit ngspice's line-length limit
-            head = 'Vin %s %s PWL(' % (src, cat)
-            chunk, out = [], [head]
-            for i, pr in enumerate(pairs):
-                chunk.append(pr)
-                if len(chunk) == 8:
-                    out.append('+ ' + ' '.join(chunk)); chunk = []
-            if chunk:
-                out.append('+ ' + ' '.join(chunk))
-            out.append('+ )')
-            body.extend(out)
+            g = qty(p.get('V0dBFS', '1')) or 1.0
+            if input_mode == 'filesource':
+                body += [
+                    'Ain %%vd([%s %s]) fsrc_in' % (src, cat),
+                    '.model fsrc_in filesource (file="%s" amploffset=[0] amplscale=[%s] '
+                    'timeoffset=0 timescale=1 timerelative=false)' % (os.path.abspath(input_pwl), sp(g))]
+            else:
+                pairs = []
+                with open(input_pwl) as f:
+                    for ln in f:
+                        c = ln.split()
+                        if len(c) >= 2:
+                            pairs.append('%s %s' % (c[0], sp(float(c[1]) * g)))
+                out = ['Vin %s %s PWL(' % (src, cat)]
+                for i in range(0, len(pairs), 8):
+                    out.append('+ ' + ' '.join(pairs[i:i + 8]))
+                out.append('+ )')
+                body.extend(out)
         elif ty == 'Speaker':
             out_node = t['Anode']  # probe here
         elif ty == 'Potentiometer' or c.get('isPot'):
             R = qty(p['Resistance']); wipe = pots.get(nm, qty(p.get('Wipe', '0.5')))
             A, W, K = t.get('Anode'), t.get('Wiper'), t.get('Cathode')
             raw, rwk = R * (1 - wipe), R * wipe   # Wipe=0 -> wiper at cathode
-            if A != W: body.append('R%s_aw %s %s %s' % (nm, A, W, sp(max(raw, 1e-3))))
-            if W != K: body.append('R%s_wk %s %s %s' % (nm, W, K, sp(max(rwk, 1e-3))))
+            # Floor at ~1 ohm, not 1m ohm: a near-zero pot section is a near-short
+            # in the signal path that makes ngspice numerically stiff (a wipe=0/1
+            # extreme could hang the solver). 1 ohm is tonally negligible.
+            if A != W: body.append('R%s_aw %s %s %s' % (nm, A, W, sp(max(raw, 1.0))))
+            if W != K: body.append('R%s_wk %s %s %s' % (nm, W, K, sp(max(rwk, 1.0))))
         elif ty == 'Triode':
             s = tube_sub('TRI', p); body.append('X%s %s %s %s %s' % (nm, t['P'], t['G'], t['K'], s))
         elif ty == 'Pentode':
@@ -249,9 +256,12 @@ if __name__ == '__main__':
     ap.add_argument('--ot-damp', default='47k', help='OT plate-to-plate damper R (heavier=more stable)')
     ap.add_argument('--ot-snub', default='10n', help='OT snubber C')
     ap.add_argument('--nfb-comp', default=None, help='NFB compensation cap, NODE=value (e.g. nNFB=1n)')
+    ap.add_argument('--input-mode', default='filesource', choices=['filesource', 'pwl'],
+                    help='how to feed the input file (time,raw-sample pairs)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
     nl = json.load(open(a.netlist))
     open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv, koren=a.koren,
-                                     ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp))
+                                     ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp,
+                                     input_mode=a.input_mode))
     print('wrote', a.out)
