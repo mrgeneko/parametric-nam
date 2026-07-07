@@ -4,8 +4,9 @@ An **offline** ngspice dataset-generation backend, as an alternative to
 `livespice_cli` for the **stiff / high-gain / combined** circuits where
 LiveSPICE's fixed-timestep solver diverges and needs extreme oversampling.
 
-This is a **proof of concept**, not yet wired into `batch_harness`. See the
-"Status / next steps" section.
+**Now wired into `batch_harness`** as `--backend ngspice` (see "Status" below).
+`gen_evh5150_ngspice.py` remains as the original standalone prototype; the
+general path is `schx_to_ngspice.py` (any `.schx`) driven by the harness.
 
 ## Why
 
@@ -79,17 +80,44 @@ Env flags: `METHOD=trap|gear` (default trap), `PREAMP_ONLY=1` (drop the power
 amp), `NO_NFB=1` (open the PI-grid feedback), `FLIP_SEC=1` (reverse OT secondary
 — diagnostic).
 
-## Status / next steps
+## Status
 
-Prototype only. To become a real backend:
+Wired end to end. Usage:
 
-1. **Generalize the translator**: `.schx` → ngspice netlist for any circuit
-   (this script hardcodes the 5150). Reuse the component/pot/tube mapping here.
-2. **Validate tube-model fidelity** against LiveSPICE reference renders (the
-   dataset's whole value is matching the target circuit's tone).
-3. **Uniform resampling** of the non-uniform transient output to 48 kHz.
-4. **Wire into `batch_harness`** as an alternate backend, selected per circuit
-   (LiveSPICE default; ngspice for the stiff/combined cases).
+```bash
+# moderate amp (e.g. JCM800 power amp) — exact DempwolfZolzer tubes:
+python batch_harness.py --backend ngspice --schx "<amp>.schx" \
+    --knobs presence --values 0.2,0.5,0.8 --input guitar.wav --output ds
+
+# stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp:
+python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 220n \
+    --nfb-comp nNFB=1n --schx "EVH 5150 Lead Full.schx" \
+    --knobs leadpre,leadpost,high,low,mid,presence --random 400 --input guitar.wav --output ds
+```
+
+Done:
+1. ✅ **General translator** — `livespice_cli --netlist` (authoritative parse) →
+   `schx_to_ngspice.py` (exact DempwolfZolzer triodes / Koren pentodes, baked
+   pots, **E+F ideal transformer**, tunable OT damping + NFB comp, `--koren`).
+2. ✅ **Uniform resampling** — non-uniform transient output → 48 kHz grid in the
+   `batch_harness` ngspice path.
+3. ✅ **XSPICE filesource** input — feeds full-length WAVs (no giant inline PWL).
+4. ✅ **`batch_harness --backend ngspice`** — per-perm translate → run → resample
+   → `.npy`, with the crest-factor divergence check.
+
+Result: the **EVH 5150 Lead full converges** (Koren mode) where LiveSPICE
+diverges even at 32× oversample. The JCM800 power amp matches a LiveSPICE render
+at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes.
+
+Open:
+- **Fidelity validation is signal- and circuit-dependent**: ~0.99 on the JCM800
+  (validated vs LiveSPICE); the **5150 full is unvalidated** — no reference
+  render exists (the whole reason ngspice is needed), and Koren tubes + heavy
+  damping + NFB comp alter the tone. It proves **convergence, not tone-match**.
+- **Per-circuit tuning is manual** — `--ot-damp`/`--nfb-comp` values and the NFB
+  node name are hand-set for the 5150; not auto-derived.
+- Tube **inter-electrode capacitances** and **pentode grid current** are omitted
+  (small; would tighten the JCM800's last ~1% and level offset).
 
 ## When to prefer which backend
 

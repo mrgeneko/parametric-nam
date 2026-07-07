@@ -200,112 +200,150 @@ def sig_path(out_dir: Path, idx: int) -> Path:
     return out_dir / "sig" / f"{idx // 100:02d}" / f"{idx:06d}.npy"
 
 
+def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc_t=-1.0):
+    """Read out_wav, run integrity + crest checks, save .npy. Shared by all backends."""
+    sig, _sr = sf.read(str(out_wav))
+    sig = sig.astype(np.float32)
+    if not np.isfinite(sig).all():
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error="NaN/Inf in output — solver may have diverged")
+    if expected_frames and len(sig) < expected_frames * 0.99:
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error=f"truncated: {len(sig)} of {expected_frames} samples")
+    rms = float(np.sqrt(np.mean(sig ** 2)))
+    peak = float(np.max(np.abs(sig)))
+    if rms < 1e-6:
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
+    # Crest factor (peak/RMS) is a scale-invariant divergence detector: clean audio
+    # sits <~10, numerical runaway spikes to tens–thousands. Fail those.
+    crest = peak / (rms + 1e-9)
+    if max_crest > 0 and crest > max_crest:
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error=f"unstable: crest={crest:.0f} > --max-crest {max_crest:g} "
+                                 f"(peak={peak:.1f} rms={rms:.2f}) — likely numerical divergence")
+    warn = []
+    if crest > 15:
+        warn.append(f"crest:{crest:.0f}")
+    if peak <= 2.0:
+        clip_frac = float(np.mean(np.abs(sig) > 0.999))
+        if clip_frac > 0.01:
+            warn.append(f"clipping:{clip_frac*100:.1f}%")
+    np.save(str(path), sig)
+    out_wav.unlink(missing_ok=True)
+    return Result(idx, dsp, proc_t, True, " ".join(warn), rms, peak)
+
+
+def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                 param_map, fixed_params, ng):
+    """Translate netlist (baked pots) -> ngspice -> resample to 48k -> out_wav.
+    Returns a failure Result, or None on success."""
+    import sys as _sys
+    _ngdir = str(Path(__file__).resolve().parent / "ngspice")
+    if _ngdir not in _sys.path:
+        _sys.path.insert(0, _ngdir)
+    import schx_to_ngspice as X
+
+    nl = json.load(open(ng["netlist"]))
+    pmap = param_map or {}
+    pots = {pmap.get(k, k): float(v) for k, v in params.items()}     # knob -> pot Name
+    if fixed_params:
+        for kv in fixed_params.split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                pots[k.strip()] = float(v)
+    dur = expected_frames / 48000.0
+    csv_path, cir_path = path.with_suffix(".csv"), path.with_suffix(".cir")
+    cir_path.write_text(X.translate(nl, pots=pots, input_pwl=ng["input"], dur=dur,
+                                    csv=str(csv_path), koren=ng.get("koren", False),
+                                    ot_damp=ng.get("ot_damp", "47k"), ot_snub=ng.get("ot_snub", "10n"),
+                                    nfb_comp=ng.get("nfb_comp"), input_mode="filesource"))
+    proc = subprocess.Popen(["ngspice", "-b", str(cir_path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with _procs_lock:
+        _active_procs.add(proc)
+    try:
+        try:
+            proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill(); proc.communicate()
+            return Result(idx, error=f"ngspice timeout after {timeout_s}s")
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc)
+    cir_path.unlink(missing_ok=True)
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        return Result(idx, error="ngspice produced no output (diverged at t~0?)")
+    d = np.loadtxt(str(csv_path))
+    csv_path.unlink(missing_ok=True)
+    if d.ndim < 2 or len(d) < 2:
+        return Result(idx, error="ngspice: too few rows (diverged at t~0)")
+    ng_t, ng_v = d[:, 0], d[:, 1]
+    if ng_t[-1] < dur * 0.99:
+        return Result(idx, error=f"ngspice aborted at {ng_t[-1]:.3f}s of {dur:.3f}s (diverged)")
+    grid = np.arange(expected_frames) / 48000.0        # resample near-uniform -> exact 48k grid
+    sig = np.interp(grid, ng_t, ng_v).astype(np.float32)
+    sf.write(str(out_wav), sig, 48000, subtype="FLOAT")
+    return None
+
+
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
                 speaker: str = None, expected_frames: int = 0,
                 timeout_s: int = 1200, oversample: int = 2,
-                max_crest: float = 0.0) -> Result:
+                max_crest: float = 0.0, ng: dict = None) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
+    out_wav = path.with_suffix(".wav")
 
-    if backend == "cpp":
-        args = [
-            str(HARNESS),
-            "--input", str(input_wav),
-            "--output", str(path.with_suffix(".wav")),
-            "--circuit", circuit,
-            "--params", fmt_params(params),
-        ]
-    elif backend == "livespice":
-        swept = fmt_params(params, param_map)
-        all_params = f"{fixed_params},{swept}" if fixed_params else swept
-        args = [
-            str(LIVESPICE_CLI),
-            "--input", str(input_wav),
-            "--output", str(path.with_suffix(".wav")),
-            "--circuit", schx,
-            "--params", all_params,
-        ]
-        if speaker:
-            args += ["--speaker", speaker]
-        if oversample and oversample != 2:
-            args += ["--oversample", str(oversample)]
-    else:
-        return Result(idx, error=f"unknown backend: {backend}")
-
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    with _procs_lock:
-        _active_procs.add(proc)
     try:
+        if backend == "ngspice":
+            err = _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                               param_map, fixed_params, ng or {})
+            return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest)
+
+        if backend == "cpp":
+            args = [str(HARNESS), "--input", str(input_wav), "--output", str(out_wav),
+                    "--circuit", circuit, "--params", fmt_params(params)]
+        elif backend == "livespice":
+            swept = fmt_params(params, param_map)
+            all_params = f"{fixed_params},{swept}" if fixed_params else swept
+            args = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(out_wav),
+                    "--circuit", schx, "--params", all_params]
+            if speaker:
+                args += ["--speaker", speaker]
+            if oversample and oversample != 2:
+                args += ["--oversample", str(oversample)]
+        else:
+            return Result(idx, error=f"unknown backend: {backend}")
+
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with _procs_lock:
+            _active_procs.add(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return Result(idx, error=f"timeout after {timeout_s}s")
-
-        if proc.returncode != 0:
-            return Result(idx, error=stderr[:500])
-
-        dsp = proc_t = -1.0
-        for line in stdout.splitlines():
-            if "DSP load:" in line:
-                dsp = float(line.split()[2].rstrip("%"))
-            if "Processing time" in line:
-                proc_t = float(line.split()[2])
-
-        out_wav = path.with_suffix(".wav")
-        sig, _sr = sf.read(str(out_wav))
-        sig = sig.astype(np.float32)
-
-        # --- WAV integrity checks (delete bad file so --resume re-runs it) ---
-        if not np.isfinite(sig).all():
-            out_wav.unlink(missing_ok=True)
-            return Result(idx, error="NaN/Inf in output — solver may have diverged")
-
-        if expected_frames and len(sig) < expected_frames * 0.99:
-            out_wav.unlink(missing_ok=True)
-            return Result(idx, error=f"truncated: {len(sig)} of {expected_frames} samples")
-
-        rms = float(np.sqrt(np.mean(sig ** 2)))
-        peak = float(np.max(np.abs(sig)))
-
-        if rms < 1e-6:
-            out_wav.unlink(missing_ok=True)
-            return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
-
-        # Crest factor (peak/RMS) is a scale-invariant divergence detector: clean
-        # audio sits <~10, numerical runaway (solver overshoot on high-gain amps)
-        # produces isolated spikes → crest of tens–thousands. Fail those so they
-        # never enter the dataset (unlike the 'clipping' heuristic below, which is
-        # meaningless for amps whose raw output peaks in the hundreds of volts).
-        crest = peak / (rms + 1e-9)
-        if max_crest > 0 and crest > max_crest:
-            out_wav.unlink(missing_ok=True)
-            return Result(idx, error=f"unstable: crest={crest:.0f} > --max-crest {max_crest:g} "
-                                     f"(peak={peak:.1f} rms={rms:.2f}) — likely numerical divergence")
-
-        warn = []
-        if crest > 15:
-            warn.append(f"crest:{crest:.0f}")
-        if peak <= 2.0:  # clipping% only meaningful for ~normalized output
-            clip_frac = float(np.mean(np.abs(sig) > 0.999))
-            if clip_frac > 0.01:
-                warn.append(f"clipping:{clip_frac*100:.1f}%")
-        warning = " ".join(warn)
-
-        np.save(str(path), sig)
-        out_wav.unlink(missing_ok=True)
-        return Result(idx, dsp, proc_t, True, warning, rms, peak)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.communicate()
+                return Result(idx, error=f"timeout after {timeout_s}s")
+            if proc.returncode != 0:
+                return Result(idx, error=stderr[:500])
+            dsp = proc_t = -1.0
+            for line in stdout.splitlines():
+                if "DSP load:" in line:
+                    dsp = float(line.split()[2].rstrip("%"))
+                if "Processing time" in line:
+                    proc_t = float(line.split()[2])
+        finally:
+            with _procs_lock:
+                _active_procs.discard(proc)
+        return _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t)
 
     except Exception as e:
         return Result(idx, error=str(e)[:500])
-    finally:
-        with _procs_lock:
-            _active_procs.discard(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +479,13 @@ def main():
     )
     ap.add_argument("--list",    action="store_true", help="list cpp circuits")
     ap.add_argument("--combine", type=Path,           help="combine sharded .npy files")
-    ap.add_argument("--backend", choices=["cpp", "livespice"], default="cpp")
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice"], default="cpp")
+    # ngspice backend (offline adaptive-timestep SPICE for stiff/high-gain amps)
+    ap.add_argument("--koren", action="store_true",
+                    help="ngspice: Koren triode model (softer, for stiff amps) vs exact DempwolfZolzer")
+    ap.add_argument("--ot-damp", default="47k", help="ngspice: OT plate-to-plate damper R (heavier=more stable)")
+    ap.add_argument("--ot-snub", default="10n", help="ngspice: OT snubber C")
+    ap.add_argument("--nfb-comp", default=None, help="ngspice: NFB compensation cap NODE=value (e.g. nNFB=1n)")
 
     # livespice backend
     ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
@@ -500,9 +544,9 @@ def main():
     param_map = None
     schx = None
 
-    if args.backend == "livespice":
+    if args.backend in ("livespice", "ngspice"):
         if not args.schx:
-            ap.error("--schx is required for --backend livespice")
+            ap.error(f"--schx is required for --backend {args.backend}")
         if not args.schx.exists():
             ap.error(f"schx not found: {args.schx}")
         schx = str(args.schx)
@@ -619,6 +663,10 @@ def main():
     # 10x realtime at the default 2x oversample; scale up with oversample since
     # sim cost is ~proportional to it (e.g. 32x -> ~160x audio length).
     timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2)))
+    if args.backend == "ngspice":
+        # ngspice adaptive sim can run ~5-50x realtime on stiff amps; be generous
+        # (a divergent perm aborts near t=0 anyway, so this mainly guards hangs).
+        timeout_s = max(600, int(audio_frames / sr * 120))
 
     bytes_per_perm = audio_frames * 4  # float32
     total_bytes = bytes_per_perm * len(perms) + in_wav.stat().st_size  # npy + sweep.wav copy
@@ -663,8 +711,11 @@ def main():
     if args.backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
         sys.exit(1)
-    if args.backend == "livespice" and not LIVESPICE_CLI.exists():
+    if args.backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
         print(f"livespice_cli not found at {LIVESPICE_CLI}. Build it first.", file=sys.stderr)
+        sys.exit(1)
+    if args.backend == "ngspice" and not shutil.which("ngspice"):
+        print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
         sys.exit(1)
 
     # ------------------------------------------------------------------
@@ -672,6 +723,27 @@ def main():
     # ------------------------------------------------------------------
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ngspice backend: dump the authoritative netlist once + write the input as an
+    # XSPICE-filesource file (time,raw-sample; V0dBFS applied by the translator).
+    ng = None
+    if args.backend == "ngspice":
+        netlist_path = out_dir / "netlist.json"
+        r = subprocess.run([str(LIVESPICE_CLI), "--circuit", schx, "--netlist", str(netlist_path)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not netlist_path.exists():
+            print(f"netlist dump failed: {r.stderr[:300]}", file=sys.stderr)
+            sys.exit(1)
+        insig, _isr = sf.read(str(in_wav))
+        if insig.ndim > 1:
+            insig = insig.mean(axis=1)
+        fsrc = out_dir / "input_fsrc.txt"
+        _t = np.arange(len(insig)) / sr
+        np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
+        ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
+              "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp}
+        print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
+              f"tubes, ot_damp={args.ot_damp})", file=sys.stderr)
 
     # Effective per-knob sampled range (min/max actually seen across perms).
     # Recorded so the exported .nam declares the true trained domain per knob
@@ -717,7 +789,7 @@ def main():
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
-                        args.oversample, args.max_crest): i
+                        args.oversample, args.max_crest, ng): i
             for i, p in to_run
         }
         for f in as_completed(futs):
