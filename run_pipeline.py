@@ -28,7 +28,7 @@ Example — full Dumble clean pipeline:
         --slimmable --mmap --epochs 200
 """
 
-import argparse, os, platform, subprocess, sys, time
+import argparse, os, platform, shutil, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +88,46 @@ def stream_run(cmd, fh, label):
     log(f"{label} finished OK.", fh)
 
 
+def inhibitor_prefix():
+    """Command prefix that keeps the machine awake for the whole pipeline.
+
+    macOS → `caffeinate -i`; Linux → `systemd-inhibit` (when available).
+    Returns [] when no inhibitor is available for this platform.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return ["caffeinate", "-i"]
+    if system == "Linux":
+        exe = shutil.which("systemd-inhibit")
+        if exe:
+            return [exe,
+                    "--what=sleep:idle",
+                    "--who=run_pipeline.py",
+                    "--why=NAM dataset generation / training",
+                    "--mode=block"]
+    return []
+
+
+def self_inhibit(no_inhibit):
+    """Re-exec this script once under a sleep inhibitor so a single lock
+    covers the entire run — including the idle gap between generation and
+    training. A guard env var prevents an infinite re-exec loop; if the
+    inhibitor is unavailable or exec fails, we fall through and run normally.
+    """
+    if no_inhibit or os.environ.get("PIPELINE_INHIBITED"):
+        return
+    prefix = inhibitor_prefix()
+    if not prefix:
+        return
+    os.environ["PIPELINE_INHIBITED"] = "1"
+    argv = prefix + [PYTHON, str(Path(__file__).resolve())] + sys.argv[1:]
+    try:
+        os.execvp(prefix[0], argv)
+    except OSError as e:
+        print(f"[warn] could not start sleep inhibitor ({e}); "
+              f"running without it.", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -114,8 +154,11 @@ def main():
     g.add_argument("--skip-generate",  action="store_true")
     g.add_argument("--skip-combine",   action="store_true")
     g.add_argument("--skip-train",     action="store_true")
-    g.add_argument("--no-caffeinate",  action="store_true",
-                   help="Disable caffeinate (macOS sleep prevention, on by default)")
+    g.add_argument("--no-inhibit", "--no-caffeinate", dest="no_inhibit",
+                   action="store_true",
+                   help="Don't hold a sleep inhibitor for the run "
+                        "(caffeinate on macOS, systemd-inhibit on Linux; "
+                        "inhibiting is on by default)")
 
     # --- generation (batch_harness.py) ---
     g = ap.add_argument_group("generation")
@@ -152,16 +195,15 @@ def main():
 
     args = ap.parse_args()
 
+    # Keep the machine awake for the whole pipeline (may run for hours).
+    # Re-execs under caffeinate / systemd-inhibit before any work begins.
+    self_inhibit(args.no_inhibit)
+
     dataset_dir  = args.dataset_dir
     outputs_npy  = dataset_dir / "outputs.npy"
     sig_dir      = dataset_dir / "sig"
     log_path     = args.log or (dataset_dir / "pipeline.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    use_caffeinate = (platform.system() == "Darwin") and not args.no_caffeinate
-
-    def wrap(cmd):
-        return (["caffeinate", "-i"] + cmd) if use_caffeinate else cmd
 
     with open(log_path, "a") as fh:
         t0 = time.time()
@@ -206,7 +248,7 @@ def main():
                 gen_cmd += ["--gang", g]
             for s in (args.steps or []):
                 gen_cmd += ["--steps", s]
-            stream_run(wrap(gen_cmd), fh, "Generation")
+            stream_run(gen_cmd, fh, "Generation")
 
         # ------------------------------------------------------------------
         # Step 2: Combine
@@ -223,7 +265,7 @@ def main():
 
         if run_combine:
             section("STEP 2 / 3 — Combine", fh)
-            stream_run(wrap([PYTHON, BATCH, "--combine", dataset_dir]), fh, "Combine")
+            stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
 
         # ------------------------------------------------------------------
         # Step 3: Train
@@ -250,7 +292,7 @@ def main():
             if args.mmap:                train_cmd.append("--mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
-            stream_run(wrap(train_cmd), fh, "Training")
+            stream_run(train_cmd, fh, "Training")
 
         elapsed = time.time() - t0
         h, m, s = int(elapsed // 3600), int((elapsed % 3600) // 60), int(elapsed % 60)
