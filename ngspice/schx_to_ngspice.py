@@ -92,6 +92,21 @@ def triode_subckt(name, p):
     return ['.subckt %s P G K' % name, ig, ip, '.ends']
 
 
+def triode_subckt_koren(name, p):
+    """Koren triode (convergence mode) — matches the prototype's proven-stable
+    12AX7 subckt: Koren plate current + a grid diode + inter-electrode caps.
+    Numerically softer than the exact DempwolfZolzer port, at a fidelity cost."""
+    Mu, Ex, Kg, Kp, Kvb = (qty(p['Mu']), qty(p['Ex']), qty(p['Kg']),
+                           qty(p['Kp']), qty(p['Kvb']))
+    vgk, vpk = 'V(G,K)', 'V(P,K)'
+    E1 = '((%s)/%s*%s)' % (vpk, sp(Kp),
+                           softplus('%s*(1/%s+(%s)/sqrt(%s+(%s)*(%s)))' % (
+                               sp(Kp), sp(Mu), vgk, sp(Kvb), vpk, vpk)))
+    return ['.subckt %s P G K' % name,
+            'Bp P K I = (%s>0)?2*pow(%s,%s)/%s:0' % (E1, E1, sp(Ex), sp(Kg)),
+            'Dgk G K DGRID', 'CGP G P 2.4p', 'CGK G K 2.3p', '.ends']
+
+
 def pentode_subckt(name, p):
     Mu, Ex, Kg1, Kg2, Kp, Kvb = (qty(p['Mu']), qty(p['Ex']), qty(p['Kg1']),
                                  qty(p['Kg2']), qty(p['Kp']), qty(p['Kvb']))
@@ -109,19 +124,27 @@ def pentode_subckt(name, p):
 # main translation
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
-              method='trap'):
+              method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None):
     pots = pots or {}
     comps = netlist['components']
-    lines = ['* schx -> ngspice (DempwolfZolzer triodes, Koren pentodes, baked pots)']
+    lines = ['* schx -> ngspice (%s triodes, Koren pentodes, baked pots)'
+             % ('Koren' if koren else 'DempwolfZolzer')]
 
     # collect unique tube param signatures -> subckt name
     subckts, sub_defs = {}, []
+    need_dgrid = [False]
+
     def tube_sub(kind, p):
         sig = (kind, tuple(sorted((k, p[k]) for k in p if k not in ('Model',))))
         if sig not in subckts:
             nm = '%s%d' % (kind, len(subckts))
             subckts[sig] = nm
-            sub_defs.extend(triode_subckt(nm, p) if kind == 'TRI' else pentode_subckt(nm, p))
+            if kind == 'PEN':
+                sub_defs.extend(pentode_subckt(nm, p))
+            elif koren:
+                sub_defs.extend(triode_subckt_koren(nm, p)); need_dgrid[0] = True
+            else:
+                sub_defs.extend(triode_subckt(nm, p))
         return subckts[sig]
 
     body, out_node = [], None
@@ -190,15 +213,22 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
                      # matrix isn't singular / floating.
                      'R%s_a %s %s 1meg' % (nm, SA, ST),
                      'R%s_c %s %s 1meg' % (nm, ST, SC),
-                     # light damping: a pure-ideal OT + high loop-gain global NFB (e.g.
+                     # OT damping: a pure-ideal OT + high loop-gain global NFB (e.g.
                      # the 5150) oscillates instantly. A plate-to-plate resistive damper
-                     # + a snubber lower the OT Q enough to converge, at minor HF cost.
-                     'R%s_ppd %s %s 47k' % (nm, SA, SC),
+                     # + a snubber lower the OT Q to converge, at minor HF cost. Light
+                     # defaults suit moderate amps; stiff amps need heavier (--ot-damp
+                     # 3k --ot-snub 220n --nfb-comp <node>=1n for the 5150 full).
+                     'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
                      'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
-                     'C%s_sn n%s_sn %s 10n' % (nm, nm, PC)]
+                     'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
         else:
             print('WARN: unhandled component %s (%s)' % (nm, ty), file=sys.stderr)
 
+    if need_dgrid[0]:
+        sub_defs.insert(0, '.model DGRID D(IS=1e-12 RS=2000 N=1.0)')
+    if nfb_comp and '=' in nfb_comp:      # HF compensation cap at the feedback node
+        n, cval_ = nfb_comp.split('=')
+        body.append('Cnfbcomp %s 0 %s' % (node(n), cval_))
     lines += sub_defs + [''] + body + [
         '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
         'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
@@ -214,8 +244,14 @@ if __name__ == '__main__':
     ap.add_argument('--pots', default='', help='name=wipe,name=wipe')
     ap.add_argument('--pwl', default='input.pwl'); ap.add_argument('--dur', type=float, default=0.5)
     ap.add_argument('--csv', default='out.csv')
+    ap.add_argument('--koren', action='store_true',
+                    help='Koren triode model (softer/convergence mode) instead of exact DempwolfZolzer')
+    ap.add_argument('--ot-damp', default='47k', help='OT plate-to-plate damper R (heavier=more stable)')
+    ap.add_argument('--ot-snub', default='10n', help='OT snubber C')
+    ap.add_argument('--nfb-comp', default=None, help='NFB compensation cap, NODE=value (e.g. nNFB=1n)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
     nl = json.load(open(a.netlist))
-    open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv))
+    open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv, koren=a.koren,
+                                     ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp))
     print('wrote', a.out)
