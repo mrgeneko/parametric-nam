@@ -229,3 +229,31 @@ Not required for training or Python inference. Needed for C++ inference validati
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - `[redacted]` — Target host for the trained `.param.nam` models
+
+## Credits & Attribution
+
+This toolchain builds on several open-source projects and published models:
+
+- **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
+  circuit simulator `livespice_cli` builds against (vendored as `extern/LiveSPICE`),
+  and the reference for the tube-model equations. The ngspice backend's tube
+  subcircuits are **ported from LiveSPICE's `Triode.cs` / `Pentode.cs`**.
+- **[ngspice](https://ngspice.sourceforge.io/)** (BSD) — the adaptive-timestep SPICE
+  engine used by the experimental `--backend ngspice`, including the **XSPICE** code
+  models (originally Georgia Tech Research Institute) whose `filesource` feeds the input.
+- **Tube models** (as implemented by LiveSPICE and ported here):
+  - **Norman Koren**'s SPICE triode/pentode model — the `--koren` mode and all pentodes.
+  - **Dempwolf–Zölzer** triode model — K. Dempwolf & U. Zölzer, *"A physically-motivated
+    triode model for circuit simulations,"* Proc. DAFx-11 (2011) — the default triode model.
+- **[Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler)** /
+  **[NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)**
+  (Steven Atkinson, MIT) — the `.nam` format, the WaveNet ("A2") architecture, and the
+  `SlimmableContainer` that this project targets.
+- **[auraloss](https://github.com/csteinmetz1/auraloss)** (Christian Steinmetz, Apache-2.0)
+  — the multi-resolution STFT loss in `param_train.py`.
+- **Ideal-transformer modeling** — the ngspice output transformer uses the standard
+  controlled-source (E+F) ideal-transformer formulation from the SPICE literature
+  (e.g. Electronic Design's "A Spice Model For The Ideal Transformer," LTwiki, and
+  diyAudio push-pull-OT threads).
+
+Underlying scientific-Python stack: PyTorch, NumPy, SciPy, soundfile.
