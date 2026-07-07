@@ -14,6 +14,7 @@ namespace livespice_cli
         static void Main(string[] args)
         {
             string inputPath = null, outputPath = null, circuitPath = null, paramsStr = null, speakerName = null;
+            string netlistPath = null;
             int sampleRate = 48000, oversample = 2, iterations = 8;
 
             for (int i = 0; i < args.Length; i++)
@@ -28,12 +29,17 @@ namespace livespice_cli
                     case "--sr": sampleRate = int.Parse(args[++i]); break;
                     case "--oversample": oversample = int.Parse(args[++i]); break;
                     case "--iterations": iterations = int.Parse(args[++i]); break;
+                    // Dump the authoritative netlist (components + node connectivity) as JSON
+                    // and exit — the foundation for the ngspice-backend .schx translator.
+                    case "--netlist": netlistPath = args[++i]; break;
                 }
             }
 
-            if (inputPath == null || outputPath == null || circuitPath == null)
+            // --netlist only needs --circuit; the audio flags aren't required.
+            if (circuitPath == null || (netlistPath == null && (inputPath == null || outputPath == null)))
             {
                 Console.Error.WriteLine("Usage: livespice_cli --input in.wav --output out.wav --circuit circuit.schx [--params k=v,...] [--speaker S1] [--sr 48000] [--oversample 2] [--iterations 8]");
+                Console.Error.WriteLine("   or: livespice_cli --circuit circuit.schx --netlist out.json   (dump netlist and exit)");
                 Environment.Exit(1);
             }
 
@@ -42,6 +48,12 @@ namespace livespice_cli
             // load circuit
             var schematic = Schematic.Load(circuitPath, log);
             var circuit = schematic.Build(log);
+
+            if (netlistPath != null)
+            {
+                DumpNetlist(circuit, netlistPath);
+                return;
+            }
 
             // set knob parameters
             if (paramsStr != null)
@@ -277,6 +289,67 @@ namespace livespice_cli
             bw.Write(dataSize);
             foreach (var s in samples)
                 bw.Write((float)s);
+        }
+
+        // -------------------------------------------------------------------
+        // Netlist dump — authoritative components + node connectivity as JSON.
+        // Consumed by the ngspice-backend .schx translator (batch_harness).
+        // -------------------------------------------------------------------
+        static string JsonStr(string s)
+        {
+            if (s == null) return "null";
+            var sb = new StringBuilder("\"");
+            foreach (char c in s)
+            {
+                if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+                else if (c == '\n') sb.Append("\\n");
+                else if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                else sb.Append(c);
+            }
+            return sb.Append('"').ToString();
+        }
+
+        static string CompValue(Component c)
+        {
+            switch (c)
+            {
+                case Resistor r: return r.Resistance.ToString();
+                case Capacitor cap: return cap.Capacitance.ToString();
+                case Potentiometer p: return p.Resistance.ToString();
+                case Rail rail: return rail.Voltage.ToString();
+                case CenterTapTransformer tx: return tx.Turns.ToString();
+                default: return null;
+            }
+        }
+
+        static void DumpNetlist(Circuit.Circuit circuit, string path)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\n  \"components\": [\n");
+            bool first = true;
+            foreach (var c in circuit.Components)
+            {
+                if (!first) sb.Append(",\n");
+                first = false;
+                sb.Append("    {\"name\": ").Append(JsonStr(c.Name));
+                sb.Append(", \"type\": ").Append(JsonStr(c.GetType().Name));
+                sb.Append(", \"value\": ").Append(JsonStr(CompValue(c)));
+                sb.Append(", \"isPot\": ").Append(c is IPotControl ? "true" : "false");
+                sb.Append(", \"terminals\": [");
+                bool tf = true;
+                foreach (var t in c.Terminals)
+                {
+                    if (!tf) sb.Append(", ");
+                    tf = false;
+                    sb.Append("{\"name\": ").Append(JsonStr(t.Name));
+                    sb.Append(", \"node\": ").Append(JsonStr(t.ConnectedTo != null ? t.ConnectedTo.Name : null));
+                    sb.Append("}");
+                }
+                sb.Append("]}");
+            }
+            sb.Append("\n  ]\n}\n");
+            File.WriteAllText(path, sb.ToString());
+            Console.Error.WriteLine($"Wrote netlist: {circuit.Components.Count()} components -> {path}");
         }
     }
 }
