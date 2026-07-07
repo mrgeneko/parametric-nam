@@ -105,6 +105,20 @@ single `--knobs Gain` / `Gain=0.5` then drives both wipers in lockstep, and the 
 appears once in the dataset and `.param.nam`. (Before this behavior, only the first
 matching section moved, so ganged pots tracked incorrectly.)
 
+### ngspice backend (experimental) — for stiff/combined amps
+
+`livespice_cli` uses a **fixed-timestep** solver. On very high-gain circuits
+(notably the **EVH 5150 Lead full amp**) it diverges and needs `--oversample 32`
+(~158 s per 5 s of audio) to stay bounded. [`ngspice/`](ngspice/) is a prototype
+**offline** backend using real SPICE (ngspice), whose **adaptive timestepping**
+converges on the same circuit with **no oversample hack** (~5–6× faster for the
+5150 full, and it never diverges). It is a proof of concept, not yet wired into
+`batch_harness`. See [`ngspice/README.md`](ngspice/README.md) for the result,
+the `method=trap` finding, fidelity caveats, and the LiveSPICE-vs-ngspice
+"which backend when" guidance. **LiveSPICE remains the default** (real-time-
+capable, `.schx`-native, reference tube models, uniform output, never aborts);
+ngspice is only for the handful of stiff/combined circuits it can't handle.
+
 ## .param.nam Format
 
 The file is a standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a new architecture that Phase 3 registers.

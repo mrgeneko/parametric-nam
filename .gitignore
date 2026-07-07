@@ -13,3 +13,7 @@ extern/LiveSPICE/**/bin/
 extern/LiveSPICE/**/obj/
 .DS_Store
 **/.DS_Store
+
+# ngspice backend build artifacts
+ngspice/*.cir
+ngspice/*.csv
