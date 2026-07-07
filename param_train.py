@@ -379,17 +379,19 @@ class ParamDataset(torch.utils.data.Dataset):
         perm_idx, params = self.samples[real_idx]
 
         inp = self.inp
-        out = (self.outputs[perm_idx] * self._scale).astype(np.float32)
+        out_row = self.outputs[perm_idx]          # mmap row view — not materialized yet
 
-        sig_len = min(len(inp), len(out))
+        sig_len = min(len(inp), out_row.shape[0])
         if sig_len > self.crop_len:
             start = np.random.randint(0, sig_len - self.crop_len)
             inp = inp[start:start + self.crop_len]
-            out = out[start:start + self.crop_len]
+            # Scale (scalar) only the crop window, not the whole 5.76M-sample
+            # row — avoids reading/processing 120x the data we actually use.
+            out = (out_row[start:start + self.crop_len] * self._scale).astype(np.float32)
         else:
             pad = self.crop_len - sig_len
             inp = np.pad(inp[:sig_len], (0, pad))
-            out = np.pad(out[:sig_len], (0, pad))
+            out = np.pad((out_row[:sig_len] * self._scale).astype(np.float32), (0, pad))
 
         inp_t = torch.from_numpy(inp.copy()).float().unsqueeze(0)
         out_t = torch.from_numpy(out.copy()).float().unsqueeze(0)
