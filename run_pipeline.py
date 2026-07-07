@@ -28,7 +28,7 @@ Example — full Dumble clean pipeline:
         --slimmable --mmap --epochs 200
 """
 
-import argparse, os, platform, shutil, subprocess, sys, time
+import argparse, csv, os, platform, shutil, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +44,17 @@ TRAIN   = HERE / "param_train.py"
 
 def ts():
     return datetime.now().strftime("%H:%M:%S")
+
+
+def fmt_dur(secs):
+    """Human-readable duration, e.g. 2h 38m 1s / 3m 12s / 19s."""
+    secs = int(round(secs))
+    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 def log(msg, fh):
@@ -62,12 +73,14 @@ def section(title, fh):
 
 
 def stream_run(cmd, fh, label):
-    """Run cmd, stream each output line with a timestamp to stdout and log."""
+    """Run cmd, stream each output line with a timestamp to stdout and log.
+    Returns the wall-clock seconds the command took."""
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     log(f"CMD: {' '.join(str(c) for c in cmd)}", fh)
     fh.write("\n")
     fh.flush()
 
+    _t = time.time()
     proc = subprocess.Popen(
         [str(c) for c in cmd],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -80,12 +93,14 @@ def stream_run(cmd, fh, label):
         fh.write(out)
         fh.flush()
     proc.wait()
+    dur = time.time() - _t
 
     if proc.returncode != 0:
         log(f"ERROR: {label} exited with code {proc.returncode} — aborting pipeline.", fh)
         sys.exit(proc.returncode)
 
-    log(f"{label} finished OK.", fh)
+    log(f"{label} finished OK ({fmt_dur(dur)}).", fh)
+    return dur
 
 
 def inhibitor_prefix():
@@ -129,6 +144,243 @@ def self_inhibit(no_inhibit):
 
 
 # ---------------------------------------------------------------------------
+# release folder
+# ---------------------------------------------------------------------------
+
+def nam_variant(output, tag):
+    """Sibling .param.nam path carrying a tag (mirrors param_train.nam_variant)."""
+    name = output.name
+    if name.endswith(".param.nam"):
+        return output.with_name(f"{name[:-len('.param.nam')]}.{tag}.param.nam")
+    return output.with_name(f"{output.stem}_{tag}{output.suffix}")
+
+
+def git_rev(path):
+    try:
+        r = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def env_info():
+    code = ("import sys,torch;print(sys.version.split()[0]);"
+            "print(torch.__version__);print(getattr(torch.version,'hip',None))")
+    try:
+        r = subprocess.run([PYTHON, "-c", code], capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            return (r.stdout.strip().split("\n") + ["?", "?", "?"])[:3]
+    except Exception:
+        pass
+    return ["?", "?", "?"]
+
+
+def hw_info():
+    """(cpu_model, logical_cores, accelerator) — best-effort, cross-platform
+    (Linux /proc/cpuinfo, macOS sysctl; GPU/MPS via the venv's torch)."""
+    system = platform.system()
+    cpu = platform.processor() or platform.machine() or "unknown"
+    try:
+        if system == "Linux":
+            for line in open("/proc/cpuinfo"):
+                if line.startswith("model name"):
+                    cpu = line.split(":", 1)[1].strip()
+                    break
+        elif system == "Darwin":
+            r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                cpu = r.stdout.strip()
+    except Exception:
+        pass
+
+    # Accelerator actually available to the training interpreter.
+    code = ("import torch\n"
+            "if torch.cuda.is_available():\n"
+            "    print(torch.cuda.get_device_name(0))\n"
+            "elif getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():\n"
+            "    print('Apple GPU (MPS/Metal)')\n"
+            "else:\n"
+            "    print('CPU only (no GPU)')\n")
+    gpu = "unknown"
+    try:
+        r = subprocess.run([PYTHON, "-c", code], capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and r.stdout.strip():
+            gpu = r.stdout.strip()
+    except Exception:
+        pass
+    return cpu, os.cpu_count(), gpu
+
+
+def reproduce_command(args):
+    """Reconstruct a one-shot run_pipeline.py command from parsed args."""
+    c = ['HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
+         f'    --dataset-dir    "{args.dataset_dir}" \\',
+         f'    --nam-output     "{args.nam_output}" \\',
+         f'    --checkpoint-dir "{args.checkpoint_dir}" \\',
+         f'    --backend {args.backend} \\']
+    if args.schx:          c.append(f'    --schx "{args.schx}" \\')
+    if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
+    if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
+    if args.values:        c.append(f'    --values {args.values} \\')
+    for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
+    for g in (args.gang or []):    c.append(f'    --gang "{g}" \\')
+    for s in (args.steps or []):   c.append(f'    --steps "{s}" \\')
+    if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
+    if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
+    if args.input:         c.append(f'    --input "{args.input}" \\')
+    if args.slimmable:     c.append('    --slimmable \\')
+    elif args.channels != 8: c.append(f'    --channels {args.channels} \\')
+    if args.mmap:          c.append('    --mmap \\')
+    c.append(f'    --repeats {args.repeats} --epochs {args.epochs} '
+             f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
+    return "\n".join(c)
+
+
+def build_release(args, fh, timings=None):
+    """Assemble a durable release folder next to the model: the best-full and
+    best-lite .param.nam files, the schematic, the full ESR history, dataset
+    params, a provenance manifest (with per-step timing + hardware), and a
+    replication script."""
+    nam_out = args.nam_output
+    stem = nam_out.name[:-len(".param.nam")] if nam_out.name.endswith(".param.nam") else nam_out.stem
+    release_dir = args.release_dir or (nam_out.parent / f"{stem}_release")
+    release_dir.mkdir(parents=True, exist_ok=True)
+    section("RELEASE — assembling durable folder", fh)
+    log(f"Release folder: {release_dir}", fh)
+
+    # --- copy model files (best-full, best-lite, primary) ---
+    for tag in ("best_full", "best_lite"):
+        src = nam_variant(nam_out, tag)
+        if src.exists():
+            shutil.copy2(src, release_dir / src.name)
+            log(f"  + {src.name}", fh)
+    if nam_out.exists():
+        shutil.copy2(nam_out, release_dir / nam_out.name)
+
+    # --- schematic, metrics, dataset params ---
+    if args.schx and args.schx.exists():
+        shutil.copy2(args.schx, release_dir / args.schx.name)
+        log(f"  + {args.schx.name}", fh)
+    metrics = args.checkpoint_dir / "metrics.csv"
+    if metrics.exists():
+        shutil.copy2(metrics, release_dir / "metrics.csv")
+    for fn in ("config.json", "params.csv"):
+        src = args.dataset_dir / fn
+        if src.exists():
+            shutil.copy2(src, release_dir / f"dataset_{fn}")
+
+    # --- parse ESRs from metrics.csv ---
+    bf = bl = final = None
+    if metrics.exists():
+        rows = list(csv.DictReader(open(metrics)))
+        if rows:
+            bf = min(rows, key=lambda r: float(r["val_esr_full"]))
+            final = rows[-1]
+            if any(float(r["val_esr_lite"]) > 0 for r in rows):
+                bl = min(rows, key=lambda r: float(r["val_esr_lite"]))
+
+    def esr_row(label, fname, row):
+        if row is None:
+            return f"| `{fname}` | — | — | — | not produced |"
+        return (f"| `{fname}` | {row['epoch']} | {float(row['val_esr_full']):.4f} "
+                f"| {float(row['val_esr_lite']):.4f} | {label} |")
+
+    esr_lines = [
+        "| File | Epoch | ESR full (8ch) | ESR lite (3ch) | Notes |",
+        "|------|------:|---------------:|---------------:|-------|",
+        esr_row("full-optimal (ship this)", nam_variant(nam_out, "best_full").name, bf),
+    ]
+    if bl is not None:
+        esr_lines.append(esr_row("lite-optimal", nam_variant(nam_out, "best_lite").name, bl))
+    esr_table = "\n".join(esr_lines)
+
+    # --- timing + hardware ---
+    def _tline(label, key):
+        if timings and key in timings:
+            return f"- {label}: {fmt_dur(timings[key])}"
+        return f"- {label}: (skipped or cached — not re-run this pass)"
+    timing_md = "\n".join([
+        _tline("Generate dataset", "generate"),
+        _tline("Combine", "combine"),
+        _tline("Train", "train"),
+    ])
+    if timings:
+        timing_md += f"\n- **Total (timed steps)**: {fmt_dur(sum(timings.values()))}"
+    cpu, cores, gpu = hw_info()
+
+    # --- provenance ---
+    py, tv, hip = env_info()
+    repo_rev = git_rev(HERE)
+    schx_repo_rev = git_rev(args.schx.parent) if args.schx else None
+    knob_spec = args.knobs or "(none)"
+    ranges = "; ".join(args.ranges or []) or (args.values or "(default)")
+    if bf is None:
+        best_line = "(metrics.csv not found)"
+    else:
+        best_line = f"Best-full ESR {float(bf['val_esr_full']):.4f} @ ep{bf['epoch']}"
+        if bl is not None:
+            best_line += f"; best-lite ESR {float(bl['val_esr_lite']):.4f} @ ep{bl['epoch']}"
+
+    manifest = f"""# {(args.circuit or stem)} — parametric NAM run manifest
+
+Auto-generated by run_pipeline.py. Provenance + parameters to replicate this model.
+
+## Models (each a SlimmableContainer: lite 3ch + full 8ch)
+{esr_table}
+
+Full per-epoch ESR history: `metrics.csv`.
+
+## Timing (this run)
+{timing_md}
+
+## Hardware
+- CPU: {cpu} ({cores} logical cores)
+- Accelerator: {gpu}
+
+## Environment
+- Python {py}, PyTorch {tv} (HIP {hip})
+- Repo `spice-to-nam` @ {repo_rev}
+- Schematic repo @ {schx_repo_rev}
+- Schematic: `{args.schx.name if args.schx else '(cpp backend)'}`
+- Input: `{args.input}`
+
+## Dataset
+- Backend: {args.backend}   Circuit: {args.circuit or (args.schx.stem if args.schx else '?')}
+- Knobs: {knob_spec}
+- Values/ranges: {ranges}
+- Fixed params: {args.fixed_params or '(none)'}
+- Speaker: {args.speaker or '(none)'}
+
+## Training
+- {'slimmable (lite 3ch + full 8ch)' if args.slimmable else f'{args.channels}ch'}, FiLM conditioning
+- epochs {args.epochs}, repeats {args.repeats}, crop_len {args.crop_len}, batch {args.batch_size}, lr {args.lr}, seed {args.seed}
+- {best_line}
+
+## Replicate
+Run `./reproduce.sh`.
+"""
+    (release_dir / "MANIFEST.md").write_text(manifest)
+
+    repro = f"""#!/usr/bin/env bash
+# Replicate this model (generate dataset + train). Auto-generated.
+set -euo pipefail
+REPO="{HERE}"
+PY="$REPO/.venv/bin/python"
+cd "$REPO"
+
+{reproduce_command(args)}
+"""
+    repro_path = release_dir / "reproduce.sh"
+    repro_path.write_text(repro)
+    repro_path.chmod(0o755)
+
+    log(f"Release folder ready: {release_dir}", fh)
+    return release_dir
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -154,6 +406,10 @@ def main():
     g.add_argument("--skip-generate",  action="store_true")
     g.add_argument("--skip-combine",   action="store_true")
     g.add_argument("--skip-train",     action="store_true")
+    g.add_argument("--release-dir",    type=Path, default=None,
+                   help="Durable release folder (default: <nam-output>_release)")
+    g.add_argument("--no-release",     action="store_true",
+                   help="Skip building the release folder after training")
     g.add_argument("--no-inhibit", "--no-caffeinate", dest="no_inhibit",
                    action="store_true",
                    help="Don't hold a sleep inhibitor for the run "
@@ -217,6 +473,8 @@ def main():
         fh.write(header)
         fh.flush()
 
+        timings = {}  # step -> wall seconds (absent = skipped)
+
         # ------------------------------------------------------------------
         # Step 1: Generate
         # ------------------------------------------------------------------
@@ -248,7 +506,7 @@ def main():
                 gen_cmd += ["--gang", g]
             for s in (args.steps or []):
                 gen_cmd += ["--steps", s]
-            stream_run(gen_cmd, fh, "Generation")
+            timings["generate"] = stream_run(gen_cmd, fh, "Generation")
 
         # ------------------------------------------------------------------
         # Step 2: Combine
@@ -265,7 +523,7 @@ def main():
 
         if run_combine:
             section("STEP 2 / 3 — Combine", fh)
-            stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
+            timings["combine"] = stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
 
         # ------------------------------------------------------------------
         # Step 3: Train
@@ -292,7 +550,17 @@ def main():
             if args.mmap:                train_cmd.append("--mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
-            stream_run(train_cmd, fh, "Training")
+            timings["train"] = stream_run(train_cmd, fh, "Training")
+
+            # ------------------------------------------------------------------
+            # Release folder (durable copy of models + provenance)
+            # ------------------------------------------------------------------
+            if not args.no_release:
+                try:
+                    build_release(args, fh, timings)
+                except Exception as e:
+                    log(f"WARNING: release folder build failed ({e}); "
+                        f"models are still in place.", fh)
 
         elapsed = time.time() - t0
         h, m, s = int(elapsed // 3600), int((elapsed % 3600) // 60), int(elapsed % 60)
