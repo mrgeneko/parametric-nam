@@ -335,6 +335,25 @@ namespace livespice_cli
                 sb.Append(", \"type\": ").Append(JsonStr(c.GetType().Name));
                 sb.Append(", \"value\": ").Append(JsonStr(CompValue(c)));
                 sb.Append(", \"isPot\": ").Append(c is IPotControl ? "true" : "false");
+                // All scalar properties (tube model params, Model enum, R/C values, ...)
+                // so the ngspice translator can rebuild the exact device.
+                sb.Append(", \"params\": {");
+                bool pf = true;
+                foreach (var prop in c.GetType().GetProperties())
+                {
+                    if (!prop.CanRead || prop.GetIndexParameters().Length > 0) continue;
+                    object val;
+                    try { val = prop.GetValue(c); } catch { continue; }
+                    if (val == null) continue;
+                    var vt = val.GetType();
+                    if (val is double || val is int || vt.IsEnum || vt.Name == "Quantity")
+                    {
+                        if (!pf) sb.Append(", ");
+                        pf = false;
+                        sb.Append(JsonStr(prop.Name)).Append(": ").Append(JsonStr(val.ToString()));
+                    }
+                }
+                sb.Append("}");
                 sb.Append(", \"terminals\": [");
                 bool tf = true;
                 foreach (var t in c.Terminals)
