@@ -237,7 +237,10 @@ def reproduce_command(args):
     if args.slimmable:     c.append('    --slimmable \\')
     elif args.channels != 8: c.append(f'    --channels {args.channels} \\')
     if args.mmap:          c.append('    --mmap \\')
-    c.append(f'    --repeats {args.repeats} --epochs {args.epochs} '
+    epochs_part = f'--epochs {args.epochs}'
+    if args.epochs == 0:
+        epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
+    c.append(f'    --repeats {args.repeats} {epochs_part} '
              f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
     return "\n".join(c)
 
@@ -447,7 +450,12 @@ def main():
 
     # --- training (param_train.py) ---
     g = ap.add_argument_group("training")
-    g.add_argument("--epochs",         type=int,   default=100)
+    g.add_argument("--epochs",         type=int,   default=100,
+                   help="Training epochs, or 0 = open-ended (run until touch <ckpt>/STOP)")
+    g.add_argument("--restart-period", type=int,   default=50,
+                   help="Open-ended SGDR restart period in epochs")
+    g.add_argument("--restart-mult",   type=int,   default=1,
+                   help="Open-ended SGDR period multiplier per restart")
     g.add_argument("--batch-size",     type=int,   default=16)
     g.add_argument("--lr",             type=float, default=3e-4)
     g.add_argument("--crop-len",       type=int,   default=44100)
@@ -554,6 +562,8 @@ def main():
                 "--output",          args.nam_output,
                 "--checkpoint-dir",  args.checkpoint_dir,
                 "--epochs",          args.epochs,
+                "--restart-period",  args.restart_period,
+                "--restart-mult",    args.restart_mult,
                 "--batch-size",      args.batch_size,
                 "--lr",              args.lr,
                 "--crop-len",        args.crop_len,

@@ -10,7 +10,7 @@ Usage:
   python param_train.py --dataset /path/to/dataset --output model.param.nam
 """
 
-import argparse, csv, datetime, json, math, os, sys, time, warnings
+import argparse, csv, datetime, json, math, os, signal, sys, time, warnings
 from pathlib import Path
 
 import numpy as np
@@ -528,6 +528,36 @@ def param_sensitivity(model: ParametricA2, device: str,
 
 
 # ---------------------------------------------------------------------------
+# Graceful-stop signalling (for open-ended --epochs 0 training)
+# ---------------------------------------------------------------------------
+
+_STOP_REQUESTED = False
+
+
+def _request_stop(signum, frame):
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    print("\n[stop] signal received — finishing current epoch, then saving and exiting.",
+          file=sys.stderr, flush=True)
+
+
+def should_stop(ckpt_dir) -> bool:
+    """True if a stop was requested via SIGINT/SIGTERM or a STOP sentinel file
+    in the checkpoint dir. Consumes the STOP file so a later resume won't
+    immediately re-trigger."""
+    if _STOP_REQUESTED:
+        return True
+    if ckpt_dir is not None and (ckpt_dir / "STOP").exists():
+        try:
+            (ckpt_dir / "STOP").unlink()
+        except OSError:
+            pass
+        print("[stop] STOP file found — finishing up and exiting.", file=sys.stderr, flush=True)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Export helpers
 # ---------------------------------------------------------------------------
 
@@ -572,7 +602,16 @@ def main():
     ap.add_argument("--channels", type=int, default=8,
                     help="A2 channel count (3=nano, 8=standard) (default: %(default)s)")
     ap.add_argument("--epochs", type=int, default=100,
-                    help="Number of training epochs (default: %(default)s)")
+                    help="Number of training epochs, or 0 = open-ended: run until "
+                         "stopped (touch <ckpt>/STOP, or SIGINT/SIGTERM). Best models "
+                         "export live, so you can stop whenever they're good enough. "
+                         "(default: %(default)s)")
+    ap.add_argument("--restart-period", type=int, default=50,
+                    help="Open-ended mode: SGDR cosine-warm-restart period in epochs "
+                         "(default: %(default)s). Each low-LR trough tends to mint a new best.")
+    ap.add_argument("--restart-mult", type=int, default=1,
+                    help="Open-ended mode: SGDR period multiplier per restart "
+                         "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -684,19 +723,36 @@ def main():
         best_lite_state = ckpt.get("best_lite_state", None)
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR {best_esr:.6f}", file=sys.stderr)
 
-    scheduler_last = start_epoch - 2
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs,
-                                                           last_epoch=scheduler_last)
+    open_ended = (args.epochs == 0)
+
+    def make_scheduler(last_epoch):
+        if open_ended:
+            # Horizon-free: cosine warm restarts (SGDR) — LR cycles down and
+            # restarts, so late training stays productive indefinitely.
+            return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=max(1, args.restart_period),
+                T_mult=max(1, args.restart_mult), last_epoch=last_epoch)
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, args.epochs, last_epoch=last_epoch)
+
+    scheduler = make_scheduler(start_epoch - 2)
     if args.resume and "scheduler_last_epoch" in ckpt:
-        scheduler_last = ckpt["scheduler_last_epoch"]
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs,
-                                                               last_epoch=scheduler_last)
+        scheduler = make_scheduler(ckpt["scheduler_last_epoch"])
     criterion = ParamLoss(mrstft_weight=args.mrstft_weight)
+
+    if open_ended:
+        signal.signal(signal.SIGINT, _request_stop)
+        signal.signal(signal.SIGTERM, _request_stop)
 
     # ------------------------------------------------------------------
     # Train
     # ------------------------------------------------------------------
-    print(f"\nTraining {args.epochs} epochs ...", file=sys.stderr)
+    if open_ended:
+        print(f"\nTraining open-ended (SGDR restarts every {args.restart_period} epochs). "
+              f"Stop with: touch {ckpt_dir / 'STOP' if ckpt_dir else 'STOP'}  (or SIGINT/SIGTERM). "
+              f"Best models export live.", file=sys.stderr)
+    else:
+        print(f"\nTraining {args.epochs} epochs ...", file=sys.stderr)
     if log_csv is not None:
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
         log_w = csv.writer(log_f)
@@ -704,7 +760,12 @@ def main():
             log_w.writerow(["epoch", "train_loss", "val_loss", "val_esr_full", "val_esr_lite", "lr", "elapsed_s"])
 
     t0 = time.time()
-    for epoch in range(start_epoch, args.epochs + 1):
+    epoch = start_epoch - 1
+    completed = 0
+    while True:
+        epoch += 1
+        if not open_ended and epoch > args.epochs:
+            break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
         val_loss, val_esr, val_esr_lite = validate(model, val_loader, criterion, device)
@@ -751,13 +812,15 @@ def main():
         lr_now = scheduler.get_last_lr()[0]
 
         # Print every epoch for production monitoring
-        eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
         best_marker = (" *" if new_best else "") + (" L" if new_best_lite else "")
         lite_str = f"  ESR_lite={val_esr_lite:.6f}" if val_esr_lite > 0 else ""
-        print(f"  [{epoch:3d}/{args.epochs}]  "
-              f"train={train_loss:.6f}  val_loss={val_loss:.6f}  "
-              f"ESR_full={val_esr:.6f}{lite_str}  lr={lr_now:.2e}  "
-              f"({elapsed:.0f}s, ETA {eta:.0f}s){best_marker}",
+        if open_ended:
+            prog, tail = f"[{epoch:4d}/inf]", f"({elapsed:.0f}s)"
+        else:
+            eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
+            prog, tail = f"[{epoch:3d}/{args.epochs}]", f"({elapsed:.0f}s, ETA {eta:.0f}s)"
+        print(f"  {prog}  train={train_loss:.6f}  val_loss={val_loss:.6f}  "
+              f"ESR_full={val_esr:.6f}{lite_str}  lr={lr_now:.2e}  {tail}{best_marker}",
               file=sys.stderr, flush=True)
 
         # Log CSV
@@ -781,11 +844,17 @@ def main():
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
 
+        completed += 1
+        # Open-ended: stop gracefully on STOP file or SIGINT/SIGTERM.
+        if open_ended and should_stop(ckpt_dir):
+            break
+
     elapsed = time.time() - t0
     if log_csv is not None:
         log_f.close()
 
-    print(f"\nTraining finished ({elapsed:.0f}s, {elapsed/args.epochs:.1f}s/epoch)",
+    print(f"\nTraining finished ({elapsed:.0f}s, {elapsed/max(1, completed):.1f}s/epoch, "
+          f"{completed} epochs)",
           file=sys.stderr)
     lite_best_str = (f", lite {best_lite_esr:.6f}"
                      if best_lite_state is not None else "")
