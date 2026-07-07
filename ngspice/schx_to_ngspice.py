@@ -128,8 +128,8 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
     for c in comps:
         ty, nm, p = c['type'], c['name'], c['params']
         t = terms(c)
-        if ty in ('Ground', 'Label'):
-            continue
+        if ty in ('Ground', 'Label', 'NamedWire'):
+            continue  # NamedWire = single-terminal net label; node already resolved
         elif ty == 'Resistor':
             n = list(t.values()); body.append('R%s %s %s %s' % (nm, n[0], n[1], sp(qty(c['value']))))
         elif ty == 'Capacitor':
@@ -189,12 +189,19 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
                      # bleeders: give the (otherwise ideal) windings a DC path so the
                      # matrix isn't singular / floating.
                      'R%s_a %s %s 1meg' % (nm, SA, ST),
-                     'R%s_c %s %s 1meg' % (nm, ST, SC)]
+                     'R%s_c %s %s 1meg' % (nm, ST, SC),
+                     # light damping: a pure-ideal OT + high loop-gain global NFB (e.g.
+                     # the 5150) oscillates instantly. A plate-to-plate resistive damper
+                     # + a snubber lower the OT Q enough to converge, at minor HF cost.
+                     'R%s_ppd %s %s 47k' % (nm, SA, SC),
+                     'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
+                     'C%s_sn n%s_sn %s 10n' % (nm, nm, PC)]
         else:
             print('WARN: unhandled component %s (%s)' % (nm, ty), file=sys.stderr)
 
     lines += sub_defs + [''] + body + [
-        '', '.options method=%s reltol=1e-3 abstol=1e-9 vntol=1e-6 itl1=1000 itl4=1000 gmin=1e-12' % method,
+        '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
+        'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
         '.control', 'set filetype=ascii', 'tran 20.8333u %s' % sp(dur),
         'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
     return '\n'.join(lines)
