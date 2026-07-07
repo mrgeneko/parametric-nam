@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""General .schx -> ngspice netlist translator.
+
+Consumes the JSON from `livespice_cli --circuit X.schx --netlist X.json`
+(authoritative components + node connectivity + full device params) and emits
+an ngspice `.cir`. Device models are ported from LiveSPICE's own equations:
+
+  * Triode  (DempwolfZolzer): ig = Gg*softplus(Cg*Vgk)^Xi + Ig0
+                              ik = -G*softplus(C*(Vpk/Mu+Vgk))^Gamma ; ip=-(ik+ig)
+  * Pentode (Koren):          E1=Vpk/Kp*softplus(Kp*(1/Mu+Vgk/sqrt(Kvb+Vg2k^2)))
+                              ip=(Vpk>0)?E1^Ex/Kg1*atan(Vpk/Kvb):0 ; ig2=E1^Ex/Kg2
+  * Potentiometer: baked to two resistors at the wiper position.
+  * CenterTapTransformer: coupled-inductor OT (approx; LiveSPICE's is ideal —
+    see ngspice/README fidelity caveats).
+
+Not a real-time backend: ngspice adaptive-timestep offline generation, for the
+stiff/high-gain circuits where LiveSPICE's fixed step diverges.
+"""
+import json
+import re
+import sys
+
+# --- quantity parsing: "68 kΩ" -> 68000.0, "22 nF" -> 22e-9, "500 mV" -> 0.5 ---
+# Unit chars (Ω, µ, F, V, ...) vary by codepoint across sources, so parse the
+# leading number + the FIRST suffix letter as a possible SI prefix; ignore units.
+# NOTE: LiveSPICE uses M = mega (e.g. "1 MΩ"); we emit plain floats, so there is
+# no SPICE M=milli ambiguity downstream.
+def qty(s):
+    if s is None:
+        return None
+    m = re.match(r'^\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(\S*)', s.strip())
+    if not m:
+        return None
+    val = float(m.group(1))
+    suf = m.group(2)
+    if suf:
+        low = suf.lower()
+        p = suf[0]
+        if low.startswith('meg'):
+            val *= 1e6
+        elif p == 'p':
+            val *= 1e-12
+        elif p == 'n':
+            val *= 1e-9
+        elif p in ('u', 'µ', 'μ'):
+            val *= 1e-6
+        elif p == 'm':          # milli (M=mega handled above via 'meg' or capital)
+            val *= 1e-3
+        elif p == 'k':
+            val *= 1e3
+        elif p == 'M':
+            val *= 1e6
+        elif p == 'G':
+            val *= 1e9
+        # otherwise p is a unit char (Ω/V/A/F/H/s...) -> no scaling
+    return val
+
+
+def sp(x):
+    """Format a float for ngspice (plain, avoids case-sensitive SI prefixes)."""
+    return repr(float(x))
+
+
+def node(n):
+    return '0' if n in (None, 'GND') else n
+
+
+def softplus(x):
+    # numerically-stable ln(1+exp(x)) = max(x,0)+ln(1+exp(-abs(x)))
+    return '(max(%s,0)+ln(1+exp(-abs(%s))))' % (x, x)
+
+
+def terms(comp):
+    """dict terminalName -> node (0 for ground)."""
+    return {t['name']: node(t['node']) for t in comp['terminals']}
+
+
+# --------------------------------------------------------------------------
+# tube subcircuits (one per unique param signature)
+# --------------------------------------------------------------------------
+def triode_subckt(name, p):
+    Mu, G, Gg, C, Cg, Xi, Gamma = (qty(p['Mu']), qty(p['G']), qty(p['Gg']),
+                                   qty(p['C']), qty(p['Cg']), qty(p['Xi']), qty(p['Gamma']))
+    Ig0 = qty(p.get('Ig0', '0'))
+    vgk, vpk = 'V(G,K)', 'V(P,K)'
+    ig = 'Bg G K I = %s*pow(%s/%s,%s)+%s' % (
+        sp(Gg), softplus('%s*%s' % (sp(Cg), vgk)), sp(Cg), sp(Xi), sp(Ig0))
+    ik = '%s*pow(%s/%s,%s)' % (sp(G), softplus('%s*((%s)/%s+%s)' % (sp(C), vpk, sp(Mu), vgk)), sp(C), sp(Gamma))
+    # ip = -(ik+ig) = |ik| - ig ; Bp sources P->K
+    ip = 'Bp P K I = %s-(%s*pow(%s/%s,%s)+%s)' % (
+        ik, sp(Gg), softplus('%s*%s' % (sp(Cg), vgk)), sp(Cg), sp(Xi), sp(Ig0))
+    return ['.subckt %s P G K' % name, ig, ip, '.ends']
+
+
+def pentode_subckt(name, p):
+    Mu, Ex, Kg1, Kg2, Kp, Kvb = (qty(p['Mu']), qty(p['Ex']), qty(p['Kg1']),
+                                 qty(p['Kg2']), qty(p['Kp']), qty(p['Kvb']))
+    vpk, vgk, vg2k = 'V(P,K)', 'V(G,K)', 'V(G2,K)'
+    E1 = '((%s)/%s*%s)' % (vpk, sp(Kp),
+                           softplus('%s*(1/%s+(%s)/sqrt(%s+(%s)*(%s)))' % (
+                               sp(Kp), sp(Mu), vgk, sp(Kvb), vg2k, vg2k)))
+    ikoren = '((%s>0)?pow(%s,%s):0)' % (E1, E1, sp(Ex))
+    ip = 'Bp P K I = (%s>0)?%s/%s*atan((%s)/%s):0' % (vpk, ikoren, sp(Kg1), vpk, sp(Kvb))
+    ig2 = 'Bg2 G2 K I = %s/%s' % (ikoren, sp(Kg2))
+    return ['.subckt %s P G2 G K' % name, ip, ig2, '.ends']
+
+
+# --------------------------------------------------------------------------
+# main translation
+# --------------------------------------------------------------------------
+def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
+              method='trap'):
+    pots = pots or {}
+    comps = netlist['components']
+    lines = ['* schx -> ngspice (DempwolfZolzer triodes, Koren pentodes, baked pots)']
+
+    # collect unique tube param signatures -> subckt name
+    subckts, sub_defs = {}, []
+    def tube_sub(kind, p):
+        sig = (kind, tuple(sorted((k, p[k]) for k in p if k not in ('Model',))))
+        if sig not in subckts:
+            nm = '%s%d' % (kind, len(subckts))
+            subckts[sig] = nm
+            sub_defs.extend(triode_subckt(nm, p) if kind == 'TRI' else pentode_subckt(nm, p))
+        return subckts[sig]
+
+    body, out_node = [], None
+    for c in comps:
+        ty, nm, p = c['type'], c['name'], c['params']
+        t = terms(c)
+        if ty in ('Ground', 'Label'):
+            continue
+        elif ty == 'Resistor':
+            n = list(t.values()); body.append('R%s %s %s %s' % (nm, n[0], n[1], sp(qty(c['value']))))
+        elif ty == 'Capacitor':
+            n = list(t.values()); body.append('C%s %s %s %s' % (nm, n[0], n[1], sp(qty(c['value']))))
+        elif ty == 'Rail':
+            body.append('V%s %s 0 DC %s' % (nm, list(t.values())[0], sp(qty(p['Voltage']))))
+        elif ty == 'Input':
+            # Inline PWL (portable across ngspice builds; PWL file= is unsupported
+            # here). For long inputs a real backend should use an XSPICE filesource
+            # — see README. V0dBFS scaling is expected to be baked into the PWL.
+            src, cat = t['Anode'], t['Cathode']
+            pairs = []
+            with open(input_pwl) as f:
+                for ln in f:
+                    ln = ln.split()
+                    if len(ln) >= 2:
+                        pairs.append(ln[0] + ' ' + ln[1])
+            # continuation-line wrapped so we don't hit ngspice's line-length limit
+            head = 'Vin %s %s PWL(' % (src, cat)
+            chunk, out = [], [head]
+            for i, pr in enumerate(pairs):
+                chunk.append(pr)
+                if len(chunk) == 8:
+                    out.append('+ ' + ' '.join(chunk)); chunk = []
+            if chunk:
+                out.append('+ ' + ' '.join(chunk))
+            out.append('+ )')
+            body.extend(out)
+        elif ty == 'Speaker':
+            out_node = t['Anode']  # probe here
+        elif ty == 'Potentiometer' or c.get('isPot'):
+            R = qty(p['Resistance']); wipe = pots.get(nm, qty(p.get('Wipe', '0.5')))
+            A, W, K = t.get('Anode'), t.get('Wiper'), t.get('Cathode')
+            raw, rwk = R * (1 - wipe), R * wipe   # Wipe=0 -> wiper at cathode
+            if A != W: body.append('R%s_aw %s %s %s' % (nm, A, W, sp(max(raw, 1e-3))))
+            if W != K: body.append('R%s_wk %s %s %s' % (nm, W, K, sp(max(rwk, 1e-3))))
+        elif ty == 'Triode':
+            s = tube_sub('TRI', p); body.append('X%s %s %s %s %s' % (nm, t['P'], t['G'], t['K'], s))
+        elif ty == 'Pentode':
+            s = tube_sub('PEN', p); body.append('X%s %s %s %s %s %s' % (nm, t['P'], t['G2'], t['G'], t['K'], s))
+        elif ty == 'CenterTapTransformer':
+            # coupled-inductor OT approx. Center-tapped winding = SA/ST/SC (plate side,
+            # high L); PA/PC = the other winding. Lp:Ls scaled by turns^2 + realistic
+            # DCR/snubber/damper so the ideal-ish OT + NFB doesn't force dt->0.
+            r = str(c['value']).split(':'); ratio = float(r[1]) / float(r[0]) if len(r) == 2 else 1.0
+            SA, ST, SC, PA, PC = t['SA'], t['ST'], t['SC'], t['PA'], t['PC']
+            Lp, Ls = 10.0, 10.0 / (ratio * ratio)
+            body += ['Rp1 %s n%s_a 60' % (SA, nm), 'Lp1 n%s_a %s %s' % (nm, ST, sp(Lp)),
+                     'Rp2 %s n%s_b 60' % (SC, nm), 'Lp2 n%s_b %s %s' % (nm, ST, sp(Lp)),
+                     'Rs %s n%s_s 0.5' % (PA, nm), 'Ls n%s_s %s %s' % (nm, PC, sp(Ls)),
+                     'K1 Lp1 Lp2 0.999', 'K2 Lp1 Ls 0.999', 'K3 Lp2 Ls 0.999',
+                     'Rsnub %s n%s_sn 10' % (PA, nm), 'Csnub n%s_sn %s 47n' % (nm, PC),
+                     'Rppd %s %s 22k' % (SA, SC)]
+        else:
+            print('WARN: unhandled component %s (%s)' % (nm, ty), file=sys.stderr)
+
+    lines += sub_defs + [''] + body + [
+        '', '.options method=%s reltol=1e-3 abstol=1e-9 vntol=1e-6 itl1=1000 itl4=1000 gmin=1e-12' % method,
+        '.control', 'set filetype=ascii', 'tran 20.8333u %s' % sp(dur),
+        'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
+    return '\n'.join(lines)
+
+
+if __name__ == '__main__':
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('netlist'); ap.add_argument('-o', '--out', default='circuit.cir')
+    ap.add_argument('--pots', default='', help='name=wipe,name=wipe')
+    ap.add_argument('--pwl', default='input.pwl'); ap.add_argument('--dur', type=float, default=0.5)
+    ap.add_argument('--csv', default='out.csv')
+    a = ap.parse_args()
+    pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
+    nl = json.load(open(a.netlist))
+    open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv))
+    print('wrote', a.out)
