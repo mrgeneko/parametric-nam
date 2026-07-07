@@ -1,127 +1,227 @@
 # spice-to-nam
 
-Toolchain for converting SPICE circuit schematics (`.schx`) into parametric Neural Amp Modeler (NAM) files. The resulting `.param.nam` file captures a circuit's behavior across its full knob range — enabling real-time parametric inference in [redacted] at a fraction of the CPU cost of live simulation.
+Toolchain for converting SPICE circuit schematics (`.schx`) into **parametric**
+Neural Amp Modeler (NAM) files. The resulting `.param.nam` captures a circuit's
+behavior across its **full knob range** — enabling real-time parametric inference
+in [redacted] at a fraction of the CPU cost of live simulation.
 
-## Overview
+Given a `.schx` (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`), it simulates
+the circuit across a sweep of knob settings, trains a FiLM-conditioned WaveNet on the
+paired audio, and exports a single `.param.nam` whose knobs match the real controls.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone with submodules (LiveSPICE nests ComputerAlgebra — recursive is required)
+git clone --recurse-submodules <this-repo> && cd spice-to-nam
+git submodule update --init --recursive extern/LiveSPICE   # if you forgot --recurse
+
+# 2. Build the simulator CLI (Linux shown; macOS: -r osx-arm64)
+cd livespice_cli && dotnet publish -c Release -r linux-x64 --self-contained -o publish/ && cd ..
+
+# 3. Python deps
+python -m venv .venv && . .venv/bin/activate
+pip install torch numpy scipy soundfile auraloss
+
+# 4. One command: generate dataset -> combine -> train -> release folder
+python run_pipeline.py \
+    --dataset-dir    /tmp/ts9_ds \
+    --nam-output     /tmp/ts9.param.nam \
+    --checkpoint-dir /tmp/ts9_ckpt \
+    --backend livespice \
+    --schx "/path/to/Ibanez TS-9.schx" \
+    --knobs drive,tone --range "drive=0.0,0.25,0.5,0.75,1.0" --range "tone=0.0,0.25,0.5,0.75,1.0" \
+    --fixed-params "Level=1.0" \
+    --input /path/to/guitar.wav \
+    --slimmable --mmap --epochs 200 --crop-len 24000 --batch-size 64
+
+# 5. Listen (Python inference, no C++ needed)
+python param_infer.py --checkpoint /tmp/ts9_ckpt/best.pt \
+    --input /path/to/dry.wav --output-dir /tmp/out/ --params "drive=0.7,tone=0.4"
+```
+
+The trained model lands at `/tmp/ts9.param.nam`; a self-contained **release folder**
+(`/tmp/ts9_release/`) with the model, schematic copy, metrics, manifest, and a
+`reproduce.sh` is built automatically. See [full build details](#build--dependencies)
+for prerequisites (.NET SDK, recursive submodules).
+
+## How it works
 
 ```
 .schx schematic
-    ↓  batch_harness.py
-Paired audio dataset: input sweep × N knob permutations
-    ↓  param_train.py
-.param.nam  (SlimmableContainer: A2 Lite 3ch + Full 8ch, FiLM knob conditioning)
-    ↓  param_infer.py
-Output WAVs at arbitrary knob positions (Python/PyTorch, no C++ required)
-    ↓  Phase 3: NeuralAmpModelerCore ParametricWaveNet factory
+    ↓  batch_harness.py        (simulate: input sweep × N knob permutations)
+Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
+    ↓  param_train.py          (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
+.param.nam  (SlimmableContainer)
+    ↓  param_infer.py          (PyTorch inference at arbitrary knob positions — no C++)
+    ↓  Phase 3                 (NeuralAmpModelerCore ParametricWaveNet factory)
 Real-time inference in [redacted]
 ```
 
+`run_pipeline.py` orchestrates the first three steps in one command; you can also run
+each script directly (below).
+
+---
+
+## `run_pipeline.py` — the primary entry point
+
+Runs **generate → combine → train** as one command, with per-step timing, a durable
+**release folder**, and macOS/Linux **sleep-inhibition** for long runs. Steps auto-skip
+when their outputs exist (`--skip-generate/-combine/-train`, `--force-generate`).
+
+```bash
+python run_pipeline.py \
+    --dataset-dir <ds> --nam-output <model.param.nam> --checkpoint-dir <ckpt> \
+    --backend livespice --schx "<amp>.schx" \
+    --knobs gain,tone,volume --random 200 --bounds tone=0.15,0.85 \
+    --input guitar.wav --slimmable --mmap \
+    --crop-len 24000 --epochs 0 --restart-period 50 --batch-size 64
+```
+
+- `--epochs 0` = **open-ended training** (see param_train) — runs until you
+  `touch <ckpt>/STOP`, exporting the best model continuously.
+- On completion it builds `<nam-output>_release/`: the best-full & best-lite
+  `.param.nam`, the `.schx`, `metrics.csv`, a provenance `MANIFEST.md` (params +
+  timing + hardware + git revs), and a runnable `reproduce.sh`. `--no-release` skips it.
+- Generation flags (`--random`, `--bounds`, `--oversample`, ngspice `--koren` etc.)
+  are forwarded to `batch_harness`; training flags to `param_train`.
+
 ## Scripts
 
-### `param_train.py` — Train a parametric NAM
+### `batch_harness.py` — generate the dataset
+
+Simulates the circuit across knob permutations, one WAV per permutation, then combines
+them into `outputs.npy`.
 
 ```bash
-# Slimmable (trains A2 Lite 3ch + Full 8ch jointly — always use this):
-caffeinate -i python param_train.py \
-    --dataset /path/to/dataset \
-    --output /path/to/model.param.nam \
-    --slimmable \
-    --epochs 500 --batch-size 64 --repeats 50 \
-    --lr 3e-4 --crop-len 48000 \
-    --checkpoint-dir /path/to/checkpoints
+# List the pots/switches in a schx:
+python batch_harness.py --backend livespice --schx "<circuit>.schx"
+
+# Grid sweep (factorial — fine for 1–3 knobs):
+python batch_harness.py --backend livespice --schx "<circuit>.schx" \
+    --knobs drive,tone --range "drive=0,0.5,1" --range "tone=0.2,0.5,0.8" \
+    --input guitar.wav --output <ds> --dry-run   # check perm count + disk first
+
+# Random sampling (for high knob counts — grids explode past ~3 knobs):
+python batch_harness.py --backend livespice --schx "<amp>.schx" \
+    --knobs gain,bass,mid,treble,master --random 200 \
+    --bounds bass=0.15,0.85 --bounds mid=0.15,0.85 --bounds treble=0.15,0.85 \
+    --input guitar.wav --output <ds>
+
+# Combine per-permutation WAVs into outputs.npy:
+python batch_harness.py --combine <ds>
 ```
 
-Resume from a checkpoint:
-```bash
-caffeinate -i python param_train.py ... --resume /path/to/checkpoints/latest.pt
-```
+- **`--random N`** samples N points in the knob hypercube (+ deterministic boundary
+  **anchors** so extremes are covered; `--no-anchors` to skip). FiLM interpolates
+  between them — far better than a coarse grid for >3 knobs. Seeded (`--seed`) and
+  extensible.
+- **`--bounds KNOB=lo,hi`** restricts a knob's sampled range (e.g. keep a tone pot in
+  its usable band, or a hot gain pot out of a divergent regime). Recorded in the
+  `.param.nam` so the host maps the knob to the real trained domain.
+- **`--max-crest`** (default 50) fails any permutation whose output crest factor
+  (peak/RMS) exceeds it — a scale-invariant detector for numerical divergence that
+  RMS/length checks miss.
+- **`--fixed-params k=v,...`** pins controls not being swept; **`--speaker`** selects a
+  speaker tap. Knob order in `--knobs` = knob order in the `.param.nam`.
 
-The dataset directory must contain the format written by `batch_harness.py --combine`:
-```
-dataset/
-    config.json      # {"knobs": ["knob1", "knob2", ...], ...}
-    sweep.wav        # dry input audio (limelight.wav or similar real guitar)
-    outputs.npy      # [N_perms, N_samples] float32 array
-    params.csv       # idx, knob1, knob2, ..., ok, error
-```
+**Ganged (multi-section) pots:** `livespice_cli` drives **every** pot/switch whose
+`Name` matches the swept knob. To model a mechanically-ganged control (e.g. a dual-gang
+Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `.schx`;
+`--knobs Gain` then moves both wipers in lockstep, and the knob appears once downstream.
 
-**Note on input formats**: Earlier guidance claimed LiveSPICE "hangs" on sine
-sweeps / broadband signals. That was a misdiagnosis — the real cause was an
-O(N²) bug in `livespice_cli`'s WAV reader that stalled on 16-bit and 32-bit-float
-inputs (24-bit PCM took a different code path and was unaffected). Fixed in
-commit `fa90d57`. Any WAV format (16/24/32-bit) and any content — including sine
-sweeps — now reads correctly. `limelight.wav` is still a fine choice, but it is
-no longer a constraint.
-
-Checkpoints written every epoch to `latest.pt`; best ESR checkpoint to `best.pt`; best weights exported immediately to `<output_stem>_best.param.nam`. Metrics logged to `metrics.csv`.
-
-### `param_infer.py` — Run inference (Python, no C++ required)
-
-Loads `best.pt` directly and runs PyTorch inference. Use this to preview models before Phase 3 C++ integration.
-
-```bash
-python param_infer.py \
-    --checkpoint /path/to/checkpoints/best.pt \
-    --input /path/to/dry.wav \
-    --output-dir /path/to/output/ \
-    --params "knob1=0.5,knob2=0.7,knob3=0.3,..."
-```
-
-Multiple `--params` flags produce multiple output files. Knob names and order come from the dataset `config.json`.
-
-### `batch_harness.py`
-
-Generates the training dataset by sweeping the circuit simulation across knob permutations.
+### `param_train.py` — train a parametric NAM
 
 ```bash
-# List pots in a schx:
-python batch_harness.py --backend livespice \
-    --schx "/path/to/circuit.schx"
-
-# Generate a dataset:
-python batch_harness.py --backend livespice \
-    --schx "/path/to/circuit.schx" \
-    --knobs knob1,knob2,knob3 \
-    --values 0.2,0.4,0.6,0.8 \
-    --fixed-params "Rock=1,Mid=0" \
-    --speaker S2 \
-    --input /path/to/limelight.wav \
-    --output /path/to/dataset \
-    --dry-run   # check permutation count and disk estimate first
-
-# Combine per-permutation WAVs into outputs.npy for training:
-python batch_harness.py --combine /path/to/dataset
+python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir <ckpt> \
+    --slimmable --mmap --crop-len 24000 --batch-size 64 --repeats 8 \
+    --lr 3e-4 --epochs 200
 ```
 
-Knob order in `--knobs` becomes the knob order in the `.param.nam` file and in all downstream UIs.
+- **`--slimmable`** (always use it) trains an A2 **Lite 3ch + Full 8ch** jointly and
+  exports both tiers in one SlimmableContainer.
+- **Dual best-checkpointing**: the best-full and best-lite epochs (which differ) are
+  each saved and exported live to `<output>.best_full.param.nam` /
+  `<output>.best_lite.param.nam`, plus `best.pt` / `best_lite.pt` and per-epoch
+  `latest.pt` + `metrics.csv`.
+- **`--epochs 0`** = open-ended: trains with an SGDR (cosine-warm-restart) schedule
+  until you `touch <ckpt>/STOP` (or SIGINT/SIGTERM). Best models export continuously,
+  so you can stop whenever ESR is good enough. `--restart-period` sets the cycle length.
+- **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
+  `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
+  model's receptive field and ~2× faster than 48000.
 
-### Ganged (multi-section) pots
+### `param_infer.py` — inference (Python, no C++)
 
-`livespice_cli` sets **every** pot (or switch) whose `Name` matches the swept knob, not
-just the first one. To model a mechanically-ganged control — e.g. the Klon Centaur's
-dual-gang Gain (a 100 kΩ section and a 1 kΩ section that turn together) — give **both**
-`Circuit.Potentiometer` components the **same `Name`** (e.g. `Gain`) in the `.schx`. A
-single `--knobs Gain` / `Gain=0.5` then drives both wipers in lockstep, and the knob still
-appears once in the dataset and `.param.nam`. (Before this behavior, only the first
-matching section moved, so ganged pots tracked incorrectly.)
+```bash
+python param_infer.py --checkpoint <ckpt>/best.pt \
+    --input dry.wav --output-dir out/ \
+    --params "drive=0.5,tone=0.7" --params "drive=0.9,tone=0.3"
+```
+Loads a checkpoint and renders WAVs at arbitrary knob positions. Repeat `--params` for
+multiple outputs. Knob names/order come from the dataset `config.json`.
 
-### ngspice backend (experimental) — for stiff/combined amps
+### `coverage_report.py` — find holes in a sampled dataset
 
-`livespice_cli` uses a **fixed-timestep** solver. On very high-gain circuits
-(notably the **EVH 5150 Lead full amp**) it diverges and needs `--oversample 32`
-(~158 s per 5 s of audio) to stay bounded. [`ngspice/`](ngspice/) is a prototype
-**offline** backend using real SPICE (ngspice), whose **adaptive timestepping**
-converges on the same circuit with **no oversample hack** (~5–6× faster for the
-5150 full, and it never diverges). It is a proof of concept, not yet wired into
-`batch_harness`. See [`ngspice/README.md`](ngspice/README.md) for the result,
-the `method=trap` finding, fidelity caveats, and the LiveSPICE-vs-ngspice
-"which backend when" guidance. **LiveSPICE remains the default** (real-time-
-capable, `.schx`-native, reference tube models, uniform output, never aborts);
-ngspice is only for the handful of stiff/combined circuits it can't handle.
+```bash
+python coverage_report.py --dataset <ds> --suggest 5
+```
+Read-only analysis of `params.csv`: success/failure summary, **per-knob boundary
+coverage**, 1-D histograms, pairwise 2-D occupancy, and nearest-neighbour **gap
+analysis** (largest empty regions, optionally emitted as fill points). Pairs with the
+seed-extensible sampler to grow a dataset toward its gaps.
 
-## .param.nam Format
+### `export_checkpoint.py` — checkpoint → `.param.nam`
 
-The file is a standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a new architecture that Phase 3 registers.
+```bash
+python export_checkpoint.py --checkpoint <ckpt>/latest.pt --dataset <ds> \
+    --output model_final.param.nam --state model
+```
+Re-exports a NAM from any `.pt` (e.g. the final `latest.pt` weights) without retraining.
+
+---
+
+## Backends
+
+**LiveSPICE** (`--backend livespice`, default) — real-time-capable, `.schx`-native,
+reference tube models, uniform audio-rate output, never aborts. Use it for essentially
+everything.
+
+**ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
+adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. the
+EVH 5150 Lead full) where LiveSPICE's fixed-step solver diverges or needs extreme
+oversampling. It translates any `.schx` to an ngspice netlist (exact Dempwolf–Zölzer /
+Koren tube models, E+F ideal transformer) and feeds the input via an XSPICE filesource.
+Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
+See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
+and the important fidelity caveats.
+
+## What a run produces
+
+A **dataset** directory (`batch_harness --combine` format):
+```
+config.json   # {"knobs": [...], "bounds": {...}, "param_map": {...}, ...}
+sweep.wav     # the dry input used
+outputs.npy   # [N_perms, N_samples] float32
+params.csv    # idx, knob1, ..., rms, peak, ok, error
+```
+
+A **release folder** (`<nam-output>_release/`, built by `run_pipeline`): the shipped
+`.best_full.param.nam` + `.best_lite.param.nam`, the `.schx`, `metrics.csv`,
+`MANIFEST.md` (provenance: params, per-step timing, hardware, git revisions), and a
+runnable `reproduce.sh`.
+
+---
+
+## Reference
+
+### `.param.nam` format
+
+A standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already
+registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a
+custom architecture Phase 3 registers.
 
 ```json
 {
@@ -163,13 +263,20 @@ The file is a standard NAM JSON with `"SlimmableContainer"` as the outer archite
 }
 ```
 
-`config.parametric.parameters` is the authoritative knob list. Array order = UI presentation order. All values normalized 0.0–1.0. `"layers"` is the **channel count** (3 or 8), not a layer count — there are always 23 layers.
+`config.parametric.parameters` is the authoritative knob list. Array order = UI
+presentation order. All values normalized 0.0–1.0. `"layers"` is the **channel count**
+(3 or 8), not a layer count — there are always 23 layers. `min`/`max` per knob come from
+the dataset `--bounds`, so the host maps the control to the real trained domain.
 
-**Key design point**: `condition_size` in the JSON is the number of knobs fed to FiLM. Audio flows through `input_mixin` separately (always 1-dim). These are two independent conditioning paths — knobs never mix with audio.
+**Key design point**: `condition_size` is the number of knobs fed to FiLM. Audio flows
+through `input_mixin` separately (always 1-dim) — knobs never mix with audio.
 
-## Architecture
+### Architecture
 
-A2 is a WaveNet variant: 23-layer dilated causal convnet with LeakyReLU and a Conv1D head. `ParametricWaveNet` adds FiLM (Feature-wise Linear Modulation) on every layer, conditioned on the knob vector. FiLM is initialized to identity (gamma=1, beta=0) so training starts from a well-behaved unconditional baseline.
+A2 is a WaveNet variant: 23-layer dilated causal convnet with LeakyReLU and a Conv1D
+head. `ParametricWaveNet` adds FiLM (Feature-wise Linear Modulation) on every layer,
+conditioned on the knob vector. FiLM is initialized to identity (gamma=1, beta=0) so
+training starts from a well-behaved unconditional baseline.
 
 Key constants (must match NeuralAmpModelerCore's A2 fast path exactly):
 - 23 layers: 14 × kernel=6, then 2 × kernel=15, then 7 × kernel=6
@@ -183,52 +290,61 @@ conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → fil
 ```
 Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
-## NAM Ecosystem Compatibility
+### NAM ecosystem compatibility
 
 - **`"SlimmableContainer"`** — standard, already registered in NeuralAmpModelerCore ✓
 - **`"ParametricWaveNet"`** — custom; requires Phase 3 factory registration
-- Official NAM tools deliberately removed user-controllable knob parameters in 2023–2024; parametric inference requires custom C++ work
-- Old parametric C++ code recoverable from NAM git history at commit `ae86979` (before PR #367 removed it)
+- Official NAM tools deliberately removed user-controllable knob parameters in
+  2023–2024; parametric inference requires custom C++ work
+- Old parametric C++ code recoverable from NAM git history at commit `ae86979`
+  (before PR #367 removed it)
 
-## Dependencies
+---
+
+## Build & Dependencies
 
 ### Python packages
-
 ```bash
 pip install torch numpy scipy soundfile auraloss
 ```
 
-### .NET SDK (for dataset generation via livespice backend)
+### .NET SDK + LiveSPICE (for dataset generation)
 
-`livespice_cli` builds against LiveSPICE, which is vendored as the `extern/LiveSPICE`
-submodule. **You must initialize submodules recursively** — LiveSPICE itself nests a
-`ComputerAlgebra` submodule, and `Circuit.csproj` has a `ProjectReference` to
-`extern/LiveSPICE/ComputerAlgebra/ComputerAlgebra/ComputerAlgebra.csproj`. Without the
-recursive init that path is empty and the build fails with dozens of `CS0246` errors
-(`Expression`, `Arrow`, `Variable`, `SolutionSet` not found — those types live in
-ComputerAlgebra).
+`livespice_cli` builds against LiveSPICE, vendored as the `extern/LiveSPICE` submodule.
+**Recursive submodule init is required** — LiveSPICE nests a `ComputerAlgebra` submodule
+that `Circuit.csproj` references; without it the build fails with `CS0246` errors
+(`Expression`, `Arrow`, `Variable`, `SolutionSet` not found).
 
 ```bash
-brew install dotnet          # csproj targets net10.0
-
-# Recursive is required — plain `--init` leaves ComputerAlgebra empty:
-git submodule update --init --recursive extern/LiveSPICE
+git submodule update --init --recursive extern/LiveSPICE   # recursive is mandatory
 
 cd livespice_cli
-dotnet publish -c Release -r osx-arm64 -o publish/
+# Linux:
+dotnet publish -c Release -r linux-x64  --self-contained -o publish/
+# macOS (Apple Silicon):
+dotnet publish -c Release -r osx-arm64  --self-contained -o publish/
+```
+(.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS.)
+The binary lands at `livespice_cli/publish/livespice_cli`, where `batch_harness.py`
+expects it.
+
+### ngspice (only for `--backend ngspice`)
+```bash
+apt install ngspice        # Linux;  macOS: brew install ngspice
 ```
 
-The binary lands at `livespice_cli/publish/livespice_cli`, which is where
-`batch_harness.py` expects it.
-
 ### NeuralAmpModelerCore (Phase 3 only)
+Not required for training or Python inference — only for C++ inference validation and
+[redacted] integration.
 
-Not required for training or Python inference. Needed for C++ inference validation and [redacted] integration. Already present in `~/work/[redacted]/NeuralAmpModelerCore_v050ko/`.
+> **Input formats**: any WAV (16/24/32-bit) and any content read correctly — an earlier
+> O(N²) bug in `livespice_cli`'s WAV reader (fixed in `fa90d57`) once made non-24-bit
+> inputs stall. Real guitar DI is recommended over synthetic sweeps.
 
 ## Related Repos
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
-- `[redacted]` — Target host for the trained `.param.nam` models
+- `[redacted]` — target host for the trained `.param.nam` models
 
 ## Credits & Attribution
 
@@ -251,9 +367,8 @@ This toolchain builds on several open-source projects and published models:
   `SlimmableContainer` that this project targets.
 - **[auraloss](https://github.com/csteinmetz1/auraloss)** (Christian Steinmetz, Apache-2.0)
   — the multi-resolution STFT loss in `param_train.py`.
-- **Ideal-transformer modeling** — the ngspice output transformer uses the standard
-  controlled-source (E+F) ideal-transformer formulation from the SPICE literature
-  (e.g. Electronic Design's "A Spice Model For The Ideal Transformer," LTwiki, and
-  diyAudio push-pull-OT threads).
+- **Ideal-transformer technique** — the ngspice output transformer uses the standard
+  controlled-source (E+F) ideal-transformer method; the specific center-tapped
+  equations are ported from LiveSPICE (above).
 
 Underlying scientific-Python stack: PyTorch, NumPy, SciPy, soundfile.
