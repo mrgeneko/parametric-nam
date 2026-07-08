@@ -67,6 +67,14 @@ faster** than the LiveSPICE 32× workaround, and correct.
 - **Adaptive timesteps are non-uniform** → a real pipeline must **resample** the
   output to the audio grid. Here `tran` uses a 48 kHz nominal step so output is
   near-uniform, but interpolation is still needed for exact alignment.
+- **ALIASING — the resample needs an anti-alias filter (currently missing).** The
+  transient output carries real ultrasonic content (a 4× solve resolves energy past
+  100 kHz), and the batch path's plain `np.interp` to 48 kHz folds everything above
+  24 kHz back into the audband — **~20% RMS** vs a proper oversample→LPF→decimate,
+  piled up near Nyquist. It's mostly above a cab's rolloff (so largely inaudible
+  cab'd) but inflates the full-band ESR and un-cab'd fidelity, and it's baked into
+  every generated perm. **Fix: oversample the solve → anti-alias LPF → decimate**
+  in `_run_ngspice`. See [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
 
 ## Usage
 
@@ -89,11 +97,17 @@ Wired end to end. Usage:
 python batch_harness.py --backend ngspice --schx "<amp>.schx" \
     --knobs presence --values 0.2,0.5,0.8 --input guitar.wav --output ds
 
-# stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp:
+# stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp.
+# NOTE: bound leadpost>=0.05 (master at exactly 0 grounds the PI -> degenerate DC
+# operating point -> the solver hangs). presence excluded (subtle + NFB-comp alters it).
 python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 220n \
     --nfb-comp nNFB=1n --schx "EVH 5150 Lead Full.schx" \
-    --knobs leadpre,leadpost,high,low,mid,presence --random 400 --input guitar.wav --output ds
+    --knobs leadpre,leadpost,high,low,mid --bounds leadpost=0.05,1.0 \
+    --fixed-params "Presence=0.5" --random 200 --input guitar.wav --output ds
 ```
+
+Full write-up of the 5150 run (convergence recipe, training, aliasing, the
+generalization gap, knob analysis): **[`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md)**.
 
 Done:
 1. ✅ **General translator** — `livespice_cli --netlist` (authoritative parse) →
@@ -110,10 +124,14 @@ diverges even at 32× oversample. The JCM800 power amp matches a LiveSPICE rende
 at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes.
 
 Open:
-- **Fidelity validation is signal- and circuit-dependent**: ~0.99 on the JCM800
-  (validated vs LiveSPICE); the **5150 full is unvalidated** — no reference
-  render exists (the whole reason ngspice is needed), and Koren tubes + heavy
-  damping + NFB comp alter the tone. It proves **convergence, not tone-match**.
+- **Anti-aliased resampling not yet implemented** (see Caveats) — the single most
+  impactful backend fix; ~20% of the generated signal is aliasing.
+- **Fidelity is signal- and circuit-dependent**: ~0.99 on the JCM800 (validated vs
+  LiveSPICE). The **5150 full has now been trained + listened to** (no LiveSPICE
+  reference exists): a 5-knob model reached validation ESR ~0.19 but **~0.43 on a
+  new DI** — "sounds like the amp, not production-close." Root causes: aliasing +
+  training-input under-coverage (a 30 s sweep slice) + 5-knob capacity spread. Full
+  analysis + improvement plan in [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
 - **Per-circuit tuning is manual** — `--ot-damp`/`--nfb-comp` values and the NFB
   node name are hand-set for the 5150; not auto-derived.
 - Tube **inter-electrode capacitances** and **pentode grid current** are omitted

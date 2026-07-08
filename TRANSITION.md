@@ -63,6 +63,33 @@ Dataset generation command (run after clean training is stable):
 
 Then combine: `python ~/work/livespice-emitter/batch_harness.py --combine /Volumes/DATA/work/dumble_od_v2`
 
+### EVH 5150 Lead Full — trained via ngspice backend (blackbox / Linux+ROCm)
+
+First **ngspice-backend** parametric capture — the 5150 full amp diverges in
+LiveSPICE, so it's the proving ground for `--backend ngspice`. Machine: blackbox
+(RX 9070 XT, ROCm), not the macOS box the Dumble runs use.
+
+- **Dataset**: `/home/USER/work/tmp/evh5150_ds/` (200 perms, 5 knobs, 30 s sweep slice)
+- **Release**: `/home/USER/work/tmp/evh5150_release/` (best-full/lite `.param.nam`, `MANIFEST.md`, `reproduce.sh`)
+- **Knobs (5)**: `leadpre, leadpost, high, low, mid`; `presence` fixed 0.5
+- **Result**: converged 200/200; **validation ESR ~0.19**, but **~0.43 on a new DI**
+  (limelight) — "sounds like the amp, not production-close."
+- **Status**: paused pending an improvement pass (see below). Unlike the Dumble
+  (low-gain, ESR 0.008), the 5150 is high-gain + had two backend/method issues.
+
+**Lessons (full write-up: [`docs/evh5150_training_notes.md`](docs/evh5150_training_notes.md)):**
+1. **Aliasing** — the ngspice 48 kHz resample lacks an anti-alias filter (~20% RMS);
+   fix = oversample→LPF→decimate in `_run_ngspice`.
+2. **Training input** — use the **full** standard sweep, not a 30 s slice (a 30 s
+   subset under-covers dark/dynamic real playing → false breakup).
+3. **Fewer knobs** for high-gain amps — capacity per knob matters (dimensionality,
+   not coverage holes — those were ruled out).
+4. Convergence recipe: `--koren --ot-damp 3k --ot-snub 220n --nfb-comp nNFB=1n`,
+   and **bound `leadpost>=0.05`** (master at 0 hangs the solver).
+
+Next planned step: a 1-knob (`leadpre`) pilot with the full sweep + anti-aliasing to
+validate the fixes cheaply before a reduced-knob overnight regen.
+
 ## Setting Up on a New Machine
 
 ### Python environment
