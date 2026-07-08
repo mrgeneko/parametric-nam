@@ -240,6 +240,7 @@ def reproduce_command(args):
     if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
     if args.input:         c.append(f'    --input "{args.input}" \\')
     if args.slimmable:     c.append('    --slimmable \\')
+    if args.slimmable and args.widths: c.append(f'    --widths {args.widths} \\')
     elif args.channels != 8: c.append(f'    --channels {args.channels} \\')
     if args.mmap:          c.append('    --mmap \\')
     epochs_part = f'--epochs {args.epochs}'
@@ -476,6 +477,8 @@ def main():
     g.add_argument("--mrstft-weight",  type=float, default=0.1)
     g.add_argument("--channels",       type=int,   default=8)
     g.add_argument("--slimmable",      action="store_true")
+    g.add_argument("--widths",         type=str,   default=None,
+                   help="Slimmable channel widths, e.g. '3,4,8' (default 3,8)")
     g.add_argument("--mmap",           action="store_true")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
@@ -593,6 +596,7 @@ def main():
             ]
             if args.slimmable:           train_cmd.append("--slimmable")
             elif args.channels != 8:     train_cmd += ["--channels", args.channels]
+            if args.slimmable and args.widths: train_cmd += ["--widths", args.widths]
             if args.mmap:                train_cmd.append("--mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")

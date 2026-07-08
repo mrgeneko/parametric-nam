@@ -255,35 +255,85 @@ class ParametricA2(nn.Module):
 
 K_LITE_CHANNELS = 3
 K_FULL_CHANNELS = 8
+K_DEFAULT_WIDTHS = [K_LITE_CHANNELS, K_FULL_CHANNELS]   # 2-tier default (back-compat)
+
+
+def parse_widths(spec) -> list[int]:
+    """'3,4,8' -> [3,4,8]; None/'' -> the default [3,8]. Sorted, de-duplicated,
+    ascending (narrowest first = the 'lite' tier, widest last = the 'full' tier)."""
+    if not spec:
+        return list(K_DEFAULT_WIDTHS)
+    if isinstance(spec, (list, tuple)):
+        vals = list(spec)
+    else:
+        vals = [int(x) for x in str(spec).split(",") if x.strip()]
+    ws = sorted(set(int(w) for w in vals))
+    if len(ws) < 2:
+        raise ValueError(f"--widths needs >=2 distinct channel counts, got {ws}")
+    return ws
 
 
 class SlimmableParametricA2(nn.Module):
-    """Two independent ParametricA2 models trained simultaneously.
+    """N independent ParametricA2 models (one per channel width) trained jointly,
+    exported as one SlimmableContainer whose submodels are selected at runtime by
+    ascending `max_value` breakpoints.
 
-    Exports as SlimmableParametricContainer with:
-      max_value=0.5 → lite (3ch)
-      max_value=1.0 → full (8ch)
+    Tiers are ordered ascending by width: index 0 = narrowest (the 'lite' tier),
+    index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
+    2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
     """
-    def __init__(self, num_params: int):
+    def __init__(self, num_params: int, widths=None):
         super().__init__()
-        self.lite = ParametricA2(K_LITE_CHANNELS, num_params)
-        self.full = ParametricA2(K_FULL_CHANNELS, num_params)
+        self.widths = parse_widths(widths)
         self.num_params = num_params
+        # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
+        # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
+        # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
+        # tiers live in `mid` (empty ModuleList when widths has just 2 entries).
+        self.lite = ParametricA2(self.widths[0], num_params)
+        self.full = ParametricA2(self.widths[-1], num_params)
+        self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
+
+    @property
+    def submodels(self):
+        """All tiers in ascending-width order."""
+        return [self.lite, *self.mid, self.full]
 
     def forward(self, audio: torch.Tensor, params: torch.Tensor):
-        return self.lite(audio, params), self.full(audio, params)
+        return [m(audio, params) for m in self.submodels]   # ascending by width
+
+    # --- tier addressing -----------------------------------------------------
+    def tier_labels(self) -> list[str]:
+        """Endpoints keep role names (lite/full) so existing tooling — metrics
+        columns, best-checkpoint filenames, release naming — keeps working;
+        middle tiers are labeled by width (e.g. 'w4')."""
+        n = len(self.widths)
+        labels = []
+        for i, w in enumerate(self.widths):
+            if i == 0:
+                labels.append("lite")
+            elif i == n - 1:
+                labels.append("full")
+            else:
+                labels.append(f"w{w}")
+        return labels
+
+    def max_values(self) -> list[float]:
+        n = len(self.widths)
+        return [round((i + 1) / n, 6) for i in range(n)]   # last == 1.0
 
     def export_nam(self, config: dict, metadata: dict, sample_rate: int,
                    input_audio: "np.ndarray | None" = None) -> dict:
-        lite_nam = self.lite.export_nam(config, metadata, sample_rate, input_audio)
-        full_nam = self.full.export_nam(config, metadata, sample_rate, input_audio)
+        subs = [m.export_nam(config, metadata, sample_rate, input_audio)
+                for m in self.submodels]
+        full_nam = subs[-1]   # widest tier supplies the container-level metadata
         return {
             "version": metadata.get("version", "0.7.0"),
             "architecture": "SlimmableContainer",
             "config": {
                 "submodels": [
-                    {"max_value": 0.5, "model": lite_nam},
-                    {"max_value": 1.0, "model": full_nam},
+                    {"max_value": mv, "model": s}
+                    for mv, s in zip(self.max_values(), subs)
                 ]
             },
             "weights": [],
@@ -457,8 +507,8 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
         inp, out, params = inp.to(device), out.to(device), params.to(device)
         optimizer.zero_grad()
         if slimmable:
-            pred_lite, pred_full = model(inp, params)
-            loss = criterion(pred_lite, out) + criterion(pred_full, out)
+            preds = model(inp, params)                       # list, one per width
+            loss = sum(criterion(p, out) for p in preds)     # joint over all tiers
         else:
             pred = model(inp, params)
             loss = criterion(pred, out)
@@ -474,26 +524,28 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
 
 
 def validate(model, loader, criterion, device):
+    """Returns (mean_val_loss, esr_per_tier) where esr_per_tier is a list of ESRs
+    in ascending-width order (len = #tiers; a single-element list for a plain,
+    non-slimmable model)."""
     model.eval()
     slimmable = isinstance(model, SlimmableParametricA2)
-    total_loss = 0
-    total_esr_full = 0
-    total_esr_lite = 0
+    total_loss = 0.0
+    esr_sums = None
     n = 0
     with torch.no_grad():
         for inp, out, params in loader:
             inp, out, params = inp.to(device), out.to(device), params.to(device)
             if slimmable:
-                pred_lite, pred_full = model(inp, params)
-                total_loss += (criterion(pred_lite, out) + criterion(pred_full, out)).item()
-                total_esr_full += esr(pred_full, out).item()
-                total_esr_lite += esr(pred_lite, out).item()
+                preds = model(inp, params)                        # list, ascending width
+                total_loss += sum(criterion(p, out) for p in preds).item()
+                e = [esr(p, out).item() for p in preds]
             else:
                 pred = model(inp, params)
                 total_loss += criterion(pred, out).item()
-                total_esr_full += esr(pred, out).item()
+                e = [esr(pred, out).item()]
+            esr_sums = e if esr_sums is None else [a + b for a, b in zip(esr_sums, e)]
             n += 1
-    return total_loss / n, total_esr_full / n, total_esr_lite / n
+    return total_loss / n, [s / n for s in esr_sums]
 
 
 # ---------------------------------------------------------------------------
@@ -630,8 +682,12 @@ def main():
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--slimmable", action="store_true",
-                    help="Train A2 Lite (3ch) + A2 Full (8ch) jointly and export as "
-                         "SlimmableParametricContainer (ignores --channels)")
+                    help="Train N A2 tiers jointly (default lite 3ch + full 8ch) and "
+                         "export as one SlimmableContainer (ignores --channels)")
+    ap.add_argument("--widths", type=str, default=None,
+                    help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
+                         "(default: 3,8). Narrowest = lite tier, widest = full tier; "
+                         "middle tiers logged/checkpointed as w<N>.")
     ap.add_argument("--param-sensitivity", action="store_true",
                     help="Run parameter sensitivity check after training")
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
@@ -691,11 +747,10 @@ def main():
     # ------------------------------------------------------------------
     num_params = dataset.num_params
     if args.slimmable:
-        model = SlimmableParametricA2(num_params)
-        lite_w = model.lite.weight_count()
-        full_w = model.full.weight_count()
-        print(f"\nModel: SlimmableParametricA2  lite={K_LITE_CHANNELS}ch ({lite_w}w) + "
-              f"full={K_FULL_CHANNELS}ch ({full_w}w), {num_params} params", file=sys.stderr)
+        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
+        desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
+                         for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
+        print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     else:
         model = ParametricA2(args.channels, num_params)
         n_weights = model.weight_count()
@@ -706,10 +761,11 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     start_epoch = 1
-    best_esr = float("inf")           # best FULL-tier val ESR (primary; drives args.output + resume)
-    best_state = None
-    best_lite_esr = float("inf")      # best LITE-tier val ESR (slimmable only)
-    best_lite_state = None
+    # Per-tier best tracking. `labels` is ascending-width order; the widest tier
+    # ("full") is primary — it drives best.pt, args.output, and resume.
+    labels = model.tier_labels() if args.slimmable else ["full"]
+    best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
+    best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
 
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
@@ -717,11 +773,20 @@ def main():
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt["epoch"] + 1
-        best_esr = ckpt.get("best_esr", float("inf"))
-        best_state = ckpt.get("best_state", None)
-        best_lite_esr = ckpt.get("best_lite_esr", float("inf"))
-        best_lite_state = ckpt.get("best_lite_state", None)
-        print(f"  Resumed at epoch {ckpt['epoch']}, best ESR {best_esr:.6f}", file=sys.stderr)
+        # new per-tier format ...
+        bt = ckpt.get("best_esr_by_tier")
+        if bt is not None:
+            best_esr.update({k: v for k, v in bt.items() if k in best_esr})
+            best_state.update({k: v for k, v in ckpt.get("best_state_by_tier", {}).items()
+                               if k in best_state})
+        else:
+            # ... or fall back to the old 2-tier scalar fields
+            if "full" in best_esr and ckpt.get("best_esr") is not None:
+                best_esr["full"] = ckpt["best_esr"]; best_state["full"] = ckpt.get("best_state")
+            if "lite" in best_esr and ckpt.get("best_lite_esr") is not None:
+                best_esr["lite"] = ckpt["best_lite_esr"]; best_state["lite"] = ckpt.get("best_lite_state")
+        print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
+              file=sys.stderr)
 
     open_ended = (args.epochs == 0)
 
@@ -757,7 +822,8 @@ def main():
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
         log_w = csv.writer(log_f)
         if not args.resume:
-            log_w.writerow(["epoch", "train_loss", "val_loss", "val_esr_full", "val_esr_lite", "lr", "elapsed_s"])
+            log_w.writerow(["epoch", "train_loss", "val_loss",
+                            *[f"val_esr_{lbl}" for lbl in labels], "lr", "elapsed_s"])
 
     t0 = time.time()
     epoch = start_epoch - 1
@@ -768,65 +834,55 @@ def main():
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
-        val_loss, val_esr, val_esr_lite = validate(model, val_loader, criterion, device)
+        val_loss, esr_list = validate(model, val_loader, criterion, device)
         scheduler.step()
+        esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
 
-        # --- best FULL-tier model (primary; drives args.output + resume) ---
-        new_best = val_esr < best_esr
-        if new_best:
-            best_esr = val_esr
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            if ckpt_dir is not None:
-                torch.save({
-                    "epoch": epoch,
-                    "model": best_state,
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler_last_epoch": scheduler.last_epoch,
-                    "best_esr": best_esr,
-                    "args_dict": dict(vars(args)),
-                }, ckpt_dir / "best.pt")
-            export_nam_state(model, best_state, dataset,
-                             nam_variant(args.output, "best_full"), device)
-
-        # --- best LITE-tier model (slimmable only; the lite optimum often lands
-        #     at a different epoch than the full one, so preserve it separately
-        #     rather than losing it) ---
-        new_best_lite = args.slimmable and val_esr_lite > 0 and val_esr_lite < best_lite_esr
-        if new_best_lite:
-            best_lite_esr = val_esr_lite
-            best_lite_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            if ckpt_dir is not None:
-                torch.save({
-                    "epoch": epoch,
-                    "model": best_lite_state,
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler_last_epoch": scheduler.last_epoch,
-                    "best_esr": best_esr,
-                    "best_lite_esr": best_lite_esr,
-                    "args_dict": dict(vars(args)),
-                }, ckpt_dir / "best_lite.pt")
-            export_nam_state(model, best_lite_state, dataset,
-                             nam_variant(args.output, "best_lite"), device)
+        # --- per-tier best-checkpointing: each width's optimum lands at a
+        #     different epoch, so snapshot each independently. The widest tier
+        #     ("full") writes best.pt and drives args.output + resume; the others
+        #     write best_<label>.pt (e.g. best_lite.pt, best_w4.pt). ---
+        new_best = {}
+        for lbl in labels:
+            e = esr_by[lbl]
+            if e < best_esr[lbl]:
+                best_esr[lbl] = e
+                best_state[lbl] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                new_best[lbl] = True
+                if ckpt_dir is not None:
+                    fname = "best.pt" if lbl == "full" else f"best_{lbl}.pt"
+                    torch.save({
+                        "epoch": epoch,
+                        "model": best_state[lbl],
+                        "optimizer": optimizer.state_dict(),
+                        "scheduler_last_epoch": scheduler.last_epoch,
+                        "best_esr": best_esr["full"],          # back-compat scalar (full)
+                        "best_esr_by_tier": dict(best_esr),
+                        "args_dict": dict(vars(args)),
+                    }, ckpt_dir / fname)
+                export_nam_state(model, best_state[lbl], dataset,
+                                 nam_variant(args.output, f"best_{lbl}"), device)
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
 
-        # Print every epoch for production monitoring
-        best_marker = (" *" if new_best else "") + (" L" if new_best_lite else "")
-        lite_str = f"  ESR_lite={val_esr_lite:.6f}" if val_esr_lite > 0 else ""
+        # Console: one ESR per tier, '*' marks tiers that improved this epoch
+        esr_str = "  ".join(f"{lbl}={esr_by[lbl]:.6f}{'*' if new_best.get(lbl) else ''}"
+                            for lbl in labels)
         if open_ended:
             prog, tail = f"[{epoch:4d}/inf]", f"({elapsed:.0f}s)"
         else:
             eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
             prog, tail = f"[{epoch:3d}/{args.epochs}]", f"({elapsed:.0f}s, ETA {eta:.0f}s)"
         print(f"  {prog}  train={train_loss:.6f}  val_loss={val_loss:.6f}  "
-              f"ESR_full={val_esr:.6f}{lite_str}  lr={lr_now:.2e}  {tail}{best_marker}",
+              f"ESR[{esr_str}]  lr={lr_now:.2e}  {tail}",
               file=sys.stderr, flush=True)
 
-        # Log CSV
+        # Log CSV: one val_esr_<tier> column per width
         if log_csv is not None:
             log_w.writerow([epoch, f"{train_loss:.8f}", f"{val_loss:.8f}",
-                            f"{val_esr:.8f}", f"{val_esr_lite:.8f}", f"{lr_now:.2e}", f"{elapsed:.1f}"])
+                            *[f"{esr_by[lbl]:.8f}" for lbl in labels],
+                            f"{lr_now:.2e}", f"{elapsed:.1f}"])
             log_f.flush()
 
         # Save checkpoint every epoch (overwrite previous to save disk space)
@@ -837,10 +893,14 @@ def main():
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler_last_epoch": scheduler.last_epoch,
-                "best_esr": best_esr,
-                "best_state": best_state,
-                "best_lite_esr": best_lite_esr,
-                "best_lite_state": best_lite_state,
+                # per-tier best tracking (new format)
+                "best_esr_by_tier": dict(best_esr),
+                "best_state_by_tier": dict(best_state),
+                # back-compat scalar fields (full tier)
+                "best_esr": best_esr["full"],
+                "best_state": best_state["full"],
+                "best_lite_esr": best_esr.get("lite", float("inf")),
+                "best_lite_state": best_state.get("lite"),
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
 
@@ -856,44 +916,38 @@ def main():
     print(f"\nTraining finished ({elapsed:.0f}s, {elapsed/max(1, completed):.1f}s/epoch, "
           f"{completed} epochs)",
           file=sys.stderr)
-    lite_best_str = (f", lite {best_lite_esr:.6f}"
-                     if best_lite_state is not None else "")
-    print(f"Best validation ESR: full {best_esr:.6f}{lite_best_str}", file=sys.stderr)
+    esr_summary = ", ".join(f"{lbl} {best_esr[lbl]:.6f}"
+                            for lbl in labels if best_state[lbl] is not None)
+    print(f"Best validation ESR by tier: {esr_summary}", file=sys.stderr)
 
-    # Finalize the best-lite .param.nam (its weights differ from the full-best,
-    # so it must be written from best_lite_state, not the restored full model).
-    if best_lite_state is not None:
-        export_nam_state(model, best_lite_state, dataset,
-                         nam_variant(args.output, "best_lite"), device)
+    # Finalize each non-primary tier's .param.nam from its own best weights (they
+    # differ from the full-best epoch, so must be written from that tier's state).
+    for lbl in labels:
+        if lbl != "full" and best_state[lbl] is not None:
+            export_nam_state(model, best_state[lbl], dataset,
+                             nam_variant(args.output, f"best_{lbl}"), device)
 
-    # Restore best (full) state — this is what args.output is exported from below.
-    if best_state:
-        model.load_state_dict(best_state)
+    # Restore best (full/widest) state — args.output is exported from it below.
+    if best_state["full"] is not None:
+        model.load_state_dict(best_state["full"])
         model.to(device)
 
-    # Save best checkpoint(s)
+    # Save best checkpoint(s): best.pt (full) + best_<label>.pt per other tier.
     if ckpt_dir is not None:
-        best_path = ckpt_dir / "best.pt"
-        torch.save({
-            "epoch": epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler_last_epoch": scheduler.last_epoch,
-            "best_esr": best_esr,
-            "args_dict": dict(vars(args)),
-        }, best_path)
-        print(f"  Best model saved to {best_path}", file=sys.stderr)
-        if best_lite_state is not None:
+        for lbl in labels:
+            if best_state[lbl] is None:
+                continue
+            fname = "best.pt" if lbl == "full" else f"best_{lbl}.pt"
             torch.save({
                 "epoch": epoch,
-                "model": best_lite_state,
+                "model": best_state[lbl],
                 "optimizer": optimizer.state_dict(),
                 "scheduler_last_epoch": scheduler.last_epoch,
-                "best_esr": best_esr,
-                "best_lite_esr": best_lite_esr,
+                "best_esr": best_esr["full"],
+                "best_esr_by_tier": dict(best_esr),
                 "args_dict": dict(vars(args)),
-            }, ckpt_dir / "best_lite.pt")
-            print(f"  Best-lite model saved to {ckpt_dir / 'best_lite.pt'}", file=sys.stderr)
+            }, ckpt_dir / fname)
+            print(f"  Best {lbl} model saved to {ckpt_dir / fname}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Parameter sensitivity check

@@ -41,7 +41,16 @@ def main():
 
     slimmable = any(k.startswith("lite.") for k in state)
     if slimmable:
-        model = SlimmableParametricA2(ds.num_params)
+        # Infer each tier's width from the state dict (rechannel.weight is
+        # (channels,1,1) per tier) so any --widths — [3,8], [3,4,8], … — round-trips.
+        def ch_of(prefix):
+            return next(v.shape[0] for k, v in state.items()
+                        if k.startswith(prefix + ".") and k.endswith("rechannel.weight"))
+        mids = sorted(int(k.split(".")[1]) for k in {k for k in state if k.startswith("mid.")}
+                      if k.split(".")[1].isdigit())
+        mids = sorted(set(mids))
+        widths = [ch_of("lite")] + [ch_of(f"mid.{i}") for i in mids] + [ch_of("full")]
+        model = SlimmableParametricA2(ds.num_params, widths=widths)
     else:
         # infer channel count from the first layer's conv weight (out_channels)
         ch = next(v.shape[0] for k, v in state.items() if k.endswith("conv.weight"))
