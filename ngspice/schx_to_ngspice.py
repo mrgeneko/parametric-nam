@@ -17,9 +17,28 @@ Not a real-time backend: ngspice adaptive-timestep offline generation, for the
 stiff/high-gain circuits where LiveSPICE's fixed step diverges.
 """
 import json
+import math
 import os
 import re
 import sys
+
+
+def adjust_wipe(x, sweep='Linear'):
+    """Dial position -> resistance fraction, matching LiveSPICE VariableResistor.AdjustWipe.
+    For a Logarithmic (audio) pot, dial 0.5 -> ~0.27, not 0.5."""
+    x = min(max(float(x), 1e-3), 1.0 - 1e-3)
+    if sweep in ('ReverseLinear', 'ReverseSigmoid', 'ReverseLogarithmic', 'ReverseAntiLogarithmic'):
+        x = 1.0 - x
+    e = math.exp(2); k = 1.8
+    if sweep in ('Logarithmic', 'ReverseLogarithmic'):
+        return (math.pow(e, x) - 1.0) / (e - 1.0)
+    if sweep in ('AntiLogarithmic', 'ReverseAntiLogarithmic'):
+        return 1.0 - (math.pow(e, 1.0 - x) - 1.0) / (e - 1.0)
+    if sweep in ('Sigmoid', 'ReverseSigmoid'):
+        return 1.0 / (1.0 + math.pow(x / (1.0 - x), -k))
+    if sweep in ('AntiSigmoid', 'ReverseAntiSigmoid'):
+        return 1.0 / (1.0 + math.pow(x / (1.0 - x), -1.0 / k))
+    return x  # Linear / ReverseLinear
 
 # --- quantity parsing: "68 kΩ" -> 68000.0, "22 nF" -> 22e-9, "500 mV" -> 0.5 ---
 # Unit chars (Ω, µ, F, V, ...) vary by codepoint across sources, so parse the
@@ -126,7 +145,7 @@ def pentode_subckt(name, p):
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
               method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None,
-              input_mode='filesource', oversample=1):
+              input_mode='filesource', oversample=1, extra=None):
     pots = pots or {}
     comps = netlist['components']
     lines = ['* schx -> ngspice (%s triodes, Koren pentodes, baked pots)'
@@ -190,7 +209,12 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         elif ty == 'Potentiometer' or c.get('isPot'):
             R = qty(p['Resistance']); wipe = pots.get(nm, qty(p.get('Wipe', '0.5')))
             A, W, K = t.get('Anode'), t.get('Wiper'), t.get('Cathode')
-            raw, rwk = R * (1 - wipe), R * wipe   # Wipe=0 -> wiper at cathode
+            # Apply the pot taper (LiveSPICE AdjustWipe). The dial position 'wipe'
+            # is NOT the resistance fraction for log/audio pots — e.g. a Logarithmic
+            # pot at dial 0.5 sits at ~0.27, not 0.5. Baking linearly overdrives the
+            # low/mid dial on gain pots (LeadPre/LeadPost) -> always-clipped.
+            P = adjust_wipe(wipe, p.get('Sweep', 'Linear'))
+            raw, rwk = R * (1 - P), R * P        # P=0 -> wiper at cathode (per LiveSPICE)
             # Floor at ~1 ohm, not 1m ohm: a near-zero pot section is a near-short
             # in the signal path that makes ngspice numerically stiff (a wipe=0/1
             # extreme could hang the solver). 1 ohm is tonally negligible.
@@ -236,6 +260,10 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
     if nfb_comp and '=' in nfb_comp:      # HF compensation cap at the feedback node
         n, cval_ = nfb_comp.split('=')
         body.append('Cnfbcomp %s 0 %s' % (node(n), cval_))
+    if extra:                             # inject extra SPICE lines (e.g. missing bright caps)
+        for ln in extra.split(';'):
+            if ln.strip():
+                body.append(ln.strip())
     lines += sub_defs + [''] + body + [
         '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
         'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
@@ -267,10 +295,12 @@ if __name__ == '__main__':
                     help='how to feed the input file (time,raw-sample pairs)')
     ap.add_argument('--oversample', type=int, default=1,
                     help='solve at N*48kHz (finer tran step); pair with anti-alias decimation')
+    ap.add_argument('--extra', default=None,
+                    help='inject extra SPICE lines, ;-separated (e.g. missing bright caps)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
     nl = json.load(open(a.netlist))
     open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv, koren=a.koren,
                                      ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp,
-                                     input_mode=a.input_mode, oversample=a.oversample))
+                                     input_mode=a.input_mode, oversample=a.oversample, extra=a.extra))
     print('wrote', a.out)
