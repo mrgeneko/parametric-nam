@@ -254,10 +254,12 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                 pots[k.strip()] = float(v)
     dur = expected_frames / 48000.0
     csv_path, cir_path = path.with_suffix(".csv"), path.with_suffix(".cir")
+    over = int(ng.get("oversample", 1) or 1)
     cir_path.write_text(X.translate(nl, pots=pots, input_pwl=ng["input"], dur=dur,
                                     csv=str(csv_path), koren=ng.get("koren", False),
                                     ot_damp=ng.get("ot_damp", "47k"), ot_snub=ng.get("ot_snub", "10n"),
-                                    nfb_comp=ng.get("nfb_comp"), input_mode="filesource"))
+                                    nfb_comp=ng.get("nfb_comp"), input_mode="filesource",
+                                    oversample=over))
     proc = subprocess.Popen(["ngspice", "-b", str(cir_path)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     with _procs_lock:
@@ -281,8 +283,19 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
     ng_t, ng_v = d[:, 0], d[:, 1]
     if ng_t[-1] < dur * 0.99:
         return Result(idx, error=f"ngspice aborted at {ng_t[-1]:.3f}s of {dur:.3f}s (diverged)")
-    grid = np.arange(expected_frames) / 48000.0        # resample near-uniform -> exact 48k grid
-    sig = np.interp(grid, ng_t, ng_v).astype(np.float32)
+    if over > 1:
+        # anti-aliased resample: interp to over*48k uniform, FIR-decimate to 48k.
+        # This removes the >24kHz content the amp emits before it folds into audband.
+        from scipy.signal import decimate
+        grid_hi = np.arange(expected_frames * over) / (48000.0 * over)
+        sig_hi = np.interp(grid_hi, ng_t, ng_v)
+        sig = decimate(sig_hi, over, ftype="fir", zero_phase=True).astype(np.float32)
+        if len(sig) < expected_frames:
+            sig = np.pad(sig, (0, expected_frames - len(sig)))
+        sig = sig[:expected_frames]
+    else:
+        grid = np.arange(expected_frames) / 48000.0    # naive interp (aliases HF)
+        sig = np.interp(grid, ng_t, ng_v).astype(np.float32)
     sf.write(str(out_wav), sig, 48000, subtype="FLOAT")
     return None
 
@@ -741,9 +754,10 @@ def main():
         _t = np.arange(len(insig)) / sr
         np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
         ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
-              "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp}
+              "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp,
+              "oversample": args.oversample}
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
-              f"tubes, ot_damp={args.ot_damp})", file=sys.stderr)
+              f"tubes, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias)", file=sys.stderr)
 
     # Effective per-knob sampled range (min/max actually seen across perms).
     # Recorded so the exported .nam declares the true trained domain per knob

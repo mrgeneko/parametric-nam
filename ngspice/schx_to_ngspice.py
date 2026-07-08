@@ -126,7 +126,7 @@ def pentode_subckt(name, p):
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
               method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None,
-              input_mode='filesource'):
+              input_mode='filesource', oversample=1):
     pots = pots or {}
     comps = netlist['components']
     lines = ['* schx -> ngspice (%s triodes, Koren pentodes, baked pots)'
@@ -239,7 +239,9 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
     lines += sub_defs + [''] + body + [
         '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
         'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
-        '.control', 'set filetype=ascii', 'tran 20.8333u %s' % sp(dur),
+        # tran step = (1/48kHz)/oversample; finer step -> ngspice resolves more
+        # bandwidth so the anti-alias decimation downstream has real HF to filter.
+        '.control', 'set filetype=ascii', 'tran %.6fu %s' % (20.8333 / oversample, sp(dur)),
         'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
     return '\n'.join(lines)
 
@@ -258,10 +260,12 @@ if __name__ == '__main__':
     ap.add_argument('--nfb-comp', default=None, help='NFB compensation cap, NODE=value (e.g. nNFB=1n)')
     ap.add_argument('--input-mode', default='filesource', choices=['filesource', 'pwl'],
                     help='how to feed the input file (time,raw-sample pairs)')
+    ap.add_argument('--oversample', type=int, default=1,
+                    help='solve at N*48kHz (finer tran step); pair with anti-alias decimation')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
     nl = json.load(open(a.netlist))
     open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv, koren=a.koren,
                                      ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp,
-                                     input_mode=a.input_mode))
+                                     input_mode=a.input_mode, oversample=a.oversample))
     print('wrote', a.out)
