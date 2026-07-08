@@ -322,6 +322,16 @@ class SlimmableParametricA2(nn.Module):
         n = len(self.widths)
         return [round((i + 1) / n, 6) for i in range(n)]   # last == 1.0
 
+    def tier_state_prefix(self, i: int) -> str:
+        """State-dict key prefix for the i-th tier (ascending width): the
+        endpoints live under 'lite.'/'full.', middle tiers under 'mid.<k>.'."""
+        n = len(self.widths)
+        if i == 0:
+            return "lite."
+        if i == n - 1:
+            return "full."
+        return f"mid.{i - 1}."
+
     def export_nam(self, config: dict, metadata: dict, sample_rate: int,
                    input_audio: "np.ndarray | None" = None) -> dict:
         subs = [m.export_nam(config, metadata, sample_rate, input_audio)
@@ -927,8 +937,26 @@ def main():
             export_nam_state(model, best_state[lbl], dataset,
                              nam_variant(args.output, f"best_{lbl}"), device)
 
-    # Restore best (full/widest) state — args.output is exported from it below.
-    if best_state["full"] is not None:
+    # Compose the single best container exported to args.output: each tier's own
+    # submodel weights taken from ITS best epoch, spliced together. Valid because
+    # the tiers are independent (no shared weights) — the container just selects
+    # one at inference — so args.output ends up optimal on EVERY tier, not just
+    # the widest. (The per-tier .best_<tier>.param.nam above stay for reference.)
+    if args.slimmable and best_state["full"] is not None:
+        composite = {k: v.clone() for k, v in best_state["full"].items()}
+        for i, lbl in enumerate(labels):
+            if lbl == "full" or best_state[lbl] is None:
+                continue
+            pref = model.tier_state_prefix(i)
+            for k, v in best_state[lbl].items():
+                if k.startswith(pref):
+                    composite[k] = v.clone()
+        model.load_state_dict(composite)
+        model.to(device)
+        print("  Composed best-of-every-tier container for "
+              f"{args.output.name}", file=sys.stderr)
+    elif best_state["full"] is not None:
+        # non-slimmable: just the single best model
         model.load_state_dict(best_state["full"])
         model.to(device)
 
