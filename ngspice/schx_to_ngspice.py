@@ -241,7 +241,12 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
         # tran step = (1/48kHz)/oversample; finer step -> ngspice resolves more
         # bandwidth so the anti-alias decimation downstream has real HF to filter.
-        '.control', 'set filetype=ascii', 'tran %.6fu %s' % (20.8333 / oversample, sp(dur)),
+        # `save` only the output node — ngspice otherwise keeps EVERY node's full
+        # transient in RAM (~100 nodes × millions of points), which OOMs on long
+        # inputs / high oversample / many parallel workers. Storing one node cuts
+        # memory ~100×. (The full circuit is still solved; only storage is limited.)
+        '.control', 'set filetype=ascii', 'save v(%s)' % out_node,
+        'tran %.6fu %s' % (20.8333 / oversample, sp(dur)),
         'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
     return '\n'.join(lines)
 
