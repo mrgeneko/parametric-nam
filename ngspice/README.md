@@ -67,14 +67,22 @@ faster** than the LiveSPICE 32× workaround, and correct.
 - **Adaptive timesteps are non-uniform** → a real pipeline must **resample** the
   output to the audio grid. Here `tran` uses a 48 kHz nominal step so output is
   near-uniform, but interpolation is still needed for exact alignment.
-- **ALIASING — the resample needs an anti-alias filter (currently missing).** The
-  transient output carries real ultrasonic content (a 4× solve resolves energy past
-  100 kHz), and the batch path's plain `np.interp` to 48 kHz folds everything above
-  24 kHz back into the audband — **~20% RMS** vs a proper oversample→LPF→decimate,
-  piled up near Nyquist. It's mostly above a cab's rolloff (so largely inaudible
-  cab'd) but inflates the full-band ESR and un-cab'd fidelity, and it's baked into
-  every generated perm. **Fix: oversample the solve → anti-alias LPF → decimate**
-  in `_run_ngspice`. See [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
+- **ALIASING (fixed via `--oversample`).** The transient output carries real
+  ultrasonic content (a 4× solve resolves energy past 100 kHz); a plain `np.interp`
+  to 48 kHz folds everything above 24 kHz back into the audband — **~20% RMS**,
+  piled up near Nyquist. `--oversample N` now solves at N×48 kHz (finer `tran` step)
+  and `_run_ngspice` FIR-decimates back to 48 kHz, filtering >24 kHz before it folds.
+  **Default is 1× (naive) — pass `--oversample 2` (or more) to enable anti-aliasing.**
+  Verified 2× on the 5150: near-Nyquist (18–24 kHz) 12.3%→9.2%. Note the aliasing is
+  mostly above a cab's rolloff (largely inaudible cab'd) but inflates the full-band
+  ESR. See [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
+- **MEMORY — long inputs need `save` (now automatic) + a sane `--workers`.** ngspice
+  keeps *every node's* full transient in RAM until it writes. The translator now
+  emits `save v(<out>)` so only the probed node is stored (~150 MB for 120 s @ 2×
+  vs ~13 GB for all nodes). Even so, the Python side loads a large ASCII CSV per
+  perm (~400 MB / 15 M rows for 120 s @ 2×, ~2 GB peak/worker), so cap `--workers`
+  to `RAM / ~2 GB` on long + oversampled runs (e.g. 4 on a 30 GB box). 120 s @ 2× ×
+  5 workers **without** the `save` fix OOMed a 30 GB machine.
 
 ## Usage
 
@@ -113,19 +121,22 @@ Done:
 1. ✅ **General translator** — `livespice_cli --netlist` (authoritative parse) →
    `schx_to_ngspice.py` (exact DempwolfZolzer triodes / Koren pentodes, baked
    pots, **E+F ideal transformer**, tunable OT damping + NFB comp, `--koren`).
-2. ✅ **Uniform resampling** — non-uniform transient output → 48 kHz grid in the
-   `batch_harness` ngspice path.
+2. ✅ **Resampling, with optional anti-aliasing** — non-uniform transient output →
+   48 kHz grid; `--oversample N` solves at N×48 kHz and FIR-decimates back (removes
+   the ~20% aliasing; default 1× is naive).
 3. ✅ **XSPICE filesource** input — feeds full-length WAVs (no giant inline PWL).
 4. ✅ **`batch_harness --backend ngspice`** — per-perm translate → run → resample
    → `.npy`, with the crest-factor divergence check.
+5. ✅ **Bounded memory** — `save v(<out>)` stores only the probed node, so long +
+   oversampled runs don't OOM (see Caveats for the `--workers` guidance).
 
 Result: the **EVH 5150 Lead full converges** (Koren mode) where LiveSPICE
 diverges even at 32× oversample. The JCM800 power amp matches a LiveSPICE render
 at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes.
 
 Open:
-- **Anti-aliased resampling not yet implemented** (see Caveats) — the single most
-  impactful backend fix; ~20% of the generated signal is aliasing.
+- **Anti-aliasing must be opted into** — default `--oversample 1` still aliases; use
+  `2`+ for real datasets. Its ~1.5–2× solve cost + memory (see Caveats) is the trade.
 - **Fidelity is signal- and circuit-dependent**: ~0.99 on the JCM800 (validated vs
   LiveSPICE). The **5150 full has now been trained + listened to** (no LiveSPICE
   reference exists): a 5-knob model reached validation ESR ~0.19 but **~0.43 on a
