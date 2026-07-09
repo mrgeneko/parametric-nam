@@ -163,6 +163,11 @@ Open:
   instability, and Xyce's continuation methods only apply to *DC operating point*
   solving (confirmed in Xyce's own source). Full test + build notes:
   [`../docs/xyce_build_notes.md`](../docs/xyce_build_notes.md).
+  Also evaluated **LTspice** (its "modified trap" integration) — not pursued
+  to a final convergence test (reasoned unlikely to help, since it removes
+  numerical damping rather than adding it; and hit an unrelated Wine
+  automation-reliability problem first). See
+  [`../docs/ltspice_evaluation.md`](../docs/ltspice_evaluation.md).
 
 ## When to prefer which backend
 
