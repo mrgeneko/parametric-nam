@@ -48,8 +48,12 @@ class FiLM(nn.Module):
     def __init__(self, channels: int, cond_dim: int):
         super().__init__()
         self.net = nn.Linear(cond_dim, 2 * channels)
-        # Identity-like init: gamma≈1, beta≈0 so FiLM passes x unchanged at start
-        nn.init.zeros_(self.net.weight)
+        # Small NON-zero weight so the knob modulates from step 0. A pure-zero init
+        # leaves FiLM at identity for ALL cond, and it then under-learns subtle /
+        # level-invariant knob effects (the 5150 gain knob changes tone but not
+        # level — exactly that case), producing a near-dead knob. Bias still starts
+        # near-identity: gamma≈1, beta≈0.
+        nn.init.normal_(self.net.weight, std=0.1)
         nn.init.zeros_(self.net.bias)
         self.net.bias.data[:channels].fill_(1.0)
 
@@ -678,6 +682,10 @@ def main():
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
                     help="Learning rate (default: %(default)s)")
+    ap.add_argument("--film-lr-mult", type=float, default=5.0,
+                    help="LR multiplier for FiLM knob-conditioning params — they get a "
+                         "small gradient signal for subtle knob effects, so boost it "
+                         "(default: %(default)s; 1.0 = off)")
     ap.add_argument("--crop-len", type=int, default=44100,
                     help="Random crop length in samples (default: %(default)s)")
     ap.add_argument("--repeats", type=int, default=1,
@@ -768,7 +776,17 @@ def main():
               f"{n_weights} weights", file=sys.stderr)
     model.to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
+    # small (knob effects are subtle vs the overall signal), so at the shared LR
+    # they under-learn and the knob goes near-dead.
+    film_params = [p for n, p in model.named_parameters() if ".film." in n and p.requires_grad]
+    other_params = [p for n, p in model.named_parameters() if ".film." not in n and p.requires_grad]
+    groups = [{"params": other_params, "lr": args.lr}]
+    if film_params:   # empty for a non-parametric (0-knob) static capture
+        groups.append({"params": film_params, "lr": args.lr * args.film_lr_mult})
+    optimizer = torch.optim.AdamW(groups, weight_decay=1e-5)
+    print(f"FiLM fix: {len(film_params)} FiLM tensors at {args.film_lr_mult}× LR "
+          f"({args.lr * args.film_lr_mult:.1e}), non-zero init (std 0.1)", file=sys.stderr)
 
     start_epoch = 1
     # Per-tier best tracking. `labels` is ascending-width order; the widest tier
