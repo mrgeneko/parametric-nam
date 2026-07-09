@@ -62,7 +62,14 @@ faster** than the LiveSPICE 32× workaround, and correct.
 - **Tube models** are Koren with ported params — close but not bit-identical to
   LiveSPICE's. Validate against a LiveSPICE reference render before trusting a
   dataset's tone.
-- **Pots baked linear** (no taper); **OT** is an approximate coupled-inductor
+- ~~Pots baked linear~~ **FIXED**: the translator now applies the `.schx` `Sweep`
+  taper (log/anti-log/sigmoid) via a faithful port of LiveSPICE's `AdjustWipe` —
+  a log gain pot at dial 0.5 correctly bakes to ~0.27, not 0.5.
+- **µF values**: LiveSPICE's parser misread U+00B5 micro signs as no-prefix
+  (`"1 µF"` → 1 FARAD). Fixed by the vendored patch
+  (`patches/livespice-microsign-prefix.patch`) + base-unit numeric netlist
+  emission. **Apply the patch before building** or every µ-valued circuit is wrong.
+- **OT** is an approximate coupled-inductor
   model (turns ratio + guessed L/DCR/snubber); **output level not calibrated**.
 - **Adaptive timesteps are non-uniform** → a real pipeline must **resample** the
   output to the audio grid. Here `tran` uses a 48 kHz nominal step so output is
@@ -108,8 +115,10 @@ python batch_harness.py --backend ngspice --schx "<amp>.schx" \
 # stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp.
 # NOTE: bound leadpost>=0.05 (master at exactly 0 grounds the PI -> degenerate DC
 # operating point -> the solver hangs). presence excluded (subtle + NFB-comp alters it).
-python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 220n \
-    --nfb-comp nNFB=1n --schx "EVH 5150 Lead Full.schx" \
+# (config "L" — the re-tuned minimal recipe: no NFB-comp cap; it is stable
+#  without one and the cap is a tone-shaper, not just a stabilizer)
+python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 100n \
+    --oversample 2 --schx "EVH 5150 Lead Full.schx" \
     --knobs leadpre,leadpost,high,low,mid --bounds leadpost=0.05,1.0 \
     --fixed-params "Presence=0.5" --random 200 --input guitar.wav --output ds
 ```

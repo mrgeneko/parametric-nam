@@ -18,14 +18,19 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 git clone --recurse-submodules <this-repo> && cd spice-to-nam
 git submodule update --init --recursive extern/LiveSPICE   # if you forgot --recurse
 
-# 2. Build the simulator CLI (Linux shown; macOS: -r osx-arm64)
+# 2. REQUIRED: apply the vendored LiveSPICE fix — without it, "µF" capacitor
+#    values are silently parsed as FARADS and every µ-valued circuit simulates
+#    wrong (see docs/evh5150_training_notes.md, "Round 2" finding #4):
+git -C extern/LiveSPICE apply ../../patches/livespice-microsign-prefix.patch
+
+# 3. Build the simulator CLI (Linux shown; macOS: -r osx-arm64)
 cd livespice_cli && dotnet publish -c Release -r linux-x64 --self-contained -o publish/ && cd ..
 
-# 3. Python deps
+# 4. Python deps
 python -m venv .venv && . .venv/bin/activate
 pip install torch numpy scipy soundfile auraloss
 
-# 4. One command: generate dataset -> combine -> train -> release folder
+# 5. One command: generate dataset -> combine -> train -> release folder
 python run_pipeline.py \
     --dataset-dir    /tmp/ts9_ds \
     --nam-output     /tmp/ts9.param.nam \
@@ -37,7 +42,7 @@ python run_pipeline.py \
     --input /path/to/guitar.wav \
     --slimmable --mmap --epochs 200 --crop-len 24000 --batch-size 64
 
-# 5. Listen (Python inference, no C++ needed)
+# 6. Listen (Python inference, no C++ needed)
 python param_infer.py --checkpoint /tmp/ts9_ckpt/best.pt \
     --input /path/to/dry.wav --output-dir /tmp/out/ --params "drive=0.7,tone=0.4"
 ```

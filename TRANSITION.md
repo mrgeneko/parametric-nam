@@ -78,17 +78,30 @@ LiveSPICE, so it's the proving ground for `--backend ngspice`. Machine: blackbox
   (low-gain, ESR 0.008), the 5150 is high-gain + had two backend/method issues.
 
 **Lessons (full write-up: [`docs/evh5150_training_notes.md`](docs/evh5150_training_notes.md)):**
-1. **Aliasing** — the ngspice 48 kHz resample lacks an anti-alias filter (~20% RMS);
-   fix = oversample→LPF→decimate in `_run_ngspice`.
-2. **Training input** — use the **full** standard sweep, not a 30 s slice (a 30 s
-   subset under-covers dark/dynamic real playing → false breakup).
-3. **Fewer knobs** for high-gain amps — capacity per knob matters (dimensionality,
-   not coverage holes — those were ruled out).
-4. Convergence recipe: `--koren --ot-damp 3k --ot-snub 220n --nfb-comp nNFB=1n`,
-   and **bound `leadpost>=0.05`** (master at 0 hangs the solver).
+1. **THE BIG ONE — µF parsed as FARADS**: LiveSPICE's Quantity parser didn't
+   recognize the U+00B5 micro sign, so `"1 µF"` = 1 Farad → infinite cathode
+   bypasses → max gain + bass mud in EVERY µ-valued circuit (5150, Tweed, Klon,
+   DS-1, Joyo; TS-9/JCM800 unaffected). Fixed via the vendored patch — **a fresh
+   clone MUST apply `patches/livespice-microsign-prefix.patch` before building.**
+2. **Pot taper** — the ngspice translator baked all pots linear; log gain pots ran
+   ~1.85× hot at mid-dial. Fixed (`adjust_wipe` port of LiveSPICE's formula).
+3. **Factory-schematic errors** — V2A cathode 39K/47µF (was 1.5K/1µF), RgV2A 470K,
+   missing R11/C48 shunt. Fixed in spice-circuits (`63d71e7`, `60bfdba`).
+4. **FiLM under-learns level-invariant knobs** — near-dead gain knob; fixed with
+   non-zero FiLM init + `--film-lr-mult` (separate higher LR group).
+5. **Aliasing** — naive 48 kHz resample folds ultrasonics (~20% RMS); fixed via
+   `--oversample N` + FIR decimation.
+6. **Training input** — use the full/composite sweep, not a 30 s slice (the bright
+   half alone under-covers dark/dynamic playing → false breakup). Note sweep120s
+   structure: 0–60 s bright/loud, 60–120 s dark/quiet.
+7. **Between-note roar is authentic** (~100 dB gain amplifying input residual —
+   not oscillation, not excess gain): gate in the host, or train on gated targets.
+8. Convergence recipe (config L): `--koren --ot-damp 3k --ot-snub 100n` (NO
+   nfb-comp), `--oversample 2`, bound `leadpost>=0.05` / `leadpre>=0.05`.
 
-Next planned step: a 1-knob (`leadpre`) pilot with the full sweep + anti-aliasing to
-validate the fixes cheaply before a reduced-knob overnight regen.
+**Status**: corrected amp passes the listen test ("sounds like a 5150"). Next: the
+v2 run — 4 knobs (leadpre, high, mid, low), LeadPost=0.5/Presence=0.5 fixed,
+~100 perms, 60 s composite input, config L, FiLM fix, open-ended training.
 
 ## Setting Up on a New Machine
 
