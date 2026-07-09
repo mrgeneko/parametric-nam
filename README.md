@@ -304,6 +304,20 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 - Old parametric C++ code recoverable from NAM git history at commit `ae86979`
   (before PR #367 removed it)
 
+### ESR targets
+
+Validation ESR (error-to-signal ratio) as a rough quality guide:
+
+| ESR | Quality |
+|---|---|
+| < 0.01 | Good |
+| < 0.005 | Excellent |
+| < 0.003 | Exceptional (JCM800 single-param achieved 0.003) |
+
+Treat these as a sanity check, not a substitute for listening — a model's
+perceptual quality and its full-band ESR can diverge quite a bit,
+especially on high-gain amps (see [`docs/evh5150_training_notes.md`](docs/evh5150_training_notes.md)).
+
 ---
 
 ## Build & Dependencies
