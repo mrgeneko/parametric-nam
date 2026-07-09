@@ -1,0 +1,75 @@
+--- a/XyceSuperBuild.cmake	2025-06-10 13:17:44.000000000 -0400
++++ b/XyceSuperBuild.cmake	2026-07-09 08:53:36.469160028 -0400
+@@ -59,6 +59,11 @@
+   -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+   -DCMAKE_MACOSX_RPATH=${CMAKE_MACOSX_RPATH}
+   -DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}
++  # Compat shim: some sub-projects (ADMS, possibly Trilinos) pin very old
++  # cmake_minimum_required()/policy versions that CMake 4.x hard-errors on.
++  # This tells CMake to treat them as requiring at least 3.5 (Kitware's own
++  # documented workaround), without patching each dependency's CMakeLists.
++  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+ )
+ set(ADMS_ARGS
+   ${DEFAULT_ARGS}
+@@ -70,11 +75,16 @@
+ )
+ 
+ set(Xyce_ARGS ${DEFAULT_ARGS}
+-  -DADMS_XML=${CMAKE_CURRENT_BINARY_DIR}/install/bin/admsXml
+-  -DXyce_PLUGIN_SUPPORT=ON
++  # ADMS disabled (see note above) -> no admsXml to point at; plugin support
++  # (Verilog-A device compilation) is explicitly off rather than left to the
++  # find_program() fallback, so this is deliberate, not implicit.
++  -DXyce_PLUGIN_SUPPORT=OFF
+   -DXyce_USE_SUPERBUILD=OFF
+-  -DFLEX_EXECUTABLE:FILEPATH=${FLEX_EXECUTABLE}
+-  -DFLEX_INCLUDE_DIRS:PATH=${FLEX_INCLUDE_DIRS}
++  # FLEX_EXECUTABLE/FLEX_INCLUDE_DIRS removed: the SuperBuild never actually
++  # find_package(FLEX)'s at its own scope, so these were always blank -- and
++  # passing a BLANK cache seed blocks Xyce's own find_package(FLEX) from
++  # auto-detecting the real /usr/bin/flex (a pre-set cache var, even empty,
++  # is not overwritten). Let Xyce detect it itself, same as ADMS/SuiteSparse did.
+ )
+ 
+ list(APPEND TRILINOS_PARALLEL_ARGS
+@@ -213,20 +223,31 @@
+ ExternalProject_Add(Trilinos
+   DEPENDS suitesparse ${BLAS_DEPS}
+   GIT_REPOSITORY https://github.com/Trilinos/Trilinos
+-  GIT_TAG trilinos-release-12-12-1
++  # Bumped from the tarball's pinned 12-12-1: Xyce 7.10's own CMakeLists
++  # rejects anything below 13.5, and INSTALL.md documents 14.4 as the actual
++  # tested minimum -- the SuperBuild's pin was simply stale for this release.
++  GIT_TAG trilinos-release-14-4-0
+   GIT_SHALLOW True
+   LIST_SEPARATOR | # Use the alternate list separator
+   PATCH_COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Patch_EpetraExt_Transform_Composite.h <SOURCE_DIR>/packages/epetraext/src/transform/EpetraExt_Transform_Composite.h
+   CMAKE_ARGS ${Xyce_TRILINOS_ARGS}
+ )
+ 
+-list(APPEND DEPENDENCIES "ADMS")
+-ExternalProject_Add(ADMS
+-  GIT_REPOSITORY https://github.com/Qucs/ADMS
+-  GIT_TAG release-2.3.7
+-  GIT_SHALLOW True
+-  CMAKE_ARGS ${ADMS_ARGS}
+-)
++# ADMS (Verilog-A model compiler) disabled: its release-2.3.7 C source is
++# incompatible with modern GCC's stricter function-prototype rules
++# (verilogaparse() K&R-style empty-paramlist declaration vs a 1-arg call site
++# -- "too many arguments"), unrelated to the CMake-policy issues already
++# patched above. We don't need Verilog-A support (tube models are hand-written
++# B-sources), and Xyce's own CMakeLists gracefully disables Xyce_PLUGIN_SUPPORT
++# when ADMS_XML isn't found (see Xyce/CMakeLists.txt:107,151), so this is a
++# supported, intended configuration -- not a hack.
++# list(APPEND DEPENDENCIES "ADMS")
++# ExternalProject_Add(ADMS
++#   GIT_REPOSITORY https://github.com/Qucs/ADMS
++#   GIT_TAG release-2.3.7
++#   GIT_SHALLOW True
++#   CMAKE_ARGS ${ADMS_ARGS}
++# )
+ 
+ ExternalProject_Add (Xyce
+   DEPENDS ${DEPENDENCIES}
