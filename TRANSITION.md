@@ -98,10 +98,43 @@ LiveSPICE, so it's the proving ground for `--backend ngspice`. Machine: blackbox
    not oscillation, not excess gain): gate in the host, or train on gated targets.
 8. Convergence recipe (config L): `--koren --ot-damp 3k --ot-snub 100n` (NO
    nfb-comp), `--oversample 2`, bound `leadpost>=0.05` / `leadpre>=0.05`.
+9. **Evaluated Xyce** (Sandia, more nonlinear continuation/homotopy methods
+   than ngspice) as a way to converge exact tubes + light damping instead of
+   Koren + heavy damping. **Verdict: negative, structurally** — Xyce's
+   continuation methods are DC-operating-point-only (confirmed in its own
+   source); our failure is a *transient* instability, outside what they cover.
+   Build notes + verdict: [`docs/xyce_build_notes.md`](docs/xyce_build_notes.md).
 
-**Status**: corrected amp passes the listen test ("sounds like a 5150"). Next: the
-v2 run — 4 knobs (leadpre, high, mid, low), LeadPost=0.5/Presence=0.5 fixed,
-~100 perms, 60 s composite input, config L, FiLM fix, open-ended training.
+**Status**: corrected amp passes the listen test ("sounds like a 5150"). The
+planned 4-knob v2 run (leadpre/high/mid/low, config L, ~100 perms) was
+**deferred** in favor of validating the fixed toolchain on a lower-risk amp
+first — see the Tweed 5F6-A Full entry below.
+
+### Tweed 5F6-A Full — validating the fixed toolchain (blackbox, LiveSPICE backend)
+
+A moderate-gain amp (no divergence risk), run to confirm the µF-parse fix +
+pot-taper fix + FiLM fix all work together cleanly before committing to the
+expensive 5150 v2 run.
+
+- **Dataset**: `/home/USER/work/tmp/tweed5f6a_ds/` — **grid** sweep (not
+  random): 5 knobs × 5 values each = **3125 perms** (`--values
+  "0.05,0.25,0.5,0.75,1.0"`, floored off exact 0 to avoid a double-zero
+  silent-output corner — see `batch_harness.py`'s `"silent WAV"` check).
+  60 s composite input (`sweep60_composite.wav` = sweep120s 5–50s bright/loud
+  + 78–93s dark/quiet, crossfaded). `--oversample 4`. Generation: 3125/3125
+  succeeded, ~5.2h.
+- **Knobs (5)**: `normalvol, brightvol, treble, middle, bass` — both channel
+  volumes are free (not one fixed to isolate "Bright-only"): the 5F6-A's two
+  channels share an input node in this `.schx` (a "jumpered" topology), so
+  `normalvol`/`brightvol` are literally the amp's two physical volume pots,
+  not a mode-select switch — the full continuous range from pure-Normal to
+  pure-Bright to both-up-jumpered is one model. `Presence` fixed 0.5 (its
+  transcription reads inert/inverted per the circuit doc — not swept).
+- **Training**: `--widths 3,4,5,8` (first real N-width slimmable run beyond
+  the old 2-tier lite/full), FiLM fix active, open-ended.
+- **Status (as of this writing)**: training in progress, epoch 3, full ESR
+  falling steadily (0.184→0.130→0.101). ~100 min/epoch (4 widths × 3125-perm
+  dataset). `touch /home/USER/work/tmp/tweed5f6a_ckpt/STOP` when satisfied.
 
 ## Setting Up on a New Machine
 

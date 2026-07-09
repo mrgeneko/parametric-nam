@@ -156,6 +156,13 @@ Open:
   node name are hand-set for the 5150; not auto-derived.
 - Tube **inter-electrode capacitances** and **pentode grid current** are omitted
   (small; would tighten the JCM800's last ~1% and level offset).
+- **The Koren-tubes + heavy-OT-damping compromise is not an ngspice limitation** —
+  evaluated [Xyce](https://xyce.sandia.gov/) (more nonlinear continuation/homotopy
+  methods) as a potential way to use exact tubes + light damping instead. Verdict:
+  **negative, structurally** — the 5150's failure is a *transient* integration
+  instability, and Xyce's continuation methods only apply to *DC operating point*
+  solving (confirmed in Xyce's own source). Full test + build notes:
+  [`../docs/xyce_build_notes.md`](../docs/xyce_build_notes.md).
 
 ## When to prefer which backend
 
