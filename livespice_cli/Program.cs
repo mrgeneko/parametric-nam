@@ -309,15 +309,24 @@ namespace livespice_cli
             return sb.Append('"').ToString();
         }
 
+        // Emit the base-unit numeric value (e.g. 1e-06), NOT Quantity.ToString():
+        // the LiveSPICE prefix formatter DROPS the micro sign, so "1 µF" prints as
+        // "1 F" and the ngspice translator would read it as 1 FARAD. The explicit
+        // (double) cast on Quantity gives the exact base-unit value.
+        static string QNum(Quantity q)
+        {
+            return ((double)q).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         static string CompValue(Component c)
         {
             switch (c)
             {
-                case Resistor r: return r.Resistance.ToString();
-                case Capacitor cap: return cap.Capacitance.ToString();
-                case Potentiometer p: return p.Resistance.ToString();
-                case Rail rail: return rail.Voltage.ToString();
-                case CenterTapTransformer tx: return tx.Turns.ToString();
+                case Resistor r: return QNum(r.Resistance);
+                case Capacitor cap: return QNum(cap.Capacitance);
+                case Potentiometer p: return QNum(p.Resistance);
+                case Rail rail: return QNum(rail.Voltage);
+                case CenterTapTransformer tx: return tx.Turns.ToString();  // ratio "7:108", not a Quantity
                 default: return null;
             }
         }
@@ -350,7 +359,9 @@ namespace livespice_cli
                     {
                         if (!pf) sb.Append(", ");
                         pf = false;
-                        sb.Append(JsonStr(prop.Name)).Append(": ").Append(JsonStr(val.ToString()));
+                        // Quantity params (R/C/µ-valued) via QNum for the same micro-sign reason.
+                        string vs = (val is Quantity q2) ? QNum(q2) : val.ToString();
+                        sb.Append(JsonStr(prop.Name)).Append(": ").Append(JsonStr(vs));
                     }
                 }
                 sb.Append("}");
