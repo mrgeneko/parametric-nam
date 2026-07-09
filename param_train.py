@@ -513,7 +513,7 @@ class ParamLoss(nn.Module):
 # ---------------------------------------------------------------------------
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
-                epoch: int = 0, total_epochs: int = 0, log_interval: int = 50):
+                epoch: int = 0, total_epochs: int = 0, log_interval: int = 10):
     model.train()
     slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
