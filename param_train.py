@@ -678,6 +678,15 @@ def main():
     ap.add_argument("--restart-mult", type=int, default=1,
                     help="Open-ended mode: SGDR period multiplier per restart "
                          "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
+    ap.add_argument("--patience", type=int, default=0,
+                    help="Early-stop after N epochs with no val-ESR improvement in ANY "
+                         "tier (0 = off). Works in both fixed-epoch and open-ended modes. "
+                         "Best-per-tier checkpoints export live, so stopping loses nothing "
+                         "already earned. (default: %(default)s)")
+    ap.add_argument("--min-delta", type=float, default=0.0,
+                    help="Minimum val-ESR decrease that counts as an improvement for "
+                         "--patience (default 0 = any strict decrease). e.g. 1e-4 ignores "
+                         "noise-floor bounces so a plateaued tier stops resetting patience.")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -794,6 +803,11 @@ def main():
     labels = model.tier_labels() if args.slimmable else ["full"]
     best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
     best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
+    # Early-stopping state (independent of best-checkpointing so --min-delta can
+    # ignore noise). patience_ref = best ESR seen per tier for the improvement test;
+    # last_improve_epoch = most recent epoch any tier improved by > --min-delta.
+    patience_ref = {lbl: float("inf") for lbl in labels}
+    last_improve_epoch = None
 
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
@@ -813,8 +827,17 @@ def main():
                 best_esr["full"] = ckpt["best_esr"]; best_state["full"] = ckpt.get("best_state")
             if "lite" in best_esr and ckpt.get("best_lite_esr") is not None:
                 best_esr["lite"] = ckpt["best_lite_esr"]; best_state["lite"] = ckpt.get("best_lite_state")
+        # restore early-stopping counter across resume (falls back to best_esr /
+        # start_epoch for checkpoints written before this field existed)
+        pr = ckpt.get("patience_ref")
+        patience_ref.update(pr if isinstance(pr, dict) else best_esr)
+        if ckpt.get("last_improve_epoch") is not None:
+            last_improve_epoch = ckpt["last_improve_epoch"]
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
+
+    if last_improve_epoch is None:
+        last_improve_epoch = start_epoch - 1
 
     open_ended = (args.epochs == 0)
 
@@ -891,6 +914,12 @@ def main():
                 export_nam_state(model, best_state[lbl], dataset,
                                  nam_variant(args.output, f"best_{lbl}"), device)
 
+        # Early-stopping bookkeeping: did any tier improve by more than min_delta?
+        for lbl in labels:
+            if esr_by[lbl] < patience_ref[lbl] - args.min_delta:
+                patience_ref[lbl] = esr_by[lbl]
+                last_improve_epoch = epoch
+
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
 
@@ -929,10 +958,21 @@ def main():
                 "best_state": best_state["full"],
                 "best_lite_esr": best_esr.get("lite", float("inf")),
                 "best_lite_state": best_state.get("lite"),
+                # early-stopping counter (survives resume)
+                "last_improve_epoch": last_improve_epoch,
+                "patience_ref": dict(patience_ref),
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
 
         completed += 1
+        # Early stop: no tier improved (by > --min-delta) for --patience epochs.
+        if args.patience > 0 and (epoch - last_improve_epoch) >= args.patience:
+            print(f"  Early stop at epoch {epoch}: no val-ESR improvement "
+                  f"(> {args.min_delta:g}) in any tier for {args.patience} epochs "
+                  f"(last improved at epoch {last_improve_epoch}). "
+                  f"Best per-tier models already exported.",
+                  file=sys.stderr, flush=True)
+            break
         # Open-ended: stop gracefully on STOP file or SIGINT/SIGTERM.
         if open_ended and should_stop(ckpt_dir):
             break
