@@ -163,10 +163,13 @@ def bjt_model(p):
 
 def jfet_model(p):
     typ = 'PJF' if str(p.get('Type', 'N')).upper().startswith('P') else 'NJF'
-    return '%s(VTO=%s BETA=%s LAMBDA=%s IS=%s CGS=%s CGD=%s)' % (
+    # RD/RS (small series R) are important for convergence: a zero-resistance JFET
+    # channel is numerically stiff in ngspice and can collapse the timestep.
+    return '%s(VTO=%s BETA=%s LAMBDA=%s IS=%s CGS=%s CGD=%s RD=%s RS=%s)' % (
         typ, sp(qty(p.get('Vt0', '-2'))), sp(qty(p.get('Beta', '1e-4'))),
         sp(qty(p.get('Lambda', '0'))), sp(qty(p.get('IS', '1e-14'))),
-        sp(qty(p.get('CGS', '4p'))), sp(qty(p.get('CGD', '4p'))))
+        sp(qty(p.get('CGS', '5p'))), sp(qty(p.get('CGD', '5p'))),
+        sp(qty(p.get('RD', '10'))), sp(qty(p.get('RS', '10'))))
 
 
 def opamp_subckt(name, Aol, GBP, Rout, rails):
