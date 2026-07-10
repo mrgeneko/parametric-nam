@@ -143,33 +143,42 @@ def pentode_subckt(name, p):
 # --------------------------------------------------------------------------
 # semiconductor models (diode / BJT / JFET) + op-amp macromodel
 # --------------------------------------------------------------------------
-# NOTE: default parasitic capacitances / transit times below are ESSENTIAL for
-# transient convergence — a device with zero junction cap switches infinitely fast
-# and drives ngspice's timestep to 0 ("timestep too small"). They're small (audio-
-# band negligible) and overridable if the .schx params carry real values.
-def diode_model(p):
+# Default parasitic caps / transit times / series R below are ESSENTIAL for transient
+# convergence — a device with zero junction cap or channel resistance switches
+# infinitely fast and drives ngspice's timestep to 0 ("timestep too small"). They're
+# small (audio-band negligible). Resolution order per value:
+#   real .schx param (p)  >  per-run convergence override (conv)  >  hardcoded default.
+# High-gain hard-clip stages (e.g. the MT-2) need bigger `diode_cjo` to soften the
+# clip edges; JFET-heavy circuits may need bigger `jfet_rd`/`jfet_rs`.
+def _cv(p, pkey, conv, ckey, default):
+    return p.get(pkey) or conv.get(ckey) or default
+
+
+def diode_model(p, conv):
     return 'D(IS=%s N=%s CJO=%s TT=%s)' % (
         sp(qty(p.get('IS', '1e-14'))), sp(qty(p.get('n', '1'))),
-        sp(qty(p.get('CJO', '4p'))), sp(qty(p.get('TT', '5n'))))
+        sp(qty(_cv(p, 'CJO', conv, 'diode_cjo', '4p'))),
+        sp(qty(_cv(p, 'TT', conv, 'diode_tt', '5n'))))
 
 
-def bjt_model(p):
+def bjt_model(p, conv):
     typ = 'PNP' if str(p.get('Type', 'NPN')).upper() == 'PNP' else 'NPN'
     return '%s(IS=%s BF=%s BR=%s CJE=%s CJC=%s TF=%s)' % (
         typ, sp(qty(p.get('IS', '1e-16'))), sp(qty(p.get('BF', '100'))),
-        sp(qty(p.get('BR', '1'))), sp(qty(p.get('CJE', '8p'))),
-        sp(qty(p.get('CJC', '4p'))), sp(qty(p.get('TF', '0.5n'))))
+        sp(qty(p.get('BR', '1'))), sp(qty(_cv(p, 'CJE', conv, 'bjt_cje', '8p'))),
+        sp(qty(_cv(p, 'CJC', conv, 'bjt_cjc', '4p'))),
+        sp(qty(_cv(p, 'TF', conv, 'bjt_tf', '0.5n'))))
 
 
-def jfet_model(p):
+def jfet_model(p, conv):
     typ = 'PJF' if str(p.get('Type', 'N')).upper().startswith('P') else 'NJF'
-    # RD/RS (small series R) are important for convergence: a zero-resistance JFET
-    # channel is numerically stiff in ngspice and can collapse the timestep.
     return '%s(VTO=%s BETA=%s LAMBDA=%s IS=%s CGS=%s CGD=%s RD=%s RS=%s)' % (
         typ, sp(qty(p.get('Vt0', '-2'))), sp(qty(p.get('Beta', '1e-4'))),
         sp(qty(p.get('Lambda', '0'))), sp(qty(p.get('IS', '1e-14'))),
-        sp(qty(p.get('CGS', '5p'))), sp(qty(p.get('CGD', '5p'))),
-        sp(qty(p.get('RD', '10'))), sp(qty(p.get('RS', '10'))))
+        sp(qty(_cv(p, 'CGS', conv, 'jfet_cgs', '5p'))),
+        sp(qty(_cv(p, 'CGD', conv, 'jfet_cgd', '5p'))),
+        sp(qty(_cv(p, 'RD', conv, 'jfet_rd', '10'))),
+        sp(qty(_cv(p, 'RS', conv, 'jfet_rs', '10'))))
 
 
 def opamp_subckt(name, Aol, GBP, Rout, rails):
@@ -194,8 +203,9 @@ def opamp_subckt(name, Aol, GBP, Rout, rails):
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
               method='trap', koren=False, ot_damp='47k', ot_snub='10n', nfb_comp=None,
-              input_mode='filesource', oversample=1, extra=None):
+              input_mode='filesource', oversample=1, extra=None, conv=None):
     pots = pots or {}
+    conv = conv or {}   # per-run device convergence overrides (diode_cjo, jfet_rd, ...)
     comps = netlist['components']
     lines = ['* schx -> ngspice (%s triodes, Koren pentodes, baked pots)'
              % ('Koren' if koren else 'DempwolfZolzer')]
@@ -291,11 +301,11 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
             if A != W: body.append('R%s_aw %s %s %s' % (nm, A, W, sp(max(raw, 1.0))))
             if W != K: body.append('R%s_wk %s %s %s' % (nm, W, K, sp(max(rwk, 1.0))))
         elif ty == 'Diode':
-            body.append('D%s %s %s %s' % (nm, t['Anode'], t['Cathode'], mdl('DM', diode_model(p))))
+            body.append('D%s %s %s %s' % (nm, t['Anode'], t['Cathode'], mdl('DM', diode_model(p, conv))))
         elif ty == 'BipolarJunctionTransistor':
-            body.append('Q%s %s %s %s %s' % (nm, t['C'], t['B'], t['E'], mdl('QM', bjt_model(p))))
+            body.append('Q%s %s %s %s %s' % (nm, t['C'], t['B'], t['E'], mdl('QM', bjt_model(p, conv))))
         elif ty == 'JunctionFieldEffectTransistor':
-            body.append('J%s %s %s %s %s' % (nm, t['D'], t['G'], t['S'], mdl('JM', jfet_model(p))))
+            body.append('J%s %s %s %s %s' % (nm, t['D'], t['G'], t['S'], mdl('JM', jfet_model(p, conv))))
         elif ty in ('IdealOpAmp', 'OpAmp'):
             vp, vn = t.get('Vcc+'), t.get('Vcc-')
             rails = bool(vp and vn and not vp.startswith('_') and not vn.startswith('_'))
@@ -379,10 +389,16 @@ if __name__ == '__main__':
                     help='solve at N*48kHz (finer tran step); pair with anti-alias decimation')
     ap.add_argument('--extra', default=None,
                     help='inject extra SPICE lines, ;-separated (e.g. missing bright caps)')
+    ap.add_argument('--conv', default='',
+                    help='device convergence overrides, key=val,...  keys: diode_cjo diode_tt '
+                         'bjt_cje bjt_cjc bjt_tf jfet_cgs jfet_cgd jfet_rd jfet_rs '
+                         '(e.g. diode_cjo=100p for high-gain hard-clip stages like the MT-2)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
+    conv = dict(kv.split('=', 1) for kv in a.conv.split(',') if '=' in kv)
     nl = json.load(open(a.netlist))
     open(a.out, 'w').write(translate(nl, pots, a.pwl, a.dur, a.csv, koren=a.koren,
                                      ot_damp=a.ot_damp, ot_snub=a.ot_snub, nfb_comp=a.nfb_comp,
-                                     input_mode=a.input_mode, oversample=a.oversample, extra=a.extra))
+                                     input_mode=a.input_mode, oversample=a.oversample, extra=a.extra,
+                                     conv=conv))
     print('wrote', a.out)

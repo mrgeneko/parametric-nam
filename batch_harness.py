@@ -259,7 +259,7 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                     csv=str(csv_path), koren=ng.get("koren", False),
                                     ot_damp=ng.get("ot_damp", "47k"), ot_snub=ng.get("ot_snub", "10n"),
                                     nfb_comp=ng.get("nfb_comp"), input_mode="filesource",
-                                    oversample=over))
+                                    oversample=over, conv=ng.get("conv")))
     proc = subprocess.Popen(["ngspice", "-b", str(cir_path)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     with _procs_lock:
