@@ -2,7 +2,7 @@
 """
 param_train.py — Train a parametric A2 + FiLM Neural Amp Modeler.
 
-Loads a dataset produced by batch_generate.py, trains an A2 architecture
+Loads a dataset produced by batch_harness.py, trains an A2 architecture
 with FiLM conditioning on knob parameters, and exports a .param.nam file
 loadable by the C++ ParametricWaveNet subclass.
 
@@ -662,7 +662,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--dataset", required=True, type=Path,
-                    help="Dataset directory from batch_generate.py")
+                    help="Dataset directory from batch_harness.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
     ap.add_argument("--channels", type=int, default=8,
