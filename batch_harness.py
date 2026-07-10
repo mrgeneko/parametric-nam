@@ -43,6 +43,14 @@ HERE = Path(__file__).resolve().parent
 HARNESS = HERE / "harness/build_o3/harness"
 LIVESPICE_CLI = HERE / "livespice_cli/publish/livespice_cli"
 
+# Per-circuit ngspice defaults, keyed by a substring of the .schx filename. Applied
+# automatically when the matching CLI flag is unset, so a circuit's known-good
+# convergence/damping config isn't re-typed each run (CLI flags win). Analogous to
+# how the 5150 ot-damp/nfb-comp are hand-set today, but auto-derived per circuit.
+NGSPICE_CIRCUIT_DEFAULTS = {
+    "MT-2": {"conv": "diode_cjo=100p"},   # soften the high-gain hard-clip edges
+}
+
 # CPP backend only — the C++ harness has its own schematic registry
 CPP_CIRCUIT_KNOBS = {
     "marshall_jcm800_2203_preamp_modded": ["gain_1", "gain_2", "bass", "middle", "treble", "volume"],
@@ -499,6 +507,8 @@ def main():
     ap.add_argument("--ot-damp", default="47k", help="ngspice: OT plate-to-plate damper R (heavier=more stable)")
     ap.add_argument("--ot-snub", default="10n", help="ngspice: OT snubber C")
     ap.add_argument("--nfb-comp", default=None, help="ngspice: NFB compensation cap NODE=value (e.g. nNFB=1n)")
+    ap.add_argument("--conv", default="", help="ngspice: device convergence overrides key=val,... "
+                    "(diode_cjo/diode_tt/bjt_*/jfet_*; e.g. diode_cjo=100p). Auto-set per-circuit if omitted.")
 
     # livespice backend
     ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
@@ -753,11 +763,16 @@ def main():
         fsrc = out_dir / "input_fsrc.txt"
         _t = np.arange(len(insig)) / sr
         np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
+        # convergence overrides: CLI --conv wins, else per-circuit default (auto)
+        _cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
+        _conv_str = args.conv or _cdef.get("conv", "")
+        conv = dict(kv.split("=", 1) for kv in _conv_str.split(",") if "=" in kv)
         ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
               "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp,
-              "oversample": args.oversample}
+              "oversample": args.oversample, "conv": conv}
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
-              f"tubes, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias)", file=sys.stderr)
+              f"tubes, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
+              f"{', conv='+_conv_str if _conv_str else ''})", file=sys.stderr)
 
     # Effective per-knob sampled range (min/max actually seen across perms).
     # Recorded so the exported .nam declares the true trained domain per knob
