@@ -320,6 +320,62 @@ especially on high-gain amps (see [`docs/evh5150_training_notes.md`](docs/evh515
 
 ---
 
+## System Requirements
+
+Training parametric NAM models is GPU- and memory-intensive. Below are guidelines
+based on real-world testing.
+
+### Minimum (CPU training, works but slow)
+
+- **RAM**: 18 GB — sufficient for dataset generation (48 permutations, 60s sweep)
+  and CPU training.
+- **GPU**: none — CPU-only training works reliably.
+- **Training speed**: ~80 s/epoch for a 4-width slimmable model (3,4,5,8ch) at
+  batch-size 16, crop-len 24000, 60s sweep.
+- **200 epochs**: ~4–5 hours on CPU.
+
+### Recommended (GPU training)
+
+- **GPU VRAM**: 16 GB+ — needed for comfortable training of slimmable models
+  with 4 widths at batch-size 16+.
+- **System RAM**: 24 GB+.
+
+### Notes for AMD GPU users
+
+PyTorch's ROCm build may lack compiled kernels for certain GPU architectures.
+If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
+(e.g. Radeon RX 6400, gfx1034), two workarounds are needed:
+
+1. **Missing `TensileLibrary.dat`** — create a symlink to the fallback database:
+   ```bash
+   ln -s TensileLibrary_Type_4xi8I_HPA_Contraction_l_Ailk_Bjlk_Cijk_Dijk_fallback.dat \
+         /path/to/torch/lib/rocblas/library/TensileLibrary.dat
+   ```
+
+2. **Override GPU architecture** — set this environment variable before running
+   training (maps gfx1034 → gfx1030, which has precompiled kernels):
+   ```bash
+   export HSA_OVERRIDE_GFX_VERSION=10.3.0
+   ```
+
+3. **Symlink missing architecture kernels** — create gfx1034 → gfx1030 symlinks
+   so rocBLAS and MIOpen find suitable code objects for the actual GPU:
+   ```bash
+   LIBDIR="/path/to/torch/lib/rocblas/library"
+   for f in "$LIBDIR"/*gfx1030*; do
+     base=$(basename "$f")
+     target="${base/gfx1030/gfx1034}"
+     [ ! -e "$LIBDIR/$target" ] && ln -s "$base" "$LIBDIR/$target"
+   done
+   ```
+
+Even with these workarounds, GPUs with only 4 GB VRAM (e.g. RX 6400) are
+**not sufficient** for training slimmable WaveNet models — they consistently
+fail with `illegal memory access` regardless of batch size or crop length.
+Use CPU training on such hardware.
+
+---
+
 ## Build & Dependencies
 
 ### Python packages
