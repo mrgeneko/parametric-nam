@@ -141,6 +141,52 @@ def pentode_subckt(name, p):
 
 
 # --------------------------------------------------------------------------
+# semiconductor models (diode / BJT / JFET) + op-amp macromodel
+# --------------------------------------------------------------------------
+# NOTE: default parasitic capacitances / transit times below are ESSENTIAL for
+# transient convergence — a device with zero junction cap switches infinitely fast
+# and drives ngspice's timestep to 0 ("timestep too small"). They're small (audio-
+# band negligible) and overridable if the .schx params carry real values.
+def diode_model(p):
+    return 'D(IS=%s N=%s CJO=%s TT=%s)' % (
+        sp(qty(p.get('IS', '1e-14'))), sp(qty(p.get('n', '1'))),
+        sp(qty(p.get('CJO', '4p'))), sp(qty(p.get('TT', '5n'))))
+
+
+def bjt_model(p):
+    typ = 'PNP' if str(p.get('Type', 'NPN')).upper() == 'PNP' else 'NPN'
+    return '%s(IS=%s BF=%s BR=%s CJE=%s CJC=%s TF=%s)' % (
+        typ, sp(qty(p.get('IS', '1e-16'))), sp(qty(p.get('BF', '100'))),
+        sp(qty(p.get('BR', '1'))), sp(qty(p.get('CJE', '8p'))),
+        sp(qty(p.get('CJC', '4p'))), sp(qty(p.get('TF', '0.5n'))))
+
+
+def jfet_model(p):
+    typ = 'PJF' if str(p.get('Type', 'N')).upper().startswith('P') else 'NJF'
+    return '%s(VTO=%s BETA=%s LAMBDA=%s IS=%s CGS=%s CGD=%s)' % (
+        typ, sp(qty(p.get('Vt0', '-2'))), sp(qty(p.get('Beta', '1e-4'))),
+        sp(qty(p.get('Lambda', '0'))), sp(qty(p.get('IS', '1e-14'))),
+        sp(qty(p.get('CGS', '4p'))), sp(qty(p.get('CGD', '4p'))))
+
+
+def opamp_subckt(name, Aol, GBP, Rout, rails):
+    """Single-pole op-amp macromodel. The gain node is ground-referenced (the
+    external feedback loop sets the DC output level, incl. single-supply mid-bias);
+    open-loop pole at GBP/Aol. When Vcc+/Vcc- are connected, the output buffer is
+    clamped to the rails (captures op-amp clipping). ngspice's adaptive solver
+    keeps the high-gain stage bounded (unlike LiveSPICE's fixed step)."""
+    Rp = 1e6
+    gm, Cp = Aol / Rp, Aol / (2 * math.pi * Rp * GBP)
+    hdr = '.subckt %s inp inn out%s' % (name, ' vp vn' if rails else '')
+    core = ['Ga 0 g inp inn %s' % sp(gm), 'Ra g 0 %s' % sp(Rp), 'Ca g 0 %s' % sp(Cp)]
+    if rails:
+        core += ['Bo ob 0 V = min(max(V(g),V(vn)+0.5),V(vp)-0.5)', 'Ro ob out %s' % sp(Rout)]
+    else:
+        core += ['Ro g out %s' % sp(Rout)]
+    return [hdr] + core + ['.ends']
+
+
+# --------------------------------------------------------------------------
 # main translation
 # --------------------------------------------------------------------------
 def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
@@ -167,6 +213,27 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
             else:
                 sub_defs.extend(triode_subckt(nm, p))
         return subckts[sig]
+
+    # semiconductor .model dedup (diode/BJT/JFET) + op-amp macromodel dedup
+    models, model_defs = {}, []
+
+    def mdl(prefix, mstr):
+        if mstr not in models:
+            models[mstr] = '%s%d' % (prefix, len(models))
+            model_defs.append('.model %s %s' % (models[mstr], mstr))
+        return models[mstr]
+
+    opamps, opamp_defs = {}, []
+
+    def opamp_sub(p, rails):
+        Aol = qty(p.get('Aol', '1e6')) or 1e6
+        GBP = qty(p.get('GBP', '10e6')) or 10e6
+        Rout = qty(p.get('Rout', '100')) or 100.0
+        sig = (Aol, GBP, Rout, rails)
+        if sig not in opamps:
+            opamps[sig] = 'OA%d' % len(opamps)
+            opamp_defs.extend(opamp_subckt(opamps[sig], Aol, GBP, Rout, rails))
+        return opamps[sig]
 
     body, out_node = [], None
     for c in comps:
@@ -220,6 +287,18 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
             # extreme could hang the solver). 1 ohm is tonally negligible.
             if A != W: body.append('R%s_aw %s %s %s' % (nm, A, W, sp(max(raw, 1.0))))
             if W != K: body.append('R%s_wk %s %s %s' % (nm, W, K, sp(max(rwk, 1.0))))
+        elif ty == 'Diode':
+            body.append('D%s %s %s %s' % (nm, t['Anode'], t['Cathode'], mdl('DM', diode_model(p))))
+        elif ty == 'BipolarJunctionTransistor':
+            body.append('Q%s %s %s %s %s' % (nm, t['C'], t['B'], t['E'], mdl('QM', bjt_model(p))))
+        elif ty == 'JunctionFieldEffectTransistor':
+            body.append('J%s %s %s %s %s' % (nm, t['D'], t['G'], t['S'], mdl('JM', jfet_model(p))))
+        elif ty in ('IdealOpAmp', 'OpAmp'):
+            vp, vn = t.get('Vcc+'), t.get('Vcc-')
+            rails = bool(vp and vn and not vp.startswith('_') and not vn.startswith('_'))
+            s = opamp_sub(p, rails)
+            pins = [t['+'], t['-'], t['Out']] + ([vp, vn] if rails else [])
+            body.append('X%s %s %s' % (nm, ' '.join(pins), s))
         elif ty == 'Triode':
             s = tube_sub('TRI', p); body.append('X%s %s %s %s %s' % (nm, t['P'], t['G'], t['K'], s))
         elif ty == 'Pentode':
@@ -264,7 +343,7 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         for ln in extra.split(';'):
             if ln.strip():
                 body.append(ln.strip())
-    lines += sub_defs + [''] + body + [
+    lines += sub_defs + opamp_defs + model_defs + [''] + body + [
         '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
         'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
         # tran step = (1/48kHz)/oversample; finer step -> ngspice resolves more
