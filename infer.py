@@ -28,7 +28,7 @@ def load_model(nam_path: str, device: torch.device, quality: str = "full"):
     data = json.loads(Path(nam_path).read_text())
     arch = data["architecture"]
 
-    if arch == "SlimmableParametricContainer":
+    if arch == "SlimmableContainer":
         # Pick submodel by quality: "lite" → max_value<=0.5, "full" → max_value>0.5
         submodels = data["config"]["submodels"]
         if quality == "lite":
@@ -36,7 +36,7 @@ def load_model(nam_path: str, device: torch.device, quality: str = "full"):
         else:
             sm = next(s for s in reversed(submodels) if s["max_value"] > 0.5)
         model_data = sm["model"]
-        print(f"Loaded: SlimmableParametricContainer [{quality}] "
+        print(f"Loaded: SlimmableContainer [{quality}] "
               f"(max_value={sm['max_value']})", file=sys.stderr)
     elif arch == "ParametricWaveNet":
         model_data = data
