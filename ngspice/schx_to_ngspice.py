@@ -258,6 +258,10 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
             n = list(t.values()); body.append('R%s %s %s %s' % (nm, n[0], n[1], sp(qty(c['value']))))
         elif ty == 'Capacitor':
             n = list(t.values()); body.append('C%s %s %s %s' % (nm, n[0], n[1], sp(qty(c['value']))))
+        elif ty == 'Inductor':
+            n = list(t.values())
+            lval = c.get('value') or p.get('Inductance')   # value field may be null; fall back to params
+            body.append('L%s %s %s %s' % (nm, n[0], n[1], sp(qty(lval))))
         elif ty == 'Rail':
             body.append('V%s %s 0 DC %s' % (nm, list(t.values())[0], sp(qty(p['Voltage']))))
         elif ty == 'Input':
