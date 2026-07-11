@@ -1,0 +1,15 @@
+# Runtime dependencies for the spice-to-nam training toolchain.
+# Pinned to the versions this toolchain is developed and tested against (Python 3.13).
+#
+#   pip install -r requirements.txt
+#
+# torch note: the default PyPI wheel is CPU and (on Apple Silicon) MPS. For NVIDIA
+# CUDA, install the matching build FIRST from the PyTorch index, then this file for
+# the rest, e.g.:
+#   pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+
+torch==2.12.1
+numpy==2.5.0
+scipy==1.18.0        # signal.decimate (oversampling), spatial.cKDTree (coverage_report gap analysis)
+soundfile==0.14.0    # WAV I/O

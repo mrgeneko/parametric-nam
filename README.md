@@ -16,21 +16,14 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 ```bash
 # 1. Clone with submodules (LiveSPICE nests ComputerAlgebra — recursive is required)
 git clone --recurse-submodules <this-repo> && cd spice-to-nam
-git submodule update --init --recursive extern/LiveSPICE   # if you forgot --recurse
 
-# 2. REQUIRED: apply the vendored LiveSPICE fix — without it, "µF" capacitor
-#    values are silently parsed as FARADS and every µ-valued circuit simulates
-#    wrong (see docs/evh5150_training_notes.md, "Round 2" finding #4):
-git -C extern/LiveSPICE apply ../../patches/livespice-microsign-prefix.patch
+# 2. One-shot setup: submodules -> apply the required LiveSPICE micro-sign patch
+#    (idempotent) -> build livespice_cli for your platform -> venv + pinned deps.
+#    (Needs the .NET SDK for the CLI build; use ./setup.sh --no-cli for Python-only.)
+./setup.sh
+. .venv/bin/activate
 
-# 3. Build the simulator CLI (Linux shown; macOS: -r osx-arm64)
-cd livespice_cli && dotnet publish -c Release -r linux-x64 --self-contained -o publish/ && cd ..
-
-# 4. Python deps
-python -m venv .venv && . .venv/bin/activate
-pip install torch numpy scipy soundfile auraloss
-
-# 5. One command: generate dataset -> combine -> train -> release folder
+# 3. One command: generate dataset -> combine -> train -> release folder
 python run_pipeline.py \
     --dataset-dir    /tmp/ts9_ds \
     --nam-output     /tmp/ts9.param.nam \
@@ -42,7 +35,7 @@ python run_pipeline.py \
     --input /path/to/guitar.wav \
     --slimmable --mmap --epochs 200 --crop-len 24000 --batch-size 64
 
-# 6. Listen (Python inference, no C++ needed)
+# 4. Listen (Python inference, no C++ needed)
 python param_infer.py --checkpoint /tmp/ts9_ckpt/best.pt \
     --input /path/to/dry.wav --output-dir /tmp/out/ --params "drive=0.7,tone=0.4"
 ```
@@ -378,10 +371,16 @@ Use CPU training on such hardware.
 
 ## Build & Dependencies
 
+**The easy path is `./setup.sh`** (see Quick Start) — it does everything below
+idempotently. The manual steps are documented here for reference / troubleshooting.
+
 ### Python packages
+Pinned in [`requirements.txt`](requirements.txt) (torch, numpy, scipy, soundfile):
 ```bash
-pip install torch numpy scipy soundfile auraloss
+pip install -r requirements.txt
 ```
+For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
+(see the note at the top of `requirements.txt`), then `pip install -r requirements.txt`.
 
 ### .NET SDK + LiveSPICE (for dataset generation)
 
@@ -390,14 +389,16 @@ pip install torch numpy scipy soundfile auraloss
 that `Circuit.csproj` references; without it the build fails with `CS0246` errors
 (`Expression`, `Arrow`, `Variable`, `SolutionSet` not found).
 
+**The micro-sign patch is required** (`patches/livespice-microsign-prefix.patch`):
+without it LiveSPICE parses `µF` (U+00B5) as FARADS and every µ-valued circuit
+simulates wrong. `setup.sh` applies it idempotently; to do it by hand:
 ```bash
 git submodule update --init --recursive extern/LiveSPICE   # recursive is mandatory
+git -C extern/LiveSPICE apply "$PWD/patches/livespice-microsign-prefix.patch"
 
 cd livespice_cli
-# Linux:
-dotnet publish -c Release -r linux-x64  --self-contained -o publish/
-# macOS (Apple Silicon):
-dotnet publish -c Release -r osx-arm64  --self-contained -o publish/
+# Linux:            dotnet publish -c Release -r linux-x64 --self-contained -o publish/
+# macOS (Apple Si): dotnet publish -c Release -r osx-arm64 --self-contained -o publish/
 ```
 (.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS.)
 The binary lands at `livespice_cli/publish/livespice_cli`, where `batch_harness.py`
