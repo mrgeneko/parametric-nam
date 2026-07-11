@@ -1,0 +1,8 @@
+# Dev / test dependencies (not needed to run the pipeline).
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=8,<9
+# Official NAM trainer — used to round-trip-validate that our static .nam exports
+# are byte/behaviour-compatible with the stock NAM ecosystem (load via nam._from_nam).
+neural-amp-modeler>=0.10

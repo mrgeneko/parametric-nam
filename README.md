@@ -308,12 +308,25 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
 ### NAM ecosystem compatibility
 
-- **`"SlimmableContainer"`** — standard, already registered in NeuralAmpModelerCore ✓
-- **`"ParametricWaveNet"`** — custom; requires Phase 3 factory registration
-- Official NAM tools deliberately removed user-controllable knob parameters in
-  2023–2024; parametric inference requires custom C++ work
-- Old parametric C++ code recoverable from NAM git history at commit `ae86979`
-  (before PR #367 removed it)
+Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-07):
+
+- **Our A2 *is* NAM's official "A2" config** — `K_KERNEL_SIZES`/`K_DILATIONS`,
+  LeakyReLU/non-gated, `condition_size=1`, widths `[3,8]` all match NAM's
+  `config_model_packed.json`. A **static** (no-FiLM) A2 is literally a standard NAM
+  model → exports as `"WaveNet"` / `"SlimmableContainer"` and loads in the stock
+  plugin. (See `docs/spice_static_plan.md`.)
+- **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and stays
+  internal to [redacted]. **Standard NAM plugins cannot drive user knobs**: the core's
+  public API is `process(input, output, num_frames)` — audio in/out, *no* parameter
+  argument, and no `SetParam`/`SetCondition` anywhere. NAM's own FiLM/`condition_dsp`
+  is *input-derived* architecture, not a knob interface. So re-serializing parametric
+  models "to match NAM" would **not** make them plugin-controllable.
+- **Delivering parametric tones to standard plugins = snapshot baking.** FiLM is
+  affine over the layer's linear ops, so freezing a knob setting folds `γ,β` exactly
+  into `conv.weight/bias` + `mixin.weight`, yielding an identical *static* A2 with no
+  FiLM. [redacted] keeps live knobs; "export this tone" bakes the setting into a
+  stock-standard `.nam`. Works on **already-trained** parametric `.nam`s offline (no
+  retrain) — pure weight transform.
 
 ### ESR targets
 
