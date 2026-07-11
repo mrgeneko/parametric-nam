@@ -20,16 +20,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ---------------------------------------------------------------------------
-# A2 architecture constants. The arrays below (num layers / kernel sizes / dilations /
-# LeakyReLU) DO match C++ a2_fast.h and NAM's A2 config.
-# ⚠ BUT THE FORWARD PASS DOES NOT MATCH (confirmed 2026-07): a2_fast.h and NAM
-# skip-ACCUMULATE each layer's post-activation into the head (head = head_rechannel(
-# Σ post_actᵢ)); ParametricA2 below is RESIDUAL-ONLY (head reads the final residual).
-# So models trained here are optimized for a different forward than [redacted] runs
-# (a2_fast.h) — a train/infer mismatch. Empirically: same weights → residual-head vs
-# NAM corr 0.18; skip-accumulating corr 0.998. Fix = skip-accumulate + retrain (also
-# unlocks stock-NAM export, since a2_fast.h == NAM WaveNet). See
-# docs/spice_static_plan.md.
+# A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
+# C++ a2_fast.h and NAM's A2 config.
+# NOTE on the head (verified 2026-07): ParametricA2 below is RESIDUAL-ONLY (head reads
+# the final residual). This MATCHES [redacted]'s PARAMETRIC inference — the residual-only
+# ParametricA2FastModel fast-path (a2_fast.cpp: "head reads final residual, NOT a skip
+# accumulator"), which is enabled (NAM_ENABLE_A2_FAST) for widths 3-8. So trained
+# parametric models are faithful in-product. However, NAM's STANDARD WaveNet (and the
+# static a2_fast path, and the generic parametric fallback) SKIP-accumulate. So a
+# residual-only model does NOT export faithfully to stock NAM plugins (bake_nam /
+# nam_standard) — that path needs a skip-accumulating variant (retrain). See
+# docs/rearchitecture_skip_accumulation.md.
 # ---------------------------------------------------------------------------
 K_NUM_LAYERS = 23
 K_HEAD_KERNEL = 16
@@ -120,9 +121,9 @@ class ParametricA2(nn.Module):
         inp_audio = audio
         for layer in self.layers:
             x = layer(x, inp_audio, params)
-        # ⚠ KNOWN BUG (see K_* constants note above): a2_fast.h / NAM feed the head the
-        # SUM of every layer's post-activation (skip accumulation); this reads only the
-        # final residual, so trained weights don't reproduce [redacted] inference.
+        # Head reads the final residual (residual-only). This MATCHES [redacted]'s
+        # parametric fast-path (ParametricA2FastModel). NAM's STANDARD WaveNet skip-
+        # accumulates instead — so this differs from stock-NAM export (see K_* note).
         x = self.head(x)
         x = x[:, :, :audio.shape[-1]]
         x = x * self.head_scale
