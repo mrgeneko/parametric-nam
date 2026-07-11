@@ -72,7 +72,10 @@ def main():
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--params", action="append", default=[],
                     help="knob=value,... (repeat for multiple outputs)")
-    ap.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
+    ap.add_argument("--device", default=(
+        "cuda" if torch.cuda.is_available()          # NVIDIA or AMD/ROCm
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"))
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)

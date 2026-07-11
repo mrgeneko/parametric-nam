@@ -87,7 +87,12 @@ def main():
                     help="For SlimmableParametricContainer: which submodel to use (default: full)")
     args = ap.parse_args()
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    # auto-detect GPU: cuda covers both NVIDIA and AMD/ROCm (ROCm exposes AMD GPUs
+    # through the torch.cuda API), then Apple MPS, else CPU.
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu")
     model, param_defs = load_model(args.model, device, quality=args.quality)
 
     audio, sr = sf.read(args.input, dtype="float32")
