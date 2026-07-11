@@ -1080,12 +1080,17 @@ def main():
     test_inp = torch.randn(1, 1, 8192, device=device)
     test_params = torch.rand(1, num_params, device=device)
     if args.slimmable:
-        for sm_data, lbl in zip(nam_data["config"]["submodels"], ["lite", "full"]):
+        # Pair each exported submodel with its SOURCE tier by ascending width. (Both
+        # nam_data["config"]["submodels"] and model.submodels are width-ascending, and
+        # tier_labels() matches that order.) Earlier this hardcoded ["lite","full"],
+        # which for 3+ tiers mislabeled and compared the wrong pair (e.g. the 4ch export
+        # vs the 8ch model) — a false WARN that also never tested the widest tier.
+        for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
+                                     model.tier_labels(), model.submodels):
             ch = sm_data["model"]["config"]["layers"]
             m2 = ParametricA2(ch, num_params)
             m2.load_weights(sm_data["model"]["weights"])
             m2.to(device)
-            src = model.lite if lbl == "lite" else model.full
             with torch.no_grad():
                 o1 = src(test_inp, test_params)
                 o2 = m2(test_inp, test_params)
