@@ -86,6 +86,24 @@ python run_pipeline.py \
 - Generation flags (`--random`, `--bounds`, `--oversample`, ngspice `--koren` etc.)
   are forwarded to `batch_harness`; training flags to `param_train`.
 
+### Per-circuit configs (`--config`)
+
+A circuit's *recipe* — schematic, input, knob grid, fixed params, widths, and
+hyperparameters — lives in a declarative TOML under [`configs/`](configs/), so the
+pipeline stays generic (one `run_pipeline.py`, one small reviewable file per circuit)
+instead of a script per `.schx`. Only the per-run output paths stay on the CLI:
+
+```bash
+python run_pipeline.py --config configs/big-muff-v1.toml \
+    --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
+    --checkpoint-dir /tmp/bigmuff_ckpt
+```
+
+Any CLI flag overrides the config (config is loaded as argparse defaults). The `[knobs]`
+table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
+`--fixed-params`, and `widths = [3,4,8]` to `--widths`. See `configs/big-muff-v1.toml`
+for a worked example (with the reasoning behind the knob sampling).
+
 ## Scripts
 
 ### `batch_harness.py` — generate the dataset

@@ -28,7 +28,7 @@ Example — full Dumble clean pipeline:
         --slimmable --mmap --epochs 200
 """
 
-import argparse, csv, os, platform, shutil, subprocess, sys, time
+import argparse, csv, os, platform, shutil, subprocess, sys, time, tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +36,45 @@ HERE    = Path(__file__).resolve().parent
 PYTHON  = sys.executable
 BATCH   = HERE / "batch_harness.py"
 TRAIN   = HERE / "param_train.py"
+
+# argparse dests whose config values are filesystem paths (argparse's type=Path is
+# only applied to CLI strings, not to set_defaults values, so we convert here).
+_CONFIG_PATH_DESTS = {"dataset_dir", "nam_output", "checkpoint_dir", "release_dir",
+                      "log", "schx", "input", "resume"}
+
+
+def load_config(path: Path) -> dict:
+    """Load a per-circuit TOML config into a dict keyed by argparse `dest`.
+
+    A config captures a circuit's reusable *recipe* declaratively so the pipeline
+    stays generic (one run_pipeline.py, one config file per circuit). CLI flags
+    override anything here (config is loaded via set_defaults).
+
+    Scalars map by name (hyphens or underscores both accepted: `crop-len` or
+    `crop_len`). Two structured tables expand to the flat flags:
+      [knobs]  NAME = [v1, v2, ...]   -> --knobs NAME,...  + one --range per knob
+      [fixed]  NAME = value           -> --fixed-params NAME=value,...
+    `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
+    """
+    with open(path, "rb") as f:
+        raw = tomllib.load(f)
+    knobs = raw.pop("knobs", None)
+    fixed = raw.pop("fixed", None)
+    out: dict = {}
+    for k, v in raw.items():
+        dest = k.replace("-", "_")
+        if dest == "widths" and isinstance(v, list):
+            v = ",".join(str(x) for x in v)
+        elif dest in _CONFIG_PATH_DESTS and v is not None:
+            v = Path(str(v)).expanduser()
+        out[dest] = v
+    if knobs:
+        out["knobs"]  = ",".join(knobs.keys())
+        out["ranges"] = [f"{name}=" + ",".join(str(x) for x in vals)
+                         for name, vals in knobs.items()]
+    if fixed:
+        out["fixed_params"] = ",".join(f"{name}={val}" for name, val in fixed.items())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +285,8 @@ def reproduce_command(args):
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
+    if args.patience:
+        epochs_part += f' --patience {args.patience} --min-delta {args.min_delta}'
     c.append(f'    --repeats {args.repeats} {epochs_part} '
              f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
     return "\n".join(c)
@@ -406,11 +447,15 @@ def main():
 
     # --- pipeline control ---
     g = ap.add_argument_group("pipeline")
-    g.add_argument("--dataset-dir",    required=True, type=Path,
+    g.add_argument("--config",         type=Path, default=None,
+                   help="TOML per-circuit config (knobs/ranges/fixed/schx/input/widths/"
+                        "hyperparams). CLI flags override it. See configs/.")
+    # These three may come from --config OR the CLI; validated after parsing.
+    g.add_argument("--dataset-dir",    type=Path, default=None,
                    help="Dataset directory (generation output / training input)")
-    g.add_argument("--nam-output",     required=True, type=Path,
+    g.add_argument("--nam-output",     type=Path, default=None,
                    help="Output .param.nam path")
-    g.add_argument("--checkpoint-dir", required=True, type=Path,
+    g.add_argument("--checkpoint-dir", type=Path, default=None,
                    help="Directory for epoch checkpoints and metrics.csv")
     g.add_argument("--log",            type=Path, default=None,
                    help="Log file (default: <dataset-dir>/pipeline.log)")
@@ -466,6 +511,11 @@ def main():
     g = ap.add_argument_group("training")
     g.add_argument("--epochs",         type=int,   default=100,
                    help="Training epochs, or 0 = open-ended (run until touch <ckpt>/STOP)")
+    g.add_argument("--patience",       type=int,   default=0,
+                   help="Early-stop after N epochs with no val-ESR improvement in any "
+                        "tier (0 = off). Forwarded to param_train.py.")
+    g.add_argument("--min-delta",      type=float, default=0.0,
+                   help="Min val-ESR decrease counting as improvement for --patience")
     g.add_argument("--restart-period", type=int,   default=50,
                    help="Open-ended SGDR restart period in epochs")
     g.add_argument("--restart-mult",   type=int,   default=1,
@@ -486,7 +536,23 @@ def main():
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.1)
 
+    # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--config", type=Path)
+    _cfg_ns, _ = _pre.parse_known_args()
+    if _cfg_ns.config is not None:
+        if not _cfg_ns.config.exists():
+            ap.error(f"--config not found: {_cfg_ns.config}")
+        ap.set_defaults(**load_config(_cfg_ns.config))
+
     args = ap.parse_args()
+
+    # dataset-dir/nam-output/checkpoint-dir are required but may arrive via --config.
+    _missing = [n for n in ("dataset_dir", "nam_output", "checkpoint_dir")
+                if getattr(args, n) is None]
+    if _missing:
+        ap.error("missing required " + ", ".join("--" + m.replace("_", "-") for m in _missing)
+                 + " (set on the CLI or in --config)")
 
     # Keep the machine awake for the whole pipeline (may run for hours).
     # Re-execs under caffeinate / systemd-inhibit before any work begins.
@@ -594,6 +660,8 @@ def main():
                 "--device",          args.device,
                 "--seed",            args.seed,
             ]
+            if args.patience:            train_cmd += ["--patience", args.patience,
+                                                        "--min-delta", args.min_delta]
             if args.slimmable:           train_cmd.append("--slimmable")
             elif args.channels != 8:     train_cmd += ["--channels", args.channels]
             if args.slimmable and args.widths: train_cmd += ["--widths", args.widths]
