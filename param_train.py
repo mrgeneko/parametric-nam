@@ -86,16 +86,17 @@ class A2Layer(nn.Module):
         self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
         self.l1x1 = nn.Conv1d(channels, channels, 1)
 
-    def forward(self, x: torch.Tensor, inp_audio: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        residual = x
+    def forward(self, x: torch.Tensor, inp_audio: torch.Tensor, cond: torch.Tensor):
+        """Returns (residual_out, post_activation). post_activation is the pre-layer1x1
+        LeakyReLU output = the 'skip' term NAM/a2_fast accumulate into the head."""
         h = self.conv(x)
         h = h[:, :, :inp_audio.shape[-1]]
         h = h + self.mixin(inp_audio)
         if self.film is not None:
             h = self.film(h, cond)
-        h = F.leaky_relu(h, K_LEAKY_SLOPE)
-        h = self.l1x1(h)
-        return h + residual
+        post_act = F.leaky_relu(h, K_LEAKY_SLOPE)
+        residual_out = x + self.l1x1(post_act)
+        return residual_out, post_act
 
 
 class ParametricA2(nn.Module):
@@ -104,10 +105,15 @@ class ParametricA2(nn.Module):
     Architecture matches the C++ A2FastModel with additional FiLM layers
     for parametric knob control.
     """
-    def __init__(self, channels: int, num_params: int):
+    def __init__(self, channels: int, num_params: int, head_mode: str = "residual"):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
+        # head_mode: "residual" (head reads final residual — matches [redacted]'s
+        # parametric fast-path) or "skip" (head reads Σ per-layer post-activations —
+        # matches NAM's standard WaveNet / stock plugins). Weights/layout identical.
+        assert head_mode in ("residual", "skip")
+        self.head_mode = head_mode
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
             A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
@@ -119,12 +125,15 @@ class ParametricA2(nn.Module):
     def forward(self, audio: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         x = self.rechannel(audio)
         inp_audio = audio
+        skip = None
         for layer in self.layers:
-            x = layer(x, inp_audio, params)
-        # Head reads the final residual (residual-only). This MATCHES [redacted]'s
-        # parametric fast-path (ParametricA2FastModel). NAM's STANDARD WaveNet skip-
-        # accumulates instead — so this differs from stock-NAM export (see K_* note).
-        x = self.head(x)
+            x, post_act = layer(x, inp_audio, params)
+            if self.head_mode == "skip":
+                skip = post_act if skip is None else skip + post_act
+        # residual → head reads final residual ([redacted] parametric fast-path);
+        # skip → head reads Σ post-activations (NAM standard / stock-plugin path).
+        head_in = skip if self.head_mode == "skip" else x
+        x = self.head(head_in)
         x = x[:, :, :audio.shape[-1]]
         x = x * self.head_scale
         return x
@@ -299,17 +308,18 @@ class SlimmableParametricA2(nn.Module):
     index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
     2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
     """
-    def __init__(self, num_params: int, widths=None):
+    def __init__(self, num_params: int, widths=None, head_mode: str = "residual"):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
+        self.head_mode = head_mode
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
         # tiers live in `mid` (empty ModuleList when widths has just 2 entries).
-        self.lite = ParametricA2(self.widths[0], num_params)
-        self.full = ParametricA2(self.widths[-1], num_params)
-        self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
+        self.lite = ParametricA2(self.widths[0], num_params, head_mode)
+        self.full = ParametricA2(self.widths[-1], num_params, head_mode)
+        self.mid = nn.ModuleList(ParametricA2(w, num_params, head_mode) for w in self.widths[1:-1])
 
     @property
     def submodels(self):
@@ -678,6 +688,8 @@ def main():
                     help="Dataset directory from batch_harness.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
+    ap.add_argument("--head-mode", choices=["residual","skip"], default="residual",
+                    help="Head input: residual (final residual — matches [redacted] parametric fast-path) or skip (Σ per-layer post-activations — matches NAM standard / stock plugins). Same weight layout.")
     ap.add_argument("--channels", type=int, default=8,
                     help="A2 channel count (3=nano, 8=standard) (default: %(default)s)")
     ap.add_argument("--epochs", type=int, default=100,
@@ -787,12 +799,12 @@ def main():
     # ------------------------------------------------------------------
     num_params = dataset.num_params
     if args.slimmable:
-        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
+        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths), head_mode=args.head_mode)
         desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
                          for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
         print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     else:
-        model = ParametricA2(args.channels, num_params)
+        model = ParametricA2(args.channels, num_params, head_mode=args.head_mode)
         n_weights = model.weight_count()
         print(f"\nModel: A2 {args.channels}-channel, {num_params} params, "
               f"{n_weights} weights", file=sys.stderr)
@@ -1101,7 +1113,7 @@ def main():
         for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
                                      model.tier_labels(), model.submodels):
             ch = sm_data["model"]["config"]["layers"]
-            m2 = ParametricA2(ch, num_params)
+            m2 = ParametricA2(ch, num_params, head_mode=args.head_mode)
             m2.load_weights(sm_data["model"]["weights"])
             m2.to(device)
             with torch.no_grad():
@@ -1111,7 +1123,7 @@ def main():
             status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
             print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
     else:
-        model2 = ParametricA2(args.channels, num_params)
+        model2 = ParametricA2(args.channels, num_params, head_mode=args.head_mode)
         model2.load_weights(nam_data["weights"])
         model2.to(device)
         with torch.no_grad():
