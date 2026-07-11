@@ -20,7 +20,8 @@ import datetime
 import torch
 
 from param_train import (ParametricA2, SlimmableParametricA2,
-                         K_KERNEL_SIZES, K_DILATIONS, K_HEAD_KERNEL)
+                         K_KERNEL_SIZES, K_DILATIONS, K_HEAD_KERNEL,
+                         K_NUM_LAYERS, K_LEAKY_SLOPE)
 
 # .nam file-format version (the WaveNet `layers_configs` schema; see NAM model-file.rst)
 NAM_VERSION = "0.5.4"
@@ -55,20 +56,33 @@ def fold_film(model: ParametricA2, params) -> ParametricA2:
 
 
 def _wavenet_config(channels: int, head_scale: float) -> dict:
-    """Official NAM WaveNet `config` for our A2 at a given width."""
-    return {
-        "layers_configs": [{
-            "input_size": 1,
-            "condition_size": 1,
-            "channels": channels,
-            "kernel_sizes": list(K_KERNEL_SIZES),
-            "dilations": list(K_DILATIONS),
-            "activation": "LeakyReLU",
-            "gated": False,
-            "head": {"out_channels": 1, "kernel_size": K_HEAD_KERNEL, "bias": True},
-        }],
-        "head_scale": head_scale,
+    """Official NAM WaveNet `config` for our A2 at a given width — mirrors exactly
+    what NAM's `WaveNet.export_config()` emits for the A2 config (verified in-venv)."""
+    n = K_NUM_LAYERS
+    film_off = lambda: {"active": False, "shift": True, "groups": 1}
+    layer = {
+        "input_size": 1,
+        "condition_size": 1,
+        "head": {"out_channels": 1, "kernel_size": K_HEAD_KERNEL, "bias": True},
+        "channels": channels,
+        "kernel_sizes": list(K_KERNEL_SIZES),
+        "dilations": list(K_DILATIONS),
+        "activation": [{"type": "LeakyReLU", "negative_slope": K_LEAKY_SLOPE}
+                       for _ in range(n)],
+        "bottleneck": channels,
+        "head1x1": {"active": False, "out_channels": 1, "groups": 1},
+        "layer1x1": {"active": True, "groups": 1},
+        "groups_input": 1,
+        "groups_input_mixin": 1,
+        "conv_pre_film": film_off(), "conv_post_film": film_off(),
+        "input_mixin_pre_film": film_off(), "input_mixin_post_film": film_off(),
+        "activation_pre_film": film_off(), "activation_post_film": film_off(),
+        "layer1x1_post_film": film_off(), "head1x1_post_film": film_off(),
+        "gating_mode": ["none"] * n,
+        "secondary_activation": [None] * n,
+        "slimmable": None,
     }
+    return {"layers": [layer], "head": None, "head_scale": head_scale}
 
 
 def _wavenet_dict(a2: ParametricA2) -> dict:
