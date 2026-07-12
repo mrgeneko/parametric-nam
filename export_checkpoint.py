@@ -52,6 +52,15 @@ def model_state(ck):
     return ck
 
 
+def ckpt_head_mode(ck) -> str:
+    """The head this checkpoint was TRAINED with. Must be carried into the model so
+    export_nam stamps the .nam correctly — exporting a skip-trained checkpoint as
+    'residual' (or vice versa) makes every downstream reader run the wrong head."""
+    if isinstance(ck, dict):
+        return (ck.get("args_dict") or {}).get("head_mode", "residual")
+    return "residual"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -79,10 +88,16 @@ def main():
             if not tier.strip() or not path.strip():
                 raise SystemExit(f"bad --compose spec: {tok!r} (want tier=path)")
             specs[tier.strip()] = Path(path.strip())
-        loaded = {t: model_state(torch.load(str(p), map_location="cpu", weights_only=False))
-                  for t, p in specs.items()}
+        raw = {t: torch.load(str(p), map_location="cpu", weights_only=False)
+               for t, p in specs.items()}
+        loaded = {t: model_state(ck) for t, ck in raw.items()}
+        modes = {t: ckpt_head_mode(ck) for t, ck in raw.items()}
+        if len(set(modes.values())) > 1:
+            raise SystemExit(f"--compose checkpoints disagree on head_mode: {modes}; "
+                             "all tiers must be trained with the same head")
+        head_mode = next(iter(modes.values()))
         widths = infer_widths(next(iter(loaded.values())))
-        model = SlimmableParametricA2(ds.num_params, widths=widths)
+        model = SlimmableParametricA2(ds.num_params, widths=widths, head_mode=head_mode)
         labels = model.tier_labels()
         missing = [l for l in labels if l not in specs]
         if missing:
@@ -101,13 +116,16 @@ def main():
         if args.state not in ck:
             raise SystemExit(f"checkpoint has no '{args.state}' key; available: {list(ck.keys())}")
         state = ck[args.state]
+        head_mode = ckpt_head_mode(ck)
         if any(k.startswith("lite.") for k in state):
-            model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state))
+            model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
+                                          head_mode=head_mode)
         else:
             ch = next(v.shape[0] for k, v in state.items() if k.endswith("conv.weight"))
-            model = ParametricA2(ch, ds.num_params)
+            model = ParametricA2(ch, ds.num_params, head_mode=head_mode)
         model.load_state_dict(state)
-        provenance = f"state={args.state}, epoch={ck.get('epoch')}, best_esr={ck.get('best_esr')}"
+        provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
+                      f"best_esr={ck.get('best_esr')}, head={head_mode}")
 
     model.eval()
     nam = model.export_nam(ds.config, {"version": "0.7.0"},

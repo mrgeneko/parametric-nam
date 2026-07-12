@@ -11,14 +11,18 @@ import pytest
 import torch
 
 import bake_nam
+import param_train
 from param_train import ParametricA2
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _make_parametric_file(path: Path, defaults=None):
-    """Write a small parametric .param.nam with declared knob metadata."""
-    m = ParametricA2(3, 2)
+def _make_parametric_file(path: Path, defaults=None, head_mode="skip"):
+    """Write a small parametric .param.nam with declared knob metadata.
+
+    Defaults to head_mode="skip" — the only mode that bakes faithfully to a standard
+    .nam (see test_bake_refuses_residual_source)."""
+    m = ParametricA2(3, 2, head_mode=head_mode)
     cfg = {"param_names": ["SUSTAIN", "TONE"],
            "bounds": {"SUSTAIN": [0.0, 1.0], "TONE": [0.0, 1.0]}}
     if defaults:
@@ -28,9 +32,15 @@ def _make_parametric_file(path: Path, defaults=None):
     return path
 
 
+def _bake_raw(src, out, *extra):
+    return subprocess.run(
+        [sys.executable, "bake_nam.py", "--in", str(src), "-o", str(out), *extra],
+        cwd=ROOT, capture_output=True, text=True)
+
+
 def _bake(src, out, *extra):
-    subprocess.run([sys.executable, "bake_nam.py", "--in", str(src), "-o", str(out), *extra],
-                   check=True, cwd=ROOT, capture_output=True, text=True)
+    r = _bake_raw(src, out, *extra)
+    assert r.returncode == 0, r.stdout + r.stderr
     return json.loads(out.read_text())
 
 
@@ -64,6 +74,42 @@ def test_embed_parametric_is_dual_payload(tmp_path):
     assert out[bake_nam.EMBED_KEY]["architecture"] == "ParametricWaveNet"
     assert out[bake_nam.EMBED_KEY] == original
     assert out["metadata"]["parametric_embedded"] is True
+
+
+def test_export_stamps_head_mode_and_schema_version(tmp_path):
+    """Every parametric .nam self-describes its head + schema so readers can't guess."""
+    for mode in ("skip", "residual"):
+        src = _make_parametric_file(tmp_path / f"{mode}.param.nam", head_mode=mode)
+        par = json.loads(src.read_text())["config"]["parametric"]
+        assert par["head_mode"] == mode
+        assert par["schema_version"] == param_train.K_PARAM_SCHEMA_VERSION
+
+
+def test_bake_refuses_residual_source(tmp_path):
+    """A residual model baked to a standard .nam would LOAD but sound WRONG (stock runs
+    a skip head). Refuse rather than emit a silent dud."""
+    src = _make_parametric_file(tmp_path / "m.param.nam", head_mode="residual")
+    r = _bake_raw(src, tmp_path / "o.nam")
+    assert r.returncode != 0
+    assert "head_mode='residual'" in (r.stdout + r.stderr)
+    assert not (tmp_path / "o.nam").exists()
+
+
+def test_allow_unfaithful_overrides_the_refusal(tmp_path):
+    src = _make_parametric_file(tmp_path / "m.param.nam", head_mode="residual")
+    out = _bake(src, tmp_path / "o.nam", "--allow-unfaithful")
+    assert out["metadata"]["baked_from_head_mode"] == "residual"
+
+
+def test_schema_guard_rejects_a_newer_schema(tmp_path):
+    """A file from a future build must fail loudly, not be silently misread."""
+    src = _make_parametric_file(tmp_path / "m.param.nam")
+    d = json.loads(src.read_text())
+    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION + 1
+    src.write_text(json.dumps(d))
+    r = _bake_raw(src, tmp_path / "o.nam")
+    assert r.returncode != 0
+    assert "schema_version" in (r.stdout + r.stderr)
 
 
 def test_stock_loads_dual_file_ignoring_embed(tmp_path):

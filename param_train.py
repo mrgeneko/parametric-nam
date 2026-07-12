@@ -36,6 +36,28 @@ K_NUM_LAYERS = 23
 K_HEAD_KERNEL = 16
 K_LEAKY_SLOPE = 0.01
 
+# Schema version of OUR config["parametric"] block — independent of the .nam file's
+# top-level "version" (0.7.0), which is NAM's FILE-FORMAT version and belongs to NAM
+# (bumping it would make loaders report the file unsupported). This one versions the
+# parametric extension so future changes can't be silently misread.
+#   0 = pre-versioning (implicit): no schema_version, no head_mode => residual head.
+#   1 = adds "head_mode" ("skip" | "residual").
+# Readers MUST fail loudly on a version they don't know rather than guess — guessing
+# a conditioning/head change produces wrong audio with no error.
+K_PARAM_SCHEMA_VERSION = 1
+
+
+def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
+    """Validate a file's parametric schema version against what this build supports.
+    Absent => 0 (legacy file: residual head, no head_mode key)."""
+    v = int(par.get("schema_version", 0))
+    if v > K_PARAM_SCHEMA_VERSION:
+        raise SystemExit(
+            f"{source}: parametric schema_version {v} is newer than this build supports "
+            f"(max {K_PARAM_SCHEMA_VERSION}). Upgrade spice-to-nam — proceeding would "
+            f"silently misread the model and produce wrong audio.")
+    return v
+
 K_KERNEL_SIZES = [
     6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
     15, 15,
@@ -250,7 +272,14 @@ class ParametricA2(nn.Module):
             "head_scale": self.head_scale.item(),
             "parametric": {
                 "type": "film",
+                "schema_version": K_PARAM_SCHEMA_VERSION,
                 "condition_size": self.num_params,
+                # Which head this model was TRAINED with. Readers must honor it:
+                #   "skip"     — head reads Σ per-layer post-activations (NAM standard).
+                #   "residual" — head reads the final residual ([redacted] parametric
+                #                fast-path). Absent => "residual" (pre-tagging files).
+                # Running a model under the wrong head silently produces wrong audio.
+                "head_mode": self.head_mode,
                 "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
                 "parameters": param_defs,
             },

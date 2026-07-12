@@ -19,7 +19,7 @@ import soundfile as sf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from param_train import ParametricA2
+from param_train import ParametricA2, check_parametric_schema
 
 CHUNK = 131072  # process in chunks to avoid MPS memory pressure
 
@@ -45,12 +45,17 @@ def load_model(nam_path: str, device: torch.device, quality: str = "full"):
 
     cfg = model_data["config"]
     channels = cfg["layers"]
-    num_params = cfg["parametric"]["condition_size"]
-    model = ParametricA2(channels, num_params)
+    par = cfg["parametric"]
+    check_parametric_schema(par, source=str(nam_path))
+    num_params = par["condition_size"]
+    # Honor the trained head; untagged (pre-tagging) files are residual.
+    head_mode = par.get("head_mode", "residual")
+    model = ParametricA2(channels, num_params, head_mode=head_mode)
     model.load_weights(model_data["weights"])
     model.to(device).eval()
     param_defs = cfg["parametric"]["parameters"]
-    print(f"  A2 {channels}ch, params={[p['name'] for p in param_defs]}", file=sys.stderr)
+    print(f"  A2 {channels}ch, head={head_mode}, params={[p['name'] for p in param_defs]}",
+          file=sys.stderr)
     return model, param_defs
 
 
