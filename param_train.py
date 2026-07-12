@@ -22,15 +22,22 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
 # C++ a2_fast.h and NAM's A2 config.
-# NOTE on the head (verified 2026-07): ParametricA2 below is RESIDUAL-ONLY (head reads
-# the final residual). This MATCHES [redacted]'s PARAMETRIC inference — the residual-only
-# ParametricA2FastModel fast-path (a2_fast.cpp: "head reads final residual, NOT a skip
-# accumulator"), which is enabled (NAM_ENABLE_A2_FAST) for widths 3-8. So trained
-# parametric models are faithful in-product. However, NAM's STANDARD WaveNet (and the
-# static a2_fast path, and the generic parametric fallback) SKIP-accumulate. So a
-# residual-only model does NOT export faithfully to stock NAM plugins (bake_nam /
-# nam_standard) — that path needs a skip-accumulating variant (retrain). See
-# docs/rearchitecture_skip_accumulation.md.
+#
+# HEAD (migrated 2026-07 — see docs/rearchitecture_skip_accumulation.md):
+#   * --head-mode defaults to "skip": the head reads the SUM of every layer's
+#     post-activation, which is what NAM's standard WaveNet, nam_wavenet.metal, the static
+#     a2_fast path, and stock NAM plugins all compute. It is the ONLY head that exports
+#     faithfully to stock plugins (corr 1.0; residual scores 0.31). It costs no accuracy
+#     (ESR-neutral vs residual) and ~2–4% CPU at narrow widths, ~nil at 8ch.
+#   * "residual" (head reads the final residual) remains selectable — it is the original
+#     [redacted]-only convention and the implicit head of every UNTAGGED legacy .nam. Hence
+#     ParametricA2's class default is still "residual": a file with no head_mode is, by
+#     definition, an old residual model. Only the CLI default is "skip".
+#   * The head is CAUSAL. It used to be padding=K//2, which let output[n] peek 7 samples
+#     into the future — information a real amp does not have, and a 7-sample misalignment
+#     against every other (causal) NAM capture.
+# Models self-describe via config.parametric.{head_mode, schema_version}; [redacted] honors
+# both and fails loudly on anything it doesn't understand, so skip and residual coexist.
 # ---------------------------------------------------------------------------
 K_NUM_LAYERS = 23
 K_HEAD_KERNEL = 16
@@ -734,7 +741,7 @@ def main():
                     help="Dataset directory from batch_harness.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
-    ap.add_argument("--head-mode", choices=["residual","skip"], default="residual",
+    ap.add_argument("--head-mode", choices=["residual","skip"], default="skip",
                     help="Head input: residual (final residual — matches [redacted] parametric fast-path) or skip (Σ per-layer post-activations — matches NAM standard / stock plugins). Same weight layout.")
     ap.add_argument("--channels", type=int, default=8,
                     help="A2 channel count (3=nano, 8=standard) (default: %(default)s)")
