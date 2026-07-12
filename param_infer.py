@@ -33,15 +33,11 @@ def load_model(checkpoint_path: str):
     num_params = len(param_names)
     args_dict["param_names"] = param_names
 
-    # Honor the head the checkpoint was TRAINED with — running a skip-trained model
-    # under the residual head (or vice versa) silently produces wrong audio.
-    head_mode = args_dict.get("head_mode", "residual")
-
     if slimmable:
-        model = SlimmableParametricA2(num_params=num_params, head_mode=head_mode)
+        model = SlimmableParametricA2(num_params=num_params)
     else:
         channels = args_dict.get("channels", 8)
-        model = ParametricA2(num_params=num_params, channels=channels, head_mode=head_mode)
+        model = ParametricA2(num_params=num_params, channels=channels)
 
     state = ckpt.get("model") or ckpt.get("best_state")
     model.load_state_dict(state)

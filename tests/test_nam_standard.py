@@ -89,13 +89,13 @@ def _best_corr(a, b, maxlag=40):
     return best
 
 
-def _roundtrip_corr(head_mode):
-    """Export a head_mode model to standard .nam, load it in official NAM, and
-    return the best lag-aligned corr on the post-warmup region."""
+def _roundtrip_corr():
+    """Export a model to a standard .nam, load it in official NAM, and return
+    (corr, lag) on the post-warmup region."""
     nam = pytest.importorskip("nam", reason="neural-amp-modeler not installed (dev dep)")
     from nam.models import _from_nam
 
-    m = ParametricA2(channels=3, num_params=2, head_mode=head_mode).eval()
+    m = ParametricA2(channels=3, num_params=2).eval()
     torch.manual_seed(0)
     for p in m.parameters():
         p.data = p.data + 0.05 * torch.randn_like(p)
@@ -114,16 +114,10 @@ def _roundtrip_corr(head_mode):
 def test_roundtrip_skip_is_bit_exact():
     """A SKIP-accumulating model exports bit-exact to official NAM's WaveNet — the
     delivery path for baked static captures into stock NAM plugins."""
-    corr, lag = _roundtrip_corr("skip")
+    corr, lag = _roundtrip_corr()
     assert corr > 0.999
     # Causal head => zero added latency and sample-exact alignment with every other NAM
     # model. A non-zero lag would comb-filter against parallel paths when summed.
     assert lag == 0, f"expected lag 0 (causal head), got {lag}"
 
 
-def test_roundtrip_residual_does_not_match_stock():
-    """A RESIDUAL-only model is [redacted]-native (its parametric fast-path reads the
-    final residual) and does NOT match stock NAM's skip-accumulating WaveNet. This
-    documents WHY skip is required for stock-plugin delivery. See
-    docs/rearchitecture_skip_accumulation.md."""
-    assert _roundtrip_corr("residual")[0] < 0.9

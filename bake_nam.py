@@ -24,11 +24,10 @@ upstream NeuralAmpModelerCore. A dual file never does. Pass --no-embed-parametri
 a static-only file (for capture-pack members, where embedding the master in every tone
 just multiplies size).
 
-HEAD MODE: a baked .nam is played with a SKIP-accumulating head everywhere it can run
-(stock NAM plugins, nam_wavenet.metal, [redacted]'s static a2_fast path). So only a
-SKIP-trained source bakes faithfully. This tool reads config.parametric.head_mode and
-REFUSES a residual source by default (it would load but sound wrong, corr ~0.31);
-retrain with `param_train.py --head-mode skip`, or pass --allow-unfaithful for A/B.
+SKIP-ONLY: a baked .nam is played with a skip-accumulating head everywhere it can run
+(stock NAM plugins, nam_wavenet.metal, [redacted]'s static a2_fast path), which is the only
+head we support. A legacy residual/untagged source is REJECTED (its weights would sound wrong,
+corr ~0.31) — retrain it.
 """
 import argparse
 import json
@@ -41,10 +40,9 @@ EMBED_KEY = "[redacted]_parametric"
 
 
 def _submodels(nam: dict, source: str = ".param.nam"):
-    """Per-submodel (channels, num_params, param_metas, weights, head_mode) for a
-    ParametricWaveNet or SlimmableContainer .param.nam. param_metas is the list of
-    {name,min,max,default} dicts as declared in the file. head_mode defaults to
-    "residual" for pre-tagging files."""
+    """Per-submodel (channels, num_params, param_metas, weights) for a ParametricWaveNet or
+    SlimmableContainer .param.nam. check_parametric_schema rejects legacy residual/untagged
+    models, so anything we return here is a supported skip model."""
     entries = ([s["model"] for s in nam["config"]["submodels"]]
                if nam.get("architecture") == "SlimmableContainer" else [nam])
     out = []
@@ -55,8 +53,7 @@ def _submodels(nam: dict, source: str = ".param.nam"):
         metas = par.get("parameters", [])
         out.append((int(cfg["layers"]),
                     int(par.get("condition_size", len(metas))),
-                    metas, m["weights"],
-                    par.get("head_mode", "residual")))
+                    metas, m["weights"]))
     return out
 
 
@@ -85,9 +82,6 @@ def main():
                          "ignores the extra key, while a parametric-aware host unlocks live knobs. "
                          "Use --no-embed-parametric for capture-pack members, where embedding the "
                          "master in every tone just multiplies the file size.")
-    ap.add_argument("--allow-unfaithful", action="store_true",
-                    help="bake a non-skip (residual) model anyway. The output will LOAD "
-                         "in stock plugins but SOUND WRONG. A/B and experiments only.")
     a = ap.parse_args()
 
     nam = json.loads(a.inp.read_text())
@@ -97,21 +91,9 @@ def main():
     match = next((s for s in subs if s[0] == target), None)
     if match is None:
         ap.error(f"width {target} not found; available: {widths}")
-    channels, num_params, metas, weights, head_mode = match
+    channels, num_params, metas, weights = match
     names = [m["name"] for m in metas]
 
-    # A baked standard .nam is played with a SKIP-accumulating head EVERYWHERE it can
-    # run (stock NAM plugins, nam_wavenet.metal, and [redacted]'s static a2_fast path).
-    # So a residual-trained model bakes to a file that LOADS but sounds WRONG (measured
-    # corr ~0.31 vs the real model). Refuse by default rather than ship a silent dud.
-    if head_mode != "skip" and not a.allow_unfaithful:
-        ap.error(
-            f"source head_mode='{head_mode}' cannot be baked faithfully.\n"
-            f"  A baked .nam is run with a skip-accumulating head, but this model was "
-            f"trained '{head_mode}'.\n"
-            f"  It would load and sound WRONG (corr ~0.31).\n"
-            f"  Fix: retrain with `param_train.py --head-mode skip`.\n"
-            f"  Override (A/B or experiments only): --allow-unfaithful")
 
     a2 = ParametricA2(channels=channels, num_params=num_params)
     a2.load_weights(weights)
@@ -130,7 +112,6 @@ def main():
     baked = dict(zip(names, vec)) if vec else "static"
     md = out.setdefault("metadata", {}) or {}
     md["baked_setting"] = baked                    # self-describing: which knob values
-    md["baked_from_head_mode"] = head_mode         # provenance for the faithfulness check
     if a.embed_parametric:
         out[EMBED_KEY] = nam                       # verbatim original → host loads live knobs
         md["parametric_embedded"] = True
@@ -141,11 +122,7 @@ def main():
     dflt_note = "" if not vec else f"  (defaulted: {defaulted or 'none'})"
     embed_note = (f"  +embedded parametric ('{EMBED_KEY}') — loads in stock AND parametric hosts"
                   if a.embed_parametric else "  [static-only: --no-embed-parametric]")
-    print(f"baked width={channels}ch  head={head_mode}  params={baked}{dflt_note}"
-          f"{embed_note}  ->  {a.out}")
-    if head_mode != "skip":
-        print("  WARNING: --allow-unfaithful — this baked tone will SOUND WRONG in any "
-              "stock plugin.")
+    print(f"baked width={channels}ch  params={baked}{dflt_note}{embed_note}  ->  {a.out}")
 
 
 if __name__ == "__main__":

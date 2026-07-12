@@ -46,15 +46,13 @@ def load_model(nam_path: str, device: torch.device, quality: str = "full"):
     cfg = model_data["config"]
     channels = cfg["layers"]
     par = cfg["parametric"]
-    check_parametric_schema(par, source=str(nam_path))
+    check_parametric_schema(par, source=str(nam_path))   # rejects legacy/residual models
     num_params = par["condition_size"]
-    # Honor the trained head; untagged (pre-tagging) files are residual.
-    head_mode = par.get("head_mode", "residual")
-    model = ParametricA2(channels, num_params, head_mode=head_mode)
+    model = ParametricA2(channels, num_params)
     model.load_weights(model_data["weights"])
     model.to(device).eval()
     param_defs = cfg["parametric"]["parameters"]
-    print(f"  A2 {channels}ch, head={head_mode}, params={[p['name'] for p in param_defs]}",
+    print(f"  A2 {channels}ch, params={[p['name'] for p in param_defs]}",
           file=sys.stderr)
     return model, param_defs
 

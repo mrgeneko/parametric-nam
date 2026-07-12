@@ -23,21 +23,19 @@ import torch.nn.functional as F
 # A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
 # C++ a2_fast.h and NAM's A2 config.
 #
-# HEAD (migrated 2026-07 — see docs/rearchitecture_skip_accumulation.md):
-#   * --head-mode defaults to "skip": the head reads the SUM of every layer's
-#     post-activation, which is what NAM's standard WaveNet, nam_wavenet.metal, the static
-#     a2_fast path, and stock NAM plugins all compute. It is the ONLY head that exports
-#     faithfully to stock plugins (corr 1.0; residual scores 0.31). It costs no accuracy
-#     (ESR-neutral vs residual) and ~2–4% CPU at narrow widths, ~nil at 8ch.
-#   * "residual" (head reads the final residual) remains selectable — it is the original
-#     [redacted]-only convention and the implicit head of every UNTAGGED legacy .nam. Hence
-#     ParametricA2's class default is still "residual": a file with no head_mode is, by
-#     definition, an old residual model. Only the CLI default is "skip".
-#   * The head is CAUSAL. It used to be padding=K//2, which let output[n] peek 7 samples
-#     into the future — information a real amp does not have, and a 7-sample misalignment
-#     against every other (causal) NAM capture.
-# Models self-describe via config.parametric.{head_mode, schema_version}; [redacted] honors
-# both and fails loudly on anything it doesn't understand, so skip and residual coexist.
+# HEAD — SKIP-ONLY (migrated 2026-07; see docs/rearchitecture_skip_accumulation.md):
+#   * The head reads the SUM of every layer's post-activation — the standard WaveNet skip
+#     connections that NAM, nam_wavenet.metal, the static a2_fast path and every stock NAM
+#     plugin already compute. It is the only head that exports faithfully to stock plugins
+#     (corr 1.0; the old residual head scored 0.31), and it costs no accuracy.
+#   * The legacy "residual" head (head reads the final residual) was a [redacted]-only
+#     convention. It is GONE — one head, no mode to choose. Models carrying it are REJECTED
+#     on load (check_parametric_schema), never silently played: residual weights under a skip
+#     head produce garbage with no error.
+#   * The head is CAUSAL. It used to be padding=K//2, which let output[n] peek 7 samples into
+#     the future — information a real amp does not have, and a 7-sample misalignment against
+#     every other (causal) NAM capture.
+# Models self-describe via config.parametric.{head_mode:"skip", schema_version}.
 # ---------------------------------------------------------------------------
 K_NUM_LAYERS = 23
 K_HEAD_KERNEL = 16
@@ -47,22 +45,36 @@ K_LEAKY_SLOPE = 0.01
 # top-level "version" (0.7.0), which is NAM's FILE-FORMAT version and belongs to NAM
 # (bumping it would make loaders report the file unsupported). This one versions the
 # parametric extension so future changes can't be silently misread.
-#   0 = pre-versioning (implicit): no schema_version, no head_mode => residual head.
-#   1 = adds "head_mode" ("skip" | "residual").
+#   0 = pre-versioning (implicit): no schema_version, no head_mode => legacy residual model,
+#       which is REJECTED (the residual head no longer exists).
+#   1 = declares "head_mode": "skip".
 # Readers MUST fail loudly on a version they don't know rather than guess — guessing
 # a conditioning/head change produces wrong audio with no error.
 K_PARAM_SCHEMA_VERSION = 1
 
 
 def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
-    """Validate a file's parametric schema version against what this build supports.
-    Absent => 0 (legacy file: residual head, no head_mode key)."""
+    """Reject any model we cannot faithfully run. SKIP-ONLY.
+
+    Two hard failures, never a guess — guessing a head silently produces wrong audio:
+      * schema_version newer than we understand;
+      * head_mode other than "skip". An ABSENT head_mode means a pre-tagging model, which is
+        residual by definition. Residual weights under a skip head give garbage (corr ~0.3),
+        so we refuse rather than run them.
+    """
     v = int(par.get("schema_version", 0))
     if v > K_PARAM_SCHEMA_VERSION:
         raise SystemExit(
             f"{source}: parametric schema_version {v} is newer than this build supports "
             f"(max {K_PARAM_SCHEMA_VERSION}). Upgrade spice-to-nam — proceeding would "
             f"silently misread the model and produce wrong audio.")
+    head_mode = par.get("head_mode", "residual")
+    if head_mode != "skip":
+        raise SystemExit(
+            f"{source}: this model uses the legacy '{head_mode}' head and is no longer "
+            f"supported. Parametric models are skip-only; the residual head was removed. Its "
+            f"weights would produce garbage under a skip head, so it is rejected rather than "
+            f"run. Retrain it, or re-download a current model.")
     return v
 
 K_KERNEL_SIZES = [
@@ -134,15 +146,10 @@ class ParametricA2(nn.Module):
     Architecture matches the C++ A2FastModel with additional FiLM layers
     for parametric knob control.
     """
-    def __init__(self, channels: int, num_params: int, head_mode: str = "residual"):
+    def __init__(self, channels: int, num_params: int):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
-        # head_mode: "residual" (head reads final residual — matches [redacted]'s
-        # parametric fast-path) or "skip" (head reads Σ per-layer post-activations —
-        # matches NAM's standard WaveNet / stock plugins). Weights/layout identical.
-        assert head_mode in ("residual", "skip")
-        self.head_mode = head_mode
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
             A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
@@ -162,14 +169,13 @@ class ParametricA2(nn.Module):
     def forward(self, audio: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         x = self.rechannel(audio)
         inp_audio = audio
+        # SKIP head: reads the SUM of every layer's post-activation — the standard WaveNet
+        # skip connections that NAM, a2_fast and every stock plugin compute.
         skip = None
         for layer in self.layers:
             x, post_act = layer(x, inp_audio, params)
-            if self.head_mode == "skip":
-                skip = post_act if skip is None else skip + post_act
-        # residual → head reads final residual ([redacted] parametric fast-path);
-        # skip → head reads Σ post-activations (NAM standard / stock-plugin path).
-        head_in = skip if self.head_mode == "skip" else x
+            skip = post_act if skip is None else skip + post_act
+        head_in = skip
         # Causal: left-pad K-1 so output[n] reads only [n-(K-1), n] — no lookahead.
         head_in = F.pad(head_in, (K_HEAD_KERNEL - 1, 0))
         x = self.head(head_in)
@@ -291,12 +297,9 @@ class ParametricA2(nn.Module):
                 "type": "film",
                 "schema_version": K_PARAM_SCHEMA_VERSION,
                 "condition_size": self.num_params,
-                # Which head this model was TRAINED with. Readers must honor it:
-                #   "skip"     — head reads Σ per-layer post-activations (NAM standard).
-                #   "residual" — head reads the final residual ([redacted] parametric
-                #                fast-path). Absent => "residual" (pre-tagging files).
-                # Running a model under the wrong head silently produces wrong audio.
-                "head_mode": self.head_mode,
+                # Always "skip" — the one head we support. Declared so readers can REJECT
+                # legacy residual/untagged models instead of silently playing garbage.
+                "head_mode": "skip",
                 "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
                 "parameters": param_defs,
             },
@@ -361,18 +364,17 @@ class SlimmableParametricA2(nn.Module):
     index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
     2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
     """
-    def __init__(self, num_params: int, widths=None, head_mode: str = "residual"):
+    def __init__(self, num_params: int, widths=None):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
-        self.head_mode = head_mode
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
         # tiers live in `mid` (empty ModuleList when widths has just 2 entries).
-        self.lite = ParametricA2(self.widths[0], num_params, head_mode)
-        self.full = ParametricA2(self.widths[-1], num_params, head_mode)
-        self.mid = nn.ModuleList(ParametricA2(w, num_params, head_mode) for w in self.widths[1:-1])
+        self.lite = ParametricA2(self.widths[0], num_params)
+        self.full = ParametricA2(self.widths[-1], num_params)
+        self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
 
     @property
     def submodels(self):
@@ -741,8 +743,6 @@ def main():
                     help="Dataset directory from batch_harness.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
-    ap.add_argument("--head-mode", choices=["residual","skip"], default="skip",
-                    help="Head input: residual (final residual — matches [redacted] parametric fast-path) or skip (Σ per-layer post-activations — matches NAM standard / stock plugins). Same weight layout.")
     ap.add_argument("--channels", type=int, default=8,
                     help="A2 channel count (3=nano, 8=standard) (default: %(default)s)")
     ap.add_argument("--epochs", type=int, default=100,
@@ -852,12 +852,12 @@ def main():
     # ------------------------------------------------------------------
     num_params = dataset.num_params
     if args.slimmable:
-        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths), head_mode=args.head_mode)
+        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
         desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
                          for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
         print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     else:
-        model = ParametricA2(args.channels, num_params, head_mode=args.head_mode)
+        model = ParametricA2(args.channels, num_params)
         n_weights = model.weight_count()
         print(f"\nModel: A2 {args.channels}-channel, {num_params} params, "
               f"{n_weights} weights", file=sys.stderr)
@@ -1166,7 +1166,7 @@ def main():
         for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
                                      model.tier_labels(), model.submodels):
             ch = sm_data["model"]["config"]["layers"]
-            m2 = ParametricA2(ch, num_params, head_mode=args.head_mode)
+            m2 = ParametricA2(ch, num_params)
             m2.load_weights(sm_data["model"]["weights"])
             m2.to(device)
             with torch.no_grad():
@@ -1176,7 +1176,7 @@ def main():
             status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
             print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
     else:
-        model2 = ParametricA2(args.channels, num_params, head_mode=args.head_mode)
+        model2 = ParametricA2(args.channels, num_params)
         model2.load_weights(nam_data["weights"])
         model2.to(device)
         with torch.no_grad():

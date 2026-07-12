@@ -17,12 +17,9 @@ from param_train import ParametricA2
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _make_parametric_file(path: Path, defaults=None, head_mode="skip"):
-    """Write a small parametric .param.nam with declared knob metadata.
-
-    Defaults to head_mode="skip" — the only mode that bakes faithfully to a standard
-    .nam (see test_bake_refuses_residual_source)."""
-    m = ParametricA2(3, 2, head_mode=head_mode)
+def _make_parametric_file(path: Path, defaults=None):
+    """Write a small parametric .param.nam. Models are skip-only."""
+    m = ParametricA2(3, 2)
     cfg = {"param_names": ["SUSTAIN", "TONE"],
            "bounds": {"SUSTAIN": [0.0, 1.0], "TONE": [0.0, 1.0]}}
     if defaults:
@@ -96,29 +93,36 @@ def test_embed_parametric_is_dual_payload(tmp_path):
     assert out["metadata"]["parametric_embedded"] is True
 
 
-def test_export_stamps_head_mode_and_schema_version(tmp_path):
-    """Every parametric .nam self-describes its head + schema so readers can't guess."""
-    for mode in ("skip", "residual"):
-        src = _make_parametric_file(tmp_path / f"{mode}.param.nam", head_mode=mode)
-        par = json.loads(src.read_text())["config"]["parametric"]
-        assert par["head_mode"] == mode
-        assert par["schema_version"] == param_train.K_PARAM_SCHEMA_VERSION
+def test_export_stamps_skip_and_schema_version(tmp_path):
+    """Every model self-describes so readers can REJECT legacy files rather than guess."""
+    src = _make_parametric_file(tmp_path / "m.param.nam")
+    par = json.loads(src.read_text())["config"]["parametric"]
+    assert par["head_mode"] == "skip"
+    assert par["schema_version"] == param_train.K_PARAM_SCHEMA_VERSION
 
 
-def test_bake_refuses_residual_source(tmp_path):
-    """A residual model baked to a standard .nam would LOAD but sound WRONG (stock runs
-    a skip head). Refuse rather than emit a silent dud."""
-    src = _make_parametric_file(tmp_path / "m.param.nam", head_mode="residual")
+def test_legacy_residual_model_is_rejected(tmp_path):
+    """SKIP-ONLY. A legacy residual (or untagged) model must be REFUSED, not baked: its
+    weights under a skip head produce garbage (corr ~0.3) with no error."""
+    src = _make_parametric_file(tmp_path / "m.param.nam")
+    d = json.loads(src.read_text())
+    d["config"]["parametric"]["head_mode"] = "residual"     # legacy model
+    src.write_text(json.dumps(d))
     r = _bake_raw(src, tmp_path / "o.nam")
     assert r.returncode != 0
-    assert "head_mode='residual'" in (r.stdout + r.stderr)
+    assert "no longer supported" in (r.stdout + r.stderr)
     assert not (tmp_path / "o.nam").exists()
 
 
-def test_allow_unfaithful_overrides_the_refusal(tmp_path):
-    src = _make_parametric_file(tmp_path / "m.param.nam", head_mode="residual")
-    out = _bake(src, tmp_path / "o.nam", "--allow-unfaithful")
-    assert out["metadata"]["baked_from_head_mode"] == "residual"
+def test_untagged_model_is_rejected(tmp_path):
+    """No head_mode at all == a pre-tagging residual model. Also refused."""
+    src = _make_parametric_file(tmp_path / "m.param.nam")
+    d = json.loads(src.read_text())
+    del d["config"]["parametric"]["head_mode"]
+    src.write_text(json.dumps(d))
+    r = _bake_raw(src, tmp_path / "o.nam")
+    assert r.returncode != 0
+    assert not (tmp_path / "o.nam").exists()
 
 
 def test_schema_guard_rejects_a_newer_schema(tmp_path):
