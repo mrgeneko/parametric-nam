@@ -273,6 +273,7 @@ def reproduce_command(args):
     if getattr(args, "ot_damp", "47k") != "47k": c.append(f'    --ot-damp {args.ot_damp} \\')
     if getattr(args, "ot_snub", "10n") != "10n": c.append(f'    --ot-snub {args.ot_snub} \\')
     if getattr(args, "nfb_comp", None): c.append(f'    --nfb-comp {args.nfb_comp} \\')
+    if getattr(args, "method", ""): c.append(f'    --method {args.method} \\')
     if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
     if args.values:        c.append(f'    --values {args.values} \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
@@ -487,6 +488,8 @@ def main():
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
     g.add_argument("--ot-snub",      default="10n", help="ngspice: OT snubber C")
     g.add_argument("--nfb-comp",     default=None, help="ngspice: NFB compensation cap NODE=value")
+    g.add_argument("--method",       default="", choices=["", "trap", "gear"],
+                   help="ngspice: integration method. Auto-set per-circuit if omitted.")
     g.add_argument("--schx",         type=Path, help="Path to .schx (livespice)")
     g.add_argument("--circuit",      help="Circuit name (cpp)")
     g.add_argument("--knobs",        help="Comma-separated knob names")
@@ -614,6 +617,7 @@ def main():
             if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
             if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
             if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
+            if args.method:        gen_cmd += ["--method",      args.method]
             if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]

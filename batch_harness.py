@@ -49,6 +49,12 @@ LIVESPICE_CLI = HERE / "livespice_cli/publish/livespice_cli"
 # how the 5150 ot-damp/nfb-comp are hand-set today, but auto-derived per circuit.
 NGSPICE_CIRCUIT_DEFAULTS = {
     "MT-2": {"conv": "diode_cjo=100p"},   # soften the high-gain hard-clip edges
+    "Boss DS-1": {"method": "gear", "conv": "diode_cjo=100p"},
+                                           # trap aborts at the antiparallel-diode clip node
+                                           # (dm1-instance dd5, "timestep too small"). gear alone
+                                           # is stable through ~23dB of op-amp gain (Dist<=0.6);
+                                           # the cjo bump (same fix as MT-2) is needed to also
+                                           # cover Dist=0.9-1.0 (near the documented 26.5dB max).
 }
 
 # CPP backend only — the C++ harness has its own schematic registry
@@ -275,7 +281,8 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                     csv=str(csv_path), koren=ng.get("koren", False),
                                     ot_damp=ng.get("ot_damp", "47k"), ot_snub=ng.get("ot_snub", "10n"),
                                     nfb_comp=ng.get("nfb_comp"), input_mode="filesource",
-                                    oversample=over, conv=ng.get("conv")))
+                                    oversample=over, conv=ng.get("conv"),
+                                    method=ng.get("method", "trap")))
     proc = subprocess.Popen(["ngspice", "-b", str(cir_path)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     with _procs_lock:
@@ -520,6 +527,8 @@ def main():
     ap.add_argument("--nfb-comp", default=None, help="ngspice: NFB compensation cap NODE=value (e.g. nNFB=1n)")
     ap.add_argument("--conv", default="", help="ngspice: device convergence overrides key=val,... "
                     "(diode_cjo/diode_tt/bjt_*/jfet_*; e.g. diode_cjo=100p). Auto-set per-circuit if omitted.")
+    ap.add_argument("--method", default="", choices=["", "trap", "gear"],
+                    help="ngspice: integration method (default trap). Auto-set per-circuit if omitted.")
 
     # livespice backend
     ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
@@ -785,15 +794,16 @@ def main():
         fsrc = out_dir / "input_fsrc.txt"
         _t = np.arange(len(insig)) / sr
         np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
-        # convergence overrides: CLI --conv wins, else per-circuit default (auto)
+        # convergence overrides: CLI --conv/--method win, else per-circuit default (auto)
         _cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
         _conv_str = args.conv or _cdef.get("conv", "")
+        _method = args.method or _cdef.get("method", "trap")
         conv = dict(kv.split("=", 1) for kv in _conv_str.split(",") if "=" in kv)
         ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
               "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp,
-              "oversample": args.oversample, "conv": conv}
+              "oversample": args.oversample, "conv": conv, "method": _method}
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
-              f"tubes, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
+              f"tubes, method={_method}, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
               f"{', conv='+_conv_str if _conv_str else ''})", file=sys.stderr)
 
     # Effective per-knob sampled range (min/max actually seen across perms).
