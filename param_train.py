@@ -487,7 +487,11 @@ class ParamDataset(torch.utils.data.Dataset):
             print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
             self.outputs = np.load(str(out_path))
 
-        # Load params.csv — successful rows only, ordered by permutation idx
+        # Load params.csv — successful rows only, ordered by permutation idx.
+        # outputs.npy (built by batch_harness.py --combine) is COMPACTED: row i
+        # is the i-th surviving .npy in sorted-filename order, not row `idx`. If
+        # any permutation failed, the raw CSV `idx` has gaps and is no longer a
+        # valid row index -- use the post-sort enumeration position instead.
         rows = []
         with open(self.dir / "params.csv", newline="") as f:
             for row in csv.DictReader(f):
@@ -495,8 +499,8 @@ class ParamDataset(torch.utils.data.Dataset):
                     rows.append(row)
         rows.sort(key=lambda r: int(r["idx"]))
         self.samples = [
-            (int(r["idx"]), {n: float(r[n]) for n in self.param_names})
-            for r in rows
+            (i, {n: float(r[n]) for n in self.param_names})
+            for i, r in enumerate(rows)
         ]
 
         self._check_output_diversity()
