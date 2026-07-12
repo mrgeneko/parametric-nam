@@ -208,9 +208,10 @@ def sig_path(out_dir: Path, idx: int) -> Path:
     return out_dir / "sig" / f"{idx // 100:02d}" / f"{idx:06d}.npy"
 
 
-def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc_t=-1.0):
+def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc_t=-1.0,
+                   warmup_s=1.0):
     """Read out_wav, run integrity + crest checks, save .npy. Shared by all backends."""
-    sig, _sr = sf.read(str(out_wav))
+    sig, sr = sf.read(str(out_wav))
     sig = sig.astype(np.float32)
     if not np.isfinite(sig).all():
         out_wav.unlink(missing_ok=True)
@@ -218,8 +219,15 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
     if expected_frames and len(sig) < expected_frames * 0.99:
         out_wav.unlink(missing_ok=True)
         return Result(idx, error=f"truncated: {len(sig)} of {expected_frames} samples")
-    rms = float(np.sqrt(np.mean(sig ** 2)))
-    peak = float(np.max(np.abs(sig)))
+    # Skip the DC-solver startup transient (~0.5-1s ring before settling, see circuit
+    # docs' "Known artifacts") when computing divergence-detection stats, so it doesn't
+    # trip a false positive on otherwise-clean, quiet (e.g. low-gain) permutations. The
+    # full untrimmed signal is still saved — sample position must stay aligned with
+    # sweep.wav, which param_train.py's ParamDataset crops using the same offset.
+    warmup_n = int(warmup_s * sr)
+    stats_sig = sig[warmup_n:] if len(sig) > warmup_n else sig
+    rms = float(np.sqrt(np.mean(stats_sig ** 2)))
+    peak = float(np.max(np.abs(stats_sig)))
     if rms < 1e-6:
         out_wav.unlink(missing_ok=True)
         return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
@@ -234,7 +242,7 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
     if crest > 15:
         warn.append(f"crest:{crest:.0f}")
     if peak <= 2.0:
-        clip_frac = float(np.mean(np.abs(sig) > 0.999))
+        clip_frac = float(np.mean(np.abs(stats_sig) > 0.999))
         if clip_frac > 0.01:
             warn.append(f"clipping:{clip_frac*100:.1f}%")
     np.save(str(path), sig)
@@ -313,7 +321,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 param_map: dict = None, fixed_params: str = None,
                 speaker: str = None, expected_frames: int = 0,
                 timeout_s: int = 1200, oversample: int = 2,
-                max_crest: float = 0.0, ng: dict = None) -> Result:
+                max_crest: float = 0.0, ng: dict = None,
+                warmup_s: float = 1.0) -> Result:
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
@@ -324,7 +333,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         if backend == "ngspice":
             err = _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                param_map, fixed_params, ng or {})
-            return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest)
+            return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest,
+                                        warmup_s=warmup_s)
 
         if backend == "cpp":
             args = [str(HARNESS), "--input", str(input_wav), "--output", str(out_wav),
@@ -361,7 +371,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         finally:
             with _procs_lock:
                 _active_procs.discard(proc)
-        return _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t)
+        return _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
+                             warmup_s=warmup_s)
 
     except Exception as e:
         return Result(idx, error=str(e)[:500])
@@ -556,6 +567,13 @@ def main():
                          "(peak/RMS) exceeds this — catches numerical divergence that "
                          "RMS/length checks miss. Clean audio is <~10; high-gain solver "
                          "runaway is tens–thousands. 0 disables. (default: %(default)s)")
+    ap.add_argument("--skip-warmup-s", type=float, default=1.0,
+                    help="seconds of DC-solver startup transient to exclude from the "
+                         "rms/peak/crest divergence-detection stats (the transient can "
+                         "otherwise false-positive --max-crest, especially on quiet/"
+                         "low-gain permutations). The saved .npy is NOT trimmed — sample "
+                         "position must stay aligned with sweep.wav. 0 disables. "
+                         "(default: %(default)s)")
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -839,7 +857,8 @@ def main():
             pool.submit(process_one, i, p, out_dir, in_wav,
                         args.backend, args.circuit, schx, param_map,
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
-                        args.oversample, args.max_crest, ng): i
+                        args.oversample, args.max_crest, ng,
+                        warmup_s=args.skip_warmup_s): i
             for i, p in to_run
         }
         for f in as_completed(futs):
