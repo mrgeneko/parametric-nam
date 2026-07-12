@@ -230,13 +230,20 @@ class ParametricA2(nn.Module):
 
         param_map = config.get("param_map", {})
         bounds = config.get("bounds", {})
+        defaults = config.get("defaults", {}) or {}
         param_defs = []
         for name in config.get("param_names", []):
             lo, hi = bounds.get(name, [0.0, 1.0])
             lo, hi = float(lo), float(hi)
+            # Declared default: the circuit's real default knob position (used by
+            # bake_nam when no --params is given). Falls back to the range midpoint
+            # only if the circuit doesn't declare one — midpoint is wrong for many
+            # controls (e.g. a Timmy's don't center at noon).
+            dflt = defaults.get(name)
+            dflt = float(dflt) if dflt is not None else round((lo + hi) / 2, 4)
             param_defs.append({
                 "name": param_map.get(name, name).strip(),
-                "min": lo, "max": hi, "default": round((lo + hi) / 2, 4),
+                "min": lo, "max": hi, "default": dflt,
             })
         layer_config = {
             "layers": self.channels,

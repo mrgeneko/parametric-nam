@@ -534,6 +534,10 @@ def main():
                          "the host renders a stepped control and quantizes to N positions. Set "
                          "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
+    ap.add_argument("--defaults", help="per-knob DEFAULT value, k=v,... (in trained units). "
+                    "Recorded in the .nam's parameters[].default so a bake with no --params "
+                    "uses the circuit's real default position, not the range midpoint "
+                    "(e.g. a Timmy's controls don't center at noon).")
     ap.add_argument("--oversample", type=int, default=2,
                     help="livespice_cli oversampling (default 2). High-gain end-to-end amps "
                          "need more to stay numerically stable (e.g. EVH 5150 Lead full = 32); "
@@ -781,6 +785,22 @@ def main():
     knob_bounds = {k: [min(p[k] for p in perms), max(p[k] for p in perms)]
                    for k in knobs}
 
+    # Per-knob declared default (optional). Keyed by knob name, in trained units;
+    # validated against the swept range so a default can't fall outside it.
+    knob_defaults = {}
+    for kv in (args.defaults or "").split(","):
+        if "=" not in kv:
+            continue
+        kname, vstr = kv.split("=", 1)
+        kname = kname.strip()
+        if kname not in knobs:
+            ap.error(f"--defaults knob '{kname}' not in --knobs list: {knobs}")
+        val = float(vstr)
+        lo, hi = knob_bounds[kname]
+        if not (lo - 1e-9 <= val <= hi + 1e-9):
+            ap.error(f"--defaults {kname}={val} is outside its swept range [{lo}, {hi}]")
+        knob_defaults[kname] = val
+
     (out_dir / "config.json").write_text(json.dumps({
         "backend": args.backend,
         "circuit": circuit_label,
@@ -788,6 +808,7 @@ def main():
         "knobs": knobs,
         "steps": steps_map,
         "bounds": knob_bounds,
+        "defaults": knob_defaults,
         "oversample": args.oversample,
         "param_map": param_map,
         "fixed_params": args.fixed_params,

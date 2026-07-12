@@ -52,14 +52,16 @@ def load_config(path: Path) -> dict:
 
     Scalars map by name (hyphens or underscores both accepted: `crop-len` or
     `crop_len`). Two structured tables expand to the flat flags:
-      [knobs]  NAME = [v1, v2, ...]   -> --knobs NAME,...  + one --range per knob
-      [fixed]  NAME = value           -> --fixed-params NAME=value,...
+      [knobs]    NAME = [v1, v2, ...] -> --knobs NAME,...  + one --range per knob
+      [fixed]    NAME = value         -> --fixed-params NAME=value,...
+      [defaults] NAME = value         -> --defaults NAME=value,... (baked-tone default)
     `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
     """
     with open(path, "rb") as f:
         raw = tomllib.load(f)
     knobs = raw.pop("knobs", None)
     fixed = raw.pop("fixed", None)
+    defaults = raw.pop("defaults", None)
     out: dict = {}
     for k, v in raw.items():
         dest = k.replace("-", "_")
@@ -74,6 +76,8 @@ def load_config(path: Path) -> dict:
                          for name, vals in knobs.items()]
     if fixed:
         out["fixed_params"] = ",".join(f"{name}={val}" for name, val in fixed.items())
+    if defaults:
+        out["defaults"] = ",".join(f"{name}={val}" for name, val in defaults.items())
     return out
 
 
@@ -276,6 +280,7 @@ def reproduce_command(args):
     for g in (args.gang or []):    c.append(f'    --gang "{g}" \\')
     for s in (args.steps or []):   c.append(f'    --steps "{s}" \\')
     if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
+    if getattr(args, "defaults", None): c.append(f'    --defaults "{args.defaults}" \\')
     if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
     if args.input:         c.append(f'    --input "{args.input}" \\')
     if args.slimmable:     c.append('    --slimmable \\')
@@ -505,6 +510,8 @@ def main():
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
+    g.add_argument("--defaults", help="Per-knob baked-tone default k=v,... (in trained units); "
+                   "recorded in the .nam so a no-args bake uses the circuit's real default")
     g.add_argument("--speaker",      help="Speaker name (e.g. S1)")
 
     # --- training (param_train.py) ---
