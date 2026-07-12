@@ -34,7 +34,7 @@ def load_model(checkpoint_path: str):
     args_dict["param_names"] = param_names
 
     if slimmable:
-        model = SlimmableParametricA2(num_params=num_params)
+        model = SlimmableParametricA2(num_params=num_params, widths=args_dict.get("widths"))
     else:
         channels = args_dict.get("channels", 8)
         model = ParametricA2(num_params=num_params, channels=channels)
@@ -53,7 +53,7 @@ def run_inference(model, audio: np.ndarray, param_vec: list[float],
 
     with torch.no_grad():
         if isinstance(model, SlimmableParametricA2):
-            _, out = model(audio_t, params_t)   # use full (8ch) output
+            out = model(audio_t, params_t)[-1]   # use full (widest) tier output
         else:
             out = model(audio_t, params_t)
 
