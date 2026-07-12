@@ -141,7 +141,15 @@ class ParametricA2(nn.Module):
             A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
             for i in range(K_NUM_LAYERS)
         ])
-        self.head = nn.Conv1d(channels, 1, K_HEAD_KERNEL, padding=K_HEAD_KERNEL // 2)
+        # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
+        # `padding=K_HEAD_KERNEL // 2` (the old behavior) makes output[n] read inputs
+        # [n-8, n+7] — i.e. 7 samples of LOOKAHEAD, which a real amp does not have. NAM and
+        # a2_fast use a strictly causal head ([n-15, n]), so the same weights played there
+        # come out 7 samples late. That constant offset is inaudible on its own, but it
+        # comb-filters against any causally-aligned parallel path (dry blend, a second amp,
+        # another NAM capture) with a first null near 3.4 kHz. Causal = 0 added latency and
+        # bit-alignment with the whole NAM ecosystem. Weight shapes are unchanged.
+        self.head = nn.Conv1d(channels, 1, K_HEAD_KERNEL)
         self.head_scale = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, audio: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
@@ -155,6 +163,8 @@ class ParametricA2(nn.Module):
         # residual → head reads final residual ([redacted] parametric fast-path);
         # skip → head reads Σ post-activations (NAM standard / stock-plugin path).
         head_in = skip if self.head_mode == "skip" else x
+        # Causal: left-pad K-1 so output[n] reads only [n-(K-1), n] — no lookahead.
+        head_in = F.pad(head_in, (K_HEAD_KERNEL - 1, 0))
         x = self.head(head_in)
         x = x[:, :, :audio.shape[-1]]
         x = x * self.head_scale

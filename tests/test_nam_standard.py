@@ -59,15 +59,18 @@ def test_parametric_requires_params():
 
 
 def _best_corr(a, b, maxlag=40):
-    """Max Pearson corr over integer lags in ±maxlag (absorbs the constant
-    head-padding latency offset between our centered head and NAM's causal head)."""
-    best = -1.0
+    """(max Pearson corr, lag) over integer lags in ±maxlag. Our head is CAUSAL, matching
+    NAM/a2_fast, so the winning lag must be 0 — a non-zero lag means we reintroduced the
+    head-padding lookahead (which comb-filters against parallel paths; see param_train)."""
+    best = (-1.0, None)
     for lag in range(-maxlag, maxlag + 1):
         aa, bb = (a[: len(a) - lag], b[lag:]) if lag >= 0 else (a[-lag:], b[: len(b) + lag])
         n = min(len(aa), len(bb))
         if n < 1000:
             continue
-        best = max(best, np.corrcoef(aa[:n], bb[:n])[0, 1])
+        c = np.corrcoef(aa[:n], bb[:n])[0, 1]
+        if c > best[0]:
+            best = (c, lag)
     return best
 
 
@@ -96,7 +99,11 @@ def _roundtrip_corr(head_mode):
 def test_roundtrip_skip_is_bit_exact():
     """A SKIP-accumulating model exports bit-exact to official NAM's WaveNet — the
     delivery path for baked static captures into stock NAM plugins."""
-    assert _roundtrip_corr("skip") > 0.999
+    corr, lag = _roundtrip_corr("skip")
+    assert corr > 0.999
+    # Causal head => zero added latency and sample-exact alignment with every other NAM
+    # model. A non-zero lag would comb-filter against parallel paths when summed.
+    assert lag == 0, f"expected lag 0 (causal head), got {lag}"
 
 
 def test_roundtrip_residual_does_not_match_stock():
@@ -104,4 +111,4 @@ def test_roundtrip_residual_does_not_match_stock():
     final residual) and does NOT match stock NAM's skip-accumulating WaveNet. This
     documents WHY skip is required for stock-plugin delivery. See
     docs/rearchitecture_skip_accumulation.md."""
-    assert _roundtrip_corr("residual") < 0.9
+    assert _roundtrip_corr("residual")[0] < 0.9
