@@ -23,8 +23,19 @@ from param_train import (ParametricA2, SlimmableParametricA2,
                          K_KERNEL_SIZES, K_DILATIONS, K_HEAD_KERNEL,
                          K_NUM_LAYERS, K_LEAKY_SLOPE)
 
-# .nam file-format version (the WaveNet `layers_configs` schema; see NAM model-file.rst)
-NAM_VERSION = "0.5.4"
+# .nam FILE-FORMAT version (NAM's namespace, not ours — our parametric block versions itself
+# separately via config.parametric.schema_version).
+#
+# Must be "0.7.0", not an older value:
+#   - [redacted] gates imports on it (NAMModelLibraryManager.isA2CompatibleVersion): anything
+#     below 0.7.0 is classified A1 and REJECTED ("A1 NAM models are not supported"). A baked
+#     file stamped 0.5.4 was bounced before its embedded parametric payload was even read.
+#   - 0.7.0 is LATEST_FULLY_SUPPORTED_NAM_FILE_VERSION in every core we checked ([redacted]'s
+#     fork, upstream, and the one NeuralAmpModelerPlugin ships), whose supported range is
+#     0.5.0–0.7.0. So 0.7.0 is fully supported by stock plugins too — it is the one value that
+#     satisfies both ends.
+# param_train's parametric export already emits 0.7.0; this keeps the baked export consistent.
+NAM_VERSION = "0.7.0"
 
 
 def fold_film(model: ParametricA2, params) -> ParametricA2:
