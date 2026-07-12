@@ -747,8 +747,6 @@ def main():
                     help="Dataset directory from batch_harness.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
-    ap.add_argument("--channels", type=int, default=8,
-                    help="A2 channel count (3=nano, 8=standard) (default: %(default)s)")
     ap.add_argument("--epochs", type=int, default=100,
                     help="Number of training epochs, or 0 = open-ended: run until "
                          "stopped (touch <ckpt>/STOP, or SIGINT/SIGTERM). Best models "
@@ -790,9 +788,6 @@ def main():
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
-    ap.add_argument("--slimmable", action="store_true",
-                    help="Train N A2 tiers jointly (default lite 3ch + full 8ch) and "
-                         "export as one SlimmableContainer (ignores --channels)")
     ap.add_argument("--widths", type=str, default=None,
                     help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
                          "(default: 3,8). Narrowest = lite tier, widest = full tier; "
@@ -805,9 +800,13 @@ def main():
                     help="Checkpoint .pt to resume from")
     ap.add_argument("--log-csv", type=Path, default=None,
                     help="Path for metrics CSV (default: --checkpoint-dir/metrics.csv)")
-    ap.add_argument("--mmap", action="store_true",
+    ap.add_argument("--mmap", action="store_true", default=True,
                     help="Memory-map outputs.npy instead of loading into RAM (~3.5 GB freed; "
-                         "use when memory pressure is high and dataset is on SSD)")
+                         "default on -- every recipe in this repo targets SSD storage and "
+                         "memory pressure is a real constraint here. Use --no-mmap to force a "
+                         "full RAM load instead (marginally faster on abundant-RAM machines).")
+    ap.add_argument("--no-mmap", action="store_false", dest="mmap",
+                    help="Load outputs.npy fully into RAM instead of memory-mapping it")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -855,16 +854,10 @@ def main():
     # Build model
     # ------------------------------------------------------------------
     num_params = dataset.num_params
-    if args.slimmable:
-        model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
-        desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
-                         for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
-        print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
-    else:
-        model = ParametricA2(args.channels, num_params)
-        n_weights = model.weight_count()
-        print(f"\nModel: A2 {args.channels}-channel, {num_params} params, "
-              f"{n_weights} weights", file=sys.stderr)
+    model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
+    desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
+                     for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
+    print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     model.to(device)
 
     # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
@@ -882,7 +875,7 @@ def main():
     start_epoch = 1
     # Per-tier best tracking. `labels` is ascending-width order; the widest tier
     # ("full") is primary — it drives best.pt, args.output, and resume.
-    labels = model.tier_labels() if args.slimmable else ["full"]
+    labels = model.tier_labels()
     best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
     best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
     # Early-stopping state (independent of best-checkpointing so --min-delta can
@@ -1082,7 +1075,7 @@ def main():
     # the tiers are independent (no shared weights) — the container just selects
     # one at inference — so args.output ends up optimal on EVERY tier, not just
     # the widest. (The per-tier .best_<tier>.param.nam above stay for reference.)
-    if args.slimmable and best_state["full"] is not None:
+    if best_state["full"] is not None:
         composite = {k: v.clone() for k, v in best_state["full"].items()}
         for i, lbl in enumerate(labels):
             if lbl == "full" or best_state[lbl] is None:
@@ -1095,10 +1088,6 @@ def main():
         model.to(device)
         print("  Composed best-of-every-tier container for "
               f"{args.output.name}", file=sys.stderr)
-    elif best_state["full"] is not None:
-        # non-slimmable: just the single best model
-        model.load_state_dict(best_state["full"])
-        model.to(device)
 
     # Save best checkpoint(s): best.pt (full) + best_<label>.pt per other tier.
     if ckpt_dir is not None:
@@ -1126,11 +1115,8 @@ def main():
         if sweep_audio.ndim > 1:
             sweep_audio = sweep_audio.mean(axis=1)
         sweep_audio = sweep_audio[:48000]
-        targets = [model.full] if args.slimmable else [model]
-        labels = ["full"] if args.slimmable else [""]
-        if args.slimmable:
-            targets.append(model.lite)
-            labels.append("lite")
+        targets = [model.full, model.lite]
+        labels = ["full", "lite"]
         for m, lbl in zip(targets, labels):
             prefix = f"[{lbl}] " if lbl else ""
             sens = param_sensitivity(m, device, sweep_audio)
@@ -1149,48 +1135,32 @@ def main():
                                 input_audio=dataset.inp)
     args.output.write_text(json.dumps(nam_data, separators=(",", ":")))
     print(f"  Architecture: {nam_data['architecture']}", file=sys.stderr)
-    if args.slimmable:
-        for sm in nam_data["config"]["submodels"]:
-            w = len(sm["model"]["weights"])
-            ch = sm["model"]["config"]["layers"]
-            print(f"    max_value={sm['max_value']}  {ch}ch  {w} weights", file=sys.stderr)
-    else:
-        print(f"  Exported {len(nam_data['weights'])} weights", file=sys.stderr)
+    for sm in nam_data["config"]["submodels"]:
+        w = len(sm["model"]["weights"])
+        ch = sm["model"]["config"]["layers"]
+        print(f"    max_value={sm['max_value']}  {ch}ch  {w} weights", file=sys.stderr)
 
     # Verify round-trip
     print(f"  Verifying round-trip ...", file=sys.stderr)
     test_inp = torch.randn(1, 1, 8192, device=device)
     test_params = torch.rand(1, num_params, device=device)
-    if args.slimmable:
-        # Pair each exported submodel with its SOURCE tier by ascending width. (Both
-        # nam_data["config"]["submodels"] and model.submodels are width-ascending, and
-        # tier_labels() matches that order.) Earlier this hardcoded ["lite","full"],
-        # which for 3+ tiers mislabeled and compared the wrong pair (e.g. the 4ch export
-        # vs the 8ch model) — a false WARN that also never tested the widest tier.
-        for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
-                                     model.tier_labels(), model.submodels):
-            ch = sm_data["model"]["config"]["layers"]
-            m2 = ParametricA2(ch, num_params)
-            m2.load_weights(sm_data["model"]["weights"])
-            m2.to(device)
-            with torch.no_grad():
-                o1 = src(test_inp, test_params)
-                o2 = m2(test_inp, test_params)
-            md = (o1 - o2).abs().max().item()
-            status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
-            print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
-    else:
-        model2 = ParametricA2(args.channels, num_params)
-        model2.load_weights(nam_data["weights"])
-        model2.to(device)
+    # Pair each exported submodel with its SOURCE tier by ascending width. (Both
+    # nam_data["config"]["submodels"] and model.submodels are width-ascending, and
+    # tier_labels() matches that order.) Earlier this hardcoded ["lite","full"],
+    # which for 3+ tiers mislabeled and compared the wrong pair (e.g. the 4ch export
+    # vs the 8ch model) — a false WARN that also never tested the widest tier.
+    for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
+                                 model.tier_labels(), model.submodels):
+        ch = sm_data["model"]["config"]["layers"]
+        m2 = ParametricA2(ch, num_params)
+        m2.load_weights(sm_data["model"]["weights"])
+        m2.to(device)
         with torch.no_grad():
-            o1 = model(test_inp, test_params)
-            o2 = model2(test_inp, test_params)
+            o1 = src(test_inp, test_params)
+            o2 = m2(test_inp, test_params)
         md = (o1 - o2).abs().max().item()
-        if md > 1e-6:
-            warnings.warn(f"Round-trip max diff = {md:.2e} — weight export may be corrupt")
-        else:
-            print(f"  Round-trip OK (max diff = {md:.2e})", file=sys.stderr)
+        status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
+        print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
 
     print(f"\nDone. Model saved to {args.output}", file=sys.stderr)
 

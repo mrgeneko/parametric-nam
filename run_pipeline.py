@@ -285,10 +285,8 @@ def reproduce_command(args):
     if getattr(args, "defaults", None): c.append(f'    --defaults "{args.defaults}" \\')
     if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
     if args.input:         c.append(f'    --input "{args.input}" \\')
-    if args.slimmable:     c.append('    --slimmable \\')
-    if args.slimmable and args.widths: c.append(f'    --widths {args.widths} \\')
-    elif args.channels != 8: c.append(f'    --channels {args.channels} \\')
-    if args.mmap:          c.append('    --mmap \\')
+    if args.widths:        c.append(f'    --widths {args.widths} \\')
+    if not args.mmap:      c.append('    --no-mmap \\')
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
@@ -415,7 +413,7 @@ Full per-epoch ESR history: `metrics.csv`.
 - Speaker: {args.speaker or '(none)'}
 
 ## Training
-- {'slimmable (lite 3ch + full 8ch)' if args.slimmable else f'{args.channels}ch'}, FiLM conditioning
+- slimmable ({args.widths or '3,8'}ch), FiLM conditioning
 - epochs {args.epochs}, repeats {args.repeats}, crop_len {args.crop_len}, batch {args.batch_size}, lr {args.lr}, seed {args.seed}
 - {best_line}
 
@@ -587,11 +585,12 @@ def main():
     g.add_argument("--crop-len",       type=int,   default=44100)
     g.add_argument("--repeats",        type=int,   default=1)
     g.add_argument("--mrstft-weight",  type=float, default=0.1)
-    g.add_argument("--channels",       type=int,   default=8)
-    g.add_argument("--slimmable",      action="store_true")
     g.add_argument("--widths",         type=str,   default=None,
                    help="Slimmable channel widths, e.g. '3,4,8' (default 3,8)")
-    g.add_argument("--mmap",           action="store_true")
+    g.add_argument("--mmap",           action="store_true", default=True,
+                   help="Memory-map the training dataset (default on -- see param_train.py --help). "
+                        "Use --no-mmap to force a full RAM load instead.")
+    g.add_argument("--no-mmap",        action="store_false", dest="mmap")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
     g.add_argument("--seed",           type=int,   default=42)
@@ -728,10 +727,8 @@ def main():
             ]
             if args.patience:            train_cmd += ["--patience", args.patience,
                                                         "--min-delta", args.min_delta]
-            if args.slimmable:           train_cmd.append("--slimmable")
-            elif args.channels != 8:     train_cmd += ["--channels", args.channels]
-            if args.slimmable and args.widths: train_cmd += ["--widths", args.widths]
-            if args.mmap:                train_cmd.append("--mmap")
+            if args.widths:              train_cmd += ["--widths", args.widths]
+            if not args.mmap:             train_cmd.append("--no-mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
             timings["train"] = stream_run(train_cmd, fh, "Training")
