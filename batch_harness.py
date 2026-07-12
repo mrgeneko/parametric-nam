@@ -28,7 +28,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
 """
 
-import atexit, argparse, csv, json, os, re, shutil, signal, subprocess, sys, threading, time
+import atexit, argparse, csv, json, os, re, shutil, signal, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,15 +47,17 @@ LIVESPICE_CLI = HERE / "livespice_cli/publish/livespice_cli"
 # automatically when the matching CLI flag is unset, so a circuit's known-good
 # convergence/damping config isn't re-typed each run (CLI flags win). Analogous to
 # how the 5150 ot-damp/nfb-comp are hand-set today, but auto-derived per circuit.
-NGSPICE_CIRCUIT_DEFAULTS = {
-    "MT-2": {"conv": "diode_cjo=100p"},   # soften the high-gain hard-clip edges
-    "Boss DS-1": {"method": "gear", "conv": "diode_cjo=100p"},
-                                           # trap aborts at the antiparallel-diode clip node
-                                           # (dm1-instance dd5, "timestep too small"). gear alone
-                                           # is stable through ~23dB of op-amp gain (Dist<=0.6);
-                                           # the cjo bump (same fix as MT-2) is needed to also
-                                           # cover Dist=0.9-1.0 (near the documented 26.5dB max).
-}
+# Data lives in ngspice/circuit_defaults.toml, not here -- add a new circuit's
+# tuning there (a data file), not by editing this shared script.
+def _load_ngspice_circuit_defaults() -> dict:
+    path = HERE / "ngspice" / "circuit_defaults.toml"
+    if not path.exists():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+NGSPICE_CIRCUIT_DEFAULTS = _load_ngspice_circuit_defaults()
 
 # CPP backend only — the C++ harness has its own schematic registry
 CPP_CIRCUIT_KNOBS = {
@@ -526,9 +528,18 @@ def main():
     ap.add_argument("--ot-snub", default="10n", help="ngspice: OT snubber C")
     ap.add_argument("--nfb-comp", default=None, help="ngspice: NFB compensation cap NODE=value (e.g. nNFB=1n)")
     ap.add_argument("--conv", default="", help="ngspice: device convergence overrides key=val,... "
-                    "(diode_cjo/diode_tt/bjt_*/jfet_*; e.g. diode_cjo=100p). Auto-set per-circuit if omitted.")
+                    "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax; e.g. diode_cjo=100p,tmax=20.8333u). "
+                    "tmax caps the max internal solver step (slower, more robust through hard "
+                    "transients). Auto-set per-circuit if omitted.")
     ap.add_argument("--method", default="", choices=["", "trap", "gear"],
                     help="ngspice: integration method (default trap). Auto-set per-circuit if omitted.")
+    ap.add_argument("--input-upsample", type=int, default=0,
+                    help="ngspice: upsample the input audio N-fold (bandlimited resample) before "
+                         "writing the filesource file. Fixes solver non-convergence on near-Nyquist "
+                         "sweep content by giving ngspice's linear interpolation a smoother waveform "
+                         "-- unlike --oversample, which only affects the solver step hint and output "
+                         "decimation, not the input's actual time resolution. Auto-set per-circuit "
+                         "if omitted (0).")
 
     # livespice backend
     ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
@@ -791,19 +802,40 @@ def main():
         insig, _isr = sf.read(str(in_wav))
         if insig.ndim > 1:
             insig = insig.mean(axis=1)
-        fsrc = out_dir / "input_fsrc.txt"
-        _t = np.arange(len(insig)) / sr
-        np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
-        # convergence overrides: CLI --conv/--method win, else per-circuit default (auto)
+        # convergence overrides: CLI --conv/--method/--input-upsample win, else per-circuit default (auto)
         _cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
         _conv_str = args.conv or _cdef.get("conv", "")
         _method = args.method or _cdef.get("method", "trap")
+        _input_up = args.input_upsample or int(_cdef.get("input_upsample", 1) or 1)
         conv = dict(kv.split("=", 1) for kv in _conv_str.split(",") if "=" in kv)
+        fsrc = out_dir / "input_fsrc.txt"
+        fsrc_sr = sr  # NOTE: local to the filesource write -- `sr` itself (48kHz)
+                      # drives output frame-count/timeout logic elsewhere and must
+                      # not be mutated by upsampling the ngspice INPUT only.
+        if _input_up > 1:
+            # filesource has no explicit interpolation setting -> ngspice linearly
+            # interpolates between our (t, v) points at whatever internal step it
+            # needs. Near-Nyquist content in a 48kHz file makes that a genuinely bad
+            # approximation (sharp slope-discontinuity "kinks" every sample), which
+            # can stress the solver into non-convergence regardless of knob setting
+            # or device model tuning -- verified: bumping device capacitances/tmax
+            # only ever relocated the failure to a different knob combination,
+            # never eliminated the underlying cause. Upsampling with a proper
+            # bandlimited (polyphase FIR) resampler before writing the filesource
+            # gives the solver a much smoother waveform to interpolate, fixing it
+            # at the source. 2x was already sufficient in testing; use a modest
+            # factor for margin, not the largest one that happens to work.
+            from scipy.signal import resample_poly
+            insig = resample_poly(insig, _input_up, 1).astype(np.float32)
+            fsrc_sr = sr * _input_up
+        _t = np.arange(len(insig)) / fsrc_sr
+        np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
         ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
               "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp,
               "oversample": args.oversample, "conv": conv, "method": _method}
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
               f"tubes, method={_method}, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
+              f"{', input_upsample='+str(_input_up)+'x' if _input_up > 1 else ''}"
               f"{', conv='+_conv_str if _conv_str else ''})", file=sys.stderr)
 
     # Effective per-knob sampled range (min/max actually seen across perms).

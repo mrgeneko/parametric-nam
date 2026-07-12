@@ -56,6 +56,17 @@ faster** than the LiveSPICE 32× workaround, and correct.
    secondary snubber, and a plate-to-plate resistive damper.
 4. **It never diverges** — always bounded, even when it can't finish. That is the
    qualitative win over a fixed-step solver (no +95 dB garbage).
+5. **A non-convergence failure can be an input-file problem, not a circuit or
+   solver problem.** On the Boss DS-1 (op-amp gain stage, not tubes), a long
+   chase through device-capacitance/`tmax`/method tuning turned out to be
+   whack-a-mole against the wrong root cause: the sweep input had an abrupt
+   volume-jump splice (a real discontinuity — adjacent 48kHz samples jumping
+   ~0.6 in one sample — not just "high frequency content"). Removing that
+   splice from the input file (not tuning the circuit or the solver) is what
+   actually got a clean 121/121. If a failure clusters at the same timestamp
+   across very different knob settings, check the input audio at that instant
+   before reaching for more device-model tuning. Full story:
+   `circuit_defaults.toml`'s `["Boss DS-1"]` entry.
 
 ## Caveats — this proves CONVERGENCE, not fidelity
 
@@ -90,6 +101,21 @@ faster** than the LiveSPICE 32× workaround, and correct.
   perm (~400 MB / 15 M rows for 120 s @ 2×, ~2 GB peak/worker), so cap `--workers`
   to `RAM / ~2 GB` on long + oversampled runs (e.g. 4 on a 30 GB box). 120 s @ 2× ×
   5 workers **without** the `save` fix OOMed a 30 GB machine.
+- **`--input-upsample N`** (bandlimited polyphase resample of the input audio
+  before the `filesource` write) is a genuinely double-edged fix, not a strict
+  improvement — see finding 5 above. `filesource` has no explicit interpolation
+  mode, so ngspice linearly interpolates the raw (t, v) samples at whatever
+  internal step it needs; linear interpolation of near-Nyquist content is a
+  crude approximation that *accidentally* attenuates that content before the
+  solver sees it. Upsampling removes that accidental damping and feeds the
+  solver the true full-amplitude high-frequency energy, which fixes
+  convergence at knob settings sensitive to the crude-interpolation "kink"
+  artifact — but can just as easily *break* convergence at other settings that
+  are sensitive to genuine high-frequency energy the crude interpolation had
+  been masking (verified, isolated A/B on the DS-1). Don't reach for this
+  before checking whether the input file itself has a genuine discontinuity
+  to fix instead (see finding 5) — that's the more likely actual cause and the
+  more reliable fix.
 
 ## Usage
 
@@ -138,10 +164,19 @@ Done:
    → `.npy`, with the crest-factor divergence check.
 5. ✅ **Bounded memory** — `save v(<out>)` stores only the probed node, so long +
    oversampled runs don't OOM (see Caveats for the `--workers` guidance).
+6. ✅ **Boss DS-1 (op-amp gain stage, not tubes)** — LiveSPICE's ideal op-amp
+   destabilizes above ~10dB closed-loop gain in this circuit's feedback
+   topology; ngspice handles the full documented 0-26.5dB range with
+   `method=gear` + a diode/BJT capacitance bump (auto-applied via
+   `circuit_defaults.toml`, keyed on `"Boss DS-1"`) plus a fixed input file
+   (see finding 5 above — the real blocker was an input-file splice, not the
+   circuit or solver). 121/121 permutations converge, zero failures.
 
 Result: the **EVH 5150 Lead full converges** (Koren mode) where LiveSPICE
 diverges even at 32× oversample. The JCM800 power amp matches a LiveSPICE render
-at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes.
+at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes. The
+**Boss DS-1** converges cleanly across its full gain range where LiveSPICE's
+ideal op-amp cannot.
 
 Open:
 - **Anti-aliasing must be opted into** — default `--oversample 1` still aliases; use

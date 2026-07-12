@@ -370,7 +370,12 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         # inputs / high oversample / many parallel workers. Storing one node cuts
         # memory ~100×. (The full circuit is still solved; only storage is limited.)
         '.control', 'set filetype=ascii', 'save v(%s)' % out_node,
-        'tran %.6fu %s' % (20.8333 / oversample, sp(dur)),
+        # tmax caps ngspice's internal adaptive step (tstep above is really just a
+        # print-resolution hint; the controller can take bigger internal steps
+        # unless tmax bounds it) -- forces finer resolution through a hard
+        # transient at the cost of speed. Opt-in via conv={'tmax': '...'}.
+        ('tran %.6fu %s 0 %s' % (20.8333 / oversample, sp(dur), conv['tmax'])
+         if conv.get('tmax') else 'tran %.6fu %s' % (20.8333 / oversample, sp(dur))),
         'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
     return '\n'.join(lines)
 

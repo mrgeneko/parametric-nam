@@ -28,7 +28,7 @@ Example — full Dumble clean pipeline:
         --slimmable --mmap --epochs 200
 """
 
-import argparse, csv, os, platform, shutil, subprocess, sys, time, tomllib
+import argparse, csv, json, os, platform, shutil, subprocess, sys, time, tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -274,6 +274,7 @@ def reproduce_command(args):
     if getattr(args, "ot_snub", "10n") != "10n": c.append(f'    --ot-snub {args.ot_snub} \\')
     if getattr(args, "nfb_comp", None): c.append(f'    --nfb-comp {args.nfb_comp} \\')
     if getattr(args, "method", ""): c.append(f'    --method {args.method} \\')
+    if getattr(args, "input_upsample", 0): c.append(f'    --input-upsample {args.input_upsample} \\')
     if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
     if args.values:        c.append(f'    --values {args.values} \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
@@ -441,6 +442,50 @@ cd "$REPO"
 
 
 # ---------------------------------------------------------------------------
+# missing-permutation gate
+# ---------------------------------------------------------------------------
+
+def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> None:
+    """Stop the pipeline if any requested permutation failed to generate.
+
+    A SPICE convergence failure isn't just "one fewer training example" -- it can
+    indicate a real problem with the circuit or with how well the solver's
+    settings cover the parameter space (see the Boss DS-1 case: two failures at
+    Dist=0.6, a non-boundary value, turned out to be a fixable convergence gap in
+    the ngspice BJT model, not incidental flakiness). It's also load-bearing for
+    correctness: ParamDataset indexes outputs.npy by each sample's position in the
+    sorted list of successes, so a gap changes what every later index refers to.
+    Default is to stop and require a human to look, via --allow-missing-perms.
+    """
+    config_path, params_path = dataset_dir / "config.json", dataset_dir / "params.csv"
+    if not config_path.exists() or not params_path.exists():
+        return  # nothing generated yet under this path (e.g. fresh --skip-generate)
+    expected = json.loads(config_path.read_text()).get("permutation_count")
+    if expected is None:
+        return
+    with open(params_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    failed = [r for r in rows if r.get("ok") != "1"]
+    if len(rows) - len(failed) >= expected and not failed:
+        return
+    skip_cols = {"idx", "dsp_load", "proc_time", "rms", "peak", "ok", "error"}
+    lines = [f"{len(failed)} of {expected} permutations failed to generate "
+             f"(only {len(rows) - len(failed)} succeeded):"]
+    for r in failed:
+        knobs = ", ".join(f"{k}={v}" for k, v in r.items() if k not in skip_cols)
+        lines.append(f"  idx={r['idx']}  {knobs}  -> {r.get('error', '?')}")
+    body = "\n".join(lines)
+    if allow_missing:
+        log(f"WARNING: proceeding with missing permutations (--allow-missing-perms):\n{body}", fh)
+    else:
+        log(f"ERROR: {body}\n"
+            "A SPICE convergence failure can indicate a real circuit/solver issue -- "
+            "investigate before training on an incomplete grid. Pass --allow-missing-perms "
+            "to proceed anyway once you've confirmed it's expected.", fh)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -490,6 +535,9 @@ def main():
     g.add_argument("--nfb-comp",     default=None, help="ngspice: NFB compensation cap NODE=value")
     g.add_argument("--method",       default="", choices=["", "trap", "gear"],
                    help="ngspice: integration method. Auto-set per-circuit if omitted.")
+    g.add_argument("--input-upsample", type=int, default=0,
+                   help="ngspice: upsample input audio N-fold before the filesource write "
+                        "(fixes near-Nyquist solver non-convergence). Auto-set per-circuit if omitted.")
     g.add_argument("--schx",         type=Path, help="Path to .schx (livespice)")
     g.add_argument("--circuit",      help="Circuit name (cpp)")
     g.add_argument("--knobs",        help="Comma-separated knob names")
@@ -510,6 +558,10 @@ def main():
     g.add_argument("--max-crest",    type=float, default=50.0,
                    help="Fail perms whose output crest factor exceeds this "
                         "(catches numerical divergence; 0 disables)")
+    g.add_argument("--allow-missing-perms", action="store_true",
+                   help="Proceed to combine/train even if some permutations failed to "
+                        "generate. Default is to stop -- a convergence failure can "
+                        "indicate a real circuit/solver issue, not just bad luck.")
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
@@ -618,6 +670,7 @@ def main():
             if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
             if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
             if args.method:        gen_cmd += ["--method",      args.method]
+            if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
             if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
@@ -631,6 +684,8 @@ def main():
             for s in (args.steps or []):
                 gen_cmd += ["--steps", s]
             timings["generate"] = stream_run(gen_cmd, fh, "Generation")
+
+        check_missing_permutations(dataset_dir, fh, args.allow_missing_perms)
 
         # ------------------------------------------------------------------
         # Step 2: Combine
