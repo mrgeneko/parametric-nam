@@ -65,6 +65,26 @@ def test_override_beats_declared_default(tmp_path):
     assert out["metadata"]["baked_setting"]["SUSTAIN"] == 0.85
 
 
+def test_dual_is_the_default(tmp_path):
+    """A plain bake must be safe to hand anyone: a stock plugin plays the baked tone, a
+    parametric host unlocks knobs. A raw .param.nam would THROW in stock, so the dual
+    shape is the safe default rather than an opt-in."""
+    src = _make_parametric_file(tmp_path / "m.param.nam", {"SUSTAIN": 0.3})
+    out = _bake(src, tmp_path / "o.nam")            # no flags
+    assert out["architecture"] == "WaveNet"
+    assert bake_nam.EMBED_KEY in out
+    assert out["metadata"]["parametric_embedded"] is True
+
+
+def test_no_embed_produces_static_only(tmp_path):
+    """Capture-pack members opt out — embedding the master in every tone multiplies size."""
+    src = _make_parametric_file(tmp_path / "m.param.nam", {"SUSTAIN": 0.3})
+    out = _bake(src, tmp_path / "o.nam", "--no-embed-parametric")
+    assert out["architecture"] == "WaveNet"
+    assert bake_nam.EMBED_KEY not in out
+    assert "parametric_embedded" not in out["metadata"]
+
+
 def test_embed_parametric_is_dual_payload(tmp_path):
     src = _make_parametric_file(tmp_path / "m.param.nam", {"SUSTAIN": 0.3})
     original = json.loads(src.read_text())

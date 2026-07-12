@@ -13,10 +13,16 @@ Omitted knobs fall back to each knob's DECLARED default (config.parametric.
 parameters[].default) — not a blanket 0.5, which is wrong for many circuits
 (e.g. a Timmy's controls don't center at noon).
 
---embed-parametric emits a DUAL-payload file: the baked static tone at top level
-(so any stock plugin plays it) PLUS the full original parametric model under the
-"[redacted]_parametric" key (which stock loaders ignore, and a parametric-aware host
-reads for live knobs). One artifact, best experience where supported.
+BY DEFAULT this emits a DUAL-payload file: the baked static tone at top level (so any
+stock plugin plays it) PLUS the full original parametric model under the
+"[redacted]_parametric" key (which stock loaders ignore, and a parametric-aware host reads
+for live knobs). One artifact, best experience where supported — and safe to hand anyone.
+
+That default matters: a RAW .param.nam handed to a stock plugin throws
+("No config parser registered for architecture: ParametricWaveNet") — verified against
+upstream NeuralAmpModelerCore. A dual file never does. Pass --no-embed-parametric to emit
+a static-only file (for capture-pack members, where embedding the master in every tone
+just multiplies size).
 
 HEAD MODE: a baked .nam is played with a SKIP-accumulating head everywhere it can run
 (stock NAM plugins, nam_wavenet.metal, [redacted]'s static a2_fast path). So only a
@@ -73,10 +79,12 @@ def main():
     ap.add_argument("--width", type=int, default=None, help="tier width to bake (default: widest)")
     ap.add_argument("-o", "--out", required=True, type=Path, help="output standard .nam")
     ap.add_argument("--sample-rate", type=int, default=48000)
-    ap.add_argument("--embed-parametric", action="store_true",
-                    help="also embed the full parametric model under "
-                         f"'{EMBED_KEY}' (stock plays the baked tone; a parametric-aware "
-                         "host unlocks live knobs)")
+    ap.add_argument("--embed-parametric", action=argparse.BooleanOptionalAction, default=True,
+                    help=f"embed the full parametric model under '{EMBED_KEY}' (DEFAULT). The "
+                         "result is safe to hand anyone: a stock plugin plays the baked tone and "
+                         "ignores the extra key, while a parametric-aware host unlocks live knobs. "
+                         "Use --no-embed-parametric for capture-pack members, where embedding the "
+                         "master in every tone just multiplies the file size.")
     ap.add_argument("--allow-unfaithful", action="store_true",
                     help="bake a non-skip (residual) model anyway. The output will LOAD "
                          "in stock plugins but SOUND WRONG. A/B and experiments only.")
@@ -131,7 +139,8 @@ def main():
     a.out.write_text(json.dumps(out, separators=(",", ":")))
     defaulted = [n for n in names if n not in kv]
     dflt_note = "" if not vec else f"  (defaulted: {defaulted or 'none'})"
-    embed_note = f"  +embedded parametric ('{EMBED_KEY}')" if a.embed_parametric else ""
+    embed_note = (f"  +embedded parametric ('{EMBED_KEY}') — loads in stock AND parametric hosts"
+                  if a.embed_parametric else "  [static-only: --no-embed-parametric]")
     print(f"baked width={channels}ch  head={head_mode}  params={baked}{dflt_note}"
           f"{embed_note}  ->  {a.out}")
     if head_mode != "skip":
