@@ -309,12 +309,16 @@ def build_release(args, fh, timings=None):
     section("RELEASE — assembling durable folder", fh)
     log(f"Release folder: {release_dir}", fh)
 
-    # --- copy model files (best-full, best-lite, primary) ---
-    for tag in ("best_full", "best_lite"):
-        src = nam_variant(nam_out, tag)
-        if src.exists():
-            shutil.copy2(src, release_dir / src.name)
-            log(f"  + {src.name}", fh)
+    # --- copy model files (every per-tier export, primary) ---
+    # Glob rather than a hardcoded ("best_full", "best_lite") tuple -- that
+    # silently dropped any middle tier (e.g. "best_w5") for 3+-width slimmable
+    # models, even though param_train.py exports one .param.nam per tier
+    # regardless of tier count. nam_out.stem strips only the LAST suffix
+    # (".nam"), so match by prefix instead of relying on Path.stem twice.
+    prefix = nam_out.name[:-len(".param.nam")] if nam_out.name.endswith(".param.nam") else nam_out.stem
+    for src in sorted(nam_out.parent.glob(f"{prefix}.best_*.param.nam")):
+        shutil.copy2(src, release_dir / src.name)
+        log(f"  + {src.name}", fh)
     if nam_out.exists():
         shutil.copy2(nam_out, release_dir / nam_out.name)
 
