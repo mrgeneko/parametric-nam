@@ -308,6 +308,42 @@ best_eps="$(IFS='/'; echo "${EPOCHS[*]}")"
 esr_inline=""
 for i in $(seq 0 $LAST_I); do esr_inline="${esr_inline:+$esr_inline · }${TIERS[$i]} ${ESRS[$i]}"; done
 
+# The "supersedes the residual-head bundles" framing is only true if a bundle
+# for this circuit actually existed before (Big Muff/JCM800/TS9/Dumble all
+# predate the skip-migration and genuinely have one). A circuit being
+# published for the first time -- e.g. Boss DS-1 -- has nothing to supersede;
+# asserting it anyway would be a false provenance claim in a permanent record.
+if [ -d "$MODELS/$CATEGORY/$CIRCUIT" ] && [ -n "$(ls -A "$MODELS/$CATEGORY/$CIRCUIT" 2>/dev/null)" ]; then
+  supersede_section='## Supersedes the residual-head bundles — this is the first CORRECT forward
+Earlier bundles for this circuit were trained with a **residual-only** head while the
+product renders **skip-accumulating** (== NAM standard). They compute different functions
+from the same weights, so their reported ESRs did not reflect in-product sound. This run
+trains the skip head directly:
+
+- `config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier.
+- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
+  stays sample-aligned when summed with parallel paths (no comb filtering).
+- The ESRs below are therefore measured under the **same forward the product runs**.
+  Earlier bundles'"'"' ESRs are **not** a valid baseline for these numbers.'
+  reading_section='## Reading these numbers
+These are the first '"$CIRCUIT_NAME"' ESRs measured under the **correct forward**
+(skip-accumulating, matching the product). The residual-head bundles reported numbers under
+a forward that never ships, so **they are not a valid baseline** — a tier that looks "worse"
+than an older run is not necessarily a regression; the two were never measuring the same thing.'
+else
+  supersede_section='## First release for this circuit
+`config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier -- trained
+directly against the skip-accumulating forward the product runs (== NAM standard), so
+there is no residual-vs-skip baseline mismatch to call out here.
+
+- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
+  stays sample-aligned when summed with parallel paths (no comb filtering).'
+  reading_section='## Reading these numbers
+First release for this circuit — no earlier bundle exists, so there is no baseline
+mismatch to flag. Trained directly against the skip-accumulating forward the product
+runs (== NAM standard).'
+fi
+
 # ---------------------------------------------------------------------------
 # 6. MANIFEST.md
 # ---------------------------------------------------------------------------
@@ -317,17 +353,7 @@ cat <<EOF
 
 One SlimmableContainer holding **$CH_SUM** tiers, FiLM-conditioned on ${#KNOBS[@]} knobs.
 
-## Supersedes the residual-head bundles — this is the first CORRECT forward
-Earlier bundles for this circuit were trained with a **residual-only** head while the
-product renders **skip-accumulating** (== NAM standard). They compute different functions
-from the same weights, so their reported ESRs did not reflect in-product sound. This run
-trains the skip head directly:
-
-- \`config.parametric.head_mode = "skip"\`, \`schema_version = 1\` on every tier.
-- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
-  stays sample-aligned when summed with parallel paths (no comb filtering).
-- The ESRs below are therefore measured under the **same forward the product runs**.
-  Earlier bundles' ESRs are **not** a valid baseline for these numbers.
+$supersede_section
 
 ## Provenance
 - **Schematic:** \`spice-circuits @ $SCHX_REV\` — \`$(basename "$SCHX")\`.
@@ -385,11 +411,7 @@ Recommended file: **\`${PREFIX}_optimal.param.nam\`** (composite — each tier a
 
 $COMPOSITE_NOTE
 
-## Reading these numbers
-These are the first $CIRCUIT_NAME ESRs measured under the **correct forward**
-(skip-accumulating, matching the product). The residual-head bundles reported numbers under
-a forward that never ships, so **they are not a valid baseline** — a tier that looks "worse"
-than an older run is not necessarily a regression; the two were never measuring the same thing.
+$reading_section
 
 The head is **strictly causal** — 0 added latency (validated: Python↔C++ A/B corr 1.000000,
 ESR 2.0e-12, lag 0).
