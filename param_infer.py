@@ -23,7 +23,11 @@ from param_train import SlimmableParametricA2, ParametricA2
 def load_model(checkpoint_path: str):
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args_dict = ckpt["args_dict"]
-    slimmable = args_dict.get("slimmable", False)
+    # Default True, not False: param_train.py no longer has a --slimmable flag
+    # (it's unconditional -- see the "drop the non-slimmable path" commit), so
+    # checkpoints saved after that change have no "slimmable" key in args_dict
+    # at all. Older checkpoints still have an explicit key and use it as-is.
+    slimmable = args_dict.get("slimmable", True)
 
     # Load param_names from the dataset config
     dataset_dir = Path(str(args_dict["dataset"]))
