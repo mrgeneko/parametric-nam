@@ -579,7 +579,10 @@ def mrstft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 def pre_emphasis(x: torch.Tensor, coef: float) -> torch.Tensor:
-    """First-order high-pass, as NAM's own trainer uses.
+    """First-order high-pass.
+
+    NAM's trainer offers this (`pre_emph_coef` + `pre_emph_weight`) but it is OFF BY DEFAULT, and
+    there it is an extra *MSE* term. Do not cite it as precedent for applying it to ESR.
 
     Distortion character lives in the harmonics. Un-emphasised, the loss is dominated by
     low-frequency fundamental energy, which is the easy part."""
@@ -588,8 +591,32 @@ def pre_emphasis(x: torch.Tensor, coef: float) -> torch.Tensor:
     return x[..., 1:] - coef * x[..., :-1]
 
 
-def esr_per_example(pred: torch.Tensor, target: torch.Tensor, eps: float) -> torch.Tensor:
+def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> torch.Tensor:
     """Error-to-signal ratio, normalised PER EXAMPLE, then averaged.
+
+    NOTE, and heed it -- NAM's own trainer carries this warning:
+
+        "Be careful when computing ESR on minibatches! The average ESR over a minibatch of data
+         is not the same as the ESR of all of the same data calculated at once (because of the
+         denominator). (Hint: think about what happens if one item in the minibatch is all
+         zeroes...)"
+
+    That is a direct warning about this function. And it bites us *precisely where we care*: the
+    crops we are trying to upweight -- the fading tails -- ARE the near-silent ones. A 0.5 s crop
+    at RMS 0.09 has energy ~194, but a crop deep in a decay tail has energy ~0.02, and a silent
+    one has ~0. An absolute epsilon does not save you: it is negligible for the loud crops and
+    useless for the quiet ones.
+
+    So the denominator is floored RELATIVE TO THE BATCH: no example may be normalised by less than
+    `floor` times the batch's mean energy. A silent crop then contributes a bounded amount instead
+    of an unbounded one, while a genuinely quiet-but-real crop is still counted at full weight.
+
+    Why depart from NAM's plain MSE at all -- see below. Short version: NAM is a STATIC modeller.
+    One device, one knob setting, one input level. It has no permutations, so the cross-setting
+    energy bias that motivates this simply does not exist for it, and MSE is a perfectly good
+    objective there. Our problem is parametric: 126 permutations spanning a 70x ENERGY range. That
+    is a different optimisation problem and it needs a different objective. The justification is
+    our own measurement (docs/loss-energy-bias.md), NOT an appeal to NAM.
 
     This is the whole point. Plain MSE is an ABSOLUTE error, so a crop's influence on the
     gradient is proportional to its ENERGY — which has two consequences we measured on the
@@ -606,10 +633,10 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, eps: float) -> tor
         distortion, because staying dirty down there earns it nothing.
 
     Dividing by each example's own energy makes every permutation, and every crop, count
-    equally -- by construction. eps floors the denominator so a near-silent crop cannot
-    explode the gradient."""
+    equally -- by construction."""
     num = ((pred - target) ** 2).sum(dim=(1, 2))
-    den = (target ** 2).sum(dim=(1, 2)) + eps
+    den = (target ** 2).sum(dim=(1, 2))
+    den = torch.clamp(den, min=floor * den.mean().detach() + 1e-12)
     return (num / den).mean()
 
 
@@ -621,18 +648,18 @@ class ParamLoss(nn.Module):
     disagreed about what mattered."""
 
     def __init__(self, mrstft_weight: float = 0.1, kind: str = "esr",
-                 pre_emph: float = 0.85, eps: float = 1e-4):
+                 pre_emph: float = 0.85, floor: float = 0.05):
         super().__init__()
         self.mrstft_weight = mrstft_weight
         self.kind = kind
         self.pre_emph = pre_emph
-        self.eps = eps
+        self.floor = floor
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         if self.kind == "esr":
             p = pre_emphasis(pred, self.pre_emph)
             t = pre_emphasis(target, self.pre_emph)
-            main = esr_per_example(p, t, self.eps)
+            main = esr_per_example(p, t, self.floor)
         else:
             main = F.mse_loss(pred, target)
         mrstft = mrstft_loss(pred, target)
@@ -840,9 +867,12 @@ def main():
     ap.add_argument("--pre-emph", type=float, default=0.85,
                     help="Pre-emphasis coefficient for the ESR loss (0 = off). Distortion lives in "
                          "the harmonics; un-emphasised, the loss is dominated by the fundamental.")
-    ap.add_argument("--esr-eps", type=float, default=1e-4,
-                    help="Floor on the per-example ESR denominator, so a near-silent crop cannot "
-                         "explode the gradient.")
+    ap.add_argument("--esr-floor", type=float, default=0.05,
+                    help="Floor on the per-example ESR denominator, as a FRACTION OF THE BATCH MEAN "
+                         "energy. An absolute epsilon does not work: it is negligible for loud crops "
+                         "and useless for the near-silent fading tails we are specifically trying to "
+                         "upweight. NAM's trainer warns about exactly this (a batch item of all "
+                         "zeroes). 0 disables the floor -- don't.")
     ap.add_argument("--mrstft-weight", type=float, default=0.1,
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
@@ -991,7 +1021,7 @@ def main():
     if args.resume and "scheduler_last_epoch" in ckpt:
         scheduler = make_scheduler(ckpt["scheduler_last_epoch"])
     criterion = ParamLoss(mrstft_weight=args.mrstft_weight, kind=args.loss,
-                          pre_emph=args.pre_emph, eps=args.esr_eps)
+                          pre_emph=args.pre_emph, floor=args.esr_floor)
     print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
           "  <-- ABSOLUTE error: loud permutations dominate the gradient"), file=sys.stderr)
 
