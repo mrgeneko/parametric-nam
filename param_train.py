@@ -578,16 +578,65 @@ def mrstft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return total / len(fft_sizes)
 
 
+def pre_emphasis(x: torch.Tensor, coef: float) -> torch.Tensor:
+    """First-order high-pass, as NAM's own trainer uses.
+
+    Distortion character lives in the harmonics. Un-emphasised, the loss is dominated by
+    low-frequency fundamental energy, which is the easy part."""
+    if coef <= 0.0:
+        return x
+    return x[..., 1:] - coef * x[..., :-1]
+
+
+def esr_per_example(pred: torch.Tensor, target: torch.Tensor, eps: float) -> torch.Tensor:
+    """Error-to-signal ratio, normalised PER EXAMPLE, then averaged.
+
+    This is the whole point. Plain MSE is an ABSOLUTE error, so a crop's influence on the
+    gradient is proportional to its ENERGY — which has two consequences we measured on the
+    Big Muff and both of them are bad:
+
+      * ACROSS the knob grid, output RMS spans 0.090 .. 0.755 — a 70x ENERGY ratio. Under MSE
+        the loudest 8% of permutations take 28% of the gradient and the quietest half get 17%.
+        The parametric model neglects the quiet settings, which drags its average ESR above a
+        static model's. It was never only a capacity problem.
+
+      * WITHIN a permutation, a decaying note's tail is worth nothing. On the most distorted
+        Big Muff setting, windows below -40 dB of peak are 8.2% of the DURATION and 0.00% of
+        the GRADIENT. That is the Boss DS-1 bug: as a note fades, the model drops the
+        distortion, because staying dirty down there earns it nothing.
+
+    Dividing by each example's own energy makes every permutation, and every crop, count
+    equally -- by construction. eps floors the denominator so a near-silent crop cannot
+    explode the gradient."""
+    num = ((pred - target) ** 2).sum(dim=(1, 2))
+    den = (target ** 2).sum(dim=(1, 2)) + eps
+    return (num / den).mean()
+
+
 class ParamLoss(nn.Module):
-    """Combined MSE + MRSTFT loss."""
-    def __init__(self, mrstft_weight: float = 0.1):
+    """ESR (per-example) + MRSTFT, with optional pre-emphasis.
+
+    `--loss mse` restores the old absolute-error behaviour, for A/B only. It is not a good
+    objective: we REPORT ESR but used to TRAIN on MSE, so the metric and the objective
+    disagreed about what mattered."""
+
+    def __init__(self, mrstft_weight: float = 0.1, kind: str = "esr",
+                 pre_emph: float = 0.85, eps: float = 1e-4):
         super().__init__()
         self.mrstft_weight = mrstft_weight
+        self.kind = kind
+        self.pre_emph = pre_emph
+        self.eps = eps
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        mse = F.mse_loss(pred, target)
+        if self.kind == "esr":
+            p = pre_emphasis(pred, self.pre_emph)
+            t = pre_emphasis(target, self.pre_emph)
+            main = esr_per_example(p, t, self.eps)
+        else:
+            main = F.mse_loss(pred, target)
         mrstft = mrstft_loss(pred, target)
-        return mse + self.mrstft_weight * mrstft
+        return main + self.mrstft_weight * mrstft
 
 
 # ---------------------------------------------------------------------------
@@ -782,6 +831,18 @@ def main():
                          "changing the audio data (default: %(default)s)")
     ap.add_argument("--val-split", type=float, default=0.1,
                     help="Fraction of samples for validation (default: %(default)s)")
+    ap.add_argument("--loss", choices=["esr", "mse"], default="esr",
+                    help="Training objective. 'esr' normalises each example by its own energy, so "
+                         "quiet knob settings and fading notes count as much as loud ones. 'mse' is "
+                         "the old absolute-error loss -- kept only for A/B; it lets the loudest 8%% "
+                         "of permutations take 28%% of the gradient and gives a note's fade-out "
+                         "0.00%% of it. (default: esr)")
+    ap.add_argument("--pre-emph", type=float, default=0.85,
+                    help="Pre-emphasis coefficient for the ESR loss (0 = off). Distortion lives in "
+                         "the harmonics; un-emphasised, the loss is dominated by the fundamental.")
+    ap.add_argument("--esr-eps", type=float, default=1e-4,
+                    help="Floor on the per-example ESR denominator, so a near-silent crop cannot "
+                         "explode the gradient.")
     ap.add_argument("--mrstft-weight", type=float, default=0.1,
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
@@ -929,7 +990,10 @@ def main():
     scheduler = make_scheduler(start_epoch - 2)
     if args.resume and "scheduler_last_epoch" in ckpt:
         scheduler = make_scheduler(ckpt["scheduler_last_epoch"])
-    criterion = ParamLoss(mrstft_weight=args.mrstft_weight)
+    criterion = ParamLoss(mrstft_weight=args.mrstft_weight, kind=args.loss,
+                          pre_emph=args.pre_emph, eps=args.esr_eps)
+    print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
+          "  <-- ABSOLUTE error: loud permutations dominate the gradient"), file=sys.stderr)
 
     if open_ended:
         signal.signal(signal.SIGINT, _request_stop)
