@@ -132,6 +132,56 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 # schx discovery (livespice backend)
 # ---------------------------------------------------------------------------
 
+def check_backend(schx: Path, backend: str, ap) -> None:
+    """Refuse a backend that cannot faithfully render this device.
+
+    A backend that REFUSES a circuit is harmless -- you find out immediately. A backend that renders
+    it WRONGLY WITHOUT ERRORING is the dangerous one, and we have exactly that:
+
+        livespice_cli's fixed-timestep BJT solve COLLAPSES TRANSISTOR GYRATORS TO A FLAT RESPONSE.
+
+    The Boss MT-2's entire voicing is gyrator-based -- the pre-distortion ~1 kHz mid hump, the
+    sweepable mid EQ -- and LiveSPICE returns ~flat 20 dB where ngspice and the real pedal swing 16 dB
+    (200 Hz) to 25 dB (5 kHz). It does not warn. It does not fail. It hands back a valid, plausible,
+    FLAT pedal, and if you render it you will train on it and ship an MT-2 with no mid hump, which is
+    the one thing an MT-2 is.
+
+    So the registry records which backends are valid per device (spice-circuits/backends.toml) and we
+    stop here rather than let the dataset be quietly wrong. A device with no entry is assumed valid --
+    absence of evidence, not a claim.
+    """
+    reg = Path(os.environ.get("SPICE_CIRCUITS")
+               or Path(__file__).resolve().parent.parent / "spice-circuits") / "devices.toml"
+    if not reg.exists():
+        return                                    # no registry reachable: nothing to check against
+    try:
+        import tomllib
+        devs = tomllib.loads(reg.read_text())
+    except Exception:
+        return
+
+    dev = next((d for d in devs.values()
+                if isinstance(d, dict) and Path(d.get("schx", "")).name == schx.name), None)
+    if not dev:
+        return
+
+    spec = (dev.get("backend") or {}).get(backend)
+    if not spec:
+        return
+    if spec.get("valid", True):
+        if spec.get("reason"):
+            print(f"note: {dev['name']} on {backend}: {spec['reason']}", file=sys.stderr)
+        return
+
+    ap.error(
+        f"\n\n  {dev['name']} CANNOT be rendered faithfully with --backend {backend}.\n\n"
+        f"  {spec.get('reason', '(no reason recorded)')}\n\n"
+        f"  This is not a crash you would have seen: the backend would have produced a valid-looking\n"
+        f"  dataset that is WRONG, and nothing downstream could tell. Valid backends for this device: "
+        f"{', '.join(b for b, s in (dev.get('backend') or {}).items() if s.get('valid', True)) or 'none recorded'}.\n"
+        f"  Declared in spice-circuits/backends.toml.\n")
+
+
 def parse_schx_controls(schx_path: str) -> dict:
     """Return {normalized_key: control_name} for every CONTROL in the schx.
 
@@ -1168,6 +1218,7 @@ def main():
         if not args.schx.exists():
             ap.error(f"schx not found: {args.schx}")
         schx = str(args.schx)
+        check_backend(args.schx, args.backend, ap)
         control_map = parse_schx_controls(schx)
 
         if not args.knobs:
