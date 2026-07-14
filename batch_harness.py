@@ -580,6 +580,134 @@ def combine(out_dir: Path):
 # post-generation dataset quality checks
 # ---------------------------------------------------------------------------
 
+
+def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
+                      input_wav: Path, schx: str, param_map: dict, fixed_params: str,
+                      speaker: str, oversample: int, iterations: int,
+                      warmup_s: float, n_probe: int = 5):
+    """Is the DATASET converged? The only check that can see it.
+
+    Every other check we run detects DIVERGENCE -- NaN, crest, truncation, timeout -- and those
+    are the easy case: the solver blew up and said so. UNDER-CONVERGENCE is the dangerous one. The
+    solver stops short of the answer and returns a perfectly plausible waveform: normal RMS, normal
+    crest, no NaN. Every check passes. The data is simply WRONG.
+
+    The Ibanez TS-9 at Drive=0.5 needs 45 Newton iterations. livespice_cli defaults to 8. On the
+    real dataset input the resulting error is ESR 7.38e-03 -- -21 dB -- and it went straight into
+    the training set of a shipped model with nothing to catch it.
+
+    THE ONLY WAY TO SEE IT IS TO SOLVE IT HARDER AND COMPARE -- but you must solve the SAME
+    EQUATIONS harder, i.e. hold the TIMESTEP FIXED and only raise the iteration count.
+
+    This distinction is the whole design, and getting it wrong makes the audit useless:
+
+      NEWTON UNDER-CONVERGENCE   the solver stopped short of the answer to the equations it was
+                                 given. A BUG. Silently wrong. Detect by raising ITERATIONS at a
+                                 FIXED timestep: if the answer moves, it had not converged.
+
+      DISCRETIZATION ERROR       BDF2's inherent O(h^2) truncation. NOT a bug, and never zero.
+                                 Halving h always changes the answer by ~4x less. Every circuit
+                                 has it. Reported as INFO so you can judge whether --oversample is
+                                 adequate, but it must NEVER be an error -- an audit that fires on
+                                 every circuit is an audit nobody reads.
+
+    (The first cut of this function doubled the oversample too, and duly reported the Big Muff --
+    which is Newton-converged at 8 iterations, ESR 0.00e+00 -- as "UNDER-CONVERGED". It was
+    measuring the method, not the mistake.)
+
+    We probe the EXTREMES, because that is where stiffness lives -- and where the default knob
+    position, which is what everything else checks, would never take us.
+    """
+    if backend != "livespice" or not perms:
+        return
+    import tempfile
+
+    # The extremes of each knob, plus the all-max corner: where a solver struggles.
+    picks = []
+    for k in knobs:
+        hi = max(p[k] for p in perms)
+        picks.append(max((p for p in perms if p[k] == hi), key=lambda p: sum(p.values())))
+    picks.append(max(perms, key=lambda p: sum(p.values())))
+    seen, uniq = set(), []
+    for p in picks:
+        key = tuple(sorted(p.items()))
+        if key not in seen:
+            seen.add(key); uniq.append(p)
+    uniq = uniq[:n_probe]
+
+    print("  Convergence audit (same timestep, 4x the iterations — did Newton actually converge?):")
+    worst, worst_at = 0.0, None
+    worst_disc, worst_disc_at = 0.0, None
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        for i, p in enumerate(uniq):
+            swept = fmt_params(p, param_map)
+            allp = f"{fixed_params},{swept}" if fixed_params else swept
+            outs = []
+            # SAME timestep, 4x the iterations -> isolates NEWTON convergence.
+            # Then same iterations, 2x the timestep -> the discretization error, for INFO only.
+            for tag, os_, it_ in (("base",  oversample,     iterations),
+                                  ("newton", oversample,    iterations * 4),
+                                  ("finer",  oversample * 2, iterations)):
+                w = td / f"{tag}.wav"
+                a = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(w),
+                     "--circuit", schx, "--params", allp,
+                     "--oversample", str(os_), "--iterations", str(it_)]
+                if speaker:
+                    a += ["--speaker", speaker]
+                r = subprocess.run(a, capture_output=True, text=True)
+                if r.returncode != 0 or not w.exists():
+                    print(f"    (probe render failed: rc={r.returncode} {r.stderr[:120]})")
+                    outs = []
+                    break
+                sig, sr = sf.read(str(w))
+                outs.append(np.asarray(sig, dtype=np.float64))
+            if len(outs) != 3:
+                continue
+            n = min(len(o) for o in outs)
+            # Clamp the warm-up skip. A skip longer than the clip leaves one sample to compare and
+            # the ESR becomes noise -- which is how this audit first reported a nonsensical 2.08 on
+            # a 1-second probe. Never let a window silently eat the signal you are measuring.
+            sk = min(int(warmup_s * 48000), max(0, n // 10))
+            base, newton, finer = (o[sk:n] for o in outs)
+            if len(base) < 4800:
+                continue
+
+            def _esr(a_, b_):
+                den = float(np.sum(b_ ** 2))
+                return float(np.sum((a_ - b_) ** 2) / den) if den > 0 else 0.0
+
+            esr = _esr(base, newton)          # THE BUG CHECK: same equations, solved harder
+            disc = _esr(base, finer)          # informational: the method's own truncation error
+            # `>=`, not `>`. A PERFECTLY converged circuit gives esr == 0.0 exactly, and `> 0.0`
+            # is false -- so the audit reported "could not probe" on the very circuits that had
+            # nothing wrong with them. A success that looks like a failure to run is worse than
+            # either.
+            if worst_at is None or esr > worst:
+                worst, worst_at = esr, p
+            if worst_disc_at is None or disc > worst_disc:
+                worst_disc, worst_disc_at = disc, p
+
+    if worst_at is None:
+        print("    (could not probe)")
+        return
+    at = " ".join(f"{k}={worst_at[k]:g}" for k in knobs)
+    if worst > 1e-5:
+        print(f"    *** UNDER-CONVERGED: ESR {worst:.2e} at [{at}] ***")
+        print(f"    Rendered at oversample={oversample}, iterations={iterations}. Solving the SAME")
+        print(f"    equations 4x harder MOVES the answer, so Newton stopped short and this dataset")
+        print(f"    is WRONG at that setting -- and nothing else would have told you: the RMS is")
+        print(f"    normal, the crest is normal, there is no NaN.")
+        print(f"    Raise the iteration count and regenerate. See docs/convergence.md.")
+    else:
+        print(f"    OK — worst ESR {worst:.2e} at [{at}] (solving harder does not move it)")
+    if worst_disc_at is not None:
+        dat = " ".join(f"{k}={worst_disc_at[k]:g}" for k in knobs)
+        print(f"    (info) BDF2 truncation at oversample={oversample}: {worst_disc:.2e} at [{dat}]. "
+              f"This is the METHOD, not a bug — it shrinks ~4x each time you double --oversample. "
+              f"Raise it if you want a tighter model of the circuit.")
+
+
 def run_post_generation_checks(out_dir: Path, knobs: List[str],
                                 perms: List[dict], values_per_knob: dict):
     csv_path = out_dir / "params.csv"
@@ -1074,6 +1202,19 @@ def main():
           f"({total / max(len(perms), 1) * 1000:.0f} ms/perm)")
 
     run_post_generation_checks(out_dir, knobs, perms, values_per_knob if not args.random else {})
+
+    # Is the DATASET converged? Every other check detects DIVERGENCE (the solver blew up and said
+    # so). This is the only one that can see UNDER-convergence -- the solver stopping short and
+    # returning a plausible, wrong waveform that passes every RMS/crest/NaN check we have.
+    # Probe at the settings the DATASET WAS ACTUALLY RENDERED WITH -- rung 0 -- not at some
+    # hardcoded ideal. An audit that checks different settings than the data was made with is
+    # auditing nothing: it happily passed a dataset rendered at 8 iterations because it was
+    # probing at 256.
+    _rung0 = _rungs(args.backend, args.oversample, ng)[0]
+    audit_convergence(out_dir, knobs, perms, args.backend, in_wav, schx, param_map,
+                      args.fixed_params, args.speaker,
+                      _rung0.get("oversample", args.oversample),
+                      _rung0.get("iterations", 8), args.skip_warmup_s)
 
     print(f"\nPost-process with:  python batch_harness.py --combine {out_dir}")
 
