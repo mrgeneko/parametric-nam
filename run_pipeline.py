@@ -293,7 +293,8 @@ def reproduce_command(args):
     if args.schx:          c.append(f'    --schx "{portable(args.schx)}" \\')
     if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
     if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
-    if args.oversample != 2: c.append(f'    --oversample {args.oversample} \\')
+    if args.oversample != "2": c.append(f'    --oversample {args.oversample} \\')
+    if args.trunc_target != 1e-3: c.append(f'    --trunc-target {args.trunc_target} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
     if getattr(args, "koren", False): c.append('    --koren \\')
@@ -575,9 +576,13 @@ def main():
     g.add_argument("--values",       help="Default sweep values for all knobs")
     g.add_argument("--range",        action="append", metavar="KNOB=v1,v2,...",
                    dest="ranges",    help="Per-knob value list (repeatable)")
-    g.add_argument("--oversample",   type=int, default=2,
-                   help="livespice_cli oversampling (default 2; high-gain amps need "
-                        "more for stability, e.g. EVH 5150 Lead full = 32)")
+    g.add_argument("--oversample",   type=str, default="2",
+                   help="oversampling factor, or 'auto' to measure the truncation-error-minimizing "
+                        "value per circuit (ngspice and livespice both supported -- see "
+                        "batch_harness.py --oversample auto). Default 2; high-gain amps need more "
+                        "for stability, e.g. EVH 5150 Lead full = 32.")
+    g.add_argument("--trunc-target", type=float, default=1e-3,
+                   help="with --oversample auto: the truncation ESR to get under (default 1e-3)")
     g.add_argument("--random",       type=int, metavar="N",
                    help="N random permutations instead of a grid (for high knob counts)")
     g.add_argument("--bounds",       action="append", metavar="KNOB=lo,hi",
@@ -749,7 +754,8 @@ def main():
             if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
             if args.method:        gen_cmd += ["--method",      args.method]
             if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
-            if args.oversample != 2: gen_cmd += ["--oversample", args.oversample]
+            if args.oversample != "2": gen_cmd += ["--oversample", args.oversample]
+            if args.trunc_target != 1e-3: gen_cmd += ["--trunc-target", args.trunc_target]
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
             if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
