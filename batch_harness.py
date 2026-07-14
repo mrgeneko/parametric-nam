@@ -1072,7 +1072,7 @@ def main():
                                       help="per-knob value override; repeatable (e.g. --range od_master=0.0,0.5,1.0)")
     ap.add_argument("--gang", action="append", metavar="KNOB=Name1,Name2,...",
                     help="map one swept knob to several ganged pot Names (e.g. a dual-gang "
-                         "pot): --gang gain=Gain_A,Gain_B . The knob is one column in the "
+                         "pot): --gang gain=Gain A,Gain B . The knob is one column in the "
                          "dataset; its value is written to every listed pot. Repeatable.")
     ap.add_argument("--steps", action="append", metavar="KNOB=N",
                     help="mark a knob as a discrete N-position switch (e.g. --steps a_sym=2). "
@@ -1103,7 +1103,7 @@ def main():
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
     ap.add_argument("--bounds",  action="append", metavar="KNOB=lo,hi",
                     help="per-knob sample range under --random (repeatable; default 0,1). "
-                         "e.g. --bounds LeadPre=0,0.9 to keep a hot gain pot out of a "
+                         "e.g. --bounds Lead Pre=0,0.9 to keep a hot gain pot out of a "
                          "divergent regime.")
     ap.add_argument("--no-anchors", action="store_true",
                     help="under --random, skip the deterministic boundary/corner anchor "

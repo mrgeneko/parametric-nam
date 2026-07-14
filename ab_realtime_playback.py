@@ -11,7 +11,7 @@ cover conditioning; this does.
 
   # 2. compare against our Python forward at the same knobs
   python ab_[redacted].py --model model.param.nam --input in.wav --cpp cpp.wav \
-      --params "SUSTAIN=0.75,TONE=0.30"
+      --params "Sustain=0.75,Tone=0.30"
 
 Three things MUST be reconciled or the comparison falsely mismatches:
 
