@@ -272,6 +272,17 @@ def main() -> None:
     inp = Path(_os.path.expanduser(cfg["input"]))
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
     oversample = cfg.get("oversample", 2)
+    if str(oversample).strip().lower() == "auto":
+        # This tool measures INTERPOLATION error (grid density in knob-space), a different
+        # question from truncation error (discretisation in time) that "auto" answers for
+        # the real dataset render. It needs a fixed number to probe at, not a recursive
+        # auto-measurement. 4 matches what auto has picked on the one ngspice circuit
+        # measured so far (the DS-1) -- a reasonable default, not a derived one.
+        print(f"  oversample auto (config) -> using 4 for this probe (interpolation error is "
+             f"not what --oversample auto measures)")
+        oversample = 4
+    else:
+        oversample = int(oversample)
     backend = cfg.get("backend", "livespice")
 
     n_perms = int(np.prod([len(v) for v in knobs.values()]))
