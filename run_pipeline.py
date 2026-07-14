@@ -24,7 +24,7 @@ Example — full Dumble clean pipeline:
         --range clean_master=0.1,0.3,0.5,0.7,0.9 \\
         --fixed-params "Rock=0" \\
         --speaker S1 \\
-        --input /Volumes/DATA/work/sweep120s.wav \\
+        --input ~/work/sweep-files/sweepv5.wav \\
         --slimmable --mmap --epochs 200
 """
 
@@ -597,6 +597,13 @@ def main():
     g.add_argument("--no-mmap",        action="store_false", dest="mmap")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
+    g.add_argument("--skip-grid-check", action="store_true",
+                   help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
+                        "midpoint and checks whether the grid can even represent the target ESR — a "
+                        "cell that fails puts a floor under the model that NO training can lift. "
+                        "Takes a couple of minutes. See docs/grid-adequacy.md.")
+    g.add_argument("--grid-target",    type=float, default=0.009,
+                   help="the model ESR the knob grid must be able to support (default 0.009)")
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.1)
@@ -652,6 +659,33 @@ def main():
                 log("SKIP generate: outputs.npy exists and no sig/ dir found. "
                     "Use --force-generate to redo.", fh)
                 run_generate = False
+
+        # ------------------------------------------------------------------
+        # Step 0: is the knob grid dense enough to be worth rendering?
+        #
+        # A grid too coarse in even one cell puts a FLOOR under the model that no amount of training
+        # can lift -- the information is simply not in the data. That is not hypothetical: the Big
+        # Muff's shipped 14x9 grid had an interpolation error of 0.0899 in Sustain 0.85-1.0, TEN
+        # TIMES the 0.0090 ESR the model was chasing, while 19 of its 21 cells were oversampled by
+        # 20-100x. It was simultaneously too dense almost everywhere and too coarse in the one place
+        # the pedal actually lives, and no training run could ever have told us.
+        #
+        # So measure it BEFORE spending the renders and the epochs. It costs a couple of minutes.
+        # See docs/grid-adequacy.md.
+        # ------------------------------------------------------------------
+        if run_generate and args.config and not args.skip_grid_check:
+            section("STEP 0 / 3 — Grid Adequacy", fh)
+            log("Measuring whether the knob grid can even represent the target ESR. A cell whose "
+                "interpolation error exceeds it cannot be fixed by training — the data does not "
+                "contain what the model would need. Re-run tools/grid_adequacy.py --suggest for a "
+                "proposed regrid, or pass --skip-grid-check to render anyway.", fh)
+            # stream_run aborts the pipeline on a non-zero exit, which is exactly what a too-coarse
+            # grid deserves: rendering and training on it would burn hours to hit a floor we already
+            # know about.
+            stream_run([PYTHON, str(HERE / "tools" / "grid_adequacy.py"),
+                        "--config", str(args.config),
+                        "--target", str(args.grid_target)],
+                       fh, "grid-adequacy")
 
         if run_generate:
             section("STEP 1 / 3 — Dataset Generation", fh)
