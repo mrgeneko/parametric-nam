@@ -13,37 +13,68 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 
 ## Quick Start
 
+**This repo is not self-contained.** It needs three sibling checkouts. Clone them side by side:
+
 ```bash
-# 1. Clone with submodules (LiveSPICE nests ComputerAlgebra — recursive is required)
-git clone --recurse-submodules <this-repo> && cd spice-to-nam
+mkdir -p ~/work && cd ~/work
 
-# 2. One-shot setup: submodules -> apply the required LiveSPICE micro-sign patch
-#    (idempotent) -> build livespice_cli for your platform -> venv + pinned deps.
-#    (Needs the .NET SDK for the CLI build; use ./setup.sh --no-cli for Python-only.)
-./setup.sh
-. .venv/bin/activate
+# All of these are PRIVATE repos — use `gh` (or SSH), not a plain https clone.
+gh repo clone mrgeneko/spice-to-nam        # this repo — the toolchain
+gh repo clone mrgeneko/spice-circuits      # the .schx library + devices.toml registry
+gh repo clone mrgeneko/livespice-emitter   # THE ORACLE (livespice_cli) lives here
+gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README)
+gh repo clone mrgeneko/spice-nam-models    # where trained runs are archived
 
-# 3. One command: generate dataset -> combine -> train -> release folder
-python run_pipeline.py \
-    --dataset-dir    /tmp/ts9_ds \
-    --nam-output     /tmp/ts9.param.nam \
-    --checkpoint-dir /tmp/ts9_ckpt \
-    --backend livespice \
-    --schx "/path/to/Ibanez TS-9.schx" \
-    --knobs drive,tone --range "drive=0.0,0.25,0.5,0.75,1.0" --range "tone=0.0,0.25,0.5,0.75,1.0" \
-    --fixed-params "Level=1.0" \
-    --input /path/to/guitar.wav \
-    --slimmable --mmap --epochs 200 --crop-len 24000 --batch-size 64
-
-# 4. Listen (Python inference, no C++ needed)
-python param_infer.py --checkpoint /tmp/ts9_ckpt/best.pt \
-    --input /path/to/dry.wav --output-dir /tmp/out/ --params "drive=0.7,tone=0.4"
+cd spice-to-nam && ./setup.sh && . .venv/bin/activate
 ```
 
-The trained model lands at `/tmp/ts9.param.nam`; a self-contained **release folder**
-(`/tmp/ts9_release/`) with the model, schematic copy, metrics, manifest, and a
-`reproduce.sh` is built automatically. See [full build details](#build--dependencies)
-for prerequisites (.NET SDK, recursive submodules).
+`setup.sh` builds the oracle from `../livespice-emitter/oracle` (needs the .NET SDK; `--no-cli` to
+skip) and creates the venv. If your checkouts are not siblings, point at them explicitly:
+
+```bash
+export LIVESPICE_CLI=/path/to/livespice-emitter/oracle/publish/livespice_cli
+```
+
+### Train a device
+
+```bash
+python run_pipeline.py --config configs/big-muff-v1.toml \
+    --dataset-dir    ~/work/tmp/bigmuff_ds \
+    --nam-output     ~/work/tmp/bigmuff.param.nam \
+    --checkpoint-dir ~/work/tmp/bigmuff_ckpt
+```
+
+One command runs **four** steps:
+
+| step | what it does | why it exists |
+|---|---|---|
+| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Aborts in ~2 min instead of wasting hours. |
+| 1 — Generate | renders the dataset across the knob grid | |
+| 2 — Combine | per-permutation WAVs → `outputs.npy` | |
+| 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
+
+**Adding a *new* device? Read [`docs/adding-a-device.md`](docs/adding-a-device.md)** — it walks the
+whole recipe, and every step in it exists because skipping it produced a quietly wrong model.
+
+### Listen
+
+```bash
+python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
+    --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
+```
+
+## Documentation
+
+| doc | read it when |
+|---|---|
+| **[`docs/adding-a-device.md`](docs/adding-a-device.md)** | **training a new device — start here** |
+| [`docs/LESSONS.md`](docs/LESSONS.md) | the failure modes this toolchain is built to prevent. Every one shipped or nearly did, and every one was **silent**. |
+| [`docs/grid-adequacy.md`](docs/grid-adequacy.md) | choosing the knob grid (measure it; don't tune by ear) |
+| [`docs/convergence.md`](docs/convergence.md) | choosing `oversample` and Newton iterations |
+| [`docs/training-budget.md`](docs/training-budget.md) | `target-steps`, and why `repeats`/`epochs` are derived |
+| [`docs/loss-energy-bias.md`](docs/loss-energy-bias.md) | why the loss is ESR, not MSE |
+| [`docs/RETRAINING.md`](docs/RETRAINING.md) | why every parametric model needs regenerating + retraining |
+| [`docs/architecture.md`](docs/architecture.md) | how the repos fit together |
 
 ## How it works
 
@@ -476,7 +507,7 @@ Not required for training or Python inference — only for C++ inference validat
 This toolchain builds on several open-source projects and published models:
 
 - **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
-  circuit simulator `livespice_cli` builds against (vendored as `extern/LiveSPICE`),
+  circuit simulator `livespice_cli` builds against (pristine, in `livespice-emitter/extern/LiveSPICE-oracle`),
   and the reference for the tube-model equations. The ngspice backend's tube
   subcircuits are **ported from LiveSPICE's `Triode.cs` / `Pentode.cs`**.
 - **[ngspice](https://ngspice.sourceforge.io/)** (BSD) — the adaptive-timestep SPICE
