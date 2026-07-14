@@ -711,14 +711,14 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     # answer, and both obvious choices are wrong:
     #
     #   the FIRST probe_s seconds   -- our sweeps open quiet, and truncation is O(h^2 * y'') so it
-    #                                  lives in the fast, loud passages. Understated the Big Muff by
-    #                                  3.4x: 6.68e-03 against the 2.25e-02 a full render shows.
+    #                                  lives in the fast, loud passages. Probing the intro understates
+    #                                  it badly.
     #   the WORST window            -- overstates it. The quantity that matters is the truncation
     #                                  contribution to the WHOLE-FILE ESR, because that is what the
-    #                                  model is fitted against and what its ESR is scored on. Peaking
-    #                                  the probe on the hardest 3 s said the Timmy needed oversample
-    #                                  8 (5.77e-03) when whole-file it sits at 8.73e-04 -- os=2 is
-    #                                  fine, and 8 would have cost 4x the render time for nothing.
+    #                                  model is fitted against and what its ESR is scored on. A probe
+    #                                  peaked on the hardest few seconds reports several times the
+    #                                  whole-file figure and buys oversample the circuit does not need
+    #                                  (4x the render time for nothing).
     #
     # So: STRATIFIED sample. Several short contiguous windows spanning the file, with the numerator
     # and denominator POOLED across them -- sum(err) / sum(sig), which is exactly the whole-file ESR
@@ -1087,12 +1087,14 @@ def main():
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
-                         "truncation, the gap between the simulated circuit and the real one. At "
-                         "the default of 2 that error is 2.25e-02 on the Big Muff, whose NAM model "
-                         "scores 0.0090: THE TARGET IS 2.5x WRONGER THAN THE MODEL, and the model "
-                         "is being spent fitting it. 'auto' climbs 2/4/8/16/32 until the truncation "
-                         "is under --trunc-target, probing both ends of every knob. See "
-                         "docs/convergence.md.")
+                         "truncation, the gap between the simulated circuit and the real one. At the "
+                         "default of 2 that error EQUALS OR EXCEEDS the ESR of the model trained on "
+                         "the data for most of our fleet (Dumble 6.1x the model ESR, hot-rod 3.6x, "
+                         "Big Muff 1.0x, Timmy 1.0x) -- the target is wronger than the model, and "
+                         "capacity is being spent fitting it. 'auto' climbs 2/4/8/16 until the "
+                         "truncation measured against a converged reference is under --trunc-target, "
+                         "probing both ends of every knob. See docs/convergence.md and "
+                         "measure_truncation.py.")
     ap.add_argument("--trunc-target", type=float, default=1e-3,
                     help="With --oversample auto: the truncation ESR to get under (default 1e-3). "
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "

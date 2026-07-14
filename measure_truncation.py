@@ -43,11 +43,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import itertools
+import os as _os
 import subprocess
 import sys
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -105,14 +106,20 @@ def load_fleet(only: str | None) -> list[tuple[str, Path, list[str]]]:
 
 def measure(schx: Path, knobs: list[str], input_wav: Path, ref_os: int,
             candidates: tuple[int, ...], iterations: int, speaker: str | None,
-            td: Path) -> dict:
-    """Worst-over-knob-settings truncation ESR at each candidate oversample."""
-    cache: dict[tuple, np.ndarray | None] = {}
+            td: Path, workers: int) -> dict:
+    """Worst-over-knob-settings truncation ESR at each candidate oversample.
 
-    def render(p: dict, os_: int):
+    Renders run CONCURRENTLY. Serially this was leaving 13 of 14 cores idle while a single
+    oversample-32 render -- 16x the work of the os=2 one it is the reference for -- ground through a
+    60 s file, and a 7-device fleet would have taken hours. Threads are the right tool: every unit of
+    work is a subprocess, so the GIL is irrelevant.
+    """
+    settings = probe_settings(knobs)
+    jobs = [(p, os_) for p in settings for os_ in (*candidates, ref_os)]
+
+    def render(job) -> tuple[tuple, np.ndarray | None]:
+        p, os_ = job
         key = (tuple(sorted(p.items())), os_)
-        if key in cache:
-            return cache[key]
         w = td / f"{abs(hash((str(schx), key)))}.wav"
         cmd = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(w),
                "--circuit", str(schx),
@@ -121,28 +128,48 @@ def measure(schx: Path, knobs: list[str], input_wav: Path, ref_os: int,
         if speaker:
             cmd += ["--speaker", speaker]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        v = None
         if r.returncode == 0 and w.exists():
             d, _ = sf.read(str(w))
-            v = np.asarray(d, dtype=np.float64)
-        else:
-            print(f"      render failed (os={os_}): {r.stderr.strip().splitlines()[-1:]}",
-                  file=sys.stderr)
-        cache[key] = v
-        return v
+            return key, np.asarray(d, dtype=np.float64)
+        tail = r.stderr.strip().splitlines()[-1:] or ["(no stderr)"]
+        print(f"      render failed (os={os_}): {tail[0]}", file=sys.stderr)
+        return key, None
 
-    settings = probe_settings(knobs)
+    cache: dict[tuple, np.ndarray | None] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for key, v in ex.map(render, jobs):
+            cache[key] = v
+
     res: dict = {"n_settings": len(settings)}
     for os_ in candidates:
         worst, at = 0.0, None
         for p in settings:
-            a, ref = render(p, os_), render(p, ref_os)
+            k = tuple(sorted(p.items()))
+            a, ref = cache.get((k, os_)), cache.get((k, ref_os))
             if a is None or ref is None:
                 continue
             e = esr(a, ref)
             if np.isfinite(e) and e >= worst:
                 worst, at = e, p
         res[os_] = (worst, at)
+
+    # IS THE REFERENCE ITSELF CONVERGED?
+    #
+    # Every number above is measured against os=ref_os, on the assumption that the reference is
+    # close enough to the truth to stand in for it. That assumption is exactly the kind we have been
+    # burned by -- a reference that has not converged is not a reference, the same way an oracle
+    # built from the thing under test is not an oracle -- and it is cheap to check: render the worst
+    # setting at 2*ref_os and see how far the reference still moves.
+    #
+    # If ESR(ref, 2*ref) is not far BELOW the smallest number in the table, the table is measuring
+    # the reference's own error, the ratios go flat, and every entry is an UNDERSTATEMENT.
+    _, at_worst = res[candidates[0]]
+    if at_worst is not None:
+        key_ref = (tuple(sorted(at_worst.items())), ref_os)
+        ref_wave = cache.get(key_ref)
+        _, finer = render((at_worst, ref_os * 2))
+        if ref_wave is not None and finer is not None:
+            res["ref_error"] = esr(ref_wave, finer)
     return res
 
 
@@ -160,6 +187,8 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=256,
                     help="Newton iterations; high, so convergence is not a confound (default 256)")
     ap.add_argument("--speaker", help="speaker to capture on multi-speaker circuits")
+    ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2),
+                    help="concurrent renders (default: cores-2)")
     args = ap.parse_args()
 
     cands = tuple(int(c) for c in args.candidates.split(","))
@@ -184,26 +213,53 @@ def main() -> None:
                 continue
             print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
             r = measure(schx, knobs, args.input, args.ref_os, cands,
-                        args.iterations, args.speaker, td)
+                        args.iterations, args.speaker, td, args.workers)
             rows.append((name, r))
 
     hdr = " | ".join(f"@ os={c}" for c in cands)
-    print(f"\n| device | {hdr} | worst setting @ os={cands[0]} | falls per doubling |")
-    print("|---|" + "---:|" * len(cands) + "---|---|")
+    print(f"\n| device | {hdr} | worst setting @ os={cands[0]} | ref err | verdict |")
+    print("|---|" + "---:|" * len(cands) + "---|---:|---|")
     for name, r in rows:
         cells = []
         for c in cands:
             v, _ = r.get(c, (float('nan'), None))
             cells.append(f"{v:.2e}")
         v0, at0 = r.get(cands[0], (float('nan'), None))
-        v1, _ = r.get(cands[1], (float('nan'), None)) if len(cands) > 1 else (float('nan'), None)
-        fall = f"{v0 / v1:.1f}x" if (np.isfinite(v0) and np.isfinite(v1) and v1 > 0) else "-"
+        vlast, _ = r.get(cands[-1], (float('nan'), None))
         atstr = ", ".join(f"{k}={v:g}" for k, v in sorted(at0.items())) if at0 else "-"
-        smooth = "" if (np.isfinite(v0) and np.isfinite(v1) and v1 > 0 and v0 / v1 >= 2.0) \
-                 else "  **NOT SMOOTH**"
-        print(f"| {name} | " + " | ".join(cells) + f" | {atstr} | {fall}{smooth} |")
 
-    print("\nO(h^2) demands the error fall ~4x per doubling. A device that falls <2x does not "
+        # EVERY consecutive ratio, not just the first. Checking only cands[0]/cands[1] would have
+        # passed the JCM800 hot-rod as healthy -- it falls a respectable 4.4x from os=2 to os=4 and
+        # then STALLS at 1.6x from 4 to 8. The stall is the finding; a verdict that reads only the
+        # first rung reports the circuit as smooth and hides it.
+        ratios = []
+        for a_, b_ in zip(cands, cands[1:]):
+            va, _ = r.get(a_, (float('nan'), None))
+            vb, _ = r.get(b_, (float('nan'), None))
+            ratios.append(va / vb if (np.isfinite(va) and np.isfinite(vb) and vb > 0) else float('nan'))
+        fall = " → ".join(f"{x:.1f}x" for x in ratios) if ratios else "-"
+
+        # The reference must be much cleaner than the finest number it is used to score. If it is
+        # not, the table bottoms out on the REFERENCE's error, not the circuit's.
+        ref_err = r.get("ref_error", float("nan"))
+        refstr = f"{ref_err:.1e}" if np.isfinite(ref_err) else "?"
+
+        stalled = [(a_, b_, x) for (a_, b_), x in zip(zip(cands, cands[1:]), ratios)
+                   if np.isfinite(x) and x < 2.0]
+        if np.isfinite(ref_err) and np.isfinite(vlast) and ref_err > 0.25 * vlast:
+            verdict = f"**REFERENCE NOT CONVERGED** — os={args.ref_os} still moves by {ref_err:.1e}, " \
+                      f"not far below the @os={cands[-1]} figure; that column is a floor, not a measurement"
+        elif stalled:
+            a_, b_, x = stalled[0]
+            verdict = f"**STALLS** {a_}→{b_}: falls only {x:.1f}x, not ~4x ({fall})"
+        else:
+            verdict = f"falls {fall}"
+        print(f"| {name} | " + " | ".join(cells) + f" | {atstr} | {refstr} | {verdict} |")
+
+    print("\n`ref err` = ESR(reference, 2x reference) at the worst setting: how far the reference "
+          f"itself\nstill moves. It must sit well below the @os={cands[-1]} column, or that column is "
+          "measuring the\nreference's own error rather than the circuit's.\n")
+    print("O(h^2) demands the error fall ~4x per doubling. A device that falls <2x does not "
           "converge in the timestep:\nsomething in it is not smooth, and oversampling will not fix "
           "its dataset.")
 
