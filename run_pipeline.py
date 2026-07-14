@@ -793,7 +793,27 @@ def main():
 
             repeats, epochs = int(args.repeats), int(args.epochs)
 
-            if args.target_steps and n_perms:
+            # OPEN-ENDED (epochs=0) has NO horizon, so a step budget is meaningless: SGDR cycles the
+            # LR down and restarts, and you stop when the best-per-cycle curve flattens. That is the
+            # ONLY honest way to find the budget, because a fixed cosine-to-zero run always ends at
+            # its best BY CONSTRUCTION and so can never tell you whether more would have helped.
+            #
+            # `repeats` still has to come from somewhere. Derive it as the fixed-mode rule would with
+            # a nominal 450-epoch schedule, which keeps steps/epoch (and therefore the length of an
+            # SGDR cycle) the same across grids of wildly different sizes.
+            nominal_epochs = epochs if epochs > 0 else 450
+            if epochs == 0 and args.target_steps and n_perms and not args.repeats_explicit:
+                repeats = max(1, round(args.target_steps * args.batch_size
+                                       / max(1, nominal_epochs * n_perms * (1 - args.val_split))))
+                spe = math.ceil(n_perms * repeats * (1 - args.val_split) / args.batch_size)
+                log(f"OPEN-ENDED (epochs=0): no step budget — SGDR runs until you stop it. "
+                    f"repeats {repeats} → {spe} steps/epoch, restart every "
+                    f"{args.restart_period} epochs ({spe * args.restart_period:,} steps/cycle).", fh)
+                log(f"  Watch the BEST val ESR PER CYCLE. When two consecutive cycles fail to "
+                    f"improve it, that is the budget — measured under the loss you are ACTUALLY "
+                    f"training with. Stop with: touch {args.checkpoint_dir}/STOP", fh)
+
+            if args.target_steps and n_perms and epochs > 0:
                 # WHICH VARIABLE IS DERIVED MATTERS, and the obvious choice is wrong.
                 #
                 # `epochs` is NOT a budget quantity -- it is the LR SCHEDULE LENGTH. CosineAnnealingLR
@@ -830,7 +850,7 @@ def main():
                         f"permutation's {audio_s:.0f}s per epoch; {total_crops:,} crops/perm over the "
                         f"run ({total_crops / max(1, audio_s / crop_s):.0f}× its length)", fh)
 
-            if n_perms:
+            if n_perms and epochs > 0:
                 items = n_perms * repeats
                 steps_ep = math.ceil(items * (1 - args.val_split) / args.batch_size)
                 total = steps_ep * epochs
