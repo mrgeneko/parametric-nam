@@ -74,3 +74,24 @@ class TestCoverage:
 
     def test_never_clips(self, exc):
         assert np.abs(exc).max() <= 0.9 + 1e-6, "a clipped input teaches the model the clipper"
+
+
+class TestLeadInSilence:
+    """The sweep MUST open with >= 1 s of silence, and for two independent reasons.
+
+    THE SOLVER. A file that starts mid-signal asks the simulator to jump straight to a large-signal
+    solution from an uninitialised state at t=0, and ngspice DIVERGES -- "diverged at t~0", every
+    retry rung, no output. Verified: the Boss DS-1 at Dist=0.2 fails on an 8 s slice of this sweep and
+    succeeds on the whole file, and giving that same slice 250 ms of silence makes it converge.
+
+    THE WARMUP CONVENTION. batch_harness discards the first warmup_s=1.0 when computing stats and ESR.
+    A shorter lead means THE SKIP EATS REAL SIGNAL: at 0.25 s of silence it was discarding 0.75 s of
+    the clean 20 Hz chirp -- the low end of the quiet sweep -- from every measurement, silently.
+    """
+
+    def test_opens_with_at_least_one_second_of_silence(self, exc):
+        first = int(np.argmax(np.abs(exc) > 1e-4))
+        assert first / SR >= 1.0, (
+            f"sweep starts at t={first/SR:.3f}s; it must open with >= 1 s of silence "
+            f"(solver operating point + the 1.0 s warmup convention)"
+        )

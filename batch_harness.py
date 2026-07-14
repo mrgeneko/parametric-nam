@@ -794,6 +794,44 @@ def input_provenance(wav: Path) -> dict:
     }
 
 
+
+# Probe clips must not start mid-signal. See write_probe_clip.
+PROBE_LEAD_S = 1.00          # silence, so the solver can find its operating point.
+                             # 1.0 s deliberately: it is the SAME warmup convention batch_harness
+                             # already uses (warmup_s=1.0) and that the sweeps themselves open with.
+                             # 0.25 s was empirically enough for the DS-1, but having two different
+                             # "how long until the circuit has settled" constants is how you end up
+                             # with one of them quietly wrong.
+PROBE_RAMP_S = 0.05          # then ease into the signal instead of stepping into it
+
+
+def write_probe_clip(sig, sr: int, path) -> int:
+    """Write a probe window WITH A QUIET LEAD-IN. Returns the number of lead samples to skip.
+
+    A window cut out of the middle of a sweep starts at whatever amplitude the signal happened to be
+    at -- often full scale, mid-chirp. That asks the simulator to jump straight to a large-signal
+    solution from an uninitialised state at t=0, and ngspice simply DIVERGES: "diverged at t~0",
+    every rung, no output.
+
+    It cost a long detour to find. The Boss DS-1 failed at Dist=0.2 on an 8 s slice and I blamed, in
+    order, the new sweep's chirps, the oversample `auto` had picked, and the retry ladder escalating
+    the wrong way. All three were wrong: it failed IDENTICALLY on the old sweep, at every oversample,
+    and at every input_upsample. The full 94 s file rendered fine -- because IT BEGINS WITH SILENCE.
+    Give the same 8 s slice 250 ms of silence and a 50 ms ramp and it converges.
+
+    The measurement must then SKIP the lead-in, or the probe scores its own warm-up transient.
+    """
+    import numpy as _np
+    lead = int(PROBE_LEAD_S * sr)
+    ramp = int(PROBE_RAMP_S * sr)
+    seg = _np.asarray(sig, dtype=_np.float64).copy()
+    if ramp and len(seg) > ramp:
+        w = 0.5 * (1 - _np.cos(_np.linspace(0, _np.pi, ramp)))
+        seg[:ramp] *= w
+    out = _np.concatenate([_np.zeros(lead), seg])
+    sf.write(str(path), out.astype(_np.float32), sr)
+    return lead
+
 def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                       param_map: dict, fixed_params: str, speaker: str,
                       target: float, probe_s: float = 8.0, n_windows: int = 4,
@@ -837,11 +875,22 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     """
     import tempfile
 
-    # ngspice is an adaptive-timestep offline solver: a render costs ~10-100x a livespice one.
-    # Probe shorter and against a nearer reference, or `auto` costs more than the dataset.
     if backend == "ngspice":
-        probe_s = min(probe_s, 4.0)
+        # ngspice is an adaptive-timestep offline solver: a render costs ~10-100x a livespice one, so
+        # probe against a nearer reference or `auto` costs more than the dataset.
         ref_os = min(ref_os, 8)
+
+        # FEWER, LONGER WINDOWS -- because NGSPICE SEGFAULTS ON SHORT CLIPS.
+        # Measured on the Boss DS-1: a 2.00 s clip exits -11 (SIGSEGV) with no output; 3.00 s and up
+        # run fine. The probe was cutting 4 windows of 1 s and adding a 1 s lead -- landing on exactly
+        # 2 s and crashing every render.
+        #
+        # It cost hours, because the crash is INVISIBLE. _run_ngspice reports any empty output as
+        # "diverged at t~0?", so a SIGSEGV reads as a convergence failure -- and I spent an afternoon
+        # chasing convergence knobs (input_upsample up, then down, oversample, fading the clip edges)
+        # against a bug that was not a convergence bug at all.
+        probe_s = max(probe_s, 8.0)
+        n_windows = 2                       # -> 4 s windows, 5 s clips with the lead. Well clear.
 
     picks = []
     for k in knobs:
@@ -883,9 +932,12 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
         win = total
     else:
         # evenly spaced windows across the file; each contiguous, each rendered on its own
+        # EVENLY-SPACED CENTRES, not endpoints. The old formula i*span/(n-1) puts the first window
+        # at t=0 and the last at the very end -- which on our sweeps is 1 s of LEADING SILENCE and the
+        # near-silent DECAY TAIL. With n_windows=2 the probe was sampling the two quietest points in
+        # the file and reporting a gloriously small error (2.52e-07) that described nothing.
         span = total - win
-        starts = [int(round(i * span / (n_windows - 1))) for i in range(n_windows)] \
-                 if n_windows > 1 else [0]
+        starts = [int((i + 0.5) * span / n_windows) for i in range(n_windows)]
 
     print(f"\n  Choosing oversample (target truncation ESR <= {target:.0e}, "
           f"{len(uniq)} knob settings, {len(starts)} x {win / sr:.1f}s windows "
@@ -896,7 +948,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
         clips = []
         for wi, st in enumerate(starts):
             c = td / f"probe{wi}.wav"
-            sf.write(str(c), sig[st:st + win], sr)
+            lead_n = write_probe_clip(sig[st:st + win], sr, c)
             clips.append(c)
 
         cache = {}
@@ -945,6 +997,10 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                 if fail is None and w.exists():
                     d, _ = sf.read(str(w))
                     v = np.asarray(d, dtype=np.float64)
+                else:
+                    print(f"    probe render FAILED at oversample={os_}, "
+                          f"{', '.join(f'{k}={x:g}' for k, x in sorted(p.items()))}: "
+                          f"{getattr(fail, 'error', 'no output')}", file=sys.stderr)
             else:
                 a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
                      "--circuit", schx, "--params", allp,
@@ -971,11 +1027,29 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                     a, b = render(clip, p, os_), render(clip, p, ref_os)
                     if a is None or b is None:
                         continue
-                    m = min(len(a), len(b)); sk = m // 10   # drop each window's start transient
+                    m = min(len(a), len(b))
+                    # SKIP THE LEAD-IN, not a blind 10%. The clips now carry 0.25 s of
+                    # silence so ngspice can find its operating point (see write_probe_clip),
+                    # and on a 2 s window that lead is 11% -- a flat 10% skip would have let
+                    # the warm-up transient into the number the whole probe exists to measure.
+                    sk = max(m // 10, lead_n + int(0.02 * sr))
                     num += float(np.sum((a[sk:m] - b[sk:m]) ** 2))
                     den += float(np.sum(b[sk:m] ** 2))
                 if den > 0 and num / den >= worst:
                     worst, worst_at = num / den, p
+
+            if worst_at is None:
+                # EVERY render failed. Do NOT return the lowest oversample with "truncation
+                # 0.00e+00" -- that is a confident, precise-looking number produced by measuring
+                # NOTHING, and it is exactly how a silently-wrong dataset gets made. It did: the
+                # ngspice probes were diverging, nothing checked the return value, den stayed 0,
+                # worst stayed 0.0, and choose_oversample reported a perfect score and picked the
+                # minimum.
+                raise RuntimeError(
+                    f"--oversample auto: EVERY probe render failed at oversample={os_}. "
+                    f"Nothing was measured, so there is no answer to give. See the failures above; "
+                    f"fix the convergence (or pass an explicit --oversample) rather than trusting a "
+                    f"number that was never computed.")
 
             ratio = (prev_d / worst) if (prev_d and worst > 0) else None
             note = f"   (falling {ratio:.1f}x per doubling)" if ratio else ""

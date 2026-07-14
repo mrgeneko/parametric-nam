@@ -103,7 +103,19 @@ def build_excitation(sr: int = SR) -> np.ndarray:
     """
     gap = silence(0.30, sr)
     return np.concatenate([
-        silence(0.25, sr),
+        # 1 s of LEADING SILENCE, and both reasons matter:
+        #
+        #   THE SOLVER needs it. A file that starts mid-signal asks the simulator to jump straight to
+        #   a large-signal solution from an uninitialised state at t=0, and ngspice simply DIVERGES
+        #   ("diverged at t~0", every rung, no output). The Boss DS-1 fails on an 8 s slice of this
+        #   very sweep and succeeds on the whole file, for exactly this reason.
+        #
+        #   THE WARMUP CONVENTION is 1.0 s. batch_harness discards the first warmup_s=1.0 when it
+        #   computes stats and ESR, to keep a startup transient out of the number. sweepv4 opens with
+        #   1.048 s of silence and satisfies both. My first cut used 0.25 s -- which meant the 1 s
+        #   warmup skip was EATING 0.75 s OF REAL SIGNAL: the opening of the clean 20 Hz chirp, i.e.
+        #   the low end of the quiet sweep, was never scored by anything.
+        silence(1.0, sr),
         log_chirp(6.0, 20, 20000, 0.10, sr),   # clean:  the LINEAR response. Tone stack, filters.
         gap,
         log_chirp(6.0, 20, 20000, 0.45, sr),   # driven: the band as it breaks up.

@@ -57,7 +57,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from batch_harness import LIVESPICE_CLI
+from batch_harness import LIVESPICE_CLI, write_probe_clip
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -101,13 +101,21 @@ class Renderer:
         if total <= win * n_windows:
             starts, win = [0], total
         else:
+            # evenly-spaced CENTRES, not endpoints -- endpoints land on the sweep's leading silence
+            # and its near-silent decay tail, and the probe then measures nothing. Same bug, same fix,
+            # as choose_oversample in batch_harness.
             span = total - win
-            starts = [int(round(i * span / (n_windows - 1))) for i in range(n_windows)]
+            starts = [int((i + 0.5) * span / n_windows) for i in range(n_windows)]
 
+        # Probe clips carry a QUIET LEAD-IN. A window cut from the middle of a sweep starts at
+        # whatever amplitude the signal happened to be at -- often full scale, mid-chirp -- which asks
+        # the simulator to jump to a large-signal solution from an uninitialised state at t=0. ngspice
+        # simply diverges ("diverged at t~0", every rung, no output). See batch_harness.
         self.clips = []
+        self.lead_n = 0
         for i, st in enumerate(starts):
             c = td / f"probe{i}.wav"
-            sf.write(str(c), x[st:st + win], sr)
+            self.lead_n = write_probe_clip(x[st:st + win], sr, c)
             self.clips.append(c)
         self.win_s = win / sr
 
@@ -154,7 +162,9 @@ def cell_error(render, knobs: dict, axis: str, lo: float, hi: float, others: dic
         if a is None or b is None or m is None:
             continue
         n = min(len(a), len(b), len(m))
-        sk = n // 10                                  # drop each window's start transient
+        # skip the LEAD-IN, not a blind 10% -- on a short window the lead is more than that,
+        # and the probe would be scoring its own warm-up transient
+        sk = max(n // 10, getattr(render, 'lead_n', 0) + int(0.02 * 48000))
         interp = 0.5 * (a[:n] + b[:n])                # the best a grid-limited learner can recover
         num += float(np.sum((interp[sk:] - m[sk:n]) ** 2))
         den += float(np.sum(m[sk:n] ** 2))
