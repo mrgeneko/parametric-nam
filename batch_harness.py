@@ -135,20 +135,27 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 def check_backend(schx: Path, backend: str, ap) -> None:
     """Refuse a backend that cannot faithfully render this device.
 
-    A backend that REFUSES a circuit is harmless -- you find out immediately. A backend that renders
-    it WRONGLY WITHOUT ERRORING is the dangerous one, and we have exactly that:
+    Which backends work is a fact about the SIMULATOR, not the circuit, so it cannot be derived from
+    a .schx. It is declared in spice-circuits/backends.toml and enforced here. A device with no entry
+    is assumed valid -- absence of evidence, not a claim.
 
-        livespice_cli's fixed-timestep BJT solve COLLAPSES TRANSISTOR GYRATORS TO A FLAT RESPONSE.
+    Two kinds of failure, and they deserve different treatment:
 
-    The Boss MT-2's entire voicing is gyrator-based -- the pre-distortion ~1 kHz mid hump, the
-    sweepable mid EQ -- and LiveSPICE returns ~flat 20 dB where ngspice and the real pedal swing 16 dB
-    (200 Hz) to 25 dB (5 kHz). It does not warn. It does not fail. It hands back a valid, plausible,
-    FLAT pedal, and if you render it you will train on it and ship an MT-2 with no mid hump, which is
-    the one thing an MT-2 is.
+      LOUD    the backend throws or refuses. Harmless -- you find out at once, and the permutation is
+              recorded as failed. The Boss MT-2 on livespice is this: Circuit.SimulationDiverged near
+              t=2.65s, exit 134, no output (its ~250x-gain distortion core is unstable under a fixed
+              timestep, and oversample 2 -> 32 does not help). Declared anyway so you learn in two
+              seconds instead of after every permutation has crashed in turn, and so you are pointed
+              at the backend that works.
 
-    So the registry records which backends are valid per device (spice-circuits/backends.toml) and we
-    stop here rather than let the dataset be quietly wrong. A device with no entry is assumed valid --
-    absence of evidence, not a claim.
+      SILENT  the backend renders the circuit WRONGLY and says nothing. THIS is what makes the file
+              worth enforcing rather than merely writing down. livespice's fixed-timestep BJT solve
+              collapses TRANSISTOR GYRATORS to a flat response -- measured ~flat 20 dB where ngspice
+              and the real pedal swing 16 dB (200 Hz) to 25 dB (5 kHz). It does not warn and it does
+              not fail; it hands back a valid, plausible, FLAT pedal. (Our MT-2 .schx sidesteps this
+              by substituting ideal inductors for the gyrators -- which is also why it is an
+              APPROXIMATION of the pedal on every backend, and why the schematic itself is worth
+              distrusting.)
     """
     reg = Path(os.environ.get("SPICE_CIRCUITS")
                or Path(__file__).resolve().parent.parent / "spice-circuits") / "devices.toml"
@@ -173,13 +180,12 @@ def check_backend(schx: Path, backend: str, ap) -> None:
             print(f"note: {dev['name']} on {backend}: {spec['reason']}", file=sys.stderr)
         return
 
+    ok = [b for b, s in (dev.get("backend") or {}).items() if s.get("valid", True)]
     ap.error(
         f"\n\n  {dev['name']} CANNOT be rendered faithfully with --backend {backend}.\n\n"
         f"  {spec.get('reason', '(no reason recorded)')}\n\n"
-        f"  This is not a crash you would have seen: the backend would have produced a valid-looking\n"
-        f"  dataset that is WRONG, and nothing downstream could tell. Valid backends for this device: "
-        f"{', '.join(b for b, s in (dev.get('backend') or {}).items() if s.get('valid', True)) or 'none recorded'}.\n"
-        f"  Declared in spice-circuits/backends.toml.\n")
+        f"  Valid backend(s) for this device: {', '.join(ok) if ok else 'NONE RECORDED'}.\n"
+        f"  Declared in spice-circuits/backends.toml — fix it there, not here, if this is wrong.\n")
 
 
 def parse_schx_controls(schx_path: str) -> dict:
