@@ -210,6 +210,11 @@ class Result:
     error: str = ""
     rms: float = 0.0
     peak: float = 0.0
+    # What it actually took to make this permutation converge. Recorded per row, because
+    # "this dataset needed 4x oversampling at high gain" is a property OF THE DATA and the
+    # next person deserves to know it without re-deriving it.
+    rung: int = 0
+    settings: str = ""
 
 
 def sig_path(out_dir: Path, idx: int) -> Path:
@@ -325,17 +330,143 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
     return None
 
 
+# ---------------------------------------------------------------------------
+# convergence escalation
+# ---------------------------------------------------------------------------
+
+# Failures a stiffer solve can actually fix. Anything else -- a bad knob name, a missing file,
+# an unknown backend -- will fail identically on every rung, so retrying just burns an hour.
+_CONVERGENCE_FAILURE = re.compile(
+    r"diverg|NaN|Inf|timestep too small|singular|convergence|no convergence|"
+    r"unstable|crest|truncated|timeout|iteration",
+    re.IGNORECASE)
+
+
+def _is_convergence_failure(err: str) -> bool:
+    return bool(err) and bool(_CONVERGENCE_FAILURE.search(err))
+
+
+def _rungs(backend: str, oversample: int, ng: dict) -> list:
+    """Escalating convergence settings, cheapest first.
+
+    We ALREADY KNEW how to fix these -- the Boss DS-1 needed input_upsample=4, the MT-2 needed
+    diode_cjo damping -- but that knowledge was hand-entered per circuit in circuit_defaults.toml
+    and NEVER REACHED FOR when a render actually failed. A failed permutation just recorded its
+    error and the run carried on with a hole in the dataset.
+
+    So: escalate on failure, and record which rung won.
+
+    The livespice ladder raises --iterations as well as --oversample, which matters more than it
+    looks: livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS and 8 is not enough for stiff circuits.
+    The Ibanez TS-9 needs 45 -- at the default the SOLVER SILENTLY STOPS SHORT and hands back a
+    converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
+    nothing reports it. (See livespice-emitter, which now measures the cap per circuit.)
+    """
+    if backend == "livespice":
+        os_ = oversample or 2
+        # RUNG 0 IS ALREADY 256 ITERATIONS, and that is not paranoia -- it is a bug fix.
+        #
+        # livespice_cli defaults to 8 Newton iterations and 8 IS NOT ENOUGH for a stiff circuit.
+        # The Ibanez TS-9 at Drive=0.5 needs 45; below that THE SOLVER SILENTLY STOPS SHORT and
+        # hands back a converged-LOOKING answer. Measured against the same render at 256, on the
+        # ACTUAL dataset input (sweep60_composite.wav): ESR 7.38e-03. That is -21 dB of error,
+        # baked into the training data, with nothing to catch it. It is not a crash, so the retry
+        # ladder below cannot save us -- there is no failure to retry.
+        #
+        # And it is FREE: LiveSPICE breaks out of the Newton loop the moment it converges, so a
+        # high ceiling costs nothing where it is not needed. Measured render time, TS-9 and Big
+        # Muff, --iterations 8 vs 128: identical to 0.01 s.
+        #
+        # An under-converged dataset is worse than a failed one. A failed permutation is a hole
+        # you can see; an under-converged one is a lie you cannot.
+        return [
+            dict(oversample=os_,     iterations=256),
+            dict(oversample=os_ * 2, iterations=256),    # halve the timestep
+            dict(oversample=os_ * 4, iterations=256),    # last resort
+        ]
+
+    if backend == "ngspice":
+        base = dict(ng or {})
+        up = int(base.get("input_upsample", 1) or 1)
+        out = [dict(base)]
+        for u in (max(up, 2), max(up, 4)):
+            r = dict(base); r["input_upsample"] = u
+            out.append(r)
+        r = dict(out[-1]); r["method"] = "gear"          # the DS-1's fix
+        out.append(r)
+        r = dict(r)                                      # + the MT-2's fix
+        r["conv"] = ",".join(x for x in (base.get("conv"), "diode_cjo=100p") if x)
+        out.append(r)
+        return out
+
+    if backend == "cpp":
+        os_ = oversample or 2
+        return [dict(oversample=os_), dict(oversample=os_ * 2), dict(oversample=os_ * 4)]
+
+    return [dict()]
+
+
+def _rung_str(rung: dict) -> str:
+    return " ".join(f"{k}={v}" for k, v in sorted(rung.items()) if v not in (None, "", 0))
+
+
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
                 speaker: str = None, expected_frames: int = 0,
                 timeout_s: int = 1200, oversample: int = 2,
                 max_crest: float = 0.0, ng: dict = None,
-                warmup_s: float = 1.0) -> Result:
+                warmup_s: float = 1.0, no_retry: bool = False) -> Result:
+    """Render one permutation, ESCALATING THE SOLVER when it fails to converge.
+
+    A failed permutation used to record its error and be forgotten -- leaving a hole in the
+    dataset that only surfaced later as "WARNING: N .npy files but M OK rows". We already knew
+    how to fix these (the DS-1 needed input_upsample=4, the MT-2 needed diode_cjo damping); that
+    knowledge was just never reached for automatically.
+    """
     path = sig_path(out_dir, idx)
     if path.exists():
         return Result(idx, ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    rungs = [dict()] if no_retry else _rungs(backend, oversample, ng)
+    last = None
+    for i, rung in enumerate(rungs):
+        os_i = rung.get("oversample", oversample)
+        ng_i = ng
+        if backend == "ngspice":
+            ng_i = rung or ng
+        r = _render_once(idx, params, out_dir, input_wav, backend, circuit, schx,
+                         param_map, fixed_params, speaker, expected_frames, timeout_s,
+                         os_i, max_crest, ng_i, warmup_s,
+                         iterations=rung.get("iterations"))
+        if r.ok:
+            r.rung, r.settings = i, (_rung_str(rung) if i else "")
+            if i:
+                print(f"  [{idx}] converged on rung {i}: {_rung_str(rung)}", file=sys.stderr)
+            return r
+        last = r
+        # Only a CONVERGENCE failure is worth another attempt. A bad knob name or a missing file
+        # fails identically on every rung; retrying it just burns the clock.
+        if not _is_convergence_failure(r.error):
+            return r
+        if i + 1 < len(rungs):
+            print(f"  [{idx}] {r.error[:80]} — escalating to rung {i+1}: "
+                  f"{_rung_str(rungs[i+1])}", file=sys.stderr)
+
+    if last is not None:
+        last.error = f"{last.error} [exhausted {len(rungs)} convergence rungs]"
+    return last or Result(idx, error="no rungs")
+
+
+def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
+                 backend: str, circuit: str = None, schx: str = None,
+                 param_map: dict = None, fixed_params: str = None,
+                 speaker: str = None, expected_frames: int = 0,
+                 timeout_s: int = 1200, oversample: int = 2,
+                 max_crest: float = 0.0, ng: dict = None,
+                 warmup_s: float = 1.0, iterations: int = None) -> Result:
+    path = sig_path(out_dir, idx)
     out_wav = path.with_suffix(".wav")
 
     try:
@@ -357,6 +488,11 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 args += ["--speaker", speaker]
             if oversample and oversample != 2:
                 args += ["--oversample", str(oversample)]
+            # livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS, and 8 is not enough for stiff
+            # circuits -- the Ibanez TS-9 needs 45. Below that the solver stops short and returns
+            # a converged-LOOKING answer that is 5.8e-03 wrong, silently. Not a crash: worse.
+            if iterations:
+                args += ["--iterations", str(iterations)]
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 
@@ -521,6 +657,11 @@ def main():
     ap.add_argument("--list",    action="store_true", help="list cpp circuits")
     ap.add_argument("--combine", type=Path,           help="combine sharded .npy files")
     ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice"], default="cpp")
+    ap.add_argument("--no-retry", action="store_true",
+                    help="Do NOT escalate solver settings when a permutation fails to converge. "
+                         "By default a failed render is retried with a stiffer solve (more Newton "
+                         "iterations, finer timestep, ngspice damping) and the rung that won is "
+                         "recorded per row in params.csv. Use this only to see the raw failure.")
     # ngspice backend (offline adaptive-timestep SPICE for stiff/high-gain amps)
     ap.add_argument("--koren", action="store_true",
                     help="ngspice: Koren triode model (softer, for stiff amps) vs exact DempwolfZolzer")
@@ -886,7 +1027,11 @@ def main():
     csv_fh = open(csv_path, "a", newline="")
     csv_w = csv.writer(csv_fh)
     if fresh:
-        csv_w.writerow(["idx"] + knobs + ["dsp_load", "proc_time", "rms", "peak", "ok", "error"])
+        # `rung` / `solver` say WHAT IT TOOK to converge this permutation. That is a property of
+        # the DATA, not of the run: "high gain needed 4x oversampling" is exactly what the next
+        # person needs and would otherwise have to rediscover.
+        csv_w.writerow(["idx"] + knobs +
+                       ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver"])
 
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
     to_run = [(i, p) for i, p in enumerate(perms) if i not in existing]
@@ -900,7 +1045,7 @@ def main():
                         args.backend, args.circuit, schx, param_map,
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
                         args.oversample, args.max_crest, ng,
-                        warmup_s=args.skip_warmup_s): i
+                        warmup_s=args.skip_warmup_s, no_retry=args.no_retry): i
             for i, p in to_run
         }
         for f in as_completed(futs):
@@ -912,7 +1057,8 @@ def main():
             finish = time.strftime("%H:%M", time.localtime(time.time() + eta))
             p = perms[idx]
             row = ([idx] + [p[k] for k in knobs] +
-                   [r.dsp_load, r.proc_time, f"{r.rms:.6f}", f"{r.peak:.6f}", int(r.ok), r.error])
+                   [r.dsp_load, r.proc_time, f"{r.rms:.6f}", f"{r.peak:.6f}", int(r.ok), r.error,
+                    r.rung, r.settings])
             csv_w.writerow(row)
             csv_fh.flush()
             status = "OK" if r.ok else "FAIL"
