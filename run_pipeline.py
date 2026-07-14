@@ -28,7 +28,7 @@ Example — full Dumble clean pipeline:
         --slimmable --mmap --epochs 200
 """
 
-import argparse, csv, json, os, platform, shutil, subprocess, sys, time, tomllib
+import argparse, csv, json, math, os, platform, shutil, subprocess, sys, time, tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -597,6 +597,12 @@ def main():
     g.add_argument("--no-mmap",        action="store_false", dest="mmap")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
+    g.add_argument("--target-steps",   type=int, default=0,
+                   help="Ask for a TRAINING BUDGET directly and let repeats be derived from it, "
+                        "instead of backing into one. total steps = epochs × n_perms × repeats × "
+                        "(1-val_split) / batch. Because that depends on n_perms, changing the knob "
+                        "grid otherwise changes how long the model trains — regridding the Big Muff "
+                        "126→60 perms silently HALVED its budget. 0 = off (use --repeats).")
     g.add_argument("--skip-grid-check", action="store_true",
                    help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
@@ -618,6 +624,14 @@ def main():
         ap.set_defaults(**load_config(_cfg_ns.config))
 
     args = ap.parse_args()
+
+    # Did the USER pass --epochs / --repeats on the command line, or did they merely come from the
+    # config's defaults? target-steps derives both, but an explicit flag must always win over a
+    # derivation -- otherwise you cannot override it, and a silently-ignored flag is worse than none.
+    _cli = set(sys.argv[1:])
+    args.epochs_explicit  = any(a == "--epochs"  or a.startswith("--epochs=")  for a in _cli)
+    args.repeats_explicit = any(a == "--repeats" or a.startswith("--repeats=") for a in _cli)
+
 
     # dataset-dir/nam-output/checkpoint-dir are required but may arrive via --config.
     _missing = [n for n in ("dataset_dir", "nam_output", "checkpoint_dir")
@@ -746,18 +760,89 @@ def main():
         # ------------------------------------------------------------------
         if not args.skip_train:
             section("STEP 3 / 3 — Training", fh)
+
+            # ------------------------------------------------------------------
+            # THE TRAINING BUDGET IS A DERIVED QUANTITY, AND IT WAS INVISIBLE.
+            #
+            # ParamDataset has len() = n_perms * repeats, and every item is a fresh random crop. So:
+            #
+            #     total gradient steps = epochs * n_perms * repeats * (1 - val_split) / batch_size
+            #
+            # It depends on n_perms. Which means CHANGING THE KNOB GRID SILENTLY CHANGES HOW LONG THE
+            # MODEL TRAINS, and nobody was watching. Two ways that already bit:
+            #
+            #   - Regridding the Big Muff from 14x9=126 to 12x5=60 HALVED its budget (24,300 steps ->
+            #     11,700). The resulting model would have looked worse and the regrid would have been
+            #     blamed, inverting the truth.
+            #   - repeats=30 was copied into every config, so the budget is a side-effect of how many
+            #     knobs a circuit happens to have: the Big Muff got ~11.7k steps and the JCM800
+            #     hot-rod (9x6x6x6 = 1944 perms) got ~369k. A 30x spread, chosen by nobody.
+            #
+            # So: derive it, print it, and let a config ask for a budget directly (target-steps)
+            # rather than back into one via repeats.
+            # ------------------------------------------------------------------
+            n_perms, audio_s, sr = 0, 0.0, 48000
+            try:
+                with open(Path(dataset_dir) / "params.csv") as f:
+                    n_perms = sum(1 for _ in csv.DictReader(f))
+                dcfg = json.loads((Path(dataset_dir) / "config.json").read_text())
+                audio_s = float(dcfg.get("input", {}).get("duration_s") or 0.0)
+                sr = int(dcfg.get("input", {}).get("samplerate") or 48000)
+            except Exception:
+                pass
+
+            repeats, epochs = int(args.repeats), int(args.epochs)
+
+            if args.target_steps and n_perms and audio_s:
+                # ---- repeats is DERIVED FROM THE DATA, not chosen ----
+                # Each item is a random crop_len crop of audio_s seconds. Drawing R crops per
+                # permutation per epoch covers, in expectation, 1 - (1 - crop/audio)^R of that
+                # permutation's audio UNIQUELY. R = audio/crop -- one crop per crop-length -- gives
+                # ~63%, and is the natural scale-free choice. The shipped repeats=30 gave only 27% of
+                # a 94 s sweep per epoch: the model saw a quarter of its own data each pass.
+                crop_s = args.crop_len / sr
+                if not args.repeats_explicit:
+                    repeats = max(1, round(audio_s / crop_s))
+
+                # ---- epochs then falls out of the BUDGET ----
+                # Safe to derive: CosineAnnealingLR uses T_max=epochs and steps once per epoch, so
+                # the LR always anneals from lr to 0 across exactly the run. Changing `epochs` moves
+                # the schedule's granularity, never its shape.
+                steps_ep = math.ceil(n_perms * repeats * (1 - args.val_split) / args.batch_size)
+                if not args.epochs_explicit:
+                    epochs = max(1, math.ceil(args.target_steps / max(1, steps_ep)))
+
+                cov = 1.0 - (1.0 - min(1.0, crop_s / audio_s)) ** repeats
+                log(f"--target-steps {args.target_steps:,} → repeats {repeats}, epochs {epochs}", fh)
+                log(f"  repeats derived from the DATA: {audio_s:.0f}s audio ÷ {crop_s:.1f}s crop "
+                    f"= {repeats} crops/perm/epoch → ~{cov:.0%} of each permutation's audio per epoch",
+                    fh)
+
+            if n_perms:
+                items = n_perms * repeats
+                steps_ep = math.ceil(items * (1 - args.val_split) / args.batch_size)
+                total = steps_ep * epochs
+                log(f"TRAINING BUDGET: {n_perms} perms × {repeats} repeats = {items:,} items/epoch  →  "
+                    f"{steps_ep} steps/epoch × {epochs} epochs = {total:,} GRADIENT STEPS", fh)
+                log(f"  crop {args.crop_len} samples ({args.crop_len/sr:.1f}s) vs a 2483-sample "
+                    f"(52 ms) receptive field — {args.crop_len/2483:.0f}× it, so the model can see "
+                    f"its own context", fh)
+                if not args.target_steps:
+                    log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_perms). Change the knob "
+                        f"grid and this number moves silently. Prefer target-steps.", fh)
+
             train_cmd = [
                 PYTHON, TRAIN,
                 "--dataset",         dataset_dir,
                 "--output",          args.nam_output,
                 "--checkpoint-dir",  args.checkpoint_dir,
-                "--epochs",          args.epochs,
+                "--epochs",          epochs,    # derived from target-steps unless explicit
                 "--restart-period",  args.restart_period,
                 "--restart-mult",    args.restart_mult,
                 "--batch-size",      args.batch_size,
                 "--lr",              args.lr,
                 "--crop-len",        args.crop_len,
-                "--repeats",         args.repeats,
+                "--repeats",         repeats,   # derived above — may differ from args.repeats
                 "--mrstft-weight",   args.mrstft_weight,
                 "--val-split",       args.val_split,
                 "--device",          args.device,
