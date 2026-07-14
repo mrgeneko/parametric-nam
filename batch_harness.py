@@ -584,7 +584,7 @@ def combine(out_dir: Path):
 def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
                       input_wav: Path, schx: str, param_map: dict, fixed_params: str,
                       speaker: str, oversample: int, iterations: int,
-                      warmup_s: float, n_probe: int = 5):
+                      warmup_s: float, n_probe: int = 8):
     """Is the DATASET converged? The only check that can see it.
 
     Every other check we run detects DIVERGENCE -- NaN, crest, truncation, timeout -- and those
@@ -622,12 +622,18 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
         return
     import tempfile
 
-    # The extremes of each knob, plus the all-max corner: where a solver struggles.
+    # BOTH ends of every knob, plus both corners. "All knobs at max" is NOT reliably the stiff
+    # setting: the Boss DS-1's Dist pot is ReverseLinear, so all-max is MINIMUM drive -- and its
+    # truncation error is 1.9e-02 at the DEFAULTS and 3.3e-04 at all-max, i.e. 57x worse in the
+    # direction we would not have looked. Probe both ends and let the measurement decide.
     picks = []
     for k in knobs:
-        hi = max(p[k] for p in perms)
-        picks.append(max((p for p in perms if p[k] == hi), key=lambda p: sum(p.values())))
-    picks.append(max(perms, key=lambda p: sum(p.values())))
+        lo, hi = min(p[k] for p in perms), max(p[k] for p in perms)
+        for v in (lo, hi):
+            picks.append(min((p for p in perms if p[k] == v),
+                             key=lambda p: abs(sum(p.values()) - sum(perms[0].values()))))
+    picks.append(max(perms, key=lambda p: sum(p.values())))   # all-max corner
+    picks.append(min(perms, key=lambda p: sum(p.values())))   # all-min corner
     seen, uniq = set(), []
     for p in picks:
         key = tuple(sorted(p.items()))
