@@ -499,17 +499,39 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         ]
 
     if backend == "ngspice":
+        # ESCALATE BEYOND THE DEFAULTS, and never repeat one.
+        #
+        # The ladder used to be written as `max(up, 2), max(up, 4)` etc., which silently COLLAPSES for
+        # any circuit whose circuit_defaults.toml already applies the fixes. The Boss DS-1 ships with
+        # input_upsample=4, method=gear AND diode_cjo -- so every rung came out IDENTICAL, and a
+        # failing permutation was retried five times with exactly the same settings. A retry ladder
+        # that does not escalate is just a slower failure.
+        #
+        # NOTE `conv` is a DICT here ({"diode_cjo": "100p", ...}), parsed from the k=v,k=v CLI string
+        # long before this point -- it is NOT the string it looks like. Treating it as one raised
+        # TypeError and took the WHOLE ngspice BACKEND down: every run died building the ladder,
+        # before a single permutation was rendered.
         base = dict(ng or {})
-        up = int(base.get("input_upsample", 1) or 1)
         out = [dict(base)]
-        for u in (max(up, 2), max(up, 4)):
-            r = dict(base); r["input_upsample"] = u
-            out.append(r)
-        r = dict(out[-1]); r["method"] = "gear"          # the DS-1's fix
-        out.append(r)
-        r = dict(r)                                      # + the MT-2's fix
-        r["conv"] = ",".join(x for x in (base.get("conv"), "diode_cjo=100p") if x)
-        out.append(r)
+
+        def escalate(**kw):
+            r = dict(out[-1])
+            r.update(kw)
+            if r != out[-1]:          # only if it actually changes something
+                out.append(r)
+
+        up = int(base.get("input_upsample", 1) or 1)
+        escalate(input_upsample=up * 2)          # BEYOND the default, not up to it
+        escalate(input_upsample=up * 4)
+
+        if base.get("method") != "gear":         # the DS-1's fix
+            escalate(method="gear")
+
+        c = dict(base.get("conv") or {})         # the MT-2's fix
+        if "diode_cjo" not in c:
+            c["diode_cjo"] = "100p"
+            escalate(conv=c)
+
         return out
 
     if backend == "cpp":
