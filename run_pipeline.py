@@ -10,11 +10,11 @@ to wipe and regenerate, or --skip-*/--only-* for manual control.
 
 Example — full Dumble clean pipeline:
     python run_pipeline.py \\
-        --dataset-dir /Volumes/DATA/work/dumble_clean \\
-        --nam-output   /Volumes/DATA/work/dumble_clean.param.nam \\
-        --checkpoint-dir /Volumes/DATA/work/dumble_clean_ckpt \\
+        --dataset-dir ~/work/tmp/dumble_clean \\
+        --nam-output   ~/work/tmp/dumble_clean.param.nam \\
+        --checkpoint-dir ~/work/tmp/dumble_clean_ckpt \\
         --backend livespice \\
-        --schx "$HOME/work/LiveSPICE-Amp-Collection/amps/Dumble/Overdrive Special Preamp.schx" \\
+        --schx "$HOME/work/parametric-devices/amps/Dumble Overdrive Special Preamp.schx" \\
         --knobs volume,mid,treble,middle,bass,clean_master \\
         --range volume=0.1,0.3,0.5,0.7,0.9 \\
         --range mid=0.0,1.0 \\
@@ -256,14 +256,41 @@ def hw_info():
     return cpu, os.cpu_count(), gpu
 
 
+def portable(p) -> str:
+    """Rewrite an absolute path into an env-anchored one, so a generated reproduce.sh RUNS.
+
+    They did not. Every archived reproduce.sh baked in the absolute paths of whatever machine made
+    it -- `REPO="/home/USER/work/..."`, `INPUT="/Volumes/DATA/work/sweep120s.wav"` -- so a script
+    whose entire purpose is reproducibility could not be run anywhere but the one box that wrote it,
+    and in one case pointed at an input file that has since been PURGED for licensing.
+
+    Anchor to the sibling repos and $HOME instead, each overridable, so the script works on any
+    machine with the standard layout and on machines without it too.
+    """
+    s = str(p)
+    for base, var in (
+        (HERE,                              "${PARAMETRIC_NAM:-$HOME/work/parametric-nam}"),
+        (HERE.parent / "parametric-devices", "${PARAMETRIC_DEVICES:-$HOME/work/parametric-devices}"),
+        (HERE.parent / "sweep-files",        "${SWEEP_FILES:-$HOME/work/sweep-files}"),
+        (HERE.parent / "hotspice",           "${HOTSPICE:-$HOME/work/hotspice}"),
+        (Path.home(),                        "$HOME"),
+    ):
+        b = str(base)
+        if s == b:
+            return var
+        if s.startswith(b + os.sep):
+            return var + s[len(b):]
+    return s
+
+
 def reproduce_command(args):
     """Reconstruct a one-shot run_pipeline.py command from parsed args."""
     c = ['HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
-         f'    --dataset-dir    "{args.dataset_dir}" \\',
-         f'    --nam-output     "{args.nam_output}" \\',
-         f'    --checkpoint-dir "{args.checkpoint_dir}" \\',
+         f'    --dataset-dir    "{portable(args.dataset_dir)}" \\',
+         f'    --nam-output     "{portable(args.nam_output)}" \\',
+         f'    --checkpoint-dir "{portable(args.checkpoint_dir)}" \\',
          f'    --backend {args.backend} \\']
-    if args.schx:          c.append(f'    --schx "{args.schx}" \\')
+    if args.schx:          c.append(f'    --schx "{portable(args.schx)}" \\')
     if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
     if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
     if args.oversample != 2: c.append(f'    --oversample {args.oversample} \\')
@@ -284,7 +311,7 @@ def reproduce_command(args):
     if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
     if getattr(args, "defaults", None): c.append(f'    --defaults "{args.defaults}" \\')
     if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
-    if args.input:         c.append(f'    --input "{args.input}" \\')
+    if args.input:         c.append(f'    --input "{portable(args.input)}" \\')
     if args.widths:        c.append(f'    --widths {args.widths} \\')
     if not args.mmap:      c.append('    --no-mmap \\')
     epochs_part = f'--epochs {args.epochs}'
@@ -429,7 +456,7 @@ Run `./reproduce.sh`.
     repro = f"""#!/usr/bin/env bash
 # Replicate this model (generate dataset + train). Auto-generated.
 set -euo pipefail
-REPO="{HERE}"
+REPO="${PARAMETRIC_NAM:-$HOME/work/parametric-nam}"
 PY="$REPO/.venv/bin/python"
 cd "$REPO"
 
