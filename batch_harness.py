@@ -376,6 +376,43 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
     return Result(idx, dsp, proc_t, True, " ".join(warn), rms, peak)
 
 
+def _filesource(raw_wav: Path, up: int, cache_dir: Path) -> str:
+    """Write (and cache) the XSPICE filesource for a given input_upsample factor.
+
+    THE FILESOURCE MUST BE A FUNCTION OF input_upsample, and it was not.
+
+    It used to be built ONCE, up front, with the upsample factor baked in -- and `ng` never carried
+    the factor at all, so _run_ngspice always read the same prebuilt file. Meanwhile _rungs
+    *escalated* input_upsample on every retry. The key it set was never read.
+
+    So THE RETRY LADDER'S input_upsample ESCALATION WAS A COMPLETE NO-OP: rungs 1 and 2 re-rendered
+    byte-identically to rung 0 and failed the same way, while the log cheerfully announced
+    "escalating to rung 1 ... input_upsample=2". The Boss DS-1's entire convergence story rests on
+    input_upsample. The one lever that fixes it was disconnected.
+
+    Upsampling matters and is genuinely double-edged (see ngspice/circuit_defaults.toml): ngspice's
+    filesource has no interpolation mode, so it linearly interpolates the (t, v) pairs at whatever
+    internal step it needs. Linear interpolation of near-Nyquist content is a crude reconstruction
+    that ACCIDENTALLY low-passes it. Proper bandlimited upsampling removes that accidental damping and
+    feeds the solver the true, full-amplitude high-frequency content -- which fixes some knob settings
+    and breaks others.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fs = cache_dir / f"fsrc_up{up}.txt"
+    if fs.exists():
+        return str(fs)
+    x, sr = sf.read(str(raw_wav))
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    if up > 1:
+        from scipy.signal import resample_poly
+        x = resample_poly(x, up, 1).astype(np.float32)
+        sr = sr * up
+    t = np.arange(len(x)) / sr
+    np.savetxt(str(fs), np.column_stack([t, x.astype(np.float32)]), fmt="%.8f %.6f")
+    return str(fs)
+
+
 def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                  param_map, fixed_params, ng):
     """Translate netlist (baked pots) -> ngspice -> resample to 48k -> out_wav.
@@ -397,7 +434,12 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
     dur = expected_frames / 48000.0
     csv_path, cir_path = path.with_suffix(".csv"), path.with_suffix(".cir")
     over = int(ng.get("oversample", 1) or 1)
-    cir_path.write_text(X.translate(nl, pots=pots, input_pwl=ng["input"], dur=dur,
+    # the filesource is a FUNCTION of input_upsample, so a rung that raises it actually
+    # changes the input the solver sees. It used not to -- see _filesource.
+    pwl = (_filesource(Path(ng["input_raw"]), int(ng.get("input_upsample", 1) or 1),
+                       Path(ng["fsrc_dir"]))
+           if ng.get("input_raw") else ng["input"])
+    cir_path.write_text(X.translate(nl, pots=pots, input_pwl=pwl, dur=dur,
                                     csv=str(csv_path), koren=ng.get("koren", False),
                                     ot_damp=ng.get("ot_damp", "47k"), ot_snub=ng.get("ot_snub", "10n"),
                                     nfb_comp=ng.get("nfb_comp"), input_mode="filesource",
@@ -755,7 +797,8 @@ def input_provenance(wav: Path) -> dict:
 def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                       param_map: dict, fixed_params: str, speaker: str,
                       target: float, probe_s: float = 8.0, n_windows: int = 4,
-                      iterations: int = 256, ref_os: int = 32) -> int:
+                      iterations: int = 256, ref_os: int = 32,
+                      backend: str = "livespice", ng: dict = None) -> int:
     """MEASURE the oversample this circuit needs. Do not guess it.
 
     oversample is a DISCRETISATION choice, and it has an error: BDF2's truncation, the gap between
@@ -793,6 +836,12 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     demands: that circuit is not smooth, and oversampling will not fix its dataset.
     """
     import tempfile
+
+    # ngspice is an adaptive-timestep offline solver: a render costs ~10-100x a livespice one.
+    # Probe shorter and against a nearer reference, or `auto` costs more than the dataset.
+    if backend == "ngspice":
+        probe_s = min(probe_s, 4.0)
+        ref_os = min(ref_os, 8)
 
     picks = []
     for k in knobs:
@@ -852,6 +901,24 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
 
         cache = {}
 
+        # THE MEASUREMENT IS BACKEND-AGNOSTIC; ONLY THE RENDERER DIFFERS.
+        #
+        # oversample means something different on each backend, but in both cases it is a knob whose
+        # error is measurable by exactly this procedure -- render at os, render finer, compare:
+        #
+        #   livespice  a FIXED timestep. oversample sets it directly, so oversample controls BDF2
+        #              TRUNCATION: the gap between the simulated circuit and the real one.
+        #
+        #   ngspice    an ADAPTIVE timestep -- so truncation is handled by the solver's own LTE
+        #              control, and this is where I originally (and wrongly) concluded that
+        #              oversample did not matter here. It does, for a different reason: it sets the
+        #              .tran OUTPUT rate ((1/48kHz)/oversample), and the result is FIR-decimated back
+        #              to 48 kHz. So oversample controls ALIASING. A distorting amp emits harmonics
+        #              far above 24 kHz, and at oversample=1 there is NO anti-aliasing at all -- every
+        #              one of them folds straight into the audio band.
+        #
+        # Same shape of error, same way to measure it. Refusing `auto` for ngspice was an artificial
+        # limit created by hardcoding LIVESPICE_CLI here, not by anything about ngspice.
         def render(clip, p, os_):
             key = (str(clip), tuple(sorted(p.items())), os_)
             if key in cache:
@@ -859,16 +926,36 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
             swept = fmt_params(p, param_map)
             allp = f"{fixed_params},{swept}" if fixed_params else swept
             w = td / f"o{os_}_{abs(hash(key))}.wav"
-            a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
-                 "--circuit", schx, "--params", allp,
-                 "--oversample", str(os_), "--iterations", str(iterations)]
-            if speaker:
-                a += ["--speaker", speaker]
-            r = subprocess.run(a, capture_output=True, text=True)
             v = None
-            if r.returncode == 0 and w.exists():
-                d, _ = sf.read(str(w))
-                v = np.asarray(d, dtype=np.float64)
+
+            if backend == "ngspice":
+                # THE PROBE MUST RENDER THE SAME WAY THE REAL RUN DOES. It did not: it wrote the clip
+                # straight out as a filesource, ignoring input_upsample -- so it measured a circuit
+                # fed a DIFFERENT input from the one the dataset would use, chose an oversample on
+                # that basis, and the real render then diverged at the value it had picked.
+                nlen = int(sf.info(str(clip)).frames)
+                ngp = dict(ng or {})
+                ngp.update({
+                    "input_raw": str(clip),
+                    "fsrc_dir": str(td / f"fs_{abs(hash(str(clip)))}"),
+                    "oversample": os_,
+                })
+                fail = _run_ngspice(0, dict(p), td / f"ng_{abs(hash(key))}", w, nlen,
+                                    600, param_map, fixed_params, ngp)
+                if fail is None and w.exists():
+                    d, _ = sf.read(str(w))
+                    v = np.asarray(d, dtype=np.float64)
+            else:
+                a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
+                     "--circuit", schx, "--params", allp,
+                     "--oversample", str(os_), "--iterations", str(iterations)]
+                if speaker:
+                    a += ["--speaker", speaker]
+                r = subprocess.run(a, capture_output=True, text=True)
+                if r.returncode == 0 and w.exists():
+                    d, _ = sf.read(str(w))
+                    v = np.asarray(d, dtype=np.float64)
+
             cache[key] = v
             return v
 
@@ -1360,15 +1447,21 @@ def main():
     # --oversample auto: MEASURE it, before anything downstream depends on the number.
     # A guessed oversample is a guessed target, and the model can only ever be as right as
     # the target it is fitted to. See choose_oversample() and docs/convergence.md.
-    if str(args.oversample).strip().lower() == "auto":
-        if args.backend != "livespice":
-            ap.error("--oversample auto requires --backend livespice "
-                     "(it measures BDF2 truncation by re-rendering at 2x the timestep; "
-                     "ngspice picks its own adaptive step, and the cpp backend inherits "
-                     "whatever oversample the emitter was built with).")
-        args.oversample = choose_oversample(
-            schx, knobs, perms, in_wav, param_map, args.fixed_params,
-            args.speaker, args.trunc_target)
+    _auto_os = str(args.oversample).strip().lower() == "auto"
+    if _auto_os:
+        if args.backend == "cpp":
+            ap.error("--oversample auto does not apply to --backend cpp: the emitted C++ inherits "
+                     "whatever oversample it was BUILT with. Re-emit it, or measure on the "
+                     "livespice/ngspice backend and rebuild.")
+        if args.backend == "livespice":
+            args.oversample = choose_oversample(
+                schx, knobs, perms, in_wav, param_map, args.fixed_params,
+                args.speaker, args.trunc_target, backend="livespice")
+            _auto_os = False
+        else:
+            # ngspice needs `ng` (netlist + filesource + convergence settings), which is not built
+            # yet. Hold a placeholder and resolve below, once it exists.
+            args.oversample = 1
     else:
         try:
             args.oversample = int(args.oversample)
@@ -1412,7 +1505,11 @@ def main():
             vals = values_per_knob[k]
             print(f"  {k}: {vals}")
     print(f"Workers:      {args.workers}")
-    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10 × os/2, oversample={args.oversample})")
+    # Do not print the placeholder as if it were the answer. On ngspice, `auto` cannot resolve until
+    # the netlist and filesource exist (they need out_dir, which a dry run must not create), so it is
+    # measured at run time -- unlike livespice, which resolves before this line.
+    _os_disp = "auto (measured after the netlist dump)" if _auto_os else args.oversample
+    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10 × os/2, oversample={_os_disp})")
     print(f"Disk est:     {fmt_bytes(total_bytes)} needed  ({fmt_bytes(avail_bytes)} free on target)")
     print()
 
@@ -1482,7 +1579,18 @@ def main():
         np.savetxt(str(fsrc), np.column_stack([_t, insig]), fmt="%.8f %.6f")
         ng = {"netlist": str(netlist_path), "input": str(fsrc), "koren": args.koren,
               "ot_damp": args.ot_damp, "ot_snub": args.ot_snub, "nfb_comp": args.nfb_comp,
-              "oversample": args.oversample, "conv": conv, "method": _method}
+              "oversample": args.oversample, "conv": conv, "method": _method,
+              # the RAW input + the factor, so a retry rung that raises input_upsample actually
+              # rebuilds the filesource instead of silently reusing the old one
+              "input_raw": str(in_wav), "input_upsample": _input_up,
+              "fsrc_dir": str(out_dir / "fsrc")}
+        if _auto_os:
+            args.oversample = choose_oversample(
+                schx, knobs, perms, in_wav, param_map, args.fixed_params,
+                args.speaker, args.trunc_target, backend="ngspice", ng=ng)
+            ng["oversample"] = args.oversample
+            timeout_s = max(600, int(audio_frames / sr * 120 * max(1, args.oversample / 2)))
+
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
               f"tubes, method={_method}, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
               f"{', input_upsample='+str(_input_up)+'x' if _input_up > 1 else ''}"
