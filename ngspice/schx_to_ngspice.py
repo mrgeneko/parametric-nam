@@ -10,8 +10,12 @@ an ngspice `.cir`. Device models are ported from LiveSPICE's own equations:
   * Pentode (Koren):          E1=Vpk/Kp*softplus(Kp*(1/Mu+Vgk/sqrt(Kvb+Vg2k^2)))
                               ip=(Vpk>0)?E1^Ex/Kg1*atan(Vpk/Kvb):0 ; ig2=E1^Ex/Kg2
   * Potentiometer: baked to two resistors at the wiper position.
-  * CenterTapTransformer: coupled-inductor OT (approx; LiveSPICE's is ideal —
-    see ngspice/README fidelity caveats).
+  * CenterTapTransformer: IDEAL, via VCVS/CCCS -- deliberately identical to
+    LiveSPICE's model, so the two backends cannot disagree about the OT. It has
+    no magnetizing inductance and therefore PASSES DC, which real iron cannot.
+    Circuits needing that physics model it explicitly, as a shunt Inductor "Lm"
+    across the secondary in the .schx, which both backends emit identically.
+    Do not "fix" it here alone -- that would split the backends.
 
 Not a real-time backend: ngspice adaptive-timestep offline generation, for the
 stiff/high-gain circuits where LiveSPICE's fixed step diverges.
