@@ -55,7 +55,7 @@ NO_NFB = os.environ.get('NO_NFB') == '1'
 PREAMP_ONLY = os.environ.get('PREAMP_ONLY') == '1'
 FLIP_SEC = os.environ.get('FLIP_SEC') == '1'
 
-# ---- component list mirrors amps/gen_evh5150_full.py in the spice-circuits repo ----
+# ---- component list mirrors amps/gen_evh5150_full.py in the parametric-devices repo ----
 def gstage(name, gin, gres, gleak, pr, ck, cc, bp, pout, cpl):
     g = 'n%s_g' % name; p = 'n%s_p' % name; k = 'n%s_k' % name
     e = [('Rg%s' % name, 'R', {'Resistance': gres}, {'A': gin, 'B': g}),

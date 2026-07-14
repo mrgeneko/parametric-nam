@@ -37,7 +37,7 @@ input_upsample = 4
 # what a real guitar signal never does and what was stressing the solver.
 # Switching the input to a version with that splice removed
 # (sweep45s.wav -- kept in a separate, private, non-redistributable repo
-# alongside sweep60_composite.wav; NOT in spice-to-nam) is what actually
+# alongside sweep60_composite.wav; NOT in parametric-nam) is what actually
 # achieved 121/121.
 #
 # input_upsample is real and worth keeping, but it's a genuinely double-edged

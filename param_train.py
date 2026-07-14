@@ -66,7 +66,7 @@ def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
     if v > K_PARAM_SCHEMA_VERSION:
         raise SystemExit(
             f"{source}: parametric schema_version {v} is newer than this build supports "
-            f"(max {K_PARAM_SCHEMA_VERSION}). Upgrade spice-to-nam — proceeding would "
+            f"(max {K_PARAM_SCHEMA_VERSION}). Upgrade parametric-nam — proceeding would "
             f"silently misread the model and produce wrong audio.")
     head_mode = par.get("head_mode", "residual")
     if head_mode != "skip":

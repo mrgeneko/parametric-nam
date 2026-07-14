@@ -1,4 +1,4 @@
-# Runtime dependencies for the spice-to-nam training toolchain.
+# Runtime dependencies for the parametric-nam training toolchain.
 # Pinned to the versions this toolchain is developed and tested against (Python 3.13).
 #
 #   pip install -r requirements.txt

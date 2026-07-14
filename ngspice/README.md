@@ -23,7 +23,7 @@ deadline). It converges on the same circuit with **no oversample hack**.
 ## Result (5150 Lead full)
 
 `gen_evh5150_ngspice.py` translates the LiveSPICE 5150 Lead full circuit
-(`spice-circuits/amps/gen_evh5150_full.py`) to an ngspice netlist and runs it:
+(`parametric-devices/amps/gen_evh5150_full.py`) to an ngspice netlist and runs it:
 
 | | LiveSPICE (fixed step) | ngspice (adaptive) |
 |---|---|---|

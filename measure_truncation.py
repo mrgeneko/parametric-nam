@@ -56,8 +56,8 @@ import soundfile as sf
 
 from batch_harness import LIVESPICE_CLI
 
-REGISTRY = Path(_os.environ.get("SPICE_CIRCUITS")
-                or Path(__file__).resolve().parent.parent / "spice-circuits") / "devices.toml"
+REGISTRY = Path(_os.environ.get("PARAMETRIC_DEVICES") or _os.environ.get("SPICE_CIRCUITS")
+                or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
 
 
 def esr(a: np.ndarray, b: np.ndarray, skip_frac: float = 0.1) -> float:

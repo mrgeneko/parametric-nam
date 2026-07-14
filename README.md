@@ -1,4 +1,4 @@
-# spice-to-nam
+# parametric-nam
 
 Toolchain for converting SPICE circuit schematics (`.schx`) into **parametric**
 Neural Amp Modeler (NAM) files. The resulting `.param.nam` captures a circuit's
@@ -19,20 +19,20 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 mkdir -p ~/work && cd ~/work
 
 # All of these are PRIVATE repos — use `gh` (or SSH), not a plain https clone.
-gh repo clone mrgeneko/spice-to-nam        # this repo — the toolchain
-gh repo clone mrgeneko/spice-circuits      # the .schx library + devices.toml registry
-gh repo clone mrgeneko/livespice-emitter   # THE ORACLE (livespice_cli) lives here
+gh repo clone mrgeneko/parametric-nam        # this repo — the toolchain
+gh repo clone mrgeneko/parametric-devices      # the .schx library + devices.toml registry
+gh repo clone mrgeneko/hotspice   # THE ORACLE (livespice_cli) lives here
 gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README)
-gh repo clone mrgeneko/spice-nam-models    # where trained runs are archived
+gh repo clone mrgeneko/parametric-nam-models    # where trained runs are archived
 
-cd spice-to-nam && ./setup.sh && . .venv/bin/activate
+cd parametric-nam && ./setup.sh && . .venv/bin/activate
 ```
 
-`setup.sh` builds the oracle from `../livespice-emitter/oracle` (needs the .NET SDK; `--no-cli` to
+`setup.sh` builds the oracle from `../hotspice/oracle` (needs the .NET SDK; `--no-cli` to
 skip) and creates the venv. If your checkouts are not siblings, point at them explicitly:
 
 ```bash
-export LIVESPICE_CLI=/path/to/livespice-emitter/oracle/publish/livespice_cli
+export LIVESPICE_CLI=/path/to/hotspice/oracle/publish/livespice_cli
 ```
 
 ### Train a device
@@ -446,7 +446,7 @@ For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
 
 ### .NET SDK + the oracle (for dataset generation)
 
-`livespice_cli` — **the oracle** — lives in **`livespice-emitter/oracle/`**, not here. This repo
+`livespice_cli` — **the oracle** — lives in **`hotspice/oracle/`**, not here. This repo
 used to carry its own near-copy, and the two drifted, as duplicates do: a fix making an unknown
 `--params` name a hard error (instead of silently rendering at the defaults, so every "swept"
 permutation comes out **identical** and the trainer learns the knob does nothing) landed in one
@@ -454,13 +454,13 @@ copy and not the other. Two tools built from one schematic, disagreeing about wh
 knobs *are*. There is now exactly one.
 
 ```bash
-git clone https://github.com/mrgeneko/livespice-emitter   # as a SIBLING of this repo
-cd livespice-emitter/oracle && ./build.sh
+git clone https://github.com/mrgeneko/hotspice   # as a SIBLING of this repo
+cd hotspice/oracle && ./build.sh
 ```
 (.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS.)
 
 `batch_harness.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
-`../livespice-emitter/oracle/publish/livespice_cli`. Set the env var if your checkout lives
+`../hotspice/oracle/publish/livespice_cli`. Set the env var if your checkout lives
 elsewhere.
 
 The oracle builds against **pristine upstream LiveSPICE**, never our fork — an oracle built from
@@ -507,7 +507,7 @@ Not required for training or Python inference — only for C++ inference validat
 This toolchain builds on several open-source projects and published models:
 
 - **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
-  circuit simulator `livespice_cli` builds against (pristine, in `livespice-emitter/extern/LiveSPICE-oracle`),
+  circuit simulator `livespice_cli` builds against (pristine, in `hotspice/extern/LiveSPICE-oracle`),
   and the reference for the tube-model equations. The ngspice backend's tube
   subcircuits are **ported from LiveSPICE's `Triode.cs` / `Pentode.cs`**.
 - **[ngspice](https://ngspice.sourceforge.io/)** (BSD) — the adaptive-timestep SPICE

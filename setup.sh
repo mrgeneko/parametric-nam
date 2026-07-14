@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-shot dev setup for spice-to-nam. Idempotent — safe to re-run.
+# One-shot dev setup for parametric-nam. Idempotent — safe to re-run.
 #
 #   ./setup.sh                # full setup
 #   ./setup.sh --no-cli       # skip the oracle build/check (Python-only work)
@@ -10,7 +10,7 @@
 #   1. locate (and if needed build) THE ORACLE — livespice_cli
 #   2. create .venv and install pinned Python deps
 #
-# THE ORACLE LIVES IN livespice-emitter, NOT HERE.
+# THE ORACLE LIVES IN hotspice, NOT HERE.
 # This repo used to vendor its own livespice_cli plus a patched LiveSPICE submodule. The copy
 # drifted from the emitter's: a fix making an unknown --params name a hard error (instead of
 # silently rendering at the defaults, so every "swept" permutation comes out IDENTICAL and the
@@ -26,7 +26,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-EMITTER="${LIVESPICE_EMITTER:-$REPO/../livespice-emitter}"
+EMITTER="${HOTSPICE:-${LIVESPICE_EMITTER:-$REPO/../hotspice}}"   # LIVESPICE_EMITTER: old name, still honoured
 BUILD_CLI=1
 for a in "$@"; do [ "$a" = "--no-cli" ] && BUILD_CLI=0; done
 
@@ -43,10 +43,10 @@ if [ "$BUILD_CLI" -eq 1 ]; then
     echo "    using \$LIVESPICE_CLI: $LIVESPICE_CLI"
   else
     if [ ! -d "$EMITTER/oracle" ]; then
-      echo "ERROR: the oracle lives in livespice-emitter, which was not found at:" >&2
+      echo "ERROR: the oracle lives in hotspice, which was not found at:" >&2
       echo "         $EMITTER" >&2
       echo "       Clone it as a SIBLING of this repo:" >&2
-      echo "         git clone https://github.com/mrgeneko/livespice-emitter" >&2
+      echo "         git clone https://github.com/mrgeneko/hotspice" >&2
       echo "       ...or point \$LIVESPICE_EMITTER / \$LIVESPICE_CLI at your checkout." >&2
       exit 1
     fi

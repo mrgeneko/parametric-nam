@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Package a finished (or killed) training run into a release bundle, VALIDATE the
-# .nam payloads, and hand off to spice-nam-models/add-run.sh.
+# .nam payloads, and hand off to parametric-nam-models/add-run.sh.
 #
 # Nothing about the model shape is hardcoded. Tiers, widths, and the whole training
 # config are DERIVED from the run itself:
@@ -27,8 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN="${RUN:-$HOME/work/tmp/bigmuff_v2_skip_causal}"      # <RUN>.best_<tier>.param.nam + <RUN>.log
 CKPT="${CKPT:-${RUN}_ckpt}"                              # best.pt, best_<tier>.pt, metrics.csv
 DS="${DS:-$HOME/work/tmp/bigmuff_v1_66_5_ds}"
-SCHX="${SCHX:-$HOME/work/spice-circuits/pedals/Big Muff Pi V1 (66#5).schx}"
-MODELS="${MODELS:-$HOME/work/spice-nam-models}"
+SCHX="${SCHX:-$HOME/work/parametric-devices/pedals/Big Muff Pi V1 (66#5).schx}"
+MODELS="${MODELS:-$HOME/work/parametric-nam-models}"
 CATEGORY="${CATEGORY:-pedals}"
 CIRCUIT="${CIRCUIT:-electro-harmonix-big-muff-pi-v1}"
 PREFIX="${PREFIX:-bigmuff}"
@@ -356,8 +356,8 @@ One SlimmableContainer holding **$CH_SUM** tiers, FiLM-conditioned on ${#KNOBS[@
 $supersede_section
 
 ## Provenance
-- **Schematic:** \`spice-circuits @ $SCHX_REV\` — \`$(basename "$SCHX")\`.
-- **Training code:** \`spice-to-nam @ $CODE_REV\`.
+- **Schematic:** \`parametric-devices @ $SCHX_REV\` — \`$(basename "$SCHX")\`.
+- **Training code:** \`parametric-nam @ $CODE_REV\`.
 - **Backend:** \`$BACKEND\`, \`--oversample $OVERSAMPLE\`.
 
 ## Circuit / knobs
@@ -425,15 +425,15 @@ cat > "$STAGE/reproduce.sh" <<EOF
 # Reproduce $CIRCUIT_NAME — ${NTIERS}-tier slimmable [$WIDTH_LIST], skip + causal head.
 #
 # Provenance (see MANIFEST.md):
-#   schematic : spice-circuits @ $SCHX_REV  ($(basename "$SCHX"))
-#   code      : spice-to-nam  @ $CODE_REV
+#   schematic : parametric-devices @ $SCHX_REV  ($(basename "$SCHX"))
+#   code      : parametric-nam  @ $CODE_REV
 #   backend   : $BACKEND, --oversample $OVERSAMPLE
 #
 $( [ -n "$STOPPED" ] && echo "# The published bundle stopped at epoch $LAST/$PLANNED; this runs the full schedule." )
 # Expect roughly: $esr_inline
 set -euo pipefail
 
-SPICE_TO_NAM="\${SPICE_TO_NAM:-\$HOME/work/spice-to-nam}"
+SPICE_TO_NAM="\${SPICE_TO_NAM:-\$HOME/work/parametric-nam}"
 OUT="\${OUT:-\$HOME/work/tmp/${PREFIX}_rerun}"
 cd "\$SPICE_TO_NAM"
 

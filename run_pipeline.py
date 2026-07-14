@@ -404,7 +404,7 @@ Full per-epoch ESR history: `metrics.csv`.
 
 ## Environment
 - Python {py}, PyTorch {tv} (HIP {hip})
-- Repo `spice-to-nam` @ {repo_rev}
+- Repo `parametric-nam` @ {repo_rev}
 - Schematic repo @ {schx_repo_rev}
 - Schematic: `{args.schx.name if args.schx else '(cpp backend)'}`
 - Input: `{args.input}`

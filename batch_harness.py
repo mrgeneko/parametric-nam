@@ -46,31 +46,31 @@ HARNESS = HERE / "harness/build_o3/harness"
 def _find_livespice_cli() -> Path:
     """Resolve THE oracle -- there must be exactly one.
 
-    This repo used to carry its own livespice_cli, a near-copy of livespice-emitter's. The two
+    This repo used to carry its own livespice_cli, a near-copy of hotspice's. The two
     drifted, as duplicates do: a fix that makes an unknown --params name a hard error (rather than
     silently rendering at the defaults, so that every "swept" permutation comes out IDENTICAL and
     the trainer learns the knob does nothing) landed in one copy and not the other. Two tools built
     from one schematic, disagreeing about what the device's knobs ARE -- the same failure the
     emitter's ParamExtractor had.
 
-    So there is now one, in livespice-emitter/oracle/, where the discipline is written down: it
+    So there is now one, in hotspice/oracle/, where the discipline is written down: it
     builds against PRISTINE LiveSPICE, never our fork, because an oracle built from the thing under
     test is not an oracle.
 
-    Order: $LIVESPICE_CLI, then a sibling livespice-emitter checkout, then the local legacy copy.
+    Order: $LIVESPICE_CLI, then a sibling hotspice checkout, then the local legacy copy.
     """
     env = os.environ.get("LIVESPICE_CLI")
     if env:
         return Path(env)
 
-    oracle = HERE.parent / "livespice-emitter" / "oracle" / "publish" / "livespice_cli"
+    oracle = HERE.parent / "hotspice" / "oracle" / "publish" / "livespice_cli"
     if oracle.exists():
         return oracle
 
     legacy = HERE / "livespice_cli/publish/livespice_cli"
     if legacy.exists():
         print("warning: using this repo's legacy livespice_cli. The oracle lives in "
-              "livespice-emitter/oracle -- build it there, or set $LIVESPICE_CLI.", file=sys.stderr)
+              "hotspice/oracle -- build it there, or set $LIVESPICE_CLI.", file=sys.stderr)
         return legacy
 
     return oracle  # report the path we WANT when it is missing
@@ -136,7 +136,7 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     """Refuse a backend that cannot faithfully render this device.
 
     Which backends work is a fact about the SIMULATOR, not the circuit, so it cannot be derived from
-    a .schx. It is declared in spice-circuits/backends.toml and enforced here. A device with no entry
+    a .schx. It is declared in parametric-devices/backends.toml and enforced here. A device with no entry
     is assumed valid -- absence of evidence, not a claim.
 
     Two kinds of failure, and they deserve different treatment:
@@ -157,8 +157,8 @@ def check_backend(schx: Path, backend: str, ap) -> None:
               APPROXIMATION of the pedal on every backend, and why the schematic itself is worth
               distrusting.)
     """
-    reg = Path(os.environ.get("SPICE_CIRCUITS")
-               or Path(__file__).resolve().parent.parent / "spice-circuits") / "devices.toml"
+    reg = Path(os.environ.get("PARAMETRIC_DEVICES") or os.environ.get("SPICE_CIRCUITS")
+               or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
     if not reg.exists():
         return                                    # no registry reachable: nothing to check against
     try:
@@ -185,7 +185,7 @@ def check_backend(schx: Path, backend: str, ap) -> None:
         f"\n\n  {dev['name']} CANNOT be rendered faithfully with --backend {backend}.\n\n"
         f"  {spec.get('reason', '(no reason recorded)')}\n\n"
         f"  Valid backend(s) for this device: {', '.join(ok) if ok else 'NONE RECORDED'}.\n"
-        f"  Declared in spice-circuits/backends.toml — fix it there, not here, if this is wrong.\n")
+        f"  Declared in parametric-devices/backends.toml — fix it there, not here, if this is wrong.\n")
 
 
 def parse_schx_controls(schx_path: str) -> dict:
@@ -473,7 +473,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
     looks: livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS and 8 is not enough for stiff circuits.
     The Ibanez TS-9 needs 45 -- at the default the SOLVER SILENTLY STOPS SHORT and hands back a
     converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
-    nothing reports it. (See livespice-emitter, which now measures the cap per circuit.)
+    nothing reports it. (See hotspice, which now measures the cap per circuit.)
     """
     if backend == "livespice":
         os_ = oversample or 2
