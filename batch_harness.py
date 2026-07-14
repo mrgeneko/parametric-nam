@@ -133,17 +133,39 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 # ---------------------------------------------------------------------------
 
 def parse_schx_controls(schx_path: str) -> dict:
-    """Return {normalized_key: exact_Name} for every Potentiometer,
-    VariableResistor, and SPDT switch in the schx."""
+    """Return {normalized_key: control_name} for every CONTROL in the schx.
+
+    A CONTROL IS NOT A COMPONENT, and a dataset must sweep controls.
+
+    A ganged pot is ONE knob with SEVERAL wiper sections, which LiveSPICE models as several
+    IPotControl components sharing a GROUP. Upstream's own VST collapses them
+    (LiveSPICEVst/SimulationProcessor.cs): a pot with no Group is its own control, named by Name;
+    pots WITH a Group become a single control named by the GROUP, whose setter writes PotValue to
+    every section. livespice_cli now resolves --params the same way.
+
+    We used to key on Name, and so swept things that are not knobs:
+
+        Dumble ODS   'Clean Master' and 'OD Master' share Group "Master" -- ONE knob, two sections.
+                     The shipped dataset swept `clean_master` and left OD Master parked at its
+                     default. On the real device those two wipers are on one shaft: that dataset
+                     covers a region of the knob space the amp CANNOT REACH, and the model was
+                     fitted to it.
+        Klon Centaur its dual-gang Gain is two 100k sections, now Group "Gain". Sweeping them
+                     independently means a 2-D grid where the device has ONE axis.
+
+    Permutations are therefore over CONTROLS: one column per knob, written to every section.
+    """
     tree = ET.parse(schx_path)
     controls = {}
     for comp in tree.getroot().iter("Component"):
         t = comp.get("_Type", "")
         if not any(x in t for x in ("Potentiometer", "VariableResistor", "SPDT")):
             continue
-        name = comp.get("Name", "")
-        key = re.sub(r'_+', '_', name.strip().lower().replace(" ", "_"))
-        controls[key] = name
+        group = (comp.get("Group") or "").strip()
+        name = (comp.get("Name") or "").strip()
+        ctrl = group or name           # <- the control
+        key = re.sub(r'_+', '_', ctrl.lower().replace(" ", "_"))
+        controls[key] = ctrl
     return controls
 
 
@@ -1071,9 +1093,14 @@ def main():
     ap.add_argument("--range",        action="append", metavar="KNOB=v1,v2,...",
                                       help="per-knob value override; repeatable (e.g. --range od_master=0.0,0.5,1.0)")
     ap.add_argument("--gang", action="append", metavar="KNOB=Name1,Name2,...",
-                    help="map one swept knob to several ganged pot Names (e.g. a dual-gang "
-                         "pot): --gang gain=Gain A,Gain B . The knob is one column in the "
-                         "dataset; its value is written to every listed pot. Repeatable.")
+                    help="ESCAPE HATCH — prefer fixing the schematic. Map one swept knob to several "
+                         "pot Names: --gang gain=Gain A,Gain B . The knob is one column in the "
+                         "dataset and its value is written to every listed pot. Repeatable. "
+                         "This is now redundant when the .schx sets a GROUP on the sections, which "
+                         "is how LiveSPICE itself models a ganged pot -- the harness reads Group and "
+                         "sweeps CONTROLS, so the ganging needs no flag. Use --gang only for a "
+                         "schematic you cannot edit (a vendored one) whose sections were never "
+                         "grouped.")
     ap.add_argument("--steps", action="append", metavar="KNOB=N",
                     help="mark a knob as a discrete N-position switch (e.g. --steps a_sym=2). "
                          "Recorded in config.json and exported as a 'steps' hint in the .nam so "
