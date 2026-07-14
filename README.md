@@ -413,27 +413,37 @@ pip install -r requirements.txt
 For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
 (see the note at the top of `requirements.txt`), then `pip install -r requirements.txt`.
 
-### .NET SDK + LiveSPICE (for dataset generation)
+### .NET SDK + the oracle (for dataset generation)
 
-`livespice_cli` builds against LiveSPICE, vendored as the `extern/LiveSPICE` submodule.
-**Recursive submodule init is required** — LiveSPICE nests a `ComputerAlgebra` submodule
-that `Circuit.csproj` references; without it the build fails with `CS0246` errors
-(`Expression`, `Arrow`, `Variable`, `SolutionSet` not found).
+`livespice_cli` — **the oracle** — lives in **`livespice-emitter/oracle/`**, not here. This repo
+used to carry its own near-copy, and the two drifted, as duplicates do: a fix making an unknown
+`--params` name a hard error (instead of silently rendering at the defaults, so every "swept"
+permutation comes out **identical** and the trainer learns the knob does nothing) landed in one
+copy and not the other. Two tools built from one schematic, disagreeing about what the device's
+knobs *are*. There is now exactly one.
 
-**The micro-sign patch is required** (`patches/livespice-microsign-prefix.patch`):
-without it LiveSPICE parses `µF` (U+00B5) as FARADS and every µ-valued circuit
-simulates wrong. `setup.sh` applies it idempotently; to do it by hand:
 ```bash
-git submodule update --init --recursive extern/LiveSPICE   # recursive is mandatory
-git -C extern/LiveSPICE apply "$PWD/patches/livespice-microsign-prefix.patch"
-
-cd livespice_cli
-# Linux:            dotnet publish -c Release -r linux-x64 --self-contained -o publish/
-# macOS (Apple Si): dotnet publish -c Release -r osx-arm64 --self-contained -o publish/
+git clone https://github.com/mrgeneko/livespice-emitter   # as a SIBLING of this repo
+cd livespice-emitter/oracle && ./build.sh
 ```
 (.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS.)
-The binary lands at `livespice_cli/publish/livespice_cli`, where `batch_harness.py`
-expects it.
+
+`batch_harness.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
+`../livespice-emitter/oracle/publish/livespice_cli`. Set the env var if your checkout lives
+elsewhere.
+
+The oracle builds against **pristine upstream LiveSPICE**, never our fork — an oracle built from
+the thing under test is not an oracle — and `oracle/build.sh` refuses to build if it finds fork
+markers.
+
+> **The micro-sign patch is gone, and deliberately.** LiveSPICE's `Quantity` parser knows
+> `U+03BC GREEK MU` (and ASCII `u`) but *not* `U+00B5 MICRO SIGN`, so upstream reads `4.7µF`
+> written with U+00B5 as **4.7 farads** — no throw, no warning, every capacitor a dead short, and
+> the simulation confidently wrong. We used to patch a vendored LiveSPICE fork, which is
+> incompatible with keeping the oracle pristine. `livespice_cli` now **normalises U+00B5 → U+03BC
+> when it loads the schematic**, so both encodings render bit-identically and no fork is needed.
+> (Our library currently uses U+03BC in 6 of 23 files and U+00B5 in none — but U+00B5 is what most
+> editors emit, so this was one save-from-the-wrong-tool away from a corrupted dataset.)
 
 ### ngspice (only for `--backend ngspice`)
 ```bash

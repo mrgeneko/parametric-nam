@@ -1,3 +1,0 @@
-[submodule "extern/LiveSPICE"]
-	path = extern/LiveSPICE
-	url = https://github.com/mrgeneko/LiveSPICE.git

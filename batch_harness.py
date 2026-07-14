@@ -41,7 +41,42 @@ import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
 HARNESS = HERE / "harness/build_o3/harness"
-LIVESPICE_CLI = HERE / "livespice_cli/publish/livespice_cli"
+
+
+def _find_livespice_cli() -> Path:
+    """Resolve THE oracle -- there must be exactly one.
+
+    This repo used to carry its own livespice_cli, a near-copy of livespice-emitter's. The two
+    drifted, as duplicates do: a fix that makes an unknown --params name a hard error (rather than
+    silently rendering at the defaults, so that every "swept" permutation comes out IDENTICAL and
+    the trainer learns the knob does nothing) landed in one copy and not the other. Two tools built
+    from one schematic, disagreeing about what the device's knobs ARE -- the same failure the
+    emitter's ParamExtractor had.
+
+    So there is now one, in livespice-emitter/oracle/, where the discipline is written down: it
+    builds against PRISTINE LiveSPICE, never our fork, because an oracle built from the thing under
+    test is not an oracle.
+
+    Order: $LIVESPICE_CLI, then a sibling livespice-emitter checkout, then the local legacy copy.
+    """
+    env = os.environ.get("LIVESPICE_CLI")
+    if env:
+        return Path(env)
+
+    oracle = HERE.parent / "livespice-emitter" / "oracle" / "publish" / "livespice_cli"
+    if oracle.exists():
+        return oracle
+
+    legacy = HERE / "livespice_cli/publish/livespice_cli"
+    if legacy.exists():
+        print("warning: using this repo's legacy livespice_cli. The oracle lives in "
+              "livespice-emitter/oracle -- build it there, or set $LIVESPICE_CLI.", file=sys.stderr)
+        return legacy
+
+    return oracle  # report the path we WANT when it is missing
+
+
+LIVESPICE_CLI = _find_livespice_cli()
 
 # Per-circuit ngspice defaults, keyed by a substring of the .schx filename. Applied
 # automatically when the matching CLI flag is unset, so a circuit's known-good
@@ -581,6 +616,211 @@ def combine(out_dir: Path):
 # ---------------------------------------------------------------------------
 
 
+
+def input_provenance(wav: Path) -> dict:
+    """WHICH sweep made this dataset -- identity, not just a path.
+
+    config.json used to record only `input_wav`, a filesystem path. Paths are not identity: they
+    point into scratch directories that get cleaned, and they say nothing about content. The cost
+    showed up the day the truncation numbers were questioned -- a dataset's sweep.wav could not be
+    matched to any known source, so an input a SHIPPED MODEL was trained on had unknown provenance
+    and the measurement could not be reproduced.
+
+    It matters more than it looks. Truncation ESR and model ESR are both INPUT-DEPENDENT (a long
+    quiet tail shrinks the denominator and inflates the ratio), so a number without its input named
+    is not a number. And our sweeps are derived from someone else's recording -- they live in a
+    separate private repo precisely because they cannot be redistributed -- so knowing exactly which
+    one a dataset used is also a licensing question, not just a reproducibility one.
+
+    The hash is of the AUDIO SAMPLES, not the file bytes: the harness re-encodes to float32, so the
+    same audio has a different file hash in every dataset. That is exactly the false negative that
+    made a bit-identical copy of sweep60_composite look like an unknown file.
+    """
+    import hashlib
+    x, sr = sf.read(str(wav), dtype="float32")
+    mono = x if x.ndim == 1 else x.mean(axis=1)
+    d = np.asarray(mono, dtype=np.float32)
+    return {
+        "name": wav.name,
+        "path": str(wav),
+        "audio_sha1": hashlib.sha1(d.tobytes()).hexdigest(),
+        "samplerate": int(sr),
+        "frames": int(len(d)),
+        "duration_s": round(len(d) / sr, 3),
+        "peak": round(float(np.abs(d).max()), 6),
+        "rms": round(float(np.sqrt((d.astype(np.float64) ** 2).mean())), 6),
+    }
+
+
+def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
+                      param_map: dict, fixed_params: str, speaker: str,
+                      target: float, probe_s: float = 8.0, n_windows: int = 4,
+                      iterations: int = 256, ref_os: int = 32) -> int:
+    """MEASURE the oversample this circuit needs. Do not guess it.
+
+    oversample is a DISCRETISATION choice, and it has an error: BDF2's truncation, the gap between
+    the simulated circuit and the real one. It is not a bug and it is never zero -- but if it is the
+    same size as the ESR of the model you train on the data, YOU ARE FITTING THE ERROR, and a model
+    cannot be more right than its target.
+
+    MEASURE IT AGAINST A REFERENCE, NOT AGAINST THE NEXT RUNG UP.
+    The tempting cheap estimate is ESR(os, 2*os) -- render twice, diff, done. It is WRONG, and it is
+    wrong in the dangerous direction: it UNDERSTATES the error, so you pick too low an oversample and
+    ship a contaminated target. The finer render is not the truth; it is merely less wrong. Writing
+    e_h for the error at timestep h, what you measure is ||e_h - e_h/2||, not ||e_h||, and the two
+    differ by a constant factor because the errors are correlated and largely cancel. Measured on the
+    Big Muff (sweep60_composite, worst corner, whole file, 256 iterations):
+
+        os     ESR vs 2*os (difference)     ESR vs os=32 (reference)     understated by
+         2            2.83e-03                     9.33e-03                  3.3x
+         4            6.45e-04                     1.98e-03                  3.1x
+         8            1.63e-04                     3.70e-04                  2.3x
+
+    So we render a reference at `ref_os` and compare every candidate against THAT.
+
+    Probed at BOTH ENDS of every knob and at both corners -- "all knobs at max" is NOT reliably the
+    stiff setting (the Boss DS-1's Dist pot is ReverseLinear, so all-max is MINIMUM drive).
+
+    Probed on STRATIFIED WINDOWS spanning the input, with numerator and denominator POOLED across
+    them: sum(err) / sum(sig) is exactly the whole-file ESR restricted to the sampled windows, and an
+    unbiased estimate of it. Whole-file is the quantity that matters, because that is what the model
+    is fitted against and scored on. Probing only the first few seconds understates it (our sweeps
+    open quiet); probing only the worst window overstates it. Windows are rendered SEPARATELY and
+    never spliced -- a concatenation would manufacture step discontinuities that are not in the
+    signal, and the probe would then be measuring its own splice.
+
+    Returns the chosen oversample. WARNS if the error does not fall ~4x per doubling as O(h^2)
+    demands: that circuit is not smooth, and oversampling will not fix its dataset.
+    """
+    import tempfile
+
+    picks = []
+    for k in knobs:
+        lo, hi = min(p[k] for p in perms), max(p[k] for p in perms)
+        for v in (lo, hi):
+            picks.append(next(p for p in perms if p[k] == v))
+    picks.append(max(perms, key=lambda p: sum(p.values())))
+    picks.append(min(perms, key=lambda p: sum(p.values())))
+    seen, uniq = set(), []
+    for p in picks:
+        key = tuple(sorted(p.items()))
+        if key not in seen:
+            seen.add(key); uniq.append(p)
+
+    # This is a probe, not a render, so it has to be SHORT -- but which part you probe decides the
+    # answer, and both obvious choices are wrong:
+    #
+    #   the FIRST probe_s seconds   -- our sweeps open quiet, and truncation is O(h^2 * y'') so it
+    #                                  lives in the fast, loud passages. Understated the Big Muff by
+    #                                  3.4x: 6.68e-03 against the 2.25e-02 a full render shows.
+    #   the WORST window            -- overstates it. The quantity that matters is the truncation
+    #                                  contribution to the WHOLE-FILE ESR, because that is what the
+    #                                  model is fitted against and what its ESR is scored on. Peaking
+    #                                  the probe on the hardest 3 s said the Timmy needed oversample
+    #                                  8 (5.77e-03) when whole-file it sits at 8.73e-04 -- os=2 is
+    #                                  fine, and 8 would have cost 4x the render time for nothing.
+    #
+    # So: STRATIFIED sample. Several short contiguous windows spanning the file, with the numerator
+    # and denominator POOLED across them -- sum(err) / sum(sig), which is exactly the whole-file ESR
+    # restricted to the sampled windows, and an unbiased estimate of it. Windows are rendered
+    # SEPARATELY and never spliced: a concatenation would manufacture step discontinuities that are
+    # not in the signal (an abrupt splice in an earlier sweep is what broke ngspice convergence --
+    # see the sweep-files repo), and the probe would then measure its own splice.
+    sig, sr = sf.read(str(input_wav))
+    total = len(sig)
+    win = min(total, int(probe_s * sr) // n_windows or total)
+    if total <= win * n_windows:
+        starts = [0]
+        win = total
+    else:
+        # evenly spaced windows across the file; each contiguous, each rendered on its own
+        span = total - win
+        starts = [int(round(i * span / (n_windows - 1))) for i in range(n_windows)] \
+                 if n_windows > 1 else [0]
+
+    print(f"\n  Choosing oversample (target truncation ESR <= {target:.0e}, "
+          f"{len(uniq)} knob settings, {len(starts)} x {win / sr:.1f}s windows "
+          f"spanning {total / sr:.0f}s):", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        clips = []
+        for wi, st in enumerate(starts):
+            c = td / f"probe{wi}.wav"
+            sf.write(str(c), sig[st:st + win], sr)
+            clips.append(c)
+
+        cache = {}
+
+        def render(clip, p, os_):
+            key = (str(clip), tuple(sorted(p.items())), os_)
+            if key in cache:
+                return cache[key]
+            swept = fmt_params(p, param_map)
+            allp = f"{fixed_params},{swept}" if fixed_params else swept
+            w = td / f"o{os_}_{abs(hash(key))}.wav"
+            a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
+                 "--circuit", schx, "--params", allp,
+                 "--oversample", str(os_), "--iterations", str(iterations)]
+            if speaker:
+                a += ["--speaker", speaker]
+            r = subprocess.run(a, capture_output=True, text=True)
+            v = None
+            if r.returncode == 0 and w.exists():
+                d, _ = sf.read(str(w))
+                v = np.asarray(d, dtype=np.float64)
+            cache[key] = v
+            return v
+
+        prev_d = None
+        os_ = 2
+        while os_ < ref_os:
+            # Pool across windows (whole-file ESR estimate), take the WORST knob setting --
+            # "all knobs at max" is not reliably the stiff one, so we probed both ends of each.
+            worst, worst_at = 0.0, None
+            for p in uniq:
+                num = den = 0.0
+                for clip in clips:
+                    a, b = render(clip, p, os_), render(clip, p, ref_os)
+                    if a is None or b is None:
+                        continue
+                    m = min(len(a), len(b)); sk = m // 10   # drop each window's start transient
+                    num += float(np.sum((a[sk:m] - b[sk:m]) ** 2))
+                    den += float(np.sum(b[sk:m] ** 2))
+                if den > 0 and num / den >= worst:
+                    worst, worst_at = num / den, p
+
+            ratio = (prev_d / worst) if (prev_d and worst > 0) else None
+            note = f"   (falling {ratio:.1f}x per doubling)" if ratio else ""
+            at = ("  at " + ", ".join(f"{k}={v:g}" for k, v in sorted(worst_at.items()))) \
+                 if worst_at else ""
+            print(f"    oversample={os_:<3} truncation {worst:.2e}{note}{at}", file=sys.stderr)
+
+            if worst <= target:
+                print(f"    -> oversample={os_} (truncation {worst:.2e} <= target {target:.0e})",
+                      file=sys.stderr)
+                return os_
+
+            # O(h^2) demands ~4x per doubling. Much less and the circuit is not smooth: oversampling
+            # will never get there, so say so rather than silently grinding up to the ceiling.
+            if ratio is not None and ratio < 2.0:
+                print(f"    *** {schx}: does NOT converge in the timestep -- the error falls only "
+                      f"{ratio:.1f}x per doubling, not the ~4x O(h^2) demands.", file=sys.stderr)
+                print(f"    *** Something in this circuit is not smooth; oversampling will not fix "
+                      f"its dataset. Using {os_ * 2}, but investigate before trusting the model.",
+                      file=sys.stderr)
+                return os_ * 2
+
+            prev_d = worst
+            os_ *= 2
+
+    # Nothing below ref_os met the target. We cannot honestly measure ref_os against itself, so this
+    # is the ceiling: say the target was not met rather than implying it was.
+    print(f"    -> oversample={ref_os} (CEILING: nothing below the reference met "
+          f"target {target:.0e}; the truncation at {ref_os} is UNMEASURED here)", file=sys.stderr)
+    return ref_os
+
+
 def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
                       input_wav: Path, schx: str, param_map: dict, fixed_params: str,
                       speaker: str, oversample: int, iterations: int,
@@ -844,10 +1084,19 @@ def main():
                     "Recorded in the .nam's parameters[].default so a bake with no --params "
                     "uses the circuit's real default position, not the range midpoint "
                     "(e.g. a Timmy's controls don't center at noon).")
-    ap.add_argument("--oversample", type=int, default=2,
-                    help="livespice_cli oversampling (default 2). High-gain end-to-end amps "
-                         "need more to stay numerically stable (e.g. EVH 5150 Lead full = 32); "
-                         "preamps are fine at 2. Higher = proportionally slower.")
+    ap.add_argument("--oversample", default="2",
+                    help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
+                         "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
+                         "truncation, the gap between the simulated circuit and the real one. At "
+                         "the default of 2 that error is 2.25e-02 on the Big Muff, whose NAM model "
+                         "scores 0.0090: THE TARGET IS 2.5x WRONGER THAN THE MODEL, and the model "
+                         "is being spent fitting it. 'auto' climbs 2/4/8/16/32 until the truncation "
+                         "is under --trunc-target, probing both ends of every knob. See "
+                         "docs/convergence.md.")
+    ap.add_argument("--trunc-target", type=float, default=1e-3,
+                    help="With --oversample auto: the truncation ESR to get under (default 1e-3). "
+                         "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
+                         "not the limiting factor. A model cannot be more right than its target.")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
     ap.add_argument("--bounds",  action="append", metavar="KNOB=lo,hi",
@@ -1000,6 +1249,24 @@ def main():
     wav_info = sf.info(str(in_wav))
     audio_frames = wav_info.frames
     sr = wav_info.samplerate
+    # --oversample auto: MEASURE it, before anything downstream depends on the number.
+    # A guessed oversample is a guessed target, and the model can only ever be as right as
+    # the target it is fitted to. See choose_oversample() and docs/convergence.md.
+    if str(args.oversample).strip().lower() == "auto":
+        if args.backend != "livespice":
+            ap.error("--oversample auto requires --backend livespice "
+                     "(it measures BDF2 truncation by re-rendering at 2x the timestep; "
+                     "ngspice picks its own adaptive step, and the cpp backend inherits "
+                     "whatever oversample the emitter was built with).")
+        args.oversample = choose_oversample(
+            schx, knobs, perms, in_wav, param_map, args.fixed_params,
+            args.speaker, args.trunc_target)
+    else:
+        try:
+            args.oversample = int(args.oversample)
+        except ValueError:
+            ap.error(f"--oversample must be an integer or 'auto' (got {args.oversample!r})")
+
     # 10x realtime at the default 2x oversample; scale up with oversample since
     # sim cost is ~proportional to it (e.g. 32x -> ~160x audio length).
     timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2)))
@@ -1149,6 +1416,7 @@ def main():
         "fixed_params": args.fixed_params,
         "speaker": args.speaker,
         "input_wav": str(in_wav),
+        "input": input_provenance(in_wav),
         "permutation_count": len(perms),
         "values": args.values or "0.1,0.3,0.5,0.7",
         "workers": args.workers,

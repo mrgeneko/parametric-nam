@@ -3,75 +3,71 @@
 # One-shot dev setup for spice-to-nam. Idempotent — safe to re-run.
 #
 #   ./setup.sh                # full setup
-#   ./setup.sh --no-cli       # skip the .NET livespice_cli build (Python-only work)
+#   ./setup.sh --no-cli       # skip the oracle build/check (Python-only work)
 #   RID=linux-arm64 ./setup.sh   # override the auto-detected .NET runtime id
 #
 # Does, in order:
-#   1. init submodules (LiveSPICE, recursive)
-#   2. apply the vendored micro-sign patch to LiveSPICE  (idempotent; see below)
-#   3. build the livespice_cli simulator for this platform  (needs .NET SDK)
-#   4. create .venv and install pinned Python deps
+#   1. locate (and if needed build) THE ORACLE — livespice_cli
+#   2. create .venv and install pinned Python deps
 #
-# The micro-sign patch is REQUIRED and easy to forget: without it LiveSPICE parses
-# "µF" (U+00B5) as FARADS, silently corrupting every µ-valued circuit. This script
-# applies it automatically and refuses to leave it unapplied.
+# THE ORACLE LIVES IN livespice-emitter, NOT HERE.
+# This repo used to vendor its own livespice_cli plus a patched LiveSPICE submodule. The copy
+# drifted from the emitter's: a fix making an unknown --params name a hard error (instead of
+# silently rendering at the defaults, so every "swept" permutation comes out IDENTICAL and the
+# trainer learns the knob does nothing) landed in one and not the other. Two tools built from one
+# schematic, disagreeing about what the device's knobs ARE. There is now exactly one, and it builds
+# against PRISTINE upstream LiveSPICE — an oracle built from the thing under test is not an oracle.
+#
+# The micro-sign patch is gone too: livespice_cli now normalises U+00B5 MICRO SIGN -> U+03BC GREEK
+# MU when it loads a schematic. (Upstream's Quantity parser knows U+03BC but not U+00B5, so it reads
+# "4.7µF" written with U+00B5 as 4.7 FARADS — no throw, no warning, every capacitor a dead short.)
+# Normalising the input fixes it without forking the simulator.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-PATCH="$REPO/patches/livespice-microsign-prefix.patch"
-LS="$REPO/extern/LiveSPICE"
+EMITTER="${LIVESPICE_EMITTER:-$REPO/../livespice-emitter}"
 BUILD_CLI=1
 for a in "$@"; do [ "$a" = "--no-cli" ] && BUILD_CLI=0; done
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
-# --- 1. submodules ---------------------------------------------------------
-say "1/4  submodules (LiveSPICE, recursive)"
-git -C "$REPO" submodule update --init --recursive
-
-# --- 2. micro-sign patch (idempotent) -------------------------------------
-say "2/4  LiveSPICE micro-sign patch"
-if [ ! -f "$PATCH" ]; then
-  echo "ERROR: patch not found: $PATCH" >&2; exit 1
-fi
-if git -C "$LS" apply --reverse --check "$PATCH" >/dev/null 2>&1; then
-  echo "    already applied — ok"
-elif git -C "$LS" apply --check "$PATCH" >/dev/null 2>&1; then
-  git -C "$LS" apply "$PATCH"; echo "    applied."
-else
-  echo "ERROR: micro-sign patch does not apply cleanly to extern/LiveSPICE." >&2
-  echo "       (submodule may be at an unexpected revision — inspect manually.)" >&2
-  exit 1
-fi
-
-# --- 3. build livespice_cli ------------------------------------------------
+# --- 1. the oracle ---------------------------------------------------------
 if [ "$BUILD_CLI" -eq 1 ]; then
-  say "3/4  build livespice_cli (.NET)"
-  if ! command -v dotnet >/dev/null 2>&1; then
-    echo "ERROR: 'dotnet' not found. Install the .NET SDK (>=8):" >&2
-    echo "       macOS: brew install --cask dotnet-sdk   |   Linux: https://dotnet.microsoft.com/download" >&2
-    exit 1
+  say "1/2  the oracle (livespice_cli)"
+
+  if [ -n "${LIVESPICE_CLI:-}" ]; then
+    if [ ! -x "$LIVESPICE_CLI" ]; then
+      echo "ERROR: \$LIVESPICE_CLI is set but not executable: $LIVESPICE_CLI" >&2; exit 1
+    fi
+    echo "    using \$LIVESPICE_CLI: $LIVESPICE_CLI"
+  else
+    if [ ! -d "$EMITTER/oracle" ]; then
+      echo "ERROR: the oracle lives in livespice-emitter, which was not found at:" >&2
+      echo "         $EMITTER" >&2
+      echo "       Clone it as a SIBLING of this repo:" >&2
+      echo "         git clone https://github.com/mrgeneko/livespice-emitter" >&2
+      echo "       ...or point \$LIVESPICE_EMITTER / \$LIVESPICE_CLI at your checkout." >&2
+      exit 1
+    fi
+    if [ -x "$EMITTER/oracle/publish/livespice_cli" ]; then
+      echo "    already built: $EMITTER/oracle/publish/livespice_cli"
+    else
+      if ! command -v dotnet >/dev/null 2>&1; then
+        echo "ERROR: 'dotnet' not found. Install the .NET SDK (>=8):" >&2
+        echo "       macOS: brew install --cask dotnet-sdk   |   Linux: https://dotnet.microsoft.com/download" >&2
+        exit 1
+      fi
+      echo "    building via $EMITTER/oracle/build.sh"
+      ( cd "$EMITTER/oracle" && ./build.sh )
+    fi
   fi
-  # auto-detect .NET runtime id unless overridden via $RID
-  if [ -z "${RID:-}" ]; then
-    case "$(uname -s)-$(uname -m)" in
-      Darwin-arm64)  RID=osx-arm64 ;;
-      Darwin-x86_64) RID=osx-x64 ;;
-      Linux-x86_64)  RID=linux-x64 ;;
-      Linux-aarch64|Linux-arm64) RID=linux-arm64 ;;
-      *) echo "ERROR: unknown platform $(uname -s)-$(uname -m); set RID=... manually." >&2; exit 1 ;;
-    esac
-  fi
-  echo "    runtime id: $RID"
-  ( cd "$REPO/livespice_cli" && dotnet publish -c Release -r "$RID" --self-contained -o publish/ )
-  echo "    built: livespice_cli/publish/livespice_cli"
 else
-  say "3/4  build livespice_cli — SKIPPED (--no-cli)"
+  say "1/2  the oracle — SKIPPED (--no-cli)"
 fi
 
-# --- 4. python venv + deps -------------------------------------------------
-say "4/4  Python venv + deps"
+# --- 2. python venv + deps -------------------------------------------------
+say "2/2  Python venv + deps"
 [ -d "$REPO/.venv" ] || python3 -m venv "$REPO/.venv"
 "$REPO/.venv/bin/python" -m pip install --quiet --upgrade pip
 "$REPO/.venv/bin/pip" install --quiet -r "$REPO/requirements.txt"
@@ -79,5 +75,9 @@ echo "    installed into .venv:"
 "$REPO/.venv/bin/python" -c "import torch,numpy,scipy,soundfile as sf; print(f'      torch {torch.__version__}, numpy {numpy.__version__}, scipy {scipy.__version__}, soundfile {sf.__version__}')"
 
 say "done. Activate with:  . .venv/bin/activate"
-[ "$BUILD_CLI" -eq 1 ] && echo "Smoke-test the CLI:  ./livespice_cli/publish/livespice_cli --help"
+if [ "$BUILD_CLI" -eq 1 ]; then
+  "$REPO/.venv/bin/python" -c "
+from batch_harness import LIVESPICE_CLI
+print(f'Oracle: {LIVESPICE_CLI}  (exists={LIVESPICE_CLI.exists()})')"
+fi
 exit 0
