@@ -57,7 +57,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from batch_harness import LIVESPICE_CLI, write_probe_clip
+from batch_harness import LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice, write_probe_clip
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -88,14 +88,46 @@ class Renderer:
     of it.
 
     This is the same trap, and the same fix, as choose_oversample in batch_harness.py.
+
+    BACKEND: ngspice needed the same three fixes choose_oversample already required --
+    (1) probe clips carry a quiet lead-in (write_probe_clip) so the solver has an
+    operating point at t=0 instead of jumping straight into a large-signal mid-chirp
+    state; (2) clips must be >= 3s -- ngspice SEGFAULTS (exit -11, no output, which
+    _run_ngspice's caller reads as "diverged") on shorter ones, discovered on the DS-1
+    at exactly the 2.00s the old 4-window/8s-probe default produced; (3) a per-circuit
+    netlist dump + NGSPICE_CIRCUIT_DEFAULTS lookup (method/conv/input_upsample), done
+    once up front, same as batch_harness.main() does for the real dataset render.
     """
 
-    def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4):
+    def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
+                backend="livespice"):
         self.schx, self.os_, self.it = schx, oversample, iterations
-        self.fixed, self.td = fixed, td
+        self.fixed, self.td, self.backend = fixed, td, backend
         self.cache: dict = {}
+        self.ng_base = None
+
+        if backend == "ngspice":
+            # Same segfault as choose_oversample: short clips crash ngspice outright.
+            probe_s = max(probe_s, 8.0)
+            n_windows = 2
+
+            netlist_path = td / "netlist.json"
+            r = subprocess.run([str(LIVESPICE_CLI), "--circuit", str(schx),
+                                "--netlist", str(netlist_path)],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not netlist_path.exists():
+                sys.exit(f"netlist dump failed for {schx}: {r.stderr[:300]}")
+            cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
+            conv = dict(kv.split("=", 1) for kv in cdef.get("conv", "").split(",") if "=" in kv)
+            self.ng_base = {
+                "netlist": str(netlist_path), "koren": False,
+                "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
+                "conv": conv, "method": cdef.get("method", "trap"),
+                "input_upsample": int(cdef.get("input_upsample", 1) or 1),
+            }
 
         x, sr = sf.read(str(inp))
+        self.sr = sr
         total = len(x)
         win = min(total, int(probe_s * sr) // n_windows or total)
         if total <= win * n_windows:
@@ -130,6 +162,27 @@ class Renderer:
         out = []
         for i, clip in enumerate(self.clips):
             w = self.td / f"{abs(hash(key))}_{i}.wav"
+            if self.backend == "ngspice":
+                nlen = int(sf.info(str(clip)).frames)
+                ngp = dict(self.ng_base)
+                ngp.update({
+                    "input_raw": str(clip),
+                    # keyed per-clip (like choose_oversample) -- _filesource caches by
+                    # upsample factor only, so a shared dir would serve clip A's
+                    # filesource back for clip B.
+                    "fsrc_dir": str(self.td / f"fs_{abs(hash(str(clip)))}"),
+                    "oversample": self.os_,
+                })
+                fail = _run_ngspice(0, params, self.td / f"ng_{abs(hash(key))}_{i}", w,
+                                    nlen, 120, None, self.fixed, ngp)
+                if fail is None and w.exists():
+                    d, _ = sf.read(str(w))
+                    out.append(np.asarray(d, dtype=np.float64))
+                else:
+                    print(f"      render failed at {allp}: {getattr(fail, 'error', 'no output')}",
+                         file=sys.stderr)
+                    out.append(None)
+                continue
             r = subprocess.run(
                 [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
                  "--circuit", str(self.schx), "--params", allp,
@@ -219,16 +272,21 @@ def main() -> None:
     inp = Path(_os.path.expanduser(cfg["input"]))
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
     oversample = cfg.get("oversample", 2)
+    backend = cfg.get("backend", "livespice")
 
     n_perms = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")
+    print(f"  backend    {backend}")
     print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_perms} permutations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
-    print(f"  probe      {args.probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters\n")
+    probe_s = max(args.probe_s, 8.0) if backend == "ngspice" else args.probe_s
+    print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
+         f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
 
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s)
+        render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
+                          backend=backend)
 
         # Probe each cell at several positions of the OTHER knobs -- the knobs interact, and a cell
         # that interpolates cleanly at one Tone can fail at another. (On the Big Muff the Sustain
