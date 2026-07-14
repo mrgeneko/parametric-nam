@@ -793,30 +793,42 @@ def main():
 
             repeats, epochs = int(args.repeats), int(args.epochs)
 
-            if args.target_steps and n_perms and audio_s:
-                # ---- repeats is DERIVED FROM THE DATA, not chosen ----
-                # Each item is a random crop_len crop of audio_s seconds. Drawing R crops per
-                # permutation per epoch covers, in expectation, 1 - (1 - crop/audio)^R of that
-                # permutation's audio UNIQUELY. R = audio/crop -- one crop per crop-length -- gives
-                # ~63%, and is the natural scale-free choice. The shipped repeats=30 gave only 27% of
-                # a 94 s sweep per epoch: the model saw a quarter of its own data each pass.
-                crop_s = args.crop_len / sr
+            if args.target_steps and n_perms:
+                # WHICH VARIABLE IS DERIVED MATTERS, and the obvious choice is wrong.
+                #
+                # `epochs` is NOT a budget quantity -- it is the LR SCHEDULE LENGTH. CosineAnnealingLR
+                # uses T_max=epochs and steps once per epoch, so epochs decides how finely the LR
+                # anneals and how many validation/checkpoint opportunities there are. Derive it from
+                # the budget and a big grid destroys it: the JCM800 hot-rod has 1944 permutations, so
+                # a data-derived repeats=94 gives 2569 steps/epoch and epochs = 24300/2569 = NINE.
+                # Nine points on the cosine curve, nine chances to checkpoint a best model.
+                #
+                # So `epochs` stays a knob (schedule granularity) and `repeats` is derived. repeats is
+                # the right free variable anyway: it is a pure virtual multiplier with no meaning of
+                # its own, whereas epochs and batch_size both mean something.
+                repeats_f = (args.target_steps * args.batch_size
+                             / max(1, epochs * n_perms * (1 - args.val_split)))
                 if not args.repeats_explicit:
-                    repeats = max(1, round(audio_s / crop_s))
+                    repeats = max(1, round(repeats_f))
 
-                # ---- epochs then falls out of the BUDGET ----
-                # Safe to derive: CosineAnnealingLR uses T_max=epochs and steps once per epoch, so
-                # the LR always anneals from lr to 0 across exactly the run. Changing `epochs` moves
-                # the schedule's granularity, never its shape.
-                steps_ep = math.ceil(n_perms * repeats * (1 - args.val_split) / args.batch_size)
-                if not args.epochs_explicit:
+                if repeats_f < 1 and not args.epochs_explicit:
+                    # The grid alone already exceeds the budget at repeats=1. Shorten the schedule
+                    # rather than silently overspend -- and say so.
+                    steps_ep = math.ceil(n_perms * 1 * (1 - args.val_split) / args.batch_size)
                     epochs = max(1, math.ceil(args.target_steps / max(1, steps_ep)))
+                    log(f"  NOTE: {n_perms} perms exceed the budget at repeats=1 — holding repeats=1 "
+                        f"and shortening the schedule to {epochs} epochs.", fh)
 
-                cov = 1.0 - (1.0 - min(1.0, crop_s / audio_s)) ** repeats
-                log(f"--target-steps {args.target_steps:,} → repeats {repeats}, epochs {epochs}", fh)
-                log(f"  repeats derived from the DATA: {audio_s:.0f}s audio ÷ {crop_s:.1f}s crop "
-                    f"= {repeats} crops/perm/epoch → ~{cov:.0%} of each permutation's audio per epoch",
-                    fh)
+                log(f"--target-steps {args.target_steps:,} → repeats {repeats} "
+                    f"(epochs {epochs} = the LR schedule length, not a budget knob)", fh)
+
+                if audio_s:
+                    crop_s = args.crop_len / sr
+                    per_ep = 1.0 - (1.0 - min(1.0, crop_s / audio_s)) ** repeats
+                    total_crops = epochs * repeats
+                    log(f"  audio coverage: {repeats} crops/perm/epoch → ~{per_ep:.0%} of each "
+                        f"permutation's {audio_s:.0f}s per epoch; {total_crops:,} crops/perm over the "
+                        f"run ({total_crops / max(1, audio_s / crop_s):.0f}× its length)", fh)
 
             if n_perms:
                 items = n_perms * repeats
