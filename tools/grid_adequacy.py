@@ -49,6 +49,7 @@ import os as _os
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -105,6 +106,18 @@ class Renderer:
         self.fixed, self.td, self.backend = fixed, td, backend
         self.cache: dict = {}
         self.ng_base = None
+        # Concurrent jobs can legitimately compute the SAME full params dict --
+        # e.g. axis=Dist's cell (0.2,0.4) at oth={Tone:0.0} and axis=Tone's cell
+        # (0.0,0.2) at oth={Dist:0.4} both render {Dist:0.4, Tone:0.0} -- and the
+        # temp file paths below are derived purely from hash(key), with no
+        # per-call uniqueness. Without a lock, two ThreadPoolExecutor workers can
+        # both pass the "not yet cached" check and race to write the SAME .csv/
+        # .cir file simultaneously, corrupting it mid-write (surfaced as ngspice's
+        # CSV having an inconsistent column count partway through). Per-key
+        # locking serializes only genuine duplicate work; different keys still
+        # render in parallel.
+        self._cache_lock = threading.Lock()
+        self._key_locks: dict = {}
 
         if backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
@@ -154,8 +167,17 @@ class Renderer:
     def __call__(self, params: dict):
         """-> list of rendered windows (one array per probe window)."""
         key = tuple(sorted(params.items()))
-        if key in self.cache:
-            return self.cache[key]
+        with self._cache_lock:
+            if key in self.cache:
+                return self.cache[key]
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._cache_lock:
+                if key in self.cache:      # another thread finished while we waited
+                    return self.cache[key]
+            return self._render(params, key)
+
+    def _render(self, params: dict, key):
         allp = ",".join(f"{k}={v}" for k, v in params.items())
         if self.fixed:
             allp = f"{self.fixed},{allp}"
@@ -195,7 +217,8 @@ class Renderer:
                 tail = (r.stderr.strip().splitlines() or ["(no stderr)"])[-1]
                 print(f"      render failed at {allp}: {tail}", file=sys.stderr)
                 out.append(None)
-        self.cache[key] = out
+        with self._cache_lock:
+            self.cache[key] = out
         return out
 
 
