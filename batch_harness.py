@@ -478,6 +478,21 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
         if len(sig) < expected_frames:
             sig = np.pad(sig, (0, expected_frames - len(sig)))
         sig = sig[:expected_frames]
+        # THE DECIMATION FILTER CAN RING PAST THE SIGNAL'S OWN PEAK, isolated single-
+        # sample overshoots at fast transients -- found on the Boss DS-1 (Dist=1.0,
+        # a guitar pick-attack transient at t=51.6s): sig_hi (the pre-decimate,
+        # correctly time-aligned upsampled signal) peaked at 1.007 there, but the
+        # FIR-decimated output spiked to 1.074, a single out-of-range sample with
+        # smooth ~0.1-0.2 values on both sides -- not a real circuit excursion, an
+        # anti-aliasing-filter ringing artifact (confirmed: neither ftype="iir" nor
+        # resample_poly avoid it, just reduce it -- ringing near a sharp transient
+        # is inherent to lowpass filtering, not a property of the filter design
+        # chosen here). A lowpass filter should not synthesize peaks the input to
+        # it didn't have, so clip to sig_hi's own peak -- self-referential, no
+        # magic constant, and a no-op on the overwhelming majority of renders
+        # (verified on the DS-1: 4 samples out of 528,000 in the reproducer).
+        hi_peak = float(np.max(np.abs(sig_hi)))
+        sig = np.clip(sig, -hi_peak, hi_peak)
     else:
         grid = np.arange(expected_frames) / 48000.0    # naive interp (aliases HF)
         sig = np.interp(grid, ng_t, ng_v).astype(np.float32)
