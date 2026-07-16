@@ -39,6 +39,26 @@ BOTTOM, on the reasoning that a linear-taper pot puts most of its audible change
 That is true of LEVEL, and backwards for WAVEFORM SHAPE, which changes fastest at the top where the
 pedal is deep into clipping -- and waveform shape is what the model has to learn.
 
+CAVEAT: GRID ADEQUACY IS NOT TRAINING BALANCE.
+This tool only answers "is the circuit's response sampled densely enough to interpolate" -- a
+property of the circuit and the sampling, with no model in it. It says nothing about whether a
+TRAINED model actually learns to represent every knob proportionally.
+
+WHAT IT MISSED ON THE TS-9.
+Drive measured <= 0.0008 in every cell (trivially easy to interpolate) while Tone measured up to
+0.1038 at the top of its travel -- by every signal this tool reports, Drive was the "easy" knob and
+shipped with a sparse 4-point grid while Tone earned 8. But a post-training sensitivity sweep (sweep
+each knob 0->1, measure output RMS change per slimmable tier) found the 3ch and 5ch tiers had all
+but ignored Drive (0.6% / 3.8% RMS spread across its full range) while the 8ch tier learned it
+properly (15.4%). Likely cause: raw dataset RMS spread across each knob's full range was Drive 8.9%
+vs Tone 51.9% -- Tone dominates the audible variation in the training signal by ~6x, so a
+capacity-limited tier spends its budget on the bigger loss-reduction opportunity (Tone) at Drive's
+expense, even though Drive's underlying circuit response was easy to sample. A grid this tool calls
+"adequate" can still starve a knob of gradient signal relative to a knob with more audible range, if
+nothing else corrects for it (loss weighting, tier width, or -- the blunt instrument -- just giving
+the starved knob more grid points so it has more to learn from per epoch). Grid density and training
+balance are separate problems; this tool only measures the first one.
+
     ./tools/grid_adequacy.py --config configs/big-muff-v1.toml --target 0.009
     ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid
 """
