@@ -648,8 +648,8 @@ def main():
                         "midpoint and checks whether the grid can even represent the target ESR — a "
                         "cell that fails puts a floor under the model that NO training can lift. "
                         "Takes a couple of minutes. See docs/grid-adequacy.md.")
-    g.add_argument("--grid-target",    type=float, default=0.009,
-                   help="the model ESR the knob grid must be able to support (default 0.009)")
+    g.add_argument("--grid-target",    type=float, default=0.007,
+                   help="the model ESR the knob grid must be able to support (default 0.007)")
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.1)

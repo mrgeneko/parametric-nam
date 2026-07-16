@@ -299,8 +299,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, required=True, help="the same TOML the pipeline uses")
-    ap.add_argument("--target", type=float, default=0.009,
-                    help="the model ESR you are chasing (default 0.009). A cell whose interpolation "
+    ap.add_argument("--target", type=float, default=0.007,
+                    help="the model ESR you are chasing (default 0.007). A cell whose interpolation "
                          "error exceeds this is the LIMITING FACTOR -- no training fixes it.")
     ap.add_argument("--probe-s", type=float, default=8.0,
                     help="seconds of the input to probe with, taken from its highest-slew window")
