@@ -116,6 +116,58 @@ class FiLM(nn.Module):
         return gamma * x + beta
 
 
+def parse_knob_boost(spec: str) -> dict[str, float]:
+    """Parse '--knob-boost' syntax: 'NAME=mult,NAME2=mult2,...' -> {NAME: mult}."""
+    boosts: dict[str, float] = {}
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, sep, mult = tok.partition("=")
+        if not sep:
+            raise SystemExit(f"--knob-boost: bad entry {tok!r} (want NAME=mult)")
+        boosts[name.strip()] = float(mult)
+    return boosts
+
+
+def register_knob_boost_hooks(model: nn.Module, param_names: list[str],
+                              boosts: dict[str, float]) -> int:
+    """Scale the backward-pass gradient flowing into specific knobs' FiLM
+    conditioning columns, in every FiLM layer of the model.
+
+    FiLM.net is nn.Linear(num_params, 2*channels): its weight matrix has one
+    INPUT column per knob (column i is entirely and only responsible for knob
+    param_names[i]'s contribution to that layer's gamma/beta). Registering a
+    gradient hook on that column lets one knob's conditioning pathway learn
+    faster without touching the loss function (which stays an honest,
+    unweighted measure of fit quality) or any other knob's learning rate --
+    unlike --film-lr-mult, which boosts the whole conditioning vector at once.
+    Generic over any knob name / any device: this has no TS-9-, Drive-, or
+    circuit-specific logic, it only needs a name present in param_names.
+    """
+    col_mult: dict[int, float] = {}
+    for name, mult in boosts.items():
+        if name not in param_names:
+            raise SystemExit(f"--knob-boost: unknown knob {name!r}; "
+                             f"dataset knobs are {param_names}")
+        col_mult[param_names.index(name)] = mult
+
+    def make_hook(cols: dict[int, float]):
+        def hook(grad: torch.Tensor) -> torch.Tensor:
+            g = grad.clone()
+            for col, mult in cols.items():
+                g[:, col] *= mult
+            return g
+        return hook
+
+    n = 0
+    for module in model.modules():
+        if isinstance(module, FiLM):
+            module.net.weight.register_hook(make_hook(col_mult))
+            n += 1
+    return n
+
+
 class A2Layer(nn.Module):
     """Single A2 dilated conv layer with optional FiLM."""
     def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int):
@@ -851,6 +903,17 @@ def main():
                     help="LR multiplier for FiLM knob-conditioning params — they get a "
                          "small gradient signal for subtle knob effects, so boost it "
                          "(default: %(default)s; 1.0 = off)")
+    ap.add_argument("--knob-boost", type=str, default=None,
+                    help="Per-knob gradient boost on FiLM conditioning weights: "
+                         "NAME=mult,NAME2=mult2,... (e.g. 'Drive=3.0'). Unlike "
+                         "--film-lr-mult (which boosts ALL knobs' conditioning equally), "
+                         "this scales the backward-pass gradient into just the named "
+                         "knob's column of every FiLM layer's weight matrix -- for a knob "
+                         "whose true audible effect is small relative to others (e.g. "
+                         "Drive next to Tone), so a capacity-limited tier doesn't learn "
+                         "to ignore it in favor of the knob with the bigger loss payoff. "
+                         "Device-agnostic: works for any knob name present in the "
+                         "dataset's config.json, not specific to any one circuit.")
     ap.add_argument("--crop-len", type=int, default=44100,
                     help="Random crop length in samples (default: %(default)s)")
     ap.add_argument("--repeats", type=int, default=1,
@@ -962,6 +1025,12 @@ def main():
     optimizer = torch.optim.AdamW(groups, weight_decay=1e-5)
     print(f"FiLM fix: {len(film_params)} FiLM tensors at {args.film_lr_mult}× LR "
           f"({args.lr * args.film_lr_mult:.1e}), non-zero init (std 0.1)", file=sys.stderr)
+
+    if args.knob_boost:
+        boosts = parse_knob_boost(args.knob_boost)
+        n_hooked = register_knob_boost_hooks(model, dataset.param_names, boosts)
+        desc = ", ".join(f"{name}×{mult}" for name, mult in boosts.items())
+        print(f"Knob boost: {desc} on {n_hooked} FiLM tensors", file=sys.stderr)
 
     start_epoch = 1
     # Per-tier best tracking. `labels` is ascending-width order; the widest tier

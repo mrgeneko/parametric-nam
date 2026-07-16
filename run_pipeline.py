@@ -51,10 +51,14 @@ def load_config(path: Path) -> dict:
     override anything here (config is loaded via set_defaults).
 
     Scalars map by name (hyphens or underscores both accepted: `crop-len` or
-    `crop_len`). Two structured tables expand to the flat flags:
-      [knobs]    NAME = [v1, v2, ...] -> --knobs NAME,...  + one --range per knob
-      [fixed]    NAME = value         -> --fixed-params NAME=value,...
-      [defaults] NAME = value         -> --defaults NAME=value,... (baked-tone default)
+    `crop_len`). Structured tables expand to the flat flags:
+      [knobs]      NAME = [v1, v2, ...] -> --knobs NAME,...  + one --range per knob
+      [fixed]      NAME = value         -> --fixed-params NAME=value,...
+      [defaults]   NAME = value         -> --defaults NAME=value,... (baked-tone default)
+      [knob-boost] NAME = mult          -> --knob-boost NAME=mult,... (FiLM gradient
+                                           boost for a knob whose audible effect is
+                                           small relative to others -- generic over
+                                           any knob name, not circuit-specific)
     `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
     """
     with open(path, "rb") as f:
@@ -62,6 +66,7 @@ def load_config(path: Path) -> dict:
     knobs = raw.pop("knobs", None)
     fixed = raw.pop("fixed", None)
     defaults = raw.pop("defaults", None)
+    knob_boost = raw.pop("knob-boost", None)
     out: dict = {}
     for k, v in raw.items():
         dest = k.replace("-", "_")
@@ -78,6 +83,8 @@ def load_config(path: Path) -> dict:
         out["fixed_params"] = ",".join(f"{name}={val}" for name, val in fixed.items())
     if defaults:
         out["defaults"] = ",".join(f"{name}={val}" for name, val in defaults.items())
+    if knob_boost:
+        out["knob_boost"] = ",".join(f"{name}={mult}" for name, mult in knob_boost.items())
     return out
 
 
@@ -315,6 +322,7 @@ def reproduce_command(args):
     if args.input:         c.append(f'    --input "{portable(args.input)}" \\')
     if args.widths:        c.append(f'    --widths {args.widths} \\')
     if not args.mmap:      c.append('    --no-mmap \\')
+    if getattr(args, "knob_boost", None): c.append(f'    --knob-boost "{args.knob_boost}" \\')
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
@@ -645,6 +653,12 @@ def main():
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.1)
+    g.add_argument("--knob-boost",     type=str,   default=None,
+                   help="Per-knob FiLM gradient boost: NAME=mult,NAME2=mult2,... (e.g. "
+                        "'Drive=3.0'). For a knob whose audible effect is small relative "
+                        "to others, so a capacity-limited tier doesn't learn to ignore "
+                        "it. Forwarded to param_train.py; also settable per-circuit via "
+                        "a [knob-boost] table in --config. Generic over any knob name.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
     _pre = argparse.ArgumentParser(add_help=False)
@@ -919,6 +933,7 @@ def main():
             if not args.mmap:             train_cmd.append("--no-mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
+            if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
             # ------------------------------------------------------------------
