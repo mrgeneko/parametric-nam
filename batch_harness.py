@@ -1340,6 +1340,18 @@ def main():
     # cpp backend
     ap.add_argument("--circuit", help="circuit name (cpp)")
 
+    ap.add_argument("--gear-make", default="", help="physical gear manufacturer, written into "
+                     "the exported .nam's metadata (e.g. --gear-make 'Electro-Harmonix'). "
+                     "Falls back to --circuit if omitted.")
+    ap.add_argument("--gear-model", default="", help="physical gear model name, written into "
+                     "the exported .nam's metadata (e.g. --gear-model 'Big Muff Pi V1'). "
+                     "Falls back to --circuit if omitted.")
+    ap.add_argument("--gear-type", default="", help="kind of gear being modeled, written into "
+                     "the exported .nam's metadata -- e.g. 'pedal', 'amp', 'amp_cab', 'preamp'. "
+                     "export_nam() defaults to 'amp' if this is never set anywhere in the "
+                     "pipeline, which is wrong for anything that isn't an amp -- always set this "
+                     "explicitly for pedals and other non-amp gear.")
+
     ap.add_argument("--input",   type=Path)
     ap.add_argument("--output",  type=Path, default=HERE / "training_data")
     ap.add_argument("--workers", type=int,  default=os.cpu_count())
@@ -1725,6 +1737,9 @@ def main():
         "permutation_count": len(perms),
         "values": args.values or "0.1,0.3,0.5,0.7",
         "workers": args.workers,
+        "gear_make": args.gear_make or circuit_label,
+        "gear_model": args.gear_model or circuit_label,
+        "gear_type": args.gear_type or "amp",
     }, indent=2))
 
     (out_dir / "sweep.wav").write_bytes(in_wav.read_bytes())

@@ -969,6 +969,13 @@ def main():
                          "full RAM load instead (marginally faster on abundant-RAM machines).")
     ap.add_argument("--no-mmap", action="store_false", dest="mmap",
                     help="Load outputs.npy fully into RAM instead of memory-mapping it")
+    ap.add_argument("--modeled-by", default=None,
+                    help="Credit for who trained/captured this model, written into the exported "
+                         ".nam's metadata (e.g. --modeled-by 'Gene Ko'). A training run is who's "
+                         "doing this specific capture, not a property of the reusable dataset, so "
+                         "this is a param_train.py flag rather than something baked into the "
+                         "dataset's config.json by batch_harness.py -- overrides anything already "
+                         "there if both are set.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -991,6 +998,11 @@ def main():
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
     dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats,
                            mmap=args.mmap)
+    if args.modeled_by:
+        # Mutates dataset.config in place, so every export_nam()/export_nam_state() call below
+        # (including mid-training "best" checkpoint exports) picks this up automatically --
+        # they all read this same dict, not a copy taken at dataset-load time.
+        dataset.config["modeled_by"] = args.modeled_by
     n_total = len(dataset)
     n_val = max(1, int(n_total * args.val_split))
     n_train = n_total - n_val

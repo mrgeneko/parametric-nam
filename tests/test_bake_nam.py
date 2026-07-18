@@ -56,6 +56,27 @@ def test_export_nam_propagates_steps_for_discrete_knobs():
     assert "steps" not in params["SUSTAIN"]
 
 
+def test_export_nam_propagates_gear_and_attribution_metadata():
+    """gear_make/gear_model/gear_type (from batch_harness.py's --gear-make/--gear-model/
+    --gear-type, baked into the dataset's config.json) and modeled_by (from param_train.py's
+    --modeled-by, merged into dataset.config at train time) must all reach the exported .nam's
+    metadata -- these were previously readable by export_nam() but had no CLI path to set them
+    anywhere in the pipeline, so a real model (bigmuff_v4_optimal.param.nam) shipped with
+    modeled_by missing entirely and gear_type silently defaulted to the wrong value ("amp" on
+    an actual pedal)."""
+    m = ParametricA2(3, 2)
+    cfg = {"param_names": ["SUSTAIN", "TONE"],
+           "bounds": {"SUSTAIN": [0.0, 1.0], "TONE": [0.0, 1.0]},
+           "gear_make": "Electro-Harmonix", "gear_model": "Big Muff Pi V1", "gear_type": "pedal",
+           "modeled_by": "Gene Ko"}
+    d = m.export_nam(cfg, {"version": "0.7.0"}, 48000)
+    meta = d["metadata"]
+    assert meta["gear_make"] == "Electro-Harmonix"
+    assert meta["gear_model"] == "Big Muff Pi V1"
+    assert meta["gear_type"] == "pedal"
+    assert meta["modeled_by"] == "Gene Ko"
+
+
 def test_knob_default_prefers_declared_then_midpoint():
     assert bake_nam._knob_default({"name": "x", "min": 0, "max": 1, "default": 0.3}) == 0.3
     assert bake_nam._knob_default({"name": "x", "min": 0.2, "max": 0.8}) == 0.5  # midpoint
