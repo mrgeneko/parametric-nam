@@ -15,7 +15,7 @@ parameters[].default) — not a blanket 0.5, which is wrong for many circuits
 
 BY DEFAULT this emits a DUAL-payload file: the baked static tone at top level (so any
 stock plugin plays it) PLUS the full original parametric model under the
-"[redacted]_parametric" key (which stock loaders ignore, and a parametric-aware host reads
+"embedded_parametric" key (which stock loaders ignore, and a parametric-aware host reads
 for live knobs). One artifact, best experience where supported — and safe to hand anyone.
 
 That default matters: a RAW .param.nam handed to a stock plugin throws
@@ -36,7 +36,7 @@ from pathlib import Path
 from param_train import ParametricA2, check_parametric_schema
 import nam_standard
 
-EMBED_KEY = "[redacted]_parametric"
+EMBED_KEY = "embedded_parametric"
 
 
 def _submodels(nam: dict, source: str = ".param.nam"):
