@@ -24,13 +24,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-RUN="${RUN:-$HOME/work/tmp/bigmuff_v2_skip_causal}"      # <RUN>.best_<tier>.param.nam + <RUN>.log
+RUN="${RUN:-$HOME/work/tmp/bigmuff_v4}"                  # <RUN>.best_<tier>.param.nam + <RUN>.log
 CKPT="${CKPT:-${RUN}_ckpt}"                              # best.pt, best_<tier>.pt, metrics.csv
-DS="${DS:-$HOME/work/tmp/bigmuff_v1_66_5_ds}"
+DS="${DS:-$HOME/work/tmp/bigmuff_v4_ds}"
 SCHX="${SCHX:-$HOME/work/parametric-devices/pedals/Big Muff Pi V1 (66#5).schx}"
 MODELS="${MODELS:-$HOME/work/parametric-nam-models}"
 CATEGORY="${CATEGORY:-pedals}"
-CIRCUIT="${CIRCUIT:-electro-harmonix-big-muff-pi-v1}"
+CIRCUIT="${CIRCUIT:-big-muff-pi-v1-66-5}"
 PREFIX="${PREFIX:-bigmuff}"
 CONFIG="${CONFIG:-configs/big-muff-v1.toml}"        # training config, for reproduce.sh
 PY_BIN="${PY_BIN:-$HERE/.venv/bin/python}"
@@ -292,8 +292,16 @@ join_with() { local sep="$1"; shift; local out=""; local x
 WIDTH_LIST="$(join_with ', ' "${WIDTHS[@]}")"
 CH_SUM="$(join_with 'ch + ' "${WIDTHS[@]}")ch"
 KNOB_LIST="$(join_with ', ' "${KNOBS[@]}")"
+# Open-ended SGDR runs carry epochs=0 (no fixed budget) -- describe them honestly, not "of 0".
 STOPPED=""
-[ "$LAST" != "$PLANNED" ] && STOPPED="**The run was stopped at epoch $LAST of $PLANNED.**"
+if [ "$PLANNED" = "0" ] || [ "$PLANNED" = "?" ]; then
+  EPOCHS_LINE="open-ended SGDR (restart every 50 epochs) — no fixed budget, stopped manually at epoch $LAST"
+  REACHED="**epoch $LAST** (open-ended SGDR run — stopped manually; no fixed epoch budget)"
+else
+  EPOCHS_LINE="epochs $PLANNED planned"
+  REACHED="**epoch $LAST of $PLANNED**"
+  [ "$LAST" != "$PLANNED" ] && STOPPED="**The run was stopped at epoch $LAST of $PLANNED.**"
+fi
 
 # per-tier table rows (generated — works for any number of tiers)
 tier_rows=""; esr_rows=""
@@ -308,41 +316,97 @@ best_eps="$(IFS='/'; echo "${EPOCHS[*]}")"
 esr_inline=""
 for i in $(seq 0 $LAST_I); do esr_inline="${esr_inline:+$esr_inline · }${TIERS[$i]} ${ESRS[$i]}"; done
 
-# The "supersedes the residual-head bundles" framing is only true if a bundle
-# for this circuit actually existed before (Big Muff/JCM800/TS9/Dumble all
-# predate the skip-migration and genuinely have one). A circuit being
-# published for the first time -- e.g. Boss DS-1 -- has nothing to supersede;
-# asserting it anyway would be a false provenance claim in a permanent record.
-if [ -d "$MODELS/$CATEGORY/$CIRCUIT" ] && [ -n "$(ls -A "$MODELS/$CATEGORY/$CIRCUIT" 2>/dev/null)" ]; then
-  supersede_section='## Supersedes the residual-head bundles — this is the first CORRECT forward
+# The framing depends on what the CURRENTLY published bundle (if any) was trained as -- and it is
+# DETECTED, not assumed. "Supersedes the residual-head bundles / first correct forward" is only true
+# if the prior bundle was actually residual. Once a circuit has migrated to skip (as Big Muff did on
+# 2026-07-13), a newer run merely fits the SAME forward better and the prior skip run IS a valid
+# baseline; claiming otherwise would be a false provenance claim in a permanent record. So read the
+# prior bundle's head_mode rather than treating "a bundle exists" as "residual".
+CIRCDIR="$MODELS/$CATEGORY/$CIRCUIT"
+PRIOR_STATE=none
+if [ -d "$CIRCDIR" ] && [ -n "$(ls -A "$CIRCDIR" 2>/dev/null)" ]; then
+  PRIOR_STATE=unknown
+  _cur="$(cat "$CIRCDIR/CURRENT" 2>/dev/null || true)"
+  _pn=""
+  [ -n "$_cur" ] && _pn="$(ls "$CIRCDIR/$_cur"/*optimal*.param.nam "$CIRCDIR/$_cur"/*best_full*.param.nam 2>/dev/null | head -1 || true)"
+  if [ -n "$_pn" ]; then
+    PRIOR_STATE="$("$PY_BIN" - "$_pn" 2>/dev/null <<'PYX'
+import json, sys
+d = json.load(open(sys.argv[1]))
+subs = d.get("config", {}).get("submodels", [])
+modes = set()
+for s in subs:
+    modes.add(s.get("model", {}).get("config", {}).get("parametric", {}).get("head_mode"))
+if not subs:                                   # single-model (non-container) .nam
+    modes.add(d.get("config", {}).get("parametric", {}).get("head_mode"))
+print("skip" if modes == {"skip"} else "residual" if "residual" in modes else "unknown")
+PYX
+)" || PRIOR_STATE=unknown
+    [ -n "$PRIOR_STATE" ] || PRIOR_STATE=unknown
+  fi
+fi
+echo "==> prior published bundle for $CIRCUIT: $PRIOR_STATE"
+
+CAUSAL='- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
+  stays sample-aligned when summed with parallel paths (no comb filtering).'
+
+case "$PRIOR_STATE" in
+  residual)
+    supersede_section='## Supersedes the residual-head bundles — this is the first CORRECT forward
 Earlier bundles for this circuit were trained with a **residual-only** head while the
 product renders **skip-accumulating** (== NAM standard). They compute different functions
 from the same weights, so their reported ESRs did not reflect in-product sound. This run
 trains the skip head directly:
 
 - `config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier.
-- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
-  stays sample-aligned when summed with parallel paths (no comb filtering).
+'"$CAUSAL"'
 - The ESRs below are therefore measured under the **same forward the product runs**.
   Earlier bundles'"'"' ESRs are **not** a valid baseline for these numbers.'
-  reading_section='## Reading these numbers
+    reading_section='## Reading these numbers
 These are the first '"$CIRCUIT_NAME"' ESRs measured under the **correct forward**
 (skip-accumulating, matching the product). The residual-head bundles reported numbers under
 a forward that never ships, so **they are not a valid baseline** — a tier that looks "worse"
 than an older run is not necessarily a regression; the two were never measuring the same thing.'
-else
-  supersede_section='## First release for this circuit
+    ;;
+  skip)
+    supersede_section='## Supersedes the previous skip-head bundle
+The current published bundle for this circuit was **already** trained on the correct
+**skip-accumulating** forward (== NAM standard) with a strictly causal head; this run uses the
+identical forward and simply fits it better:
+
+- `config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier.
+'"$CAUSAL"'
+- ESRs are measured under the **same forward** as the previous bundle, so the numbers below are a
+  like-for-like comparison — a genuine improvement, not a change in what "ESR" measures.'
+    reading_section='## Reading these numbers
+Measured under the same **skip-accumulating** forward as the previous '"$CIRCUIT_NAME"' bundle, so
+these ESRs are directly comparable to it — lower is a genuine, like-for-like improvement. The
+residual-vs-skip migration already happened in an earlier run, so no such caveat applies here.'
+    ;;
+  none)
+    supersede_section='## First release for this circuit
 `config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier -- trained
 directly against the skip-accumulating forward the product runs (== NAM standard), so
 there is no residual-vs-skip baseline mismatch to call out here.
 
-- The head is **strictly causal** (left-padded, K−1) — **zero added latency**, so the model
-  stays sample-aligned when summed with parallel paths (no comb filtering).'
-  reading_section='## Reading these numbers
+'"$CAUSAL"
+    reading_section='## Reading these numbers
 First release for this circuit — no earlier bundle exists, so there is no baseline
 mismatch to flag. Trained directly against the skip-accumulating forward the product
 runs (== NAM standard).'
-fi
+    ;;
+  *)  # bundle exists but head mode unreadable -- make NO residual-vs-skip claim either way
+    supersede_section='## Supersedes the previous bundle for this circuit
+`config.parametric.head_mode = "skip"`, `schema_version = 1` on every tier -- trained against the
+skip-accumulating forward the product runs (== NAM standard). (The previous bundle'"'"'s head mode
+could not be read, so no residual-vs-skip baseline claim is made here.)
+
+'"$CAUSAL"
+    reading_section='## Reading these numbers
+Trained against the skip-accumulating forward the product runs (== NAM standard). The previous
+bundle'"'"'s head mode could not be confirmed, so treat cross-run ESR comparisons with care.'
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 6. MANIFEST.md
@@ -369,7 +433,7 @@ $supersede_section
 
 ## Training
 - Slimmable A2, widths **[$WIDTH_LIST]**, FiLM, **skip + causal head**.
-- epochs $PLANNED planned, batch $BATCH, lr $LR (cosine), crop-len $CROP, repeats $REPEATS,
+- $EPOCHS_LINE, batch $BATCH, lr $LR (cosine), crop-len $CROP, repeats $REPEATS,
   patience $PATIENCE. Apple Silicon (MPS).
 EOF
 [ -n "$STOPPED" ] && echo "- $STOPPED"
@@ -402,7 +466,7 @@ cat > "$STAGE/ESR_RECORD.md" <<EOF
 # ESR record — $CIRCUIT_NAME, ${NTIERS}-tier [$WIDTH_LIST], skip + causal head
 
 ESR = error-to-signal ratio (val split), from \`metrics.csv\`.
-Reached **epoch $LAST of $PLANNED**.
+Reached $REACHED.
 
 | tier | width | ESR | best epoch |
 |---|---|---:|---|
