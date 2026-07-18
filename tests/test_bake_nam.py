@@ -41,6 +41,21 @@ def _bake(src, out, *extra):
     return json.loads(out.read_text())
 
 
+def test_export_nam_propagates_steps_for_discrete_knobs():
+    """A knob marked discrete via config["steps"] (from --steps at dataset-generation
+    time) must carry a "steps" field in the exported parameter def, so readers (e.g.
+    NeuralAmpModelerCore's DSPParamDef.steps) can render an N-position selector instead
+    of a continuous knob. Continuous knobs must NOT get a spurious "steps" key."""
+    m = ParametricA2(3, 2)
+    cfg = {"param_names": ["SUSTAIN", "TONE"],
+           "bounds": {"SUSTAIN": [0.0, 1.0], "TONE": [0.0, 1.0]},
+           "steps": {"TONE": 3}}
+    d = m.export_nam(cfg, {"version": "0.7.0"}, 48000)
+    params = {p["name"]: p for p in d["config"]["parametric"]["parameters"]}
+    assert params["TONE"]["steps"] == 3
+    assert "steps" not in params["SUSTAIN"]
+
+
 def test_knob_default_prefers_declared_then_midpoint():
     assert bake_nam._knob_default({"name": "x", "min": 0, "max": 1, "default": 0.3}) == 0.3
     assert bake_nam._knob_default({"name": "x", "min": 0.2, "max": 0.8}) == 0.5  # midpoint

@@ -328,6 +328,7 @@ class ParametricA2(nn.Module):
         param_map = config.get("param_map", {})
         bounds = config.get("bounds", {})
         defaults = config.get("defaults", {}) or {}
+        steps_map = config.get("steps", {}) or {}
         param_defs = []
         for name in config.get("param_names", []):
             lo, hi = bounds.get(name, [0.0, 1.0])
@@ -338,10 +339,17 @@ class ParametricA2(nn.Module):
             # controls (e.g. a Timmy's don't center at noon).
             dflt = defaults.get(name)
             dflt = float(dflt) if dflt is not None else round((lo + hi) / 2, 4)
-            param_defs.append({
+            entry = {
                 "name": param_map.get(name, name).strip(),
                 "min": lo, "max": hi, "default": dflt,
-            })
+            }
+            # Discrete switch metadata (from --steps at dataset-generation time), for
+            # readers (NeuralAmpModelerCore's DSPParamDef.steps) that render an N-position
+            # selector instead of a continuous knob. Omitted for ordinary continuous knobs.
+            steps = int(steps_map.get(name, 0) or 0)
+            if steps >= 2:
+                entry["steps"] = steps
+            param_defs.append(entry)
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),
