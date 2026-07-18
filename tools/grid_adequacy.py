@@ -337,6 +337,10 @@ def main() -> None:
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
 
+    # FUTURE ENHANCEMENT: probes render into this ephemeral TemporaryDirectory with an in-memory cache,
+    # so a re-run (e.g. iterating the grid one axis at a time) re-renders every probe from scratch --
+    # no cross-run reuse. A persistent on-disk cache keyed by (schx-rev, params, oversample, iterations)
+    # would let successive runs reuse the unchanged probes, which is most of them during a regrid.
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
@@ -349,10 +353,14 @@ def main() -> None:
         jobs = []
         for axis, vals in knobs.items():
             other_axes = {k: v for k, v in knobs.items() if k != axis}
-            slices = [{}] if not other_axes else [
-                {k: v[i] for k, v in other_axes.items()}
-                for i in (0, len(next(iter(other_axes.values()))) // 2, -1)
-            ]
+            # Three reference slices: the other knobs at their low / mid / high value. Index each
+            # axis at ITS OWN position -- axes have different lengths (e.g. Gain 9, Middle 3), so the
+            # old code's single shared index (the first axis's midpoint) ran off the end of shorter
+            # axes with an IndexError.
+            def _slice(pos):
+                return {k: (v[0] if pos == "lo" else v[-1] if pos == "hi" else v[len(v) // 2])
+                        for k, v in other_axes.items()}
+            slices = [{}] if not other_axes else [_slice(p) for p in ("lo", "mid", "hi")]
             for lo, hi in zip(vals, vals[1:]):
                 for oth in slices:
                     jobs.append((axis, lo, hi, oth))
