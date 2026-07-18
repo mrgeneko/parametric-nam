@@ -299,9 +299,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, required=True, help="the same TOML the pipeline uses")
-    ap.add_argument("--target", type=float, default=0.007,
-                    help="the model ESR you are chasing (default 0.007). A cell whose interpolation "
-                         "error exceeds this is the LIMITING FACTOR -- no training fixes it.")
+    ap.add_argument("--target", type=float, default=0.03,
+                    help="the interpolation ESR the knob grid must support (default 0.03). A cell "
+                         "whose interpolation error exceeds this is the LIMITING FACTOR -- no training "
+                         "fixes it. NOTE this is an AUDIBILITY floor, not a training-fidelity target: "
+                         "grid interpolation error is masked, signal-correlated distortion the user "
+                         "has no reference for, so ~0.03 (-15 dB) is inaudible in use. Do NOT set it to "
+                         "the model ESR you train to (0.003-0.007) -- that over-densifies the grid for "
+                         "error nobody can hear. Plain ESR matches what the NAM trainer selects on.")
     ap.add_argument("--probe-s", type=float, default=8.0,
                     help="seconds of the input to probe with, taken from its highest-slew window")
     ap.add_argument("--iterations", type=int, default=256)
