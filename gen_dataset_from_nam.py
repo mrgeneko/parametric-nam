@@ -61,11 +61,20 @@ DEFAULT_PREFIX_MAP = {
 _TOKEN_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
 
 
-def _parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -> dict:
+def _parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -> tuple:
     """Split "G2, B5, M5, T5, Rvb0, Rsn0, Prsn0" (after stripping any leading device-name words)
     into {knob_name: float_value}, skipping any token whose prefix isn't in prefix_map (unknown/
-    device-name tokens are expected and silently ignored, not an error)."""
-    out = {}
+    device-name tokens are expected and silently ignored, not an error).
+
+    Also returns {knob_name: digit_string} (the raw token digits, e.g. "10") so callers can catch
+    the DEFAULT SCALE'S AMBIGUITY: 10**(-len(digits)) assumes every extra digit is another decimal
+    place (a PERCENTAGE convention: "50" -> 0.50), which silently collides with a DIAL-POSITION
+    convention (1..10 written out, where "10" means the max, 1.0, not 0.10) -- "G1" and "G10" both
+    scale to 0.1 by default. There is no way to tell which convention a filename uses from the
+    digit string alone, so this can only be caught after the fact by comparing outputs across the
+    whole batch (see main()'s collision check), not fixed inside this function.
+    """
+    out, raw_digits = {}, {}
     for raw in stem.split(","):
         tok = raw.strip()
         m = _TOKEN_RE.match(tok.split()[-1]) if tok else None
@@ -79,7 +88,8 @@ def _parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -
         if scale is None:
             scale = 10 ** (-len(digits))   # single digit -> /10, matches the user's spec exactly
         out[name] = round(int(digits) * scale, 6)
-    return out
+        raw_digits[name] = digits
+    return out, raw_digits
 
 
 def _load_mapping_csv(path: Path) -> dict:
@@ -185,17 +195,38 @@ def main():
     mapping = _load_mapping_csv(args.mapping_csv) if args.mapping_csv else {}
 
     # 1. Parse every filename into a {knob: value} dict.
-    per_file = {}
+    per_file, per_file_raw = {}, {}
     for f in files:
         if f.name in mapping:
-            per_file[f] = mapping[f.name]
+            per_file[f], per_file_raw[f] = mapping[f.name], {}
         else:
-            per_file[f] = _parse_filename_tokens(f.stem, prefix_map, scale_overrides)
+            per_file[f], per_file_raw[f] = _parse_filename_tokens(f.stem, prefix_map, scale_overrides)
     empty = [f.name for f, p in per_file.items() if not p]
     if empty:
         print(f"WARNING: no knobs parsed from filename for: {empty}\n"
               f"         (use --knob-map / --mapping-csv if this batch uses a different convention)",
               file=sys.stderr)
+
+    # 1b. Catch the default scale's DIAL-POSITION-vs-PERCENTAGE ambiguity (see
+    # _parse_filename_tokens' docstring): if two files carry DIFFERENT raw digit strings for the
+    # same knob (e.g. "1" and "10") but the default 10**(-len(digits)) scale collapsed them to the
+    # SAME float value, that's not a legitimate duplicate capture -- it's the scale guessing wrong.
+    # Fail loudly with the exact colliding files rather than silently training on a corrupted grid.
+    for name in sorted({k for p in per_file_raw.values() for k in p}):
+        by_value: dict = {}
+        for f, raw in per_file_raw.items():
+            if name in raw:
+                by_value.setdefault(per_file[f][name], []).append((f.name, raw[name]))
+        for value, hits in by_value.items():
+            distinct_digits = {digits for _, digits in hits}
+            if len(hits) >= 2 and len(distinct_digits) >= 2:
+                ap.error(
+                    f"'{name}' scale collision: {[h[0] for h in hits]} carry DIFFERENT filename "
+                    f"tokens ({sorted(distinct_digits)}) but all scaled to the SAME value "
+                    f"({value}) under the default 10**(-len(digits)) rule. This is the classic "
+                    f"dial-position-vs-percentage ambiguity (\"1\" and \"10\" both -> 0.1) -- pass "
+                    f"--knob-scale {name}=FACTOR (a fixed factor applied to the raw digits, e.g. "
+                    f"0.1 for a 1..10 dial) to disambiguate.")
 
     # 2. Auto-detect fixed vs swept: a knob with exactly one distinct value across the batch is
     # fixed, not trained -- per the source instruction, a batch this small routinely has several
