@@ -1069,8 +1069,8 @@ def main():
     # ------------------------------------------------------------------
     num_params = dataset.num_params
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
-    desc = ", ".join(f"{lbl}={w}ch({m.weight_count()}w)"
-                     for lbl, w, m in zip(model.tier_labels(), model.widths, model.submodels))
+    desc = ", ".join(f"w{w}({m.weight_count()}w)"
+                     for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     model.to(device)
 
@@ -1096,6 +1096,11 @@ def main():
     # Per-tier best tracking. `labels` is ascending-width order; the widest tier
     # ("full") is primary — it drives best.pt, args.output, and resume.
     labels = model.tier_labels()
+    # DISPLAY labels are the actual channel widths (w3..w8), so the log/metrics are unambiguous --
+    # "lite"/"full" are positional and depend on the widths list, which is confusing. The lite/full
+    # keys still index the dicts + name the checkpoint files + drive resume/release for back-compat;
+    # only what's printed/columned changes.
+    wlabel = {lbl: f"w{w}" for lbl, w in zip(labels, model.widths)}
     best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
     best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
 
@@ -1158,7 +1163,7 @@ def main():
         log_w = csv.writer(log_f)
         if not args.resume:
             log_w.writerow(["epoch", "train_loss", "val_loss",
-                            *[f"val_esr_{lbl}" for lbl in labels], "lr", "elapsed_s"])
+                            *[f"val_esr_{wlabel[lbl]}" for lbl in labels], "lr", "elapsed_s"])
 
     t0 = time.time()
     epoch = start_epoch - 1
@@ -1203,7 +1208,7 @@ def main():
         lr_now = scheduler.get_last_lr()[0]
 
         # Console: one ESR per tier, '*' marks tiers that improved this epoch
-        esr_str = "  ".join(f"{lbl}={esr_by[lbl]:.6f}{'*' if new_best.get(lbl) else ''}"
+        esr_str = "  ".join(f"{wlabel[lbl]}={esr_by[lbl]:.6f}{'*' if new_best.get(lbl) else ''}"
                             for lbl in labels)
         if open_ended:
             prog, tail = f"[{epoch:4d}/inf]", f"({elapsed/3600:.2f}h)"
@@ -1252,7 +1257,7 @@ def main():
     print(f"\nTraining finished ({elapsed:.0f}s, {elapsed/max(1, completed):.1f}s/epoch, "
           f"{completed} epochs)",
           file=sys.stderr)
-    esr_summary = ", ".join(f"{lbl} {best_esr[lbl]:.6f}"
+    esr_summary = ", ".join(f"{wlabel[lbl]} {best_esr[lbl]:.6f}"
                             for lbl in labels if best_state[lbl] is not None)
     print(f"Best validation ESR by tier: {esr_summary}", file=sys.stderr)
 
