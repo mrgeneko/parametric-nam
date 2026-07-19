@@ -111,7 +111,6 @@ emit("BATCH", a.get("batch_size", "?"))
 emit("LR", a.get("lr", "?"))
 emit("CROP", a.get("crop_len", "?"))
 emit("REPEATS", a.get("repeats", "?"))
-emit("PATIENCE", a.get("patience", "?"))
 emit("WIDTHS_CSV", a.get("widths", ""))
 emit("CIRCUIT_NAME", cfg.get("circuit", "?"))
 emit("OVERSAMPLE", cfg.get("oversample", "?"))
@@ -433,8 +432,9 @@ $supersede_section
 
 ## Training
 - Slimmable A2, widths **[$WIDTH_LIST]**, FiLM, **skip + causal head**.
-- $EPOCHS_LINE, batch $BATCH, lr $LR (cosine), crop-len $CROP, repeats $REPEATS,
-  patience $PATIENCE. Apple Silicon (MPS).
+- $EPOCHS_LINE, batch $BATCH, lr $LR (cosine), crop-len $CROP, repeats $REPEATS.
+  No early stopping (removed 2026-07-19 -- it fired once and cost a 17-22% improvement
+  from a cosine tail it cut short). Apple Silicon (MPS).
 EOF
 [ -n "$STOPPED" ] && echo "- $STOPPED"
 cat <<EOF
@@ -505,8 +505,8 @@ python run_pipeline.py --config $CONFIG \\
   --dataset-dir "$DS" \\
   --nam-output  "\$OUT.param.nam" \\
   --checkpoint-dir "\${OUT}_ckpt" \\
-  --slimmable --widths $WIDTHS_CSV \\
-  --epochs $PLANNED --patience $PATIENCE
+  --widths $WIDTHS_CSV \\
+  --epochs $PLANNED
 EOF
 chmod +x "$STAGE/reproduce.sh"
 

@@ -326,8 +326,6 @@ def reproduce_command(args):
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
-    if args.patience:
-        epochs_part += f' --patience {args.patience} --min-delta {args.min_delta}'
     c.append(f'    --repeats {args.repeats} {epochs_part} '
              f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
     return "\n".join(c)
@@ -615,11 +613,6 @@ def main():
     g = ap.add_argument_group("training")
     g.add_argument("--epochs",         type=int,   default=100,
                    help="Training epochs, or 0 = open-ended (run until touch <ckpt>/STOP)")
-    g.add_argument("--patience",       type=int,   default=0,
-                   help="Early-stop after N epochs with no val-ESR improvement in any "
-                        "tier (0 = off). Forwarded to param_train.py.")
-    g.add_argument("--min-delta",      type=float, default=0.0,
-                   help="Min val-ESR decrease counting as improvement for --patience")
     g.add_argument("--restart-period", type=int,   default=50,
                    help="Open-ended SGDR restart period in epochs")
     g.add_argument("--restart-mult",   type=int,   default=1,
@@ -654,6 +647,10 @@ def main():
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.1)
+    g.add_argument("--val-passes",     type=int,   default=4,
+                   help="Repeat the full validation pass this many times per epoch and average "
+                        "-- reduces noise in reported val_esr and best-checkpoint selection. "
+                        "Forwarded to param_train.py.")
     g.add_argument("--knob-boost",     type=str,   default=None,
                    help="Per-knob FiLM gradient boost: NAME=mult,NAME2=mult2,... (e.g. "
                         "'Drive=3.0'). For a knob whose audible effect is small relative "
@@ -925,11 +922,10 @@ def main():
                 "--repeats",         repeats,   # derived above — may differ from args.repeats
                 "--mrstft-weight",   args.mrstft_weight,
                 "--val-split",       args.val_split,
+                "--val-passes",      args.val_passes,
                 "--device",          args.device,
                 "--seed",            args.seed,
             ]
-            if args.patience:            train_cmd += ["--patience", args.patience,
-                                                        "--min-delta", args.min_delta]
             if args.widths:              train_cmd += ["--widths", args.widths]
             if not args.mmap:             train_cmd.append("--no-mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]

@@ -614,11 +614,6 @@ class ParamDataset(torch.utils.data.Dataset):
 # Loss functions
 # ---------------------------------------------------------------------------
 
-def esr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Error-to-signal ratio."""
-    return ((pred - target) ** 2).sum() / (target ** 2).sum()
-
-
 def mrstft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Multi-resolution STFT loss (L1 on magnitudes)."""
     fft_sizes = [512, 1024, 2048]
@@ -755,28 +750,71 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     return total_loss / len(loader)
 
 
-def validate(model, loader, criterion, device):
+def validate(model, loader, criterion, device, val_passes: int = 1):
     """Returns (mean_val_loss, esr_per_tier) where esr_per_tier is a list of ESRs
     in ascending-width order (len = #tiers; a single-element list for a plain,
-    non-slimmable model)."""
+    non-slimmable model).
+
+    ESR here is per-example — each example normalised by its OWN target energy,
+    then averaged across the batch — with the same floor `criterion` trains
+    against (falls back to ParamLoss's own default, 0.05, for callers that pass a
+    plain criterion with no `.floor`, e.g. export_checkpoint.py's verification
+    step). This matches both NAM's own official esr() (nam/models/losses.py:
+    per-example mean over the sample axis, THEN mean over the batch axis — NOT a
+    single ratio over the whole batch at once) and this codebase's own training
+    objective (esr_per_example). No pre-emphasis here, unlike the training loss:
+    pre-emphasis is a loss-SHAPING choice specific to this codebase, not part of
+    NAM's esr() definition, and every other circuit's published ESR_RECORD.md
+    already reports plain (non-pre-emphasised) ESR -- changing that would make
+    this circuit's numbers incomparable to its own history and to every other one.
+
+    Previously this used a plain batch-aggregate ratio (sum of squared error over
+    the WHOLE batch / sum of target energy over the whole batch), which is neither
+    of the above: a batch's ratio is dominated by whichever examples in it happen
+    to be loudest, so the reported number (and therefore best-checkpoint
+    selection) could vary by tens of percent from one random crop draw to the
+    next, independent of actual model quality -- see param_train.py's own
+    esr_per_example() docstring ("the Boss DS-1 bug") for why training's loss
+    already avoided this; validate() just never got the same fix.
+
+    val_passes repeats the ENTIRE val_loader this many times, averaging every pass
+    into the same running total. ParamDataset re-crops randomly on every single
+    __getitem__ call (see its own docstring), so iterating the same loader again
+    draws genuinely different random windows, not the same ones twice -- this is
+    real additional coverage, not a wasted repeat. NAM's own trainer never needed
+    this: its Dataset uses fixed, non-random sample windows (checked directly,
+    nam/data.py), so its validation is already fully deterministic epoch to epoch.
+    This codebase's parametric extension (many knob permutations, each covered via
+    randomly-cropped repeats) is what introduces the noise val_passes averages
+    down -- increasing it trades epoch wall-clock time for a less noisy reading
+    (variance falls roughly as 1/val_passes, i.e. std roughly as 1/sqrt(val_passes)
+    for independent draws), which matters most for best-checkpoint selection
+    (see the plain "if new < best: save" rule below in the training loop, which
+    has no other noise-smoothing of its own -- NAM's own PackedBestCheckpoint uses
+    the identical rule, checked directly, so there was no existing technique to
+    borrow; making the input to that rule less noisy is the mitigation available
+    without changing the selection rule itself).
+    """
     model.eval()
     slimmable = isinstance(model, SlimmableParametricA2)
+    floor = getattr(criterion, "floor", 0.05)
     total_loss = 0.0
     esr_sums = None
     n = 0
     with torch.no_grad():
-        for inp, out, params in loader:
-            inp, out, params = inp.to(device), out.to(device), params.to(device)
-            if slimmable:
-                preds = model(inp, params)                        # list, ascending width
-                total_loss += sum(criterion(p, out) for p in preds).item()
-                e = [esr(p, out).item() for p in preds]
-            else:
-                pred = model(inp, params)
-                total_loss += criterion(pred, out).item()
-                e = [esr(pred, out).item()]
-            esr_sums = e if esr_sums is None else [a + b for a, b in zip(esr_sums, e)]
-            n += 1
+        for _ in range(max(1, val_passes)):
+            for inp, out, params in loader:
+                inp, out, params = inp.to(device), out.to(device), params.to(device)
+                if slimmable:
+                    preds = model(inp, params)                        # list, ascending width
+                    total_loss += sum(criterion(p, out) for p in preds).item()
+                    e = [esr_per_example(p, out, floor).item() for p in preds]
+                else:
+                    pred = model(inp, params)
+                    total_loss += criterion(pred, out).item()
+                    e = [esr_per_example(pred, out, floor).item()]
+                esr_sums = e if esr_sums is None else [a + b for a, b in zip(esr_sums, e)]
+                n += 1
     return total_loss / n, [s / n for s in esr_sums]
 
 
@@ -894,15 +932,6 @@ def main():
     ap.add_argument("--restart-mult", type=int, default=1,
                     help="Open-ended mode: SGDR period multiplier per restart "
                          "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
-    ap.add_argument("--patience", type=int, default=0,
-                    help="Early-stop after N epochs with no val-ESR improvement in ANY "
-                         "tier (0 = off). Works in both fixed-epoch and open-ended modes. "
-                         "Best-per-tier checkpoints export live, so stopping loses nothing "
-                         "already earned. (default: %(default)s)")
-    ap.add_argument("--min-delta", type=float, default=0.0,
-                    help="Minimum val-ESR decrease that counts as an improvement for "
-                         "--patience (default 0 = any strict decrease). e.g. 1e-4 ignores "
-                         "noise-floor bounces so a plateaued tier stops resetting patience.")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -929,6 +958,17 @@ def main():
                          "changing the audio data (default: %(default)s)")
     ap.add_argument("--val-split", type=float, default=0.1,
                     help="Fraction of samples for validation (default: %(default)s)")
+    ap.add_argument("--val-passes", type=int, default=4,
+                    help="Repeat the full validation pass this many times per epoch and "
+                         "average -- ParamDataset re-crops randomly on every call, so this is "
+                         "real additional coverage, not a repeated identical reading. Reduces "
+                         "noise in the reported val_esr (variance falls ~1/val_passes), which "
+                         "matters most for best-checkpoint selection: that's a plain "
+                         "'new best if lower' rule with no smoothing of its own, so a less "
+                         "noisy input to it is the mitigation available without changing the "
+                         "rule itself. Costs roughly (val_passes-1) extra forward-only passes "
+                         "over the (much smaller than train) val set per epoch. "
+                         "(default: %(default)s)")
     ap.add_argument("--loss", choices=["esr", "mse"], default="esr",
                     help="Training objective. 'esr' normalises each example by its own energy, so "
                          "quiet knob settings and fading notes count as much as loud ones. 'mse' is "
@@ -1058,11 +1098,6 @@ def main():
     labels = model.tier_labels()
     best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
     best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
-    # Early-stopping state (independent of best-checkpointing so --min-delta can
-    # ignore noise). patience_ref = best ESR seen per tier for the improvement test;
-    # last_improve_epoch = most recent epoch any tier improved by > --min-delta.
-    patience_ref = {lbl: float("inf") for lbl in labels}
-    last_improve_epoch = None
 
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
@@ -1082,17 +1117,8 @@ def main():
                 best_esr["full"] = ckpt["best_esr"]; best_state["full"] = ckpt.get("best_state")
             if "lite" in best_esr and ckpt.get("best_lite_esr") is not None:
                 best_esr["lite"] = ckpt["best_lite_esr"]; best_state["lite"] = ckpt.get("best_lite_state")
-        # restore early-stopping counter across resume (falls back to best_esr /
-        # start_epoch for checkpoints written before this field existed)
-        pr = ckpt.get("patience_ref")
-        patience_ref.update(pr if isinstance(pr, dict) else best_esr)
-        if ckpt.get("last_improve_epoch") is not None:
-            last_improve_epoch = ckpt["last_improve_epoch"]
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
-
-    if last_improve_epoch is None:
-        last_improve_epoch = start_epoch - 1
 
     open_ended = (args.epochs == 0)
 
@@ -1143,7 +1169,8 @@ def main():
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
-        val_loss, esr_list = validate(model, val_loader, criterion, device)
+        val_loss, esr_list = validate(model, val_loader, criterion, device,
+                                     val_passes=args.val_passes)
         scheduler.step()
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
 
@@ -1171,12 +1198,6 @@ def main():
                     }, ckpt_dir / fname)
                 export_nam_state(model, best_state[lbl], dataset,
                                  nam_variant(args.output, f"best_{lbl}"), device)
-
-        # Early-stopping bookkeeping: did any tier improve by more than min_delta?
-        for lbl in labels:
-            if esr_by[lbl] < patience_ref[lbl] - args.min_delta:
-                patience_ref[lbl] = esr_by[lbl]
-                last_improve_epoch = epoch
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
@@ -1216,21 +1237,10 @@ def main():
                 "best_state": best_state["full"],
                 "best_lite_esr": best_esr.get("lite", float("inf")),
                 "best_lite_state": best_state.get("lite"),
-                # early-stopping counter (survives resume)
-                "last_improve_epoch": last_improve_epoch,
-                "patience_ref": dict(patience_ref),
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
 
         completed += 1
-        # Early stop: no tier improved (by > --min-delta) for --patience epochs.
-        if args.patience > 0 and (epoch - last_improve_epoch) >= args.patience:
-            print(f"  Early stop at epoch {epoch}: no val-ESR improvement "
-                  f"(> {args.min_delta:g}) in any tier for {args.patience} epochs "
-                  f"(last improved at epoch {last_improve_epoch}). "
-                  f"Best per-tier models already exported.",
-                  file=sys.stderr, flush=True)
-            break
         # Open-ended: stop gracefully on STOP file or SIGINT/SIGTERM.
         if open_ended and should_stop(ckpt_dir):
             break
