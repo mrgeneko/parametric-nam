@@ -28,7 +28,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
 """
 
-import atexit, argparse, csv, json, os, re, shutil, signal, subprocess, sys, threading, time, tomllib
+import atexit, argparse, csv, fcntl, json, os, re, shutil, signal, subprocess, sys, threading, time, tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1299,6 +1299,38 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
 # main
 # ---------------------------------------------------------------------------
 
+def acquire_generation_lock(out_dir: Path):
+    """Take an exclusive, non-blocking lock on out_dir for the lifetime of a generation run.
+
+    WHY: two batch_harness generations pointed at one dir corrupt it SILENTLY. params.csv is
+    opened in append mode with no lock, so a second run re-logs its resume set as duplicate
+    rows; meanwhile the idx-named .npy files (last-writer-wins) look perfect. The dataset then
+    passes every render/RMS/convergence check but its params.csv no longer lines up 1:1 with the
+    combined outputs.npy -- ParamDataset pairs the i-th row with output row i, so knobs get
+    matched to the WRONG audio (and rows past the .npy count run off the end). This is exactly
+    the failure that produced 288 duplicate top-gain rows in the jcm800-sag run (two harnesses,
+    28 concurrent renders).
+
+    flock is advisory but auto-releases when the fd closes -- process exit, crash, or kill --
+    so there is no stale lock to reap. The returned handle MUST stay referenced for the whole
+    run (closing/GC'ing it drops the lock); main() holds it until it returns.
+    """
+    lock_path = out_dir / ".generation.lock"
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        sys.exit(
+            f"ERROR: another batch_harness is already generating into {out_dir}\n"
+            f"       (exclusive lock held on {lock_path}). Two concurrent generations corrupt\n"
+            f"       params.csv. Wait for the running one to finish, or use a different --output."
+        )
+    fh.write(f"pid={os.getpid()}\n")
+    fh.flush()
+    return fh
+
+
 def main():
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1636,6 +1668,10 @@ def main():
     # ------------------------------------------------------------------
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Refuse to start if another generation already owns this dir (see acquire_generation_lock).
+    # Held for the whole run; keep the handle referenced so the lock isn't released early.
+    _gen_lock = acquire_generation_lock(out_dir)
 
     # ngspice backend: dump the authoritative netlist once + write the input as an
     # XSPICE-filesource file (time,raw-sample; V0dBFS applied by the translator).
