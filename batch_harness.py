@@ -748,7 +748,10 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
 # combine → single outputs.npy
 # ---------------------------------------------------------------------------
 
-def combine(out_dir: Path):
+DEFAULT_OUTPUT_PEAK = 0.9  # normalize the loudest permutation to this peak (~-1 dBFS headroom)
+
+
+def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: bool = True):
     csv_path = out_dir / "params.csv"
     if not csv_path.exists():
         print("params.csv not found", file=sys.stderr)
@@ -762,12 +765,34 @@ def combine(out_dir: Path):
     sample = np.load(str(npy_paths[0]))
     n_perms, n_samples = len(npy_paths), len(sample)
 
-    # Cross-check .npy count against params.csv OK rows
+    # Cross-check .npy count against params.csv OK rows, and read the peak column: a full amp's
+    # output node swings to its rail (tens of volts), so the raw render is NOT a sane audio level.
+    # Normalize the WHOLE dataset by ONE constant (loudest perm -> output_peak) BEFORE writing
+    # outputs.npy, so the model trains toward sane levels instead of raw voltage. One constant, not
+    # per-perm: per-perm normalization would flatten the inter-knob loudness (Master/Gain getting
+    # louder) that the model must learn. Uses the post-warmup peak from params.csv; glitchy perms
+    # have already hard-failed (see _finalize_wav), so they don't inflate the global peak.
+    ok_rows = 0
+    global_peak = 0.0
     with open(csv_path) as f:
-        ok_rows = sum(1 for r in csv.DictReader(f) if r.get("ok") == "1")
+        for r in csv.DictReader(f):
+            if r.get("ok") == "1":
+                ok_rows += 1
+                try:
+                    global_peak = max(global_peak, abs(float(r.get("peak", 0.0))))
+                except (TypeError, ValueError):
+                    pass
     if n_perms != ok_rows:
         print(f"WARNING: {n_perms} .npy files but {ok_rows} OK rows in params.csv — "
               f"some permutations may have failed", file=sys.stderr)
+
+    scale = 1.0
+    if normalize:
+        if global_peak > 0.0:
+            scale = output_peak / global_peak
+        else:
+            print("WARNING: could not read a positive peak from params.csv — writing RAW output "
+                  "(not normalized)", file=sys.stderr)
 
     out_path = out_dir / "outputs.npy"
     arr = np.lib.format.open_memmap(str(out_path), mode="w+",
@@ -778,7 +803,7 @@ def combine(out_dir: Path):
         sig = np.load(str(p))
         if len(sig) != n_samples:
             bad_lengths.append((str(p), len(sig)))
-        arr[i] = sig
+        arr[i] = sig * scale if scale != 1.0 else sig
         p.unlink()
     arr.flush()
 
@@ -793,8 +818,25 @@ def combine(out_dir: Path):
     try: os.rmdir(out_dir / "sig")
     except OSError: pass
 
+    # Record the applied scale so the dataset's level is reproducible / known downstream.
+    if normalize and scale != 1.0:
+        cfg_path = out_dir / "config.json"
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            cfg["output_scale"] = scale
+            cfg["output_peak_target"] = output_peak
+            cfg["raw_global_peak"] = global_peak
+            cfg_path.write_text(json.dumps(cfg, indent=2))
+        except Exception as e:
+            print(f"WARNING: could not record output_scale in config.json: {e}", file=sys.stderr)
+
     print(f"Wrote {n_perms} × {n_samples} = {n_perms * n_samples // 1_000_000:.0f}M samples → {out_path}")
     print(f"Shape: ({n_perms}, {n_samples}) — {'OK' if not bad_lengths else 'WARNING: length mismatches above'}")
+    if normalize and scale != 1.0:
+        print(f"Output normalized: raw global peak {global_peak:.2f} → {output_peak} "
+              f"(scale ×{scale:.6f}); recorded as output_scale in config.json")
+    else:
+        print("Output NOT normalized (raw render levels)")
 
 
 # ---------------------------------------------------------------------------
@@ -1367,6 +1409,12 @@ def main():
     )
     ap.add_argument("--list",    action="store_true", help="list cpp circuits")
     ap.add_argument("--combine", type=Path,           help="combine sharded .npy files")
+    ap.add_argument("--output-peak", type=float, default=DEFAULT_OUTPUT_PEAK,
+                    help=f"--combine: normalize the loudest permutation to this peak (default "
+                         f"{DEFAULT_OUTPUT_PEAK}). ONE constant for the whole dataset, so inter-knob "
+                         f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
+    ap.add_argument("--no-output-normalize", action="store_true",
+                    help="--combine: write the raw render levels instead of normalizing (debug only).")
     ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice"], default="cpp")
     ap.add_argument("--no-retry", action="store_true",
                     help="Do NOT escalate solver settings when a permutation fails to converge. "
@@ -1481,7 +1529,8 @@ def main():
     if args.list:
         return list_circuits()
     if args.combine:
-        return combine(args.combine)
+        return combine(args.combine, output_peak=args.output_peak,
+                       normalize=not args.no_output_normalize)
 
     # ------------------------------------------------------------------
     # Resolve knobs and circuit identity
