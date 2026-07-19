@@ -1206,10 +1206,10 @@ def main():
         esr_str = "  ".join(f"{lbl}={esr_by[lbl]:.6f}{'*' if new_best.get(lbl) else ''}"
                             for lbl in labels)
         if open_ended:
-            prog, tail = f"[{epoch:4d}/inf]", f"({elapsed:.0f}s)"
+            prog, tail = f"[{epoch:4d}/inf]", f"({elapsed/3600:.2f}h)"
         else:
             eta = (elapsed / (epoch - start_epoch + 1)) * (args.epochs - epoch)
-            prog, tail = f"[{epoch:3d}/{args.epochs}]", f"({elapsed:.0f}s, ETA {eta:.0f}s)"
+            prog, tail = f"[{epoch:3d}/{args.epochs}]", f"({elapsed/3600:.2f}h, ETA {eta/3600:.2f}h)"
         print(f"  {prog}  train={train_loss:.6f}  val_loss={val_loss:.6f}  "
               f"ESR[{esr_str}]  lr={lr_now:.2e}  {tail}",
               file=sys.stderr, flush=True)
