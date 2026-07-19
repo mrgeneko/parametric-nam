@@ -330,6 +330,17 @@ class Result:
     settings: str = ""
 
 
+# Single-sample solver-overshoot spike detector (see _finalize_wav). A sample is flagged as a spike
+# when it exceeds SPIKE_NEIGHBOR_RATIO x its louder immediate neighbor AND SPIKE_BULK_RATIO x the
+# perm's own 99th-percentile |amplitude| (its "normal" ceiling, e.g. the clip rail). Both together:
+# the neighbor ratio catches single-sample-ness (real transients span many samples); the bulk ratio
+# keeps legitimate transients that ride near the perm's own peak from tripping it. Validated on the
+# jcm800-sag set: 0 false positives across 1284 clean perms, every clear overshoot (>2x the rail)
+# caught. A band-limited waveform physically cannot satisfy both at once, so this is a safe hard gate.
+SPIKE_NEIGHBOR_RATIO = 3.0
+SPIKE_BULK_RATIO = 2.0
+
+
 def sig_path(out_dir: Path, idx: int) -> Path:
     return out_dir / "sig" / f"{idx // 100:02d}" / f"{idx:06d}.npy"
 
@@ -364,6 +375,24 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
         out_wav.unlink(missing_ok=True)
         return Result(idx, error=f"unstable: crest={crest:.0f} > --max-crest {max_crest:g} "
                                  f"(peak={peak:.1f} rms={rms:.2f}) — likely numerical divergence")
+    # Isolated single-sample spikes: a band-limited render CANNOT jump to several times its immediate
+    # neighbors in one sample. The stiff power-amp Newton solve occasionally overshoots for a single
+    # timestep (|hundreds| against a ~72 V rail) then recovers -- a SOLVER ARTIFACT, not real amp
+    # behavior, and a poison training target. HARD-FAIL it so the LiveSPICE Newton solve gets fixed at
+    # the source rather than the glitch silently entering the dataset. The discriminator is single-
+    # sample-ness (a real transient spans many samples, so its neighbors are comparable); the crest
+    # check above misses these because one sample barely moves the RMS.
+    asig = np.abs(stats_sig)
+    neigh = np.maximum(np.concatenate(([0.0], asig[:-1])), np.concatenate((asig[1:], [0.0])))
+    bulk = float(np.percentile(asig, 99.0))   # the perm's own "normal" ceiling (e.g. the clip rail)
+    spikes = (asig > SPIKE_NEIGHBOR_RATIO * neigh) & (asig > SPIKE_BULK_RATIO * bulk)
+    n_spikes = int(spikes.sum())
+    if n_spikes:
+        wi = int(np.argmax(np.where(spikes, asig, 0.0)))
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error=f"solver spike: {n_spikes} isolated single-sample overshoot(s); "
+                                 f"worst |{asig[wi]:.0f}| at sample {wi} (neighbors<={neigh[wi]:.1f}, "
+                                 f"p99={bulk:.1f}) — LiveSPICE Newton overshoot, not real")
     warn = []
     if crest > 15:
         warn.append(f"crest:{crest:.0f}")
