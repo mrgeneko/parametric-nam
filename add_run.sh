@@ -278,6 +278,24 @@ cp "$DS/config.json"   "$STAGE/dataset_config.json"
 cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
 cp "$SCHX"             "$STAGE/"
 
+# Tone-response documentation: small-signal magnitude frequency response of the shipped
+# composite, per tier, at each tone knob's min/max -- rendered through the real C++ product
+# path (render_parametric) via Farina deconvolution. Best-effort: needs the C++ binary
+# (set RENDER_PARAMETRIC, or have render_parametric on PATH / in the fork's build/tools);
+# if it is unavailable the tool prints a warning and exits 0, and the release proceeds
+# WITHOUT the chart. Non-fatal on error too, so a broken chart never blocks a publish.
+TONE_CHART=0
+if "$PY_BIN" "$HERE/tools/plot_tone_response.py" \
+      --model  "$RUN.optimal.param.nam" \
+      --config "$DS/config.json" \
+      --out    "$STAGE/tone_response.svg" \
+      --summary "$STAGE/tone_response.md" && [ -f "$STAGE/tone_response.svg" ]; then
+  TONE_CHART=1
+  echo "==> tone-response chart: tone_response.svg"
+else
+  echo "==> tone-response chart skipped (render_parametric unavailable or errored)"
+fi
+
 SCHX_REPO="$(git -C "$(dirname "$SCHX")" rev-parse --show-toplevel)"
 SCHX_REV="$(git -C "$SCHX_REPO" rev-parse --short HEAD)"
 CODE_REV="$(git -C "$HERE" rev-parse --short HEAD)"
@@ -458,6 +476,22 @@ See \`ESR_RECORD.md\` and \`reproduce.sh\`.
 EOF
 [ -n "$BLURB" ] && { echo; echo "## Circuit notes"; echo; cat "$BLURB"; }
 } > "$STAGE/MANIFEST.md"
+
+# Tone-response section (only if the chart was generated above).
+if [ "$TONE_CHART" -eq 1 ]; then
+  {
+    echo
+    echo "## Tone response (small-signal)"
+    echo
+    echo "Magnitude frequency response of \`${PREFIX}_optimal.param.nam\`, one panel per tier"
+    echo "per tone knob (min vs max), measured through the C++ render path with Farina"
+    echo "deconvolution (immune to the sweep's HF energy taper; distortion products time-"
+    echo "separated out). Drive held low so the curves reflect EQ shaping, not distortion."
+    echo "See \`tone_response.svg\`."
+    echo
+    cat "$STAGE/tone_response.md"
+  } >> "$STAGE/MANIFEST.md"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. ESR_RECORD.md
