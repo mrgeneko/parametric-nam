@@ -80,16 +80,28 @@ widths = [int(w) for w in str(raw_widths).split(",") if w.strip()]
 from param_train import SlimmableParametricA2
 tiers = SlimmableParametricA2(1, widths=widths).tier_labels()
 
+# Resolve each tier's metrics column. param_train now writes val_esr_w<width> for EVERY
+# tier (the w<N> console/metrics rename, 2f89fee) -- so the endpoints are val_esr_w3 /
+# val_esr_w8, NOT val_esr_lite / val_esr_full. Older runs wrote val_esr_<tierlabel>.
+# Resolve by width first, then fall back to the label, so both layouts publish.
 rows = list(csv.DictReader(open(ckpt / "metrics.csv")))
-missing = [t for t in tiers if f"val_esr_{t}" not in rows[0]]
+hdr = rows[0]
+def col_for(tier, width):
+    for cand in (f"val_esr_w{width}", f"val_esr_{tier}"):
+        if cand in hdr:
+            return cand
+    return None
+cols = {t: col_for(t, w) for t, w in zip(tiers, widths)}
+missing = [t for t, c in cols.items() if c is None]
 if missing:
     sys.exit(f"metrics.csv has no column(s) for tier(s) {missing}; "
-             f"header={[c for c in rows[0] if c.startswith('val_esr_')]}")
+             f"header={[c for c in hdr if c.startswith('val_esr_')]}")
 
 esrs, epochs = [], []
-for t in tiers:                       # look up BY NAME, never by position
-    r = min(rows, key=lambda r: float(r[f"val_esr_{t}"]))
-    esrs.append(f"{float(r[f'val_esr_{t}']):.5f}")
+for t in tiers:                       # look up BY NAME/width, never by position
+    c = cols[t]
+    r = min(rows, key=lambda r: float(r[c]))
+    esrs.append(f"{float(r[c]):.5f}")
     epochs.append(r["epoch"])
 last = max(int(r["epoch"]) for r in rows)
 
