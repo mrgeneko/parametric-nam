@@ -107,6 +107,11 @@ last = max(int(r["epoch"]) for r in rows)
 
 cfg = json.loads((ds / "config.json").read_text())
 knobs = cfg.get("knobs", [])
+# A capture-sourced dataset (gen_dataset_from_nam.py, future wav-pair tool) has no .schx --
+# config.json records that as schx=null. Everything schx-specific below (bundling the schematic,
+# deriving its git revision, the tone-response ground-truth overlay, the registry handoff) is
+# gated on this.
+is_capture = cfg.get("schx") is None
 
 def emit(k, v): print(f"{k}={shlex.quote(str(v))}")
 def emit_arr(k, vs): print(f"{k}=({' '.join(shlex.quote(str(v)) for v in vs)})")
@@ -130,6 +135,11 @@ emit("BACKEND", cfg.get("backend", "?"))
 emit("NPERM", cfg.get("permutation_count", "?"))
 emit("INPUT_WAV", Path(str(cfg.get("input_wav", "?"))).name)
 emit("FIXED", cfg.get("fixed_params", "") or "none")
+emit("IS_CAPTURE", "1" if is_capture else "0")
+emit("GEAR_MAKE", cfg.get("gear_make", "?"))
+emit("GEAR_MODEL", cfg.get("gear_model", "?"))
+emit("GEAR_TYPE", cfg.get("gear_type", "?"))
+emit("N_SOURCE_FILES", len(cfg.get("source_nam_files") or []))
 PY
 FACTS="$("$PY_BIN" "$TMPD/facts.py" "$CKPT" "$DS" "$RUN.log" "$HERE")"
 eval "$FACTS"
@@ -288,7 +298,10 @@ cp "$RUN.optimal.param.nam" "$STAGE/${PREFIX}_optimal.param.nam"
 cp "$CKPT/metrics.csv" "$STAGE/metrics.csv"
 cp "$DS/config.json"   "$STAGE/dataset_config.json"
 cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
-cp "$SCHX"             "$STAGE/"
+# Capture-sourced runs (IS_CAPTURE=1, see facts.py) have no .schx to bundle -- config.json's own
+# schx=null already says so, and $SCHX is just this script's schx-path default in that case, not
+# a real file for this run.
+[ "$IS_CAPTURE" -eq 0 ] && cp "$SCHX" "$STAGE/"
 
 # Tone-response documentation: small-signal magnitude frequency response of the shipped
 # composite, per tier, at each tone knob's min/max -- rendered through the real C++ product
@@ -300,11 +313,17 @@ cp "$SCHX"             "$STAGE/"
 # the render binary is unavailable the tool prints a warning and exits 0; if only the oracle
 # is missing it falls back to the model-only chart. Non-fatal on error too, so a broken
 # chart never blocks a publish.
+# Capture-sourced runs have no circuit to overlay against -- plot_tone_response.py already
+# falls back to a model-only chart when the schx/oracle side is unavailable, so just omit --schx
+# rather than pointing it at a schx that isn't this run's source.
+TONE_SCHX_ARGS=()
+[ "$IS_CAPTURE" -eq 0 ] && TONE_SCHX_ARGS=(--schx "$SCHX")
+
 TONE_CHART=0
 if "$PY_BIN" "$HERE/tools/plot_tone_response.py" \
       --model  "$RUN.optimal.param.nam" \
       --config "$DS/config.json" \
-      --schx   "$SCHX" \
+      ${TONE_SCHX_ARGS[@]+"${TONE_SCHX_ARGS[@]}"} \
       --out    "$STAGE/tone_response.svg" \
       --summary "$STAGE/tone_response.md" && [ -f "$STAGE/tone_response.svg" ]; then
   TONE_CHART=1
@@ -313,8 +332,14 @@ else
   echo "==> tone-response chart skipped (render_parametric unavailable or errored)"
 fi
 
-SCHX_REPO="$(git -C "$(dirname "$SCHX")" rev-parse --show-toplevel)"
-SCHX_REV="$(git -C "$SCHX_REPO" rev-parse --short HEAD)"
+if [ "$IS_CAPTURE" -eq 0 ]; then
+  SCHX_REPO="$(git -C "$(dirname "$SCHX")" rev-parse --show-toplevel)"
+  SCHX_REV="$(git -C "$SCHX_REPO" rev-parse --short HEAD)"
+else
+  # No schematic for a capture-sourced run -- see PROVENANCE_LINE below for what's shown instead.
+  SCHX_REPO=""
+  SCHX_REV=""
+fi
 CODE_REV="$(git -C "$HERE" rev-parse --short HEAD)"
 
 LAST_I=$((NTIERS - 1))
@@ -442,6 +467,15 @@ bundle'"'"'s head mode could not be confirmed, so treat cross-run ESR comparison
     ;;
 esac
 
+# Provenance line: a real .schx + git revision for a schx-sourced run, or the source .nam
+# captures' own gear metadata for a capture-sourced one (IS_CAPTURE, see facts.py) -- there is no
+# schematic to cite for the latter, config.json already records that as schx=null.
+if [ "$IS_CAPTURE" -eq 0 ]; then
+  PROVENANCE_LINE="- **Schematic:** \`parametric-devices @ $SCHX_REV\` — \`$(basename "$SCHX")\`."
+else
+  PROVENANCE_LINE="- **Source:** $N_SOURCE_FILES real captured \`.nam\` files (not a circuit simulation) — $GEAR_MAKE $GEAR_MODEL ($GEAR_TYPE)."
+fi
+
 # ---------------------------------------------------------------------------
 # 6. MANIFEST.md
 # ---------------------------------------------------------------------------
@@ -454,7 +488,7 @@ One SlimmableContainer holding **$CH_SUM** tiers, FiLM-conditioned on ${#KNOBS[@
 $supersede_section
 
 ## Provenance
-- **Schematic:** \`parametric-devices @ $SCHX_REV\` — \`$(basename "$SCHX")\`.
+$PROVENANCE_LINE
 - **Training code:** \`parametric-nam @ $CODE_REV\`.
 - **Backend:** \`$BACKEND\`, \`--oversample $OVERSAMPLE\`.
 
@@ -536,12 +570,17 @@ EOF
 # ---------------------------------------------------------------------------
 # 8. reproduce.sh
 # ---------------------------------------------------------------------------
+if [ "$IS_CAPTURE" -eq 0 ]; then
+  REPRO_PROV_LINE="#   schematic : parametric-devices @ $SCHX_REV  ($(basename "$SCHX"))"
+else
+  REPRO_PROV_LINE="#   source    : $N_SOURCE_FILES real captured .nam files -- $GEAR_MAKE $GEAR_MODEL"
+fi
 cat > "$STAGE/reproduce.sh" <<EOF
 #!/usr/bin/env bash
 # Reproduce $CIRCUIT_NAME — ${NTIERS}-tier slimmable [$WIDTH_LIST], skip + causal head.
 #
 # Provenance (see MANIFEST.md):
-#   schematic : parametric-devices @ $SCHX_REV  ($(basename "$SCHX"))
+$REPRO_PROV_LINE
 #   code      : parametric-nam  @ $CODE_REV
 #   backend   : $BACKEND, --oversample $OVERSAMPLE
 #
@@ -569,7 +608,14 @@ ls -1 "$STAGE" | sed 's/^/      /'
 # 9. Hand off to the models repo.
 # ---------------------------------------------------------------------------
 ADD="$MODELS/add-run.sh"
-args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --schx-repo "$SCHX_REPO")
+if [ "$IS_CAPTURE" -eq 0 ]; then
+  args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --schx-repo "$SCHX_REPO")
+else
+  # No schematic to validate the run dir against -- add-run.sh skips the devices.toml registry
+  # check entirely for --capture-source runs (see its own comments for the tradeoff: no automated
+  # directory-name-drift protection for this class of device).
+  args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --capture-source)
+fi
 if [ "$do_push" -eq 1 ]; then args+=(--push); elif [ "$do_commit" -eq 1 ]; then args+=(--commit); fi
 
 if [ "$dry" -eq 1 ]; then

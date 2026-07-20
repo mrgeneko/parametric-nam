@@ -37,7 +37,6 @@ import argparse
 import csv
 import glob
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -47,60 +46,8 @@ import soundfile as sf
 import torch
 
 import batch_harness as bh
+from capture_common import add_knob_parsing_args, check_scale_collisions, parse_all_filenames, resolve_knob_maps
 from nam.models import init_from_nam
-
-# Default prefix -> knob-name map, matching the 5150 DST [REDACTED] captures the user provided.
-# A token's ALPHA PREFIX (not just its first letter) is the dict key, so "Rvb"/"Rsn"/"Prsn" never
-# collide with "R" or with each other -- filename splitting isolates the whole prefix run before
-# lookup, see _parse_filename_tokens.
-DEFAULT_PREFIX_MAP = {
-    "G": "Gain", "B": "Bass", "M": "Mids", "T": "Treble",
-    "Rvb": "Reverb", "Rsn": "Resonance", "Prsn": "Presence",
-}
-
-_TOKEN_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
-
-
-def _parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -> tuple:
-    """Split "G2, B5, M5, T5, Rvb0, Rsn0, Prsn0" (after stripping any leading device-name words)
-    into {knob_name: float_value}, skipping any token whose prefix isn't in prefix_map (unknown/
-    device-name tokens are expected and silently ignored, not an error).
-
-    Also returns {knob_name: digit_string} (the raw token digits, e.g. "10") so callers can catch
-    the DEFAULT SCALE'S AMBIGUITY: 10**(-len(digits)) assumes every extra digit is another decimal
-    place (a PERCENTAGE convention: "50" -> 0.50), which silently collides with a DIAL-POSITION
-    convention (1..10 written out, where "10" means the max, 1.0, not 0.10) -- "G1" and "G10" both
-    scale to 0.1 by default. There is no way to tell which convention a filename uses from the
-    digit string alone, so this can only be caught after the fact by comparing outputs across the
-    whole batch (see main()'s collision check), not fixed inside this function.
-    """
-    out, raw_digits = {}, {}
-    for raw in stem.split(","):
-        tok = raw.strip()
-        m = _TOKEN_RE.match(tok.split()[-1]) if tok else None
-        if not m:
-            continue
-        prefix, digits = m.group(1), m.group(2)
-        name = prefix_map.get(prefix)
-        if name is None:
-            continue
-        scale = scale_overrides.get(prefix, scale_overrides.get(name))
-        if scale is None:
-            scale = 10 ** (-len(digits))   # single digit -> /10, matches the user's spec exactly
-        out[name] = round(int(digits) * scale, 6)
-        raw_digits[name] = digits
-    return out, raw_digits
-
-
-def _load_mapping_csv(path: Path) -> dict:
-    """filename,<Knob1>,<Knob2>,... escape hatch -- bypasses regex/token parsing entirely for
-    conventions that don't fit the "comma-separated PREFIXdigits tokens" shape."""
-    out = {}
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            fname = row.pop("filename")
-            out[fname] = {k: float(v) for k, v in row.items() if v not in (None, "")}
-    return out
 
 
 def load_nam_model(path: Path, tier: str = "full"):
@@ -137,15 +84,7 @@ def main():
                      help="shared sweep input, same convention as the .schx pipeline")
     ap.add_argument("--tier", choices=["full", "lite"], default="full",
                      help="which SlimmableContainer submodel to run when a .nam is container-wrapped")
-    ap.add_argument("--knob-map", action="append", default=[],
-                     help="PREFIX=Name, overrides/extends the default filename-token prefix map "
-                          "(e.g. --knob-map D=Drive). Repeatable.")
-    ap.add_argument("--knob-scale", action="append", default=[],
-                     help="PREFIX_OR_NAME=FACTOR, overrides the default digit->value scale "
-                          "(default: 1/10^len(digits), i.e. a single digit -> value/10). Repeatable.")
-    ap.add_argument("--mapping-csv", type=Path,
-                     help="filename,<Knob1>,<Knob2>,... CSV; bypasses filename-token parsing "
-                          "entirely for a batch that doesn't follow the token convention")
+    add_knob_parsing_args(ap)
     ap.add_argument("--gear-make", default=None)
     ap.add_argument("--gear-model", default=None)
     ap.add_argument("--gear-type", default=None,
@@ -184,49 +123,15 @@ def main():
     if not files:
         ap.error(f"no .nam files matched {args.nam}")
 
-    prefix_map = dict(DEFAULT_PREFIX_MAP)
-    for kv in args.knob_map:
-        k, v = kv.split("=", 1)
-        prefix_map[k.strip()] = v.strip()
-    scale_overrides = {}
-    for kv in args.knob_scale:
-        k, v = kv.split("=", 1)
-        scale_overrides[k.strip()] = float(v)
-    mapping = _load_mapping_csv(args.mapping_csv) if args.mapping_csv else {}
+    prefix_map, scale_overrides, mapping = resolve_knob_maps(args)
 
     # 1. Parse every filename into a {knob: value} dict.
-    per_file, per_file_raw = {}, {}
-    for f in files:
-        if f.name in mapping:
-            per_file[f], per_file_raw[f] = mapping[f.name], {}
-        else:
-            per_file[f], per_file_raw[f] = _parse_filename_tokens(f.stem, prefix_map, scale_overrides)
-    empty = [f.name for f, p in per_file.items() if not p]
-    if empty:
-        print(f"WARNING: no knobs parsed from filename for: {empty}\n"
-              f"         (use --knob-map / --mapping-csv if this batch uses a different convention)",
-              file=sys.stderr)
+    per_file, per_file_raw = parse_all_filenames(files, prefix_map, scale_overrides, mapping)
 
     # 1b. Catch the default scale's DIAL-POSITION-vs-PERCENTAGE ambiguity (see
-    # _parse_filename_tokens' docstring): if two files carry DIFFERENT raw digit strings for the
-    # same knob (e.g. "1" and "10") but the default 10**(-len(digits)) scale collapsed them to the
-    # SAME float value, that's not a legitimate duplicate capture -- it's the scale guessing wrong.
-    # Fail loudly with the exact colliding files rather than silently training on a corrupted grid.
-    for name in sorted({k for p in per_file_raw.values() for k in p}):
-        by_value: dict = {}
-        for f, raw in per_file_raw.items():
-            if name in raw:
-                by_value.setdefault(per_file[f][name], []).append((f.name, raw[name]))
-        for value, hits in by_value.items():
-            distinct_digits = {digits for _, digits in hits}
-            if len(hits) >= 2 and len(distinct_digits) >= 2:
-                ap.error(
-                    f"'{name}' scale collision: {[h[0] for h in hits]} carry DIFFERENT filename "
-                    f"tokens ({sorted(distinct_digits)}) but all scaled to the SAME value "
-                    f"({value}) under the default 10**(-len(digits)) rule. This is the classic "
-                    f"dial-position-vs-percentage ambiguity (\"1\" and \"10\" both -> 0.1) -- pass "
-                    f"--knob-scale {name}=FACTOR (a fixed factor applied to the raw digits, e.g. "
-                    f"0.1 for a 1..10 dial) to disambiguate.")
+    # capture_common.parse_filename_tokens' docstring) -- fail loudly with the exact colliding
+    # files rather than silently training on a corrupted grid.
+    check_scale_collisions(per_file, per_file_raw, ap.error)
 
     # 2. Auto-detect fixed vs swept: a knob with exactly one distinct value across the batch is
     # fixed, not trained -- per the source instruction, a batch this small routinely has several
