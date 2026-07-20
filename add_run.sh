@@ -280,14 +280,19 @@ cp "$SCHX"             "$STAGE/"
 
 # Tone-response documentation: small-signal magnitude frequency response of the shipped
 # composite, per tier, at each tone knob's min/max -- rendered through the real C++ product
-# path (render_parametric) via Farina deconvolution. Best-effort: needs the C++ binary
-# (set RENDER_PARAMETRIC, or have render_parametric on PATH / in the fork's build/tools);
-# if it is unavailable the tool prints a warning and exits 0, and the release proceeds
-# WITHOUT the chart. Non-fatal on error too, so a broken chart never blocks a publish.
+# path (render_parametric) via Farina deconvolution. With --schx (passed here), it ALSO
+# renders the circuit through the LiveSPICE oracle and overlays each tier's knob effect
+# against that ground truth + reports the per-knob fidelity error. Best-effort: needs the
+# C++ binary (set RENDER_PARAMETRIC, or render_parametric on PATH / the fork's build/tools);
+# the schx overlay additionally needs the oracle ($LIVESPICE_CLI / the hotspice build). If
+# the render binary is unavailable the tool prints a warning and exits 0; if only the oracle
+# is missing it falls back to the model-only chart. Non-fatal on error too, so a broken
+# chart never blocks a publish.
 TONE_CHART=0
 if "$PY_BIN" "$HERE/tools/plot_tone_response.py" \
       --model  "$RUN.optimal.param.nam" \
       --config "$DS/config.json" \
+      --schx   "$SCHX" \
       --out    "$STAGE/tone_response.svg" \
       --summary "$STAGE/tone_response.md" && [ -f "$STAGE/tone_response.svg" ]; then
   TONE_CHART=1
@@ -483,11 +488,12 @@ if [ "$TONE_CHART" -eq 1 ]; then
     echo
     echo "## Tone response (small-signal)"
     echo
-    echo "Magnitude frequency response of \`${PREFIX}_optimal.param.nam\`, one panel per tier"
-    echo "per tone knob (min vs max), measured through the C++ render path with Farina"
-    echo "deconvolution (immune to the sweep's HF energy taper; distortion products time-"
-    echo "separated out). Drive held low so the curves reflect EQ shaping, not distortion."
-    echo "See \`tone_response.svg\`."
+    echo "Magnitude frequency response of \`${PREFIX}_optimal.param.nam\`, measured through the"
+    echo "C++ product path with Farina deconvolution (immune to the sweep's HF energy taper;"
+    echo "distortion products time-separated out). When the LiveSPICE oracle was available, the"
+    echo "chart overlays each tier's knob effect against the REAL CIRCUIT (ground truth) and the"
+    echo "table reports per-knob fidelity error; otherwise it is the model's own per-tier response."
+    echo "Drive held low so the curves reflect EQ shaping, not distortion. See \`tone_response.svg\`."
     echo
     cat "$STAGE/tone_response.md"
   } >> "$STAGE/MANIFEST.md"
