@@ -27,9 +27,17 @@ _TOKEN_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
 
 
 def parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -> tuple:
-    """Split "G2, B5, M5, T5, Rvb0, Rsn0, Prsn0" (after stripping any leading device-name words)
-    into {knob_name: float_value}, skipping any token whose prefix isn't in prefix_map (unknown/
-    device-name tokens are expected and silently ignored, not an error).
+    """Extract every "PREFIXdigits" token from a filename stem (e.g. "G2, B5, M5, T5, Rvb0" or
+    "Kot DST T3 Drv2") into {knob_name: float_value}, skipping any token whose prefix isn't in
+    prefix_map (unknown/device-name tokens like "Kot"/"DST"/"5150" are expected and silently
+    ignored, not an error).
+
+    Scans EVERY comma-or-whitespace-separated word in the whole stem, not just the last word of
+    each comma segment -- a filename can carry more than one relevant token per segment with no
+    comma between them (e.g. "T3 Drv2" has two: King of Tone captures use "Kot DST T3 Drv2", Tone
+    and Drive back to back with only a space). Treating commas as just another word-separator
+    (rather than iterating comma-segments and taking each one's last word) handles both
+    conventions with the same code path.
 
     Also returns {knob_name: digit_string} (the raw token digits, e.g. "10") so callers can catch
     the DEFAULT SCALE'S AMBIGUITY: 10**(-len(digits)) assumes every extra digit is another decimal
@@ -40,9 +48,8 @@ def parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) ->
     whole batch (see check_scale_collisions), not fixed inside this function.
     """
     out, raw_digits = {}, {}
-    for raw in stem.split(","):
-        tok = raw.strip()
-        m = _TOKEN_RE.match(tok.split()[-1]) if tok else None
+    for tok in stem.replace(",", " ").split():
+        m = _TOKEN_RE.match(tok)
         if not m:
             continue
         prefix, digits = m.group(1), m.group(2)
