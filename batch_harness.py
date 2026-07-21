@@ -535,9 +535,18 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
 
 # Failures a stiffer solve can actually fix. Anything else -- a bad knob name, a missing file,
 # an unknown backend -- will fail identically on every rung, so retrying just burns an hour.
+#
+# "spike"/"overshoot" were missing until 2026-07-21: _finalize_wav's single-sample-spike detector
+# (isolated Newton overshoot, see its own docstring) returns an error string that matched NONE of
+# these keywords, so a spike failure was never escalated -- it failed once at the base rung and
+# gave up immediately, even though the retry ladder's whole design intent ("failures a stiffer
+# solve can actually fix") explicitly covers this exact failure mode, and the JCM800-sag precedent
+# (docs/LESSONS.md #12) confirms oversample *can* clear these. Found on the Fender Twin (sag): the
+# real dataset generation run hard-failed ~87% of its first 107 permutations, nearly all on spike
+# errors that had never been given a single retry.
 _CONVERGENCE_FAILURE = re.compile(
     r"diverg|NaN|Inf|timestep too small|singular|convergence|no convergence|"
-    r"unstable|crest|truncated|timeout|iteration",
+    r"unstable|crest|truncated|timeout|iteration|spike|overshoot",
     re.IGNORECASE)
 
 
