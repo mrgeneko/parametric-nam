@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from per_perm_esr import compute_per_perm_esr, summarize as summarize_per_perm_esr, write_csv as write_per_perm_esr_csv
+
 # ---------------------------------------------------------------------------
 # A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
 # C++ a2_fast.h and NAM's A2 config.
@@ -994,8 +996,12 @@ def main():
                     help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
                          "(default: 3,8). Narrowest = lite tier, widest = full tier; "
                          "middle tiers logged/checkpointed as w<N>.")
-    ap.add_argument("--param-sensitivity", action="store_true",
-                    help="Run parameter sensitivity check after training")
+    ap.add_argument("--skip-param-sensitivity", action="store_true",
+                    help="Skip the parameter sensitivity check after training (runs by default)")
+    ap.add_argument("--skip-per-perm-esr", action="store_true",
+                    help="Skip the per-permutation ESR check after training (runs by default). "
+                         "Runs full-length inference over every permutation per tier -- can be "
+                         "slow for large grids (e.g. a 1,944-permutation config).")
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
                     help="Directory to save epoch checkpoints and metrics CSV")
     ap.add_argument("--resume", type=Path, default=None,
@@ -1305,18 +1311,18 @@ def main():
             print(f"  Best {lbl} model saved to {ckpt_dir / fname}", file=sys.stderr)
 
     # ------------------------------------------------------------------
-    # Parameter sensitivity check
+    # Parameter sensitivity check -- runs by default; --skip-param-sensitivity to skip.
     # ------------------------------------------------------------------
-    if args.param_sensitivity:
+    if not args.skip_param_sensitivity:
         print(f"\nParameter sensitivity check ...", file=sys.stderr)
         sweep_audio, _ = sf.read(str(dataset.dir / "sweep.wav"))
         if sweep_audio.ndim > 1:
             sweep_audio = sweep_audio.mean(axis=1)
         sweep_audio = sweep_audio[:48000]
-        targets = [model.full, model.lite]
-        labels = ["full", "lite"]
-        for m, lbl in zip(targets, labels):
-            prefix = f"[{lbl}] " if lbl else ""
+        # All tiers, not just the two endpoints -- model.full/model.lite alone
+        # silently skipped any middle tier (e.g. a w4 in widths [3,4,8]).
+        for m, lbl in zip(model.submodels, model.tier_labels()):
+            prefix = f"[{lbl}] "
             sens = param_sensitivity(m, device, sweep_audio)
             for k, v in sens.items():
                 pname = dataset.param_names[int(k.split("_")[-1])] if "_" in k else k
@@ -1324,6 +1330,23 @@ def main():
                 if v < 1e-6:
                     warnings.warn(f"  {prefix}{pname}: output doesn't change with this param "
                                   f"(max_diff={v:.2e}) — model may be ignoring knobs")
+
+    # ------------------------------------------------------------------
+    # Per-permutation ESR -- runs by default; --skip-per-perm-esr to skip.
+    # Full-length inference per permutation (not a training crop), per tier --
+    # shows WHERE in the knob grid the model is weak, not just an average.
+    # Reuses the already-loaded dataset in memory; no re-read from disk.
+    # ------------------------------------------------------------------
+    if not args.skip_per_perm_esr:
+        print(f"\nPer-permutation ESR check ...", file=sys.stderr)
+        for m, lbl in zip(model.submodels, model.tier_labels()):
+            results = compute_per_perm_esr(m, dataset.inp, dataset.outputs, dataset.samples,
+                                           dataset.param_names, device, dataset._scale)
+            print(f"\n{summarize_per_perm_esr(results, lbl)}", file=sys.stderr)
+            if ckpt_dir is not None:
+                csv_path = ckpt_dir / f"per_perm_esr_{lbl}.csv"
+                write_per_perm_esr_csv(results, dataset.param_names, csv_path)
+                print(f"  Wrote {csv_path}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Export .param.nam
