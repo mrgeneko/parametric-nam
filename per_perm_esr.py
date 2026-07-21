@@ -26,7 +26,9 @@ import soundfile as sf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from param_infer import load_model
+# Deferred to inside main() (CLI-only, not used by compute_per_perm_esr/summarize/write_csv):
+# param_infer imports param_train, which imports THIS module for compute_per_perm_esr/summarize/
+# write_csv -- a module-level import here would be circular.
 
 
 def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
@@ -103,6 +105,7 @@ def main():
     ap.add_argument("-o", "--output", type=Path, default=None, help="Write per-perm CSV here")
     args = ap.parse_args()
 
+    from param_infer import load_model
     dataset_dir = Path(args.dataset)
     model, args_dict = load_model(args.checkpoint)
     model.to(args.device)
