@@ -493,6 +493,15 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
         with _procs_lock:
             _active_procs.discard(proc)
     cir_path.unlink(missing_ok=True)
+    # A NEGATIVE returncode is a signal, not a solve: ngspice CRASHED (macOS builds
+    # SIGSEGV on filesources >=384k points, and on ~2s clips). Reporting it as
+    # "diverged at t~0?" sent a whole afternoon chasing convergence knobs at a bug
+    # that was never a convergence bug -- and it must not match the retry ladder's
+    # convergence keywords, because every rung crashes identically.
+    if proc.returncode is not None and proc.returncode < 0:
+        return Result(idx, error=f"ngspice killed by signal {-proc.returncode} "
+                                 f"(crash, not a solve failure -- e.g. the macOS "
+                                 f"filesource-size segfault)")
     if not csv_path.exists() or csv_path.stat().st_size == 0:
         return Result(idx, error="ngspice produced no output (diverged at t~0?)")
     d = np.loadtxt(str(csv_path))
@@ -1532,7 +1541,8 @@ def main():
                     "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax/klu; e.g. diode_cjo=100p,tmax=10.4166u). "
                     "tmax caps the max internal solver step; the default is one audio period "
                     "(20.8333u) regardless of oversample — set it SMALLER to force finer steps "
-                    "through hard transients (slower). klu=0 falls back to the Sparse 1.3 solver. "
+                    "through hard transients (slower). klu=1 opts into the KLU solver — measure "
+                    "first; it broke the 5150 and was slower on the DS-1 (see schx_to_ngspice.py). "
                     "Auto-set per-circuit if omitted.")
     ap.add_argument("--method", default="", choices=["", "trap", "gear"],
                     help="ngspice: integration method (default trap). Auto-set per-circuit if omitted.")

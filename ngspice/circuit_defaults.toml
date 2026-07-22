@@ -13,14 +13,25 @@ conv = "diode_cjo=100p"   # soften the high-gain hard-clip edges
 
 ["Boss DS-1"]
 method = "gear"
-conv = "diode_cjo=100p,bjt_cje=40p,bjt_cjc=20p,tmax=20.8333u"
-input_upsample = 4
+conv = "diode_cjo=100p,bjt_cje=40p,bjt_cjc=20p"
 # trap aborts at the antiparallel-diode clip node (dm1-instance dd5, "timestep
 # too small"). gear alone is stable through ~23dB of op-amp gain (Dist<=0.6);
 # the cjo bump (same fix as MT-2) is needed to also cover Dist=0.9-1.0 (near
-# the documented 26.5dB max). bjt_cje/bjt_cjc/tmax are headroom for other
-# marginal moments at high gain; kept for margin even though they were not
-# the deciding fix (see below).
+# the documented 26.5dB max). bjt_cje/bjt_cjc are headroom for other marginal
+# moments at high gain; kept for margin even though they were not the deciding
+# fix (see below).
+#
+# RETIRED (2026-07-21): `tmax=20.8333u` -- it is now the translator's DEFAULT
+# step ceiling (see schx_to_ngspice.py), so the entry was a no-op; worse, the
+# old code's implicit cap was tstep, making an explicit 20.8333u a LOOSENER at
+# oversample>=2, the opposite of the "headroom" it was kept for.
+# RETIRED (2026-07-21): `input_upsample = 4` -- measured to have ZERO effect on
+# the solver's internal step count (the filesource densification never changes
+# how ngspice steps, only what it interpolates), while quadrupling the ASCII
+# filesource every permutation re-parses at startup (~200MB for a 45s input).
+# The post-mortem below already concluded the deciding fix was removing the
+# input splice, not the upsample; validated post-removal on a stratified
+# window of sweep45s.wav: full 11x11 Dist x Tone grid, 121/121 OK, rung 0.
 #
 # STATUS (2026-07-12): RESOLVED. 121/121 permutations converge, zero
 # failures, full Dist x Tone grid, ~9.75 min generation time.

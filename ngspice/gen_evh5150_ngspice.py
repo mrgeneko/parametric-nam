@@ -222,9 +222,13 @@ else:
 
 lines += ['',
  '* method=trap COMPLETES the full amp; method=gear aborts at the NFB node (~45 ms).',
- # klu: select the KLU direct solver — ngspice defaults to Sparse 1.3 even when
- # built with KLU, and this netlist is exactly the 100+-node case where KLU wins.
- '.options method=%s reltol=1e-3 abstol=1e-9 vntol=1e-6 itl1=1000 itl4=1000 gmin=1e-12 klu' % METHOD,
+ # NO `.options klu` here, and do not lower itl4 -- both measured (2026-07-21):
+ # with klu this transient ABORTS at 10.7ms (grid-diode node, "timestep too
+ # small"); Sparse completes it. And itl4 < ~1000 aborts at 32.5ms -- the step
+ # cut-and-retry does NOT substitute for Newton iterations at the hard moments,
+ # so the high limit is load-bearing on this amp (it costs nothing where it
+ # does not bind: the DS-1 renders bit-identically at itl4=10 vs 500).
+ '.options method=%s reltol=1e-3 abstol=1e-9 vntol=1e-6 itl1=1000 itl4=1000 gmin=1e-12' % METHOD,
  '.control',
  'set filetype=ascii',
  'tran 20.8333u 0.3',            # 48 kHz nominal output step; solver adapts finer internally

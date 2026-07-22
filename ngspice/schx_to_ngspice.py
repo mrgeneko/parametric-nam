@@ -364,13 +364,18 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         for ln in extra.split(';'):
             if ln.strip():
                 body.append(ln.strip())
-    # KLU direct solver: ngspice-46+ ships it but silently defaults to Sparse 1.3
-    # (the 1980s solver) — the banner says "Compiled with KLU" yet every run logs
-    # "Using SPARSE 1.3" until `.options klu` selects it. This workload is millions
-    # of factorizations per render, and KLU is typically 1.3-2x faster on the
-    # 100+-node amps. Harmless on non-KLU builds (unknown option -> warning,
-    # Sparse fallback). Opt out via conv={'klu': '0'} if an A/B ever regresses.
-    use_klu = str(conv.get('klu', '1')).lower() not in ('0', 'false', 'off', 'no')
+    # KLU direct solver: OPT-IN (conv={'klu': '1'}), not default. It was briefly the
+    # default on the theory that KLU beats Sparse 1.3 on repeated factorizations --
+    # and the A/B said otherwise, in both directions that matter:
+    #   * 5150 full amp (the big-matrix case KLU should win): with klu the transient
+    #     ABORTS at 10.7ms ("timestep too small ... dgrid-instance d.xvv5b.dgk");
+    #     with Sparse it completes the full render. KLU's different pivoting/roundoff
+    #     flips a marginal convergence, fatally.
+    #   * Boss DS-1, 7.5s worst-corner render, all else equal: klu 3.02s vs Sparse
+    #     2.68s -- SLOWER on a pedal-sized matrix.
+    # Keep the plumbing: a circuit that measures faster AND converges with KLU can
+    # set klu=1 in circuit_defaults.toml. Do not turn it on without that A/B.
+    use_klu = str(conv.get('klu', '0')).lower() in ('1', 'true', 'on', 'yes')
 
     # tmax IS the internal step ceiling, and without an explicit one ngspice uses
     # min(tstep, span/50) = tstep — so the "adaptive" solver was forced to take

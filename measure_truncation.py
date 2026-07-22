@@ -54,20 +54,60 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from batch_harness import LIVESPICE_CLI
+from batch_harness import LIVESPICE_CLI, write_probe_clip
 
 REGISTRY = Path(_os.environ.get("PARAMETRIC_DEVICES") or _os.environ.get("SPICE_CIRCUITS")
                 or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
 
 
-def esr(a: np.ndarray, b: np.ndarray, skip_frac: float = 0.1) -> float:
-    """ESR of `a` against reference `b`, dropping the leading transient."""
+def esr_terms(a: np.ndarray, b: np.ndarray, lead_n: int, sr: int) -> tuple[float, float]:
+    """(numerator, denominator) of the ESR of `a` against reference `b`, dropping the
+    leading transient. Returned as terms, not a ratio, so window measurements can be
+    POOLED: sum(err)/sum(sig) across windows is exactly the whole-file ESR restricted
+    to the sampled windows (see choose_oversample). On a whole-file measurement
+    (lead_n=0) the skip reduces to the historical 10%."""
     m = min(len(a), len(b))
-    sk = int(m * skip_frac)
-    den = float(np.sum(b[sk:m] ** 2))
-    if den <= 0:
-        return float("nan")
-    return float(np.sum((a[sk:m] - b[sk:m]) ** 2) / den)
+    sk = max(m // 10, lead_n + int(0.02 * sr))
+    if m - sk < 4800:
+        return 0.0, 0.0
+    return (float(np.sum((a[sk:m] - b[sk:m]) ** 2)),
+            float(np.sum(b[sk:m] ** 2)))
+
+
+def probe_clips(input_wav: Path, probe_s: float, n_windows: int, td: Path
+                ) -> tuple[list[Path], int, int]:
+    """Cut stratified probe windows from the input; returns (clips, lead_n, sr).
+
+    probe_s <= 0 means measure the WHOLE file (the historical behavior): one 'window'
+    that is the input itself, no lead-in.
+
+    Truncation is a property of the solver at a knob setting, not of sweep length --
+    but WHERE you probe decides the answer (our sweeps open quiet and end in a decay
+    tail), so this mirrors choose_oversample exactly: evenly-spaced window CENTRES
+    across the file, each window rendered separately with write_probe_clip's silent
+    lead-in + ramp (never spliced -- a splice manufactures step discontinuities and
+    the probe then measures its own splice), numerator/denominator pooled across
+    windows. At the default 10 s of a 60 s sweep this cuts the render bill ~6x, and
+    the reference renders (16x the cost of an os=2 render each) with it.
+    """
+    if probe_s <= 0:
+        sr = sf.info(str(input_wav)).samplerate
+        return [input_wav], 0, sr
+    sig, sr = sf.read(str(input_wav))
+    total = len(sig)
+    win = min(total, int(probe_s * sr) // n_windows or total)
+    if total <= win * n_windows:
+        starts = [0]
+        win = total
+    else:
+        span = total - win
+        starts = [int((i + 0.5) * span / n_windows) for i in range(n_windows)]
+    clips, lead_n = [], 0
+    for wi, st in enumerate(starts):
+        c = td / f"probe_w{wi}.wav"
+        lead_n = write_probe_clip(sig[st:st + win], sr, c)
+        clips.append(c)
+    return clips, lead_n, sr
 
 
 def probe_settings(knobs: list[str]) -> list[dict]:
@@ -105,24 +145,29 @@ def load_fleet(only: str | None) -> list[tuple[str, Path, list[str]]]:
     return out
 
 
-def measure(schx: Path, knobs: list[str], input_wav: Path, ref_os: int,
-            candidates: tuple[int, ...], iterations: int, speaker: str | None,
-            td: Path, workers: int) -> dict:
+def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: int,
+            ref_os: int, candidates: tuple[int, ...], iterations: int,
+            speaker: str | None, td: Path, workers: int) -> dict:
     """Worst-over-knob-settings truncation ESR at each candidate oversample.
 
     Renders run CONCURRENTLY. Serially this was leaving 13 of 14 cores idle while a single
     oversample-32 render -- 16x the work of the os=2 one it is the reference for -- ground through a
     60 s file, and a 7-device fleet would have taken hours. Threads are the right tool: every unit of
     work is a subprocess, so the GIL is irrelevant.
+
+    `clips` are the probe windows from probe_clips() (possibly just the whole input); each
+    (setting, oversample) is rendered per window and the ESR numerator/denominator POOLED
+    across windows, so the reported number estimates the same whole-file quantity either way.
     """
     settings = probe_settings(knobs)
-    jobs = [(p, os_) for p in settings for os_ in (*candidates, ref_os)]
+    jobs = [(p, os_, wi) for p in settings for os_ in (*candidates, ref_os)
+            for wi in range(len(clips))]
 
     def render(job) -> tuple[tuple, np.ndarray | None]:
-        p, os_ = job
-        key = (tuple(sorted(p.items())), os_)
+        p, os_, wi = job
+        key = (tuple(sorted(p.items())), os_, wi)
         w = td / f"{abs(hash((str(schx), key)))}.wav"
-        cmd = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(w),
+        cmd = [str(LIVESPICE_CLI), "--input", str(clips[wi]), "--output", str(w),
                "--circuit", str(schx),
                "--params", ",".join(f"{k}={v}" for k, v in p.items()),
                "--oversample", str(os_), "--iterations", str(iterations)]
@@ -141,15 +186,22 @@ def measure(schx: Path, knobs: list[str], input_wav: Path, ref_os: int,
         for key, v in ex.map(render, jobs):
             cache[key] = v
 
+    def pooled_esr(k: tuple, os_a: int, os_b: int) -> float:
+        num = den = 0.0
+        for wi in range(len(clips)):
+            a, b = cache.get((k, os_a, wi)), cache.get((k, os_b, wi))
+            if a is None or b is None:
+                continue
+            n, d = esr_terms(a, b, lead_n, sr)
+            num += n
+            den += d
+        return num / den if den > 0 else float("nan")
+
     res: dict = {"n_settings": len(settings)}
     for os_ in candidates:
         worst, at = 0.0, None
         for p in settings:
-            k = tuple(sorted(p.items()))
-            a, ref = cache.get((k, os_)), cache.get((k, ref_os))
-            if a is None or ref is None:
-                continue
-            e = esr(a, ref)
+            e = pooled_esr(tuple(sorted(p.items())), os_, ref_os)
             if np.isfinite(e) and e >= worst:
                 worst, at = e, p
         res[os_] = (worst, at)
@@ -166,11 +218,11 @@ def measure(schx: Path, knobs: list[str], input_wav: Path, ref_os: int,
     # the reference's own error, the ratios go flat, and every entry is an UNDERSTATEMENT.
     _, at_worst = res[candidates[0]]
     if at_worst is not None:
-        key_ref = (tuple(sorted(at_worst.items())), ref_os)
-        ref_wave = cache.get(key_ref)
-        _, finer = render((at_worst, ref_os * 2))
-        if ref_wave is not None and finer is not None:
-            res["ref_error"] = esr(ref_wave, finer)
+        k = tuple(sorted(at_worst.items()))
+        for wi in range(len(clips)):
+            key, v = render((at_worst, ref_os * 2, wi))
+            cache[key] = v
+        res["ref_error"] = pooled_esr(k, ref_os, ref_os * 2)
     return res
 
 
@@ -190,6 +242,17 @@ def main() -> None:
     ap.add_argument("--speaker", help="speaker to capture on multi-speaker circuits")
     ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2),
                     help="concurrent renders (default: cores-2)")
+    ap.add_argument("--probe-s", type=float, default=10.0,
+                    help="total seconds of the input to actually render, as stratified windows "
+                         "(default 10). Truncation is a property of the solver, not of sweep "
+                         "length; windowed+pooled estimates the same whole-file quantity at a "
+                         "fraction of the cost. Validated on the Big Muff vs the documented "
+                         "whole-file table: ~1.3x HIGH at every rung (the safe direction -- "
+                         "borderline circuits get more oversample, not less), same worst "
+                         "setting, identical fall ratios. 0 = whole file (slow; the historical "
+                         "behavior).")
+    ap.add_argument("--n-windows", type=int, default=4,
+                    help="number of stratified windows --probe-s is split into (default 4)")
     args = ap.parse_args()
 
     cands = tuple(int(c) for c in args.candidates.split(","))
@@ -208,12 +271,16 @@ def main() -> None:
     rows = []
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
+        clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td)
+        if len(clips) > 1 or clips[0] != args.input:
+            print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
+                  f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")
         for name, schx, knobs in fleet:
             if not schx.exists():
                 print(f"  {name}: MISSING {schx}", file=sys.stderr)
                 continue
             print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
-            r = measure(schx, knobs, args.input, args.ref_os, cands,
+            r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
                         args.iterations, args.speaker, td, args.workers)
             rows.append((name, r))
 
