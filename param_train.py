@@ -799,7 +799,8 @@ class ParamLoss(nn.Module):
 # ---------------------------------------------------------------------------
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
-                epoch: int = 0, total_epochs: int = 0, log_interval: int = 10):
+                epoch: int = 0, total_epochs: int = 0, log_interval: int = 10,
+                amp_dtype=None, scaler=None):
     """One epoch. Two deliberate structural choices, both numerically identical to
     the naive form:
 
@@ -819,9 +820,24 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     sum is what forced 4-tier runs down to batch 32 on a 48 GB M4 Pro (Jetsam,
     docs/multi_width_slimmable_plan.md §12). Grad clipping and optimizer.step()
     still happen once per step over the accumulated grads, exactly as before."""
+    import contextlib
     model.train()
     slimmable = isinstance(model, SlimmableParametricA2)
     can_cache = isinstance(criterion, ParamLoss)
+
+    # --amp: autocast wraps ONLY the model forward. The prediction is cast back to
+    # fp32 before the criterion, so ESR/MRSTFT — including the near-silent tails
+    # the loss is specifically designed to weight — are always scored in fp32.
+    def fwd(m, x, p):
+        if amp_dtype is None:
+            return m(x, p)
+        with torch.autocast(device_type=device, dtype=amp_dtype):
+            pred = m(x, p)
+        return pred.float()
+
+    def bwd(loss):
+        (scaler.scale(loss) if scaler is not None else loss).backward()
+
     total_loss = torch.zeros((), device=device)
     for step, (inp, out, params) in enumerate(loader):
         _watchdog_arm(f"epoch {epoch} step {step}")
@@ -831,17 +847,23 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
             cache = criterion.precompute(out) if can_cache else None
             step_loss = torch.zeros((), device=device)
             for m in model.submodels:
-                loss = (criterion(m(inp, params), out, cache) if can_cache
-                        else criterion(m(inp, params), out))
-                loss.backward()
+                loss = (criterion(fwd(m, inp, params), out, cache) if can_cache
+                        else criterion(fwd(m, inp, params), out))
+                bwd(loss)
                 step_loss += loss.detach()
         else:
-            loss = criterion(model(inp, params), out)
-            loss.backward()
+            loss = criterion(fwd(model, inp, params), out)
+            bwd(loss)
             step_loss = loss.detach()
+        if scaler is not None:
+            scaler.unscale_(optimizer)   # so clip_grad_norm_ sees true gradients
         if clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-        optimizer.step()
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         total_loss += step_loss
         if log_interval > 0 and (step + 1) % log_interval == 0:
             print(f"  [{epoch:3d}/{total_epochs}] step {step+1}/{len(loader)}  "
@@ -1074,8 +1096,15 @@ def main():
     ap.add_argument("--repeats", type=int, default=1,
                     help="Virtual dataset multiplier — increases steps/epoch without "
                          "changing the audio data (default: %(default)s)")
-    ap.add_argument("--val-split", type=float, default=0.1,
-                    help="Fraction of samples for validation (default: %(default)s)")
+    ap.add_argument("--val-split", type=float, default=0.05,
+                    help="Fraction of samples for validation (default: %(default)s). Was 0.1; "
+                         "val here does not measure interpolation anyway (the same knob settings "
+                         "land in train and val -- docs/architecture.md), so a big split buys "
+                         "only noise-reduction on the checkpoint-selection signal, which "
+                         "--val-passes already provides: 0.05 x 4 passes scores twice the crops "
+                         "of the old 0.1 x 1. The Dumble production runs used 0.02 without "
+                         "issue; halving the split also returns ~5%% of the step budget to "
+                         "actual training.")
     ap.add_argument("--val-passes", type=int, default=4,
                     help="Repeat the full validation pass this many times per epoch and "
                          "average -- ParamDataset re-crops randomly on every call, so this is "
@@ -1106,6 +1135,19 @@ def main():
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
+    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="off",
+                    help="Mixed-precision TRAINING forward (default: off). The model forward "
+                         "runs under autocast in half precision; the LOSS is always computed "
+                         "in fp32 (the MRSTFT magnitudes of near-silent fading tails are "
+                         "exactly what the ESR loss exists to protect), and validate() always "
+                         "runs fp32 so val ESR stays comparable across runs and matches the "
+                         "exported (fp32) model. fp16 uses GradScaler loss scaling; bf16 "
+                         "needs none (fp32 exponent range) but has fewer mantissa bits. "
+                         "OPT-IN pending a per-device A/B: judge on level_band_esr.py bands "
+                         "and per_perm_esr.py spread per docs/RETRAINING.md, never the "
+                         "headline val ESR. Worth trying because production-shape training "
+                         "measured COMPUTE-bound on MPS (KoT: ~1.7 s/step of conv work), "
+                         "where half precision roughly doubles throughput.")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--widths", type=str, default=None,
@@ -1122,6 +1164,21 @@ def main():
                     help="Directory to save epoch checkpoints and metrics CSV")
     ap.add_argument("--resume", type=Path, default=None,
                     help="Checkpoint .pt to resume from")
+    ap.add_argument("--init-from", type=Path, default=None,
+                    help="WEIGHTS-ONLY warm start from a checkpoint .pt (best.pt or "
+                         "latest.pt): loads the model weights and NOTHING else -- fresh "
+                         "optimizer, fresh LR schedule from epoch 1, best-ESR history reset "
+                         "so new bests checkpoint immediately. This is the retrain-after-"
+                         "dataset-change mode --resume cannot serve: --resume restores the "
+                         "old best ESRs, which a re-rendered (different) target would never "
+                         "beat, silently suppressing all checkpointing. Use when the circuit "
+                         "and knobs are unchanged but the render improved (e.g. the "
+                         "oversample=8 fleet re-render): the old solution is a close starting "
+                         "point, plausibly cutting steps-to-plateau severalfold. Widths and "
+                         "knob count must match the checkpoint. Mutually exclusive with "
+                         "--resume. CAVEAT (docs/RETRAINING.md): checkpoints trained under "
+                         "the old MSE loss carry the loud-perm bias the ESR loss removed -- "
+                         "gate acceptance on level_band_esr.py bands, not headline ESR.")
     ap.add_argument("--log-csv", type=Path, default=None,
                     help="Path for metrics CSV (default: --checkpoint-dir/metrics.csv)")
     ap.add_argument("--mmap", action="store_true", default=True,
@@ -1271,6 +1328,22 @@ def main():
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
 
+    if args.init_from is not None:
+        if args.resume is not None:
+            sys.exit("--init-from and --resume are mutually exclusive: one starts a NEW run "
+                     "from old weights, the other continues an old run. Pick one.")
+        print(f"Warm start (weights only) from {args.init_from} ...", file=sys.stderr)
+        init_ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        try:
+            model.load_state_dict(init_ckpt["model"])
+        except RuntimeError as e:
+            sys.exit(f"--init-from checkpoint does not fit this model (widths/knob-count "
+                     f"mismatch?): {e}")
+        src_best = init_ckpt.get("best_esr_by_tier") or {"full": init_ckpt.get("best_esr")}
+        print(f"  Loaded weights (source run's best ESR: "
+              f"{ {k: round(v, 6) for k, v in src_best.items() if v is not None} }). "
+              f"Optimizer, schedule, and best-ESR tracking start FRESH.", file=sys.stderr)
+
     open_ended = (args.epochs == 0)
 
     def make_scheduler(last_epoch):
@@ -1290,6 +1363,15 @@ def main():
                           pre_emph=args.pre_emph, floor=args.esr_floor)
     print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
           "  <-- ABSOLUTE error: loud permutations dominate the gradient"), file=sys.stderr)
+
+    amp_dtype = {"off": None, "fp16": torch.float16, "bf16": torch.bfloat16}[args.amp]
+    scaler = None
+    if amp_dtype is torch.float16:
+        # fp16 gradients underflow without loss scaling; bf16 does not need it.
+        scaler = torch.amp.GradScaler(device)
+    if amp_dtype is not None:
+        print(f"  AMP: {args.amp} model forward (loss + validation stay fp32"
+              f"{', GradScaler on' if scaler else ''})", file=sys.stderr)
 
     if open_ended:
         signal.signal(signal.SIGINT, _request_stop)
@@ -1324,7 +1406,8 @@ def main():
         if not open_ended and epoch > args.epochs:
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
-                                 epoch=epoch, total_epochs=args.epochs, log_interval=10)
+                                 epoch=epoch, total_epochs=args.epochs, log_interval=10,
+                                 amp_dtype=amp_dtype, scaler=scaler)
         # Drain the MPS async queue between train (batch=args.batch_size) and val
         # (batch=len(val_ds)%batch_size or smaller) -- two distinct batch shapes back
         # to back, every epoch, with no sync between them. Matches a documented class

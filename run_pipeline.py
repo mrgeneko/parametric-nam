@@ -651,7 +651,14 @@ def main():
                         "audibility floor -- NOT the training-fidelity ESR; see tools/grid_adequacy.py)")
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
-    g.add_argument("--val-split",      type=float, default=0.1)
+    g.add_argument("--val-split",      type=float, default=0.05,
+                   help="Val fraction (was 0.1 -- see param_train.py --help for why 0.05)")
+    g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="off",
+                   help="Mixed-precision training forward (opt-in, needs a per-device A/B "
+                        "-- see param_train.py --help). Forwarded to param_train.py.")
+    g.add_argument("--init-from",      type=Path,  default=None,
+                   help="Weights-only warm start from a previous run's best.pt (fresh "
+                        "optimizer/schedule/bests). Forwarded to param_train.py.")
     g.add_argument("--val-passes",     type=int,   default=4,
                    help="Repeat the full validation pass this many times per epoch and average "
                         "-- reduces noise in reported val_esr and best-checkpoint selection. "
@@ -937,6 +944,8 @@ def main():
             if args.widths:              train_cmd += ["--widths", args.widths]
             if not args.mmap:             train_cmd.append("--no-mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
+            if args.amp != "off":        train_cmd += ["--amp", args.amp]
+            if args.init_from:           train_cmd += ["--init-from", args.init_from]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
             if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
             timings["train"] = stream_run(train_cmd, fh, "Training")
