@@ -219,7 +219,11 @@ class A2Layer(nn.Module):
         """Returns (residual_out, post_activation). post_activation is the pre-layer1x1
         LeakyReLU output = the 'skip' term NAM/a2_fast accumulate into the head."""
         h = self.conv(x)
-        h = h[:, :, :inp_audio.shape[-1]]
+        # .contiguous(): this crop is non-contiguous (each row stays stride-1 internally,
+        # but rows are no longer packed at the original conv output's stride) -- suspected
+        # trigger for the 2026-07-21 MPS backward-pass hangs (a historical class of MPS
+        # deadlock when backpropagating through non-contiguous tensors). Cheap either way.
+        h = h[:, :, :inp_audio.shape[-1]].contiguous()
         h = h + self.mixin(inp_audio)
         if self.film is not None:
             h = self.film(h, cond)
@@ -267,7 +271,7 @@ class ParametricA2(nn.Module):
         # Causal: left-pad K-1 so output[n] reads only [n-(K-1), n] — no lookahead.
         head_in = F.pad(head_in, (K_HEAD_KERNEL - 1, 0))
         x = self.head(head_in)
-        x = x[:, :, :audio.shape[-1]]
+        x = x[:, :, :audio.shape[-1]].contiguous()   # see A2Layer.forward's .contiguous() note
         x = x * self.head_scale
         return x
 
