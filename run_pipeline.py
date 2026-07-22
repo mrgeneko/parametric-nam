@@ -463,7 +463,7 @@ Run `./reproduce.sh`.
     repro = f"""#!/usr/bin/env bash
 # Replicate this model (generate dataset + train). Auto-generated.
 set -euo pipefail
-REPO="${PARAMETRIC_NAM:-$HOME/work/parametric-nam}"
+REPO="${{PARAMETRIC_NAM:-$HOME/work/parametric-nam}}"
 PY="$REPO/.venv/bin/python"
 cd "$REPO"
 
