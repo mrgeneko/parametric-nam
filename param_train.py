@@ -1152,9 +1152,23 @@ def main():
 
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        # Load to CPU, then move to `device` ourselves in small, explicit steps -- NOT
+        # map_location=device, which bulk-deserializes the whole checkpoint (model weights
+        # AND the full Adam state, exp_avg/exp_avg_sq/step per parameter -- 2x the param
+        # count) directly onto MPS in one shot. 2026-07-21: every resumed run hung on MPS
+        # tonight; a fresh (no-resume) run never did. This bulk one-shot transfer -- so
+        # different from a fresh run's gradual, incremental device population (params
+        # moved via model.to(device), optimizer state lazily created one .step() at a
+        # time) -- is the leading suspect. model.load_state_dict() below already copies
+        # per-parameter into the (already on-device) model, so only optimizer state needs
+        # an explicit, separate move.
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
         start_epoch = ckpt["epoch"] + 1
         # new per-tier format ...
         bt = ckpt.get("best_esr_by_tier")
