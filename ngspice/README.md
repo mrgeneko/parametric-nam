@@ -88,8 +88,13 @@ faster** than the LiveSPICE 32× workaround, and correct.
 - **ALIASING (fixed via `--oversample`).** The transient output carries real
   ultrasonic content (a 4× solve resolves energy past 100 kHz); a plain `np.interp`
   to 48 kHz folds everything above 24 kHz back into the audband — **~20% RMS**,
-  piled up near Nyquist. `--oversample N` now solves at N×48 kHz (finer `tran` step)
+  piled up near Nyquist. `--oversample N` sets a finer `tran` output step
   and `_run_ngspice` FIR-decimates back to 48 kHz, filtering >24 kHz before it folds.
+  (Since the explicit-`tmax` change the solver's *internal* step ceiling is one audio
+  period regardless of oversample — LTE control takes it finer through hard
+  transients, which is where the ultrasonic content lives. Previously the emitted
+  tstep silently doubled as the step ceiling, so `--oversample N` forced N× solve
+  cost everywhere; see the comment above the `tran` line in `schx_to_ngspice.py`.)
   **Default is 1× (naive) — pass `--oversample 2` (or more) to enable anti-aliasing.**
   Verified 2× on the 5150: near-Nyquist (18–24 kHz) 12.3%→9.2%. Note the aliasing is
   mostly above a cab's rolloff (largely inaudible cab'd) but inflates the full-band

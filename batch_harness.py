@@ -438,7 +438,12 @@ def _filesource(raw_wav: Path, up: int, cache_dir: Path) -> str:
         x = resample_poly(x, up, 1).astype(np.float32)
         sr = sr * up
     t = np.arange(len(x)) / sr
-    np.savetxt(str(fs), np.column_stack([t, x.astype(np.float32)]), fmt="%.8f %.6f")
+    # Write-to-temp + atomic rename: parallel probe renders (choose_oversample /
+    # audit_convergence) share a cache dir, and two threads racing the exists()
+    # check above must not interleave writes into the same half-written file.
+    tmp = fs.with_suffix(f".tmp{os.getpid()}_{threading.get_ident()}")
+    np.savetxt(str(tmp), np.column_stack([t, x.astype(np.float32)]), fmt="%.8f %.6f")
+    os.replace(tmp, fs)
     return str(fs)
 
 
@@ -646,13 +651,18 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 speaker: str = None, expected_frames: int = 0,
                 timeout_s: int = 1200, oversample: int = 2,
                 max_crest: float = 0.0, ng: dict = None,
-                warmup_s: float = 1.0, no_retry: bool = False) -> Result:
+                warmup_s: float = 1.0, no_retry: bool = False,
+                start_rung: int = 0) -> Result:
     """Render one permutation, ESCALATING THE SOLVER when it fails to converge.
 
     A failed permutation used to record its error and be forgotten -- leaving a hole in the
     dataset that only surfaced later as "WARNING: N .npy files but M OK rows". We already knew
     how to fix these (the DS-1 needed input_upsample=4, the MT-2 needed diode_cjo damping); that
     knowledge was just never reached for automatically.
+
+    start_rung: begin the ladder here instead of at 0. Set from a previous run's params.csv --
+    the winning rung is recorded per row precisely so it never has to be rediscovered, and until
+    now nothing ever read it back: every re-render paid the full failed-rung ladder again.
     """
     path = sig_path(out_dir, idx)
     if path.exists():
@@ -660,8 +670,10 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
     path.parent.mkdir(parents=True, exist_ok=True)
 
     rungs = [dict()] if no_retry else _rungs(backend, oversample, ng)
+    start = min(max(start_rung, 0), len(rungs) - 1)
     last = None
-    for i, rung in enumerate(rungs):
+    for i in range(start, len(rungs)):
+        rung = rungs[i]
         os_i = rung.get("oversample", oversample)
         ng_i = ng
         if backend == "ngspice":
@@ -672,13 +684,22 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                          iterations=rung.get("iterations"))
         if r.ok:
             r.rung, r.settings = i, (_rung_str(rung) if i else "")
-            if i:
+            if i and i > start:
                 print(f"  [{idx}] converged on rung {i}: {_rung_str(rung)}", file=sys.stderr)
             return r
         last = r
         # Only a CONVERGENCE failure is worth another attempt. A bad knob name or a missing file
         # fails identically on every rung; retrying it just burns the clock.
         if not _is_convergence_failure(r.error):
+            return r
+        # A TIMEOUT is a convergence failure the ladder cannot outrun on backends whose
+        # escalation is a finer timestep: rung N+1 renders the same audio at 2x the solver
+        # cost against the SAME timeout_s, so if rung N ran out of clock, rung N+1 is
+        # guaranteed to -- and a hopeless permutation used to burn timeout_s x n_rungs
+        # (hours) before failing. ngspice is exempt: its rungs change method/damping at
+        # roughly equal solver cost, so a retry there can genuinely win.
+        if "timeout" in r.error.lower() and backend in ("livespice", "cpp"):
+            r.error = f"{r.error} [not escalating: higher rungs are strictly slower]"
             return r
         if i + 1 < len(rungs):
             print(f"  [{idx}] {r.error[:80]} — escalating to rung {i+1}: "
@@ -931,7 +952,8 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                       param_map: dict, fixed_params: str, speaker: str,
                       target: float, probe_s: float = 8.0, n_windows: int = 4,
                       iterations: int = 256, ref_os: int = 32,
-                      backend: str = "livespice", ng: dict = None) -> int:
+                      backend: str = "livespice", ng: dict = None,
+                      workers: int = None) -> int:
     """MEASURE the oversample this circuit needs. Do not guess it.
 
     oversample is a DISCRETISATION choice, and it has an error: BDF2's truncation, the gap between
@@ -1110,9 +1132,32 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
             cache[key] = v
             return v
 
+        # PRE-WARM THE CACHE IN PARALLEL. The measurement loop below reads renders
+        # one at a time; rendered serially they use one core while the reference
+        # renders alone cost ref_os/2 x a candidate each. All (clip, perm, os)
+        # renders at a given rung are independent, so fill the cache with a pool
+        # first and let the (unchanged) measurement math read it back. Keys are
+        # deduped before submission, and each batch completes before the serial
+        # loop runs, so the cache dict is never raced.
+        def prewarm(os_list):
+            jobs, seen_keys = [], set()
+            for p in uniq:
+                for clip in clips:
+                    for o in os_list:
+                        key = (str(clip), tuple(sorted(p.items())), o)
+                        if key not in cache and key not in seen_keys:
+                            seen_keys.add(key)
+                            jobs.append((clip, p, o))
+            if len(jobs) > 1:
+                with ThreadPoolExecutor(max_workers=workers or os.cpu_count()) as ex:
+                    list(ex.map(lambda j: render(*j), jobs))
+
+        prewarm([ref_os])          # the expensive ones, all up front
+
         prev_d = None
         os_ = 2
         while os_ < ref_os:
+            prewarm([os_])
             # Pool across windows (whole-file ESR estimate), take the WORST knob setting --
             # "all knobs at max" is not reliably the stiff one, so we probed both ends of each.
             worst, worst_at = 0.0, None
@@ -1180,7 +1225,8 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
 def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
                       input_wav: Path, schx: str, param_map: dict, fixed_params: str,
                       speaker: str, oversample: int, iterations: int,
-                      warmup_s: float, n_probe: int = 8):
+                      n_probe: int = 8, workers: int = None,
+                      probe_s: float = 8.0, n_windows: int = 4):
     """Is the DATASET converged? The only check that can see it.
 
     Every other check we run detects DIVERGENCE -- NaN, crest, truncation, timeout -- and those
@@ -1213,6 +1259,15 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
 
     We probe the EXTREMES, because that is where stiffness lives -- and where the default knob
     position, which is what everything else checks, would never take us.
+
+    Probed on STRATIFIED WINDOWS, rendered IN PARALLEL. The first version re-rendered the whole
+    input up to 24 times, serially, on one core -- right after the dataset render had just used
+    every core -- and on a small grid the audit cost rivalled the render itself. Newton
+    under-convergence is a property of the solver at a knob setting, not of sweep length, so it is
+    measured the same way choose_oversample measures truncation: short windows spanning the file
+    (with the write_probe_clip lead-in so the solver does not step into mid-chirp amplitude from
+    a cold start), numerator and denominator POOLED across windows. All (setting, variant, window)
+    renders are independent and go through one thread pool.
     """
     if backend != "livespice" or not perms:
         return
@@ -1237,54 +1292,91 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
             seen.add(key); uniq.append(p)
     uniq = uniq[:n_probe]
 
+    # Stratified windows across the file, evenly-spaced CENTRES (same reasoning as
+    # choose_oversample: endpoints land on the leading silence and the decay tail).
+    sig, sr = sf.read(str(input_wav))
+    total = len(sig)
+    win = min(total, int(probe_s * sr) // n_windows or total)
+    if total <= win * n_windows:
+        starts = [0]
+        win = total
+    else:
+        span = total - win
+        starts = [int((i + 0.5) * span / n_windows) for i in range(n_windows)]
+
+    # SAME timestep, 4x the iterations -> isolates NEWTON convergence.
+    # Then same iterations, 2x the timestep -> the discretization error, for INFO only.
+    variants = (("base",   oversample,     iterations),
+                ("newton", oversample,     iterations * 4),
+                ("finer",  oversample * 2, iterations))
+
     print("  Convergence audit (same timestep, 4x the iterations — did Newton actually converge?):")
     worst, worst_at = 0.0, None
     worst_disc, worst_disc_at = 0.0, None
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        for i, p in enumerate(uniq):
+        clips, lead_n = [], 0
+        for wi, st in enumerate(starts):
+            c = td / f"probe{wi}.wav"
+            lead_n = write_probe_clip(sig[st:st + win], sr, c)
+            clips.append(c)
+
+        def render(pi, tag, os_, it_, wi):
+            p = uniq[pi]
             swept = fmt_params(p, param_map)
             allp = f"{fixed_params},{swept}" if fixed_params else swept
-            outs = []
-            # SAME timestep, 4x the iterations -> isolates NEWTON convergence.
-            # Then same iterations, 2x the timestep -> the discretization error, for INFO only.
-            for tag, os_, it_ in (("base",  oversample,     iterations),
-                                  ("newton", oversample,    iterations * 4),
-                                  ("finer",  oversample * 2, iterations)):
-                w = td / f"{tag}.wav"
-                a = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(w),
-                     "--circuit", schx, "--params", allp,
-                     "--oversample", str(os_), "--iterations", str(it_)]
-                if speaker:
-                    a += ["--speaker", speaker]
-                r = subprocess.run(a, capture_output=True, text=True)
-                if r.returncode != 0 or not w.exists():
-                    print(f"    (probe render failed: rc={r.returncode} {r.stderr[:120]})")
-                    outs = []
-                    break
-                sig, sr = sf.read(str(w))
-                outs.append(np.asarray(sig, dtype=np.float64))
-            if len(outs) != 3:
-                continue
-            n = min(len(o) for o in outs)
-            # Clamp the warm-up skip. A skip longer than the clip leaves one sample to compare and
-            # the ESR becomes noise -- which is how this audit first reported a nonsensical 2.08 on
-            # a 1-second probe. Never let a window silently eat the signal you are measuring.
-            sk = min(int(warmup_s * 48000), max(0, n // 10))
-            base, newton, finer = (o[sk:n] for o in outs)
-            if len(base) < 4800:
-                continue
+            w = td / f"a{pi}_{tag}_w{wi}.wav"
+            a = [str(LIVESPICE_CLI), "--input", str(clips[wi]), "--output", str(w),
+                 "--circuit", schx, "--params", allp,
+                 "--oversample", str(os_), "--iterations", str(it_)]
+            if speaker:
+                a += ["--speaker", speaker]
+            r = subprocess.run(a, capture_output=True, text=True)
+            if r.returncode != 0 or not w.exists():
+                return f"rc={r.returncode} {r.stderr[:120]}"
+            s, _ = sf.read(str(w))
+            return np.asarray(s, dtype=np.float64)
 
-            def _esr(a_, b_):
-                den = float(np.sum(b_ ** 2))
-                return float(np.sum((a_ - b_) ** 2) / den) if den > 0 else 0.0
+        jobs = [(pi, tag, os_, it_, wi)
+                for pi in range(len(uniq))
+                for tag, os_, it_ in variants
+                for wi in range(len(clips))]
+        with ThreadPoolExecutor(max_workers=workers or os.cpu_count()) as ex:
+            outs = dict(zip(((j[0], j[1], j[4]) for j in jobs),
+                            ex.map(lambda j: render(*j), jobs)))
 
-            esr = _esr(base, newton)          # THE BUG CHECK: same equations, solved harder
-            disc = _esr(base, finer)          # informational: the method's own truncation error
-            # `>=`, not `>`. A PERFECTLY converged circuit gives esr == 0.0 exactly, and `> 0.0`
-            # is false -- so the audit reported "could not probe" on the very circuits that had
-            # nothing wrong with them. A success that looks like a failure to run is worse than
-            # either.
+        for pi, p in enumerate(uniq):
+            fails = [v for k, v in outs.items() if k[0] == pi and isinstance(v, str)]
+            if fails:
+                print(f"    (probe render failed: {fails[0]})")
+                continue
+            # Pool numerator/denominator across windows: sum(err)/sum(sig) is the
+            # whole-file ESR restricted to the sampled windows.
+            num_n = den_n = num_d = den_d = 0.0
+            for wi in range(len(clips)):
+                base = outs[(pi, "base", wi)]
+                newton = outs[(pi, "newton", wi)]
+                finer = outs[(pi, "finer", wi)]
+                m = min(len(base), len(newton), len(finer))
+                # SKIP THE LEAD-IN plus a margin, not a dataset-warmup skip: the clips
+                # carry write_probe_clip's silence + ramp, and the measurement must not
+                # score the solver's own warm-up. Clamped so a short window can never be
+                # silently eaten -- the failure mode that once produced an ESR of 2.08.
+                sk = max(m // 10, lead_n + int(0.02 * sr))
+                if m - sk < 4800:
+                    continue
+                b = base[sk:m]
+                num_n += float(np.sum((b - newton[sk:m]) ** 2))
+                den_n += float(np.sum(newton[sk:m] ** 2))
+                num_d += float(np.sum((b - finer[sk:m]) ** 2))
+                den_d += float(np.sum(finer[sk:m] ** 2))
+            if den_n <= 0:
+                continue
+            esr = num_n / den_n               # THE BUG CHECK: same equations, solved harder
+            disc = (num_d / den_d) if den_d > 0 else 0.0   # info: the method's own truncation
+            # `worst_at is None or ...`, not `> 0.0`. A PERFECTLY converged circuit gives
+            # esr == 0.0 exactly, and a bare `> 0.0` reported "could not probe" on the very
+            # circuits that had nothing wrong with them.
             if worst_at is None or esr > worst:
                 worst, worst_at = esr, p
             if worst_disc_at is None or disc > worst_disc:
@@ -1437,9 +1529,11 @@ def main():
     ap.add_argument("--ot-snub", default="10n", help="ngspice: OT snubber C")
     ap.add_argument("--nfb-comp", default=None, help="ngspice: NFB compensation cap NODE=value (e.g. nNFB=1n)")
     ap.add_argument("--conv", default="", help="ngspice: device convergence overrides key=val,... "
-                    "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax; e.g. diode_cjo=100p,tmax=20.8333u). "
-                    "tmax caps the max internal solver step (slower, more robust through hard "
-                    "transients). Auto-set per-circuit if omitted.")
+                    "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax/klu; e.g. diode_cjo=100p,tmax=10.4166u). "
+                    "tmax caps the max internal solver step; the default is one audio period "
+                    "(20.8333u) regardless of oversample — set it SMALLER to force finer steps "
+                    "through hard transients (slower). klu=0 falls back to the Sparse 1.3 solver. "
+                    "Auto-set per-circuit if omitted.")
     ap.add_argument("--method", default="", choices=["", "trap", "gear"],
                     help="ngspice: integration method (default trap). Auto-set per-circuit if omitted.")
     ap.add_argument("--input-upsample", type=int, default=0,
@@ -1676,7 +1770,8 @@ def main():
         if args.backend == "livespice":
             args.oversample = choose_oversample(
                 schx, knobs, perms, in_wav, param_map, args.fixed_params,
-                args.speaker, args.trunc_target, backend="livespice")
+                args.speaker, args.trunc_target, backend="livespice",
+                workers=args.workers)
             _auto_os = False
         else:
             # ngspice needs `ng` (netlist + filesource + convergence settings), which is not built
@@ -1811,7 +1906,8 @@ def main():
         if _auto_os:
             args.oversample = choose_oversample(
                 schx, knobs, perms, in_wav, param_map, args.fixed_params,
-                args.speaker, args.trunc_target, backend="ngspice", ng=ng)
+                args.speaker, args.trunc_target, backend="ngspice", ng=ng,
+                workers=args.workers)
             ng["oversample"] = args.oversample
             timeout_s = max(600, int(audio_frames / sr * 120 * max(1, args.oversample / 2)))
 
@@ -1880,7 +1976,29 @@ def main():
 
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
     to_run = [(i, p) for i, p in enumerate(perms) if i not in existing]
-    print(f"Resume: {len(existing)} done, {len(to_run)} remaining\n")
+    print(f"Resume: {len(existing)} done, {len(to_run)} remaining")
+
+    # RUNG MEMORY. The winning rung is recorded per row in params.csv because "high gain needed
+    # 4x oversampling" is a property of the data -- but nothing ever read it back, so a re-render
+    # (shards deleted after --combine, a --no-retry run redone, a regeneration) started every
+    # permutation at rung 0 and paid the full failed-rung ladder again. If a permutation that
+    # still needs rendering has an ok row with rung > 0, start its ladder there. (Appended
+    # duplicate rows are read in order, so the latest row for an idx wins.)
+    prev_rungs = {}
+    if not fresh and not args.no_retry:
+        with open(csv_path) as _f:
+            for _row in csv.DictReader(_f):
+                try:
+                    _i, _r = int(_row["idx"]), int(_row.get("rung") or 0)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if _row.get("ok") == "1":
+                    prev_rungs[_i] = _r
+    prev_rungs = {i: r for i, r in prev_rungs.items() if r > 0}
+    _remembered = prev_rungs.keys() & {i for i, _ in to_run}
+    if _remembered:
+        print(f"Rung memory: {len(_remembered)} permutations start at their previously-winning rung")
+    print()
 
     t0 = time.time()
     done = 0
@@ -1890,7 +2008,8 @@ def main():
                         args.backend, args.circuit, schx, param_map,
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
                         args.oversample, args.max_crest, ng,
-                        warmup_s=args.skip_warmup_s, no_retry=args.no_retry): i
+                        warmup_s=args.skip_warmup_s, no_retry=args.no_retry,
+                        start_rung=prev_rungs.get(i, 0)): i
             for i, p in to_run
         }
         for f in as_completed(futs):
@@ -1931,7 +2050,7 @@ def main():
     audit_convergence(out_dir, knobs, perms, args.backend, in_wav, schx, param_map,
                       args.fixed_params, args.speaker,
                       _rung0.get("oversample", args.oversample),
-                      _rung0.get("iterations", 8), args.skip_warmup_s)
+                      _rung0.get("iterations", 8), workers=args.workers)
 
     print(f"\nPost-process with:  python batch_harness.py --combine {out_dir}")
 

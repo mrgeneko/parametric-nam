@@ -364,22 +364,40 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         for ln in extra.split(';'):
             if ln.strip():
                 body.append(ln.strip())
+    # KLU direct solver: ngspice-46+ ships it but silently defaults to Sparse 1.3
+    # (the 1980s solver) — the banner says "Compiled with KLU" yet every run logs
+    # "Using SPARSE 1.3" until `.options klu` selects it. This workload is millions
+    # of factorizations per render, and KLU is typically 1.3-2x faster on the
+    # 100+-node amps. Harmless on non-KLU builds (unknown option -> warning,
+    # Sparse fallback). Opt out via conv={'klu': '0'} if an A/B ever regresses.
+    use_klu = str(conv.get('klu', '1')).lower() not in ('0', 'false', 'off', 'no')
+
+    # tmax IS the internal step ceiling, and without an explicit one ngspice uses
+    # min(tstep, span/50) = tstep — so the "adaptive" solver was forced to take
+    # (1/48kHz)/oversample steps EVERYWHERE, including passages where LTE control
+    # would happily stride far larger. Measured: an explicit tmax at the audio
+    # period cut internal step count 2.5x with ESR 4.2e-6 vs a 2us reference.
+    # (The old comment here claimed tstep was "just a print-resolution hint" and
+    # tmax an opt-in tightener. It was backwards: tstep was the cap, and the
+    # emitted tmax could only LOOSEN it at oversample>=2.)
+    # Default the ceiling to ONE AUDIO PERIOD, decoupled from oversample: the
+    # solver always resolves at least 48kHz, LTE takes it finer through clip
+    # edges, and oversample keeps its real job — output density for the
+    # anti-alias decimation downstream. conv={'tmax': '...'} overrides (smaller
+    # = forced finer everywhere = slower; the DS-1's 20.8333u is now the default).
+    tmax = conv.get('tmax') or '20.8333u'
+
     lines += sub_defs + opamp_defs + model_defs + [''] + body + [
         '', '.options method=%s reltol=1e-3 abstol=5e-9 vntol=1e-6 itl1=500 itl4=500 '
-        'gmin=1e-9 gminsteps=50 rshunt=1e8' % method,
-        # tran step = (1/48kHz)/oversample; finer step -> ngspice resolves more
-        # bandwidth so the anti-alias decimation downstream has real HF to filter.
+        'gmin=1e-9 gminsteps=50 rshunt=1e8%s' % (method, ' klu' if use_klu else ''),
         # `save` only the output node — ngspice otherwise keeps EVERY node's full
         # transient in RAM (~100 nodes × millions of points), which OOMs on long
         # inputs / high oversample / many parallel workers. Storing one node cuts
         # memory ~100×. (The full circuit is still solved; only storage is limited.)
         '.control', 'set filetype=ascii', 'save v(%s)' % out_node,
-        # tmax caps ngspice's internal adaptive step (tstep above is really just a
-        # print-resolution hint; the controller can take bigger internal steps
-        # unless tmax bounds it) -- forces finer resolution through a hard
-        # transient at the cost of speed. Opt-in via conv={'tmax': '...'}.
-        ('tran %.6fu %s 0 %s' % (20.8333 / oversample, sp(dur), conv['tmax'])
-         if conv.get('tmax') else 'tran %.6fu %s' % (20.8333 / oversample, sp(dur))),
+        # tstep is kept at (1/48kHz)/oversample for wrdata/print bookkeeping, but
+        # the solve density is governed by tmax + LTE (see above), not tstep.
+        'tran %.6fu %s 0 %s' % (20.8333 / oversample, sp(dur), tmax),
         'wrdata %s v(%s)' % (csv, out_node), 'quit', '.endc', '.end', '']
     return '\n'.join(lines)
 
