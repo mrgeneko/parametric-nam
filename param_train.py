@@ -1095,10 +1095,20 @@ def main():
     train_ds, val_ds = torch.utils.data.random_split(
         dataset, [n_train, n_val],
         generator=torch.Generator().manual_seed(args.seed))
+    # drop_last=True on BOTH loaders: 2026-07-21, King of Tone (train 3554, val 394 --
+    # neither divides evenly by batch_size=64) hung on MPS within 1-2 epochs, fresh or
+    # resumed, while OD-3 (train 3456, val 384 -- BOTH exact multiples of 64) never did,
+    # in any test tonight. The real difference: a dataset whose sizes don't divide evenly
+    # forces a smaller last batch every epoch (KoT: 34 then 64 then 10), so MPS has to
+    # keep re-specializing MRSTFT's stft() kernels for multiple shapes instead of one --
+    # a documented class of MPSGraph deadlock (github.com/jamiepine/voicebox#905). Losing
+    # up to batch_size-1 samples/epoch (here: 34 train, 10 val, ~1%/2.5%) is a small,
+    # standard price -- val_passes already averages multiple passes for exactly this kind
+    # of noise, and a shape-stable run beats an exhaustive one that hangs.
     train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
     print(f"  {n_total} total samples ({n_train} train, {n_val} val)",
           file=sys.stderr)
     print(f"  Params: {dataset.param_names}", file=sys.stderr)
