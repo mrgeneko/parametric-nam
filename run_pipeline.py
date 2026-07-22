@@ -617,6 +617,11 @@ def main():
                    help="Open-ended SGDR restart period in epochs")
     g.add_argument("--restart-mult",   type=int,   default=1,
                    help="Open-ended SGDR period multiplier per restart")
+    g.add_argument("--stale-cycles",   type=int,   default=3,
+                   help="Open-ended auto-stop: stop after this many consecutive SGDR cycles "
+                        "with no new best on any tier (0 = manual STOP-file only; see "
+                        "param_train.py --help for why the default is 3, not the doc's 2). "
+                        "Forwarded to param_train.py.")
     g.add_argument("--batch-size",     type=int,   default=16)
     g.add_argument("--lr",             type=float, default=3e-4)
     g.add_argument("--crop-len",       type=int,   default=44100)
@@ -901,9 +906,11 @@ def main():
                 total = steps_ep * epochs
                 log(f"TRAINING BUDGET: {n_perms} perms × {repeats} repeats = {items:,} items/epoch  →  "
                     f"{steps_ep} steps/epoch × {epochs} epochs = {total:,} GRADIENT STEPS", fh)
-                log(f"  crop {args.crop_len} samples ({args.crop_len/sr:.1f}s) vs a 2483-sample "
-                    f"(52 ms) receptive field — {args.crop_len/2483:.0f}× it, so the model can see "
-                    f"its own context", fh)
+                # RF = sum((k-1)*d over the 23 layers) + (head 16-tap - 1) + 1 = 6,347 samples.
+                # The long-quoted 2,483 figure matched no version of the kernel/dilation lists.
+                log(f"  crop {args.crop_len} samples ({args.crop_len/sr:.1f}s) vs a 6347-sample "
+                    f"(132 ms) receptive field — {args.crop_len/6347:.1f}× it, so the model can see "
+                    f"its own context (the crop's first RF samples have zero left-context)", fh)
                 if not args.target_steps:
                     log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_perms). Change the knob "
                         f"grid and this number moves silently. Prefer target-steps.", fh)
@@ -916,6 +923,7 @@ def main():
                 "--epochs",          epochs,    # derived from target-steps unless explicit
                 "--restart-period",  args.restart_period,
                 "--restart-mult",    args.restart_mult,
+                "--stale-cycles",    args.stale_cycles,
                 "--batch-size",      args.batch_size,
                 "--lr",              args.lr,
                 "--crop-len",        args.crop_len,

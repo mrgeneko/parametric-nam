@@ -208,9 +208,19 @@ class A2Layer(nn.Module):
     """Single A2 dilated conv layer with optional FiLM."""
     def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int):
         super().__init__()
-        pad = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(channels, channels, kernel_size,
-                              padding=pad, dilation=dilation)
+        # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
+        # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
+        # samples, cropped them off with a slice that produced a NON-CONTIGUOUS tensor,
+        # and then needed a .contiguous() copy of the entire [B, C, T] activation per
+        # layer per direction -- gigabytes of pure memcpy per step at batch 64, and the
+        # non-contiguous intermediate was the suspected trigger for the 2026-07-21 MPS
+        # backward-pass hangs. F.pad(x, (pad, 0)) + an unpadded conv yields exactly T
+        # already-contiguous samples, numerically identical (left-pad + crop-to-T IS the
+        # causal left-pad), and removes the hang trigger at the source. (Verified
+        # bit-equal on CPU against the pad-then-crop form; state-dict layout unchanged --
+        # padding is not a parameter.)
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
         self.mixin = nn.Conv1d(1, channels, 1, bias=False)
         self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
         self.l1x1 = nn.Conv1d(channels, channels, 1)
@@ -218,12 +228,7 @@ class A2Layer(nn.Module):
     def forward(self, x: torch.Tensor, inp_audio: torch.Tensor, cond: torch.Tensor):
         """Returns (residual_out, post_activation). post_activation is the pre-layer1x1
         LeakyReLU output = the 'skip' term NAM/a2_fast accumulate into the head."""
-        h = self.conv(x)
-        # .contiguous(): this crop is non-contiguous (each row stays stride-1 internally,
-        # but rows are no longer packed at the original conv output's stride) -- suspected
-        # trigger for the 2026-07-21 MPS backward-pass hangs (a historical class of MPS
-        # deadlock when backpropagating through non-contiguous tensors). Cheap either way.
-        h = h[:, :, :inp_audio.shape[-1]].contiguous()
+        h = self.conv(F.pad(x, (self.pad, 0)))
         h = h + self.mixin(inp_audio)
         if self.film is not None:
             h = self.film(h, cond)
@@ -269,9 +274,10 @@ class ParametricA2(nn.Module):
             skip = post_act if skip is None else skip + post_act
         head_in = skip
         # Causal: left-pad K-1 so output[n] reads only [n-(K-1), n] — no lookahead.
+        # The unpadded conv over T + (K-1) samples yields exactly T outputs, so the old
+        # trailing crop + .contiguous() were a no-op slice plus a full-tensor copy.
         head_in = F.pad(head_in, (K_HEAD_KERNEL - 1, 0))
         x = self.head(head_in)
-        x = x[:, :, :audio.shape[-1]].contiguous()   # see A2Layer.forward's .contiguous() note
         x = x * self.head_scale
         return x
 
@@ -654,23 +660,36 @@ class ParamDataset(torch.utils.data.Dataset):
 # Loss functions
 # ---------------------------------------------------------------------------
 
+# (fft, hop, win) per resolution — shared by mrstft_loss and ParamLoss._stft_mags.
+_MRSTFT_RESOLUTIONS = [(512, 128, 512), (1024, 256, 1024), (2048, 512, 2048)]
+
+# Hann windows cached per (length, device). torch.hann_window used to be allocated
+# INSIDE every torch.stft call — 12-24 fresh GPU tensors per training step.
+_HANN_CACHE: dict = {}
+
+
+def _hann(win: int, device) -> torch.Tensor:
+    key = (win, str(device))
+    w = _HANN_CACHE.get(key)
+    if w is None:
+        w = _HANN_CACHE[key] = torch.hann_window(win, device=device)
+    return w
+
+
+def _stft_mags(x: torch.Tensor) -> list:
+    """The three MRSTFT magnitude spectra of [B, 1, T] audio."""
+    return [torch.abs(torch.stft(x.squeeze(1), fft, hop, win, _hann(win, x.device),
+                                 return_complex=True))
+            for fft, hop, win in _MRSTFT_RESOLUTIONS]
+
+
 def mrstft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Multi-resolution STFT loss (L1 on magnitudes)."""
-    fft_sizes = [512, 1024, 2048]
-    hop_sizes = [128, 256, 512]
-    win_lengths = [512, 1024, 2048]
+    p_mags, t_mags = _stft_mags(pred), _stft_mags(target)
     total = torch.tensor(0.0, device=pred.device)
-    for fft, hop, win in zip(fft_sizes, hop_sizes, win_lengths):
-        s_pred = torch.stft(pred.squeeze(1), fft, hop, win,
-                            torch.hann_window(win, device=pred.device),
-                            return_complex=True)
-        s_target = torch.stft(target.squeeze(1), fft, hop, win,
-                              torch.hann_window(win, device=pred.device),
-                              return_complex=True)
-        mag_pred = torch.abs(s_pred)
-        mag_target = torch.abs(s_target)
-        total += F.l1_loss(mag_pred, mag_target)
-    return total / len(fft_sizes)
+    for pm, tm in zip(p_mags, t_mags):
+        total += F.l1_loss(pm, tm)
+    return total / len(p_mags)
 
 
 def pre_emphasis(x: torch.Tensor, coef: float) -> torch.Tensor:
@@ -750,14 +769,28 @@ class ParamLoss(nn.Module):
         self.pre_emph = pre_emph
         self.floor = floor
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def precompute(self, target: torch.Tensor) -> dict:
+        """Target-side loss terms, computed ONCE per batch and shared across tiers.
+
+        A slimmable step calls the criterion once per tier against the SAME target;
+        without this, the target's pre-emphasis and its three STFTs are recomputed
+        per tier — up to ~37% of the MRSTFT work duplicated on a 4-tier run. The
+        target carries no autograd graph, so the cached tensors are plain constants
+        and reusing them across sequential per-tier backward passes is safe."""
+        return {"t_pre": pre_emphasis(target, self.pre_emph) if self.kind == "esr" else None,
+                "t_mags": _stft_mags(target)}
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                cache: dict = None) -> torch.Tensor:
         if self.kind == "esr":
             p = pre_emphasis(pred, self.pre_emph)
-            t = pre_emphasis(target, self.pre_emph)
+            t = cache["t_pre"] if cache is not None else pre_emphasis(target, self.pre_emph)
             main = esr_per_example(p, t, self.floor)
         else:
             main = F.mse_loss(pred, target)
-        mrstft = mrstft_loss(pred, target)
+        t_mags = cache["t_mags"] if cache is not None else _stft_mags(target)
+        p_mags = _stft_mags(pred)
+        mrstft = sum(F.l1_loss(pm, tm) for pm, tm in zip(p_mags, t_mags)) / len(p_mags)
         return main + self.mrstft_weight * mrstft
 
 
@@ -767,29 +800,54 @@ class ParamLoss(nn.Module):
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
                 epoch: int = 0, total_epochs: int = 0, log_interval: int = 10):
+    """One epoch. Two deliberate structural choices, both numerically identical to
+    the naive form:
+
+    NO PER-STEP HOST SYNC. `total_loss += loss.item()` forced a full MPS queue
+    drain every step, making the loop strictly alternate CPU batch-prep / GPU
+    compute (with num_workers=0 they are the same thread's turns). The loss is
+    accumulated as an on-device tensor and .item() happens only at the
+    log_interval print — which sits INSIDE the armed watchdog region, so a wedged
+    GPU queue still gets caught: the blocking sync happens under a 45 s timer at
+    most log_interval steps after the wedge.
+
+    PER-TIER FORWARD+BACKWARD for slimmable models. Tiers share no weights and
+    the joint loss is an unweighted sum, so sum-then-backward and sequential
+    per-tier backward produce identical gradients (modulo fp reduction order).
+    Sequential frees each tier's activation graph before the next tier's forward
+    runs, so peak memory is ~the LARGEST tier instead of the SUM of tiers — the
+    sum is what forced 4-tier runs down to batch 32 on a 48 GB M4 Pro (Jetsam,
+    docs/multi_width_slimmable_plan.md §12). Grad clipping and optimizer.step()
+    still happen once per step over the accumulated grads, exactly as before."""
     model.train()
     slimmable = isinstance(model, SlimmableParametricA2)
-    total_loss = 0
+    can_cache = isinstance(criterion, ParamLoss)
+    total_loss = torch.zeros((), device=device)
     for step, (inp, out, params) in enumerate(loader):
         _watchdog_arm(f"epoch {epoch} step {step}")
         inp, out, params = inp.to(device), out.to(device), params.to(device)
         optimizer.zero_grad()
         if slimmable:
-            preds = model(inp, params)                       # list, one per width
-            loss = sum(criterion(p, out) for p in preds)     # joint over all tiers
+            cache = criterion.precompute(out) if can_cache else None
+            step_loss = torch.zeros((), device=device)
+            for m in model.submodels:
+                loss = (criterion(m(inp, params), out, cache) if can_cache
+                        else criterion(m(inp, params), out))
+                loss.backward()
+                step_loss += loss.detach()
         else:
-            pred = model(inp, params)
-            loss = criterion(pred, out)
-        loss.backward()
+            loss = criterion(model(inp, params), out)
+            loss.backward()
+            step_loss = loss.detach()
         if clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
         optimizer.step()
-        total_loss += loss.item()
-        _watchdog_disarm()
+        total_loss += step_loss
         if log_interval > 0 and (step + 1) % log_interval == 0:
             print(f"  [{epoch:3d}/{total_epochs}] step {step+1}/{len(loader)}  "
-                  f"loss={total_loss/(step+1):.6f}", file=sys.stderr, flush=True)
-    return total_loss / len(loader)
+                  f"loss={total_loss.item()/(step+1):.6f}", file=sys.stderr, flush=True)
+        _watchdog_disarm()
+    return total_loss.item() / len(loader)
 
 
 def validate(model, loader, criterion, device, val_passes: int = 1):
@@ -839,6 +897,7 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
     """
     model.eval()
     slimmable = isinstance(model, SlimmableParametricA2)
+    can_cache = isinstance(criterion, ParamLoss)
     floor = getattr(criterion, "floor", 0.05)
     total_loss = 0.0
     esr_sums = None
@@ -849,7 +908,9 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
                 inp, out, params = inp.to(device), out.to(device), params.to(device)
                 if slimmable:
                     preds = model(inp, params)                        # list, ascending width
-                    total_loss += sum(criterion(p, out) for p in preds).item()
+                    cache = criterion.precompute(out) if can_cache else None
+                    total_loss += sum(criterion(p, out, cache) if can_cache
+                                      else criterion(p, out) for p in preds).item()
                     e = [esr_per_example(p, out, floor).item() for p in preds]
                 else:
                     pred = model(inp, params)
@@ -974,6 +1035,21 @@ def main():
     ap.add_argument("--restart-mult", type=int, default=1,
                     help="Open-ended mode: SGDR period multiplier per restart "
                          "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
+    ap.add_argument("--stale-cycles", type=int, default=3,
+                    help="Open-ended mode: stop automatically after this many consecutive "
+                         "SGDR cycles in which NO tier minted a new best val ESR — the "
+                         "stopping rule docs/training-budget.md specifies, which until now "
+                         "was executed by a human watching the log (the 5150 run burned "
+                         "~2.5h past its plateau waiting for one). Compared at CYCLE "
+                         "granularity, i.e. at matched LR phase, so the cosine-tail "
+                         "artifact that killed per-epoch patience (a best always lands "
+                         "near each trough) cannot fire. Default 3, not the doc's 2: "
+                         "replaying the OD-3 run's metrics.csv showed improvements arrive "
+                         "in bursts with 100+-epoch droughts — 2 would have stopped at "
+                         "ep 1150 and forfeited a further 16-23%% ESR that landed by 1689. "
+                         "Sparse-capture datasets (whose val metric is noisiest) may want "
+                         "4+, or 0 to disable (the old manual behavior). The counter "
+                         "resets on --resume. (default: %(default)s)")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -1239,6 +1315,10 @@ def main():
     t0 = time.time()
     epoch = start_epoch - 1
     completed = 0
+    # SGDR cycle-aware auto-stop bookkeeping (open-ended mode, --stale-cycles).
+    cycle_improved = False
+    stale_cycles = 0
+    auto_stop = False
     while True:
         epoch += 1
         if not open_ended and epoch > args.epochs:
@@ -1289,6 +1369,8 @@ def main():
                 export_nam_state(model, best_state[lbl], dataset,
                                  nam_variant(args.output, f"best_{lbl}"), device)
                 _watchdog_disarm()
+        if new_best:
+            cycle_improved = True
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
@@ -1334,8 +1416,31 @@ def main():
             _watchdog_disarm()
 
         completed += 1
-        # Open-ended: stop gracefully on STOP file or SIGINT/SIGTERM.
-        if open_ended and should_stop(ckpt_dir):
+
+        # SGDR cycle-aware auto-stop: the documented budget rule (docs/training-budget.md:
+        # "two consecutive cycles with no new best = the budget"), executed by the loop
+        # instead of a human watching the log. CosineAnnealingWarmRestarts wraps T_cur to
+        # 0 on the scheduler.step() that completes a cycle, so this fires exactly at each
+        # trough — cycle-to-cycle comparisons happen at matched LR phase, which is what
+        # makes this rule immune to the cosine-tail artifact that broke per-epoch patience.
+        if open_ended and args.stale_cycles > 0 and getattr(scheduler, "T_cur", None) == 0:
+            if cycle_improved:
+                stale_cycles = 0
+            else:
+                stale_cycles += 1
+            print(f"  [cycle end @ epoch {epoch}] "
+                  + ("new best(s) this cycle" if cycle_improved
+                     else f"no improvement — {stale_cycles}/{args.stale_cycles} stale cycles"),
+                  file=sys.stderr, flush=True)
+            cycle_improved = False
+            if stale_cycles >= args.stale_cycles:
+                print(f"[stop] {args.stale_cycles} consecutive SGDR cycles without a new best "
+                      f"on any tier — plateau reached, stopping (disable with --stale-cycles 0).",
+                      file=sys.stderr, flush=True)
+                auto_stop = True
+
+        # Open-ended: stop gracefully on plateau, STOP file, or SIGINT/SIGTERM.
+        if open_ended and (auto_stop or should_stop(ckpt_dir)):
             break
 
     elapsed = time.time() - t0
