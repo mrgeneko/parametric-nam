@@ -10,7 +10,7 @@ Usage:
   python param_train.py --dataset /path/to/dataset --output model.param.nam
 """
 
-import argparse, csv, datetime, json, math, os, signal, sys, time, warnings
+import argparse, csv, datetime, faulthandler, json, math, os, signal, sys, time, warnings
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from per_perm_esr import compute_per_perm_esr, summarize as summarize_per_perm_esr, write_csv as write_per_perm_esr_csv
+
+# ---------------------------------------------------------------------------
+# Hang watchdog. 2026-07-21: MPS training on this fleet has hung silently
+# (no exception, no error) at the epoch boundary -- observed in both the
+# checkpoint save's .cpu() device copy AND the next epoch's first backward
+# pass, via manual `sample <pid>` stack traces (a slow, live-only diagnostic).
+# This arms a timer before each such operation and cancels it on success; if
+# an operation doesn't return in time, faulthandler dumps every thread's
+# Python-level traceback to <ckpt-or-cwd>/watchdog.log -- so a recurrence is
+# caught automatically, unattended, instead of needing a human to `sample` it
+# during the narrow window before the next kill/relaunch.
+_watchdog_file = None
+
+
+def _watchdog_open(ckpt_dir):
+    global _watchdog_file
+    path = (ckpt_dir if ckpt_dir is not None else Path(".")) / "watchdog.log"
+    _watchdog_file = open(path, "a")
+    print(f"Hang watchdog armed -- stalls dump to {path}", file=sys.stderr)
+
+
+def _watchdog_arm(label: str, timeout: float = 45.0):
+    if _watchdog_file is None:
+        return
+    _watchdog_file.write(f"\n--- watchdog armed for {label!r} at "
+                          f"{datetime.datetime.now().isoformat()} (timeout {timeout}s) ---\n")
+    _watchdog_file.flush()
+    faulthandler.dump_traceback_later(timeout, exit=False, file=_watchdog_file)
+
+
+def _watchdog_disarm():
+    if _watchdog_file is None:
+        return
+    faulthandler.cancel_dump_traceback_later()
 
 # ---------------------------------------------------------------------------
 # A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
@@ -733,6 +767,7 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     slimmable = isinstance(model, SlimmableParametricA2)
     total_loss = 0
     for step, (inp, out, params) in enumerate(loader):
+        _watchdog_arm(f"epoch {epoch} step {step}")
         inp, out, params = inp.to(device), out.to(device), params.to(device)
         optimizer.zero_grad()
         if slimmable:
@@ -746,6 +781,7 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
         optimizer.step()
         total_loss += loss.item()
+        _watchdog_disarm()
         if log_interval > 0 and (step + 1) % log_interval == 0:
             print(f"  [{epoch:3d}/{total_epochs}] step {step+1}/{len(loader)}  "
                   f"loss={total_loss/(step+1):.6f}", file=sys.stderr, flush=True)
@@ -1171,6 +1207,7 @@ def main():
             log_w.writerow(["epoch", "train_loss", "val_loss",
                             *[f"val_esr_{wlabel[lbl]}" for lbl in labels], "lr", "elapsed_s"])
 
+    _watchdog_open(ckpt_dir)
     t0 = time.time()
     epoch = start_epoch - 1
     completed = 0
@@ -1180,8 +1217,10 @@ def main():
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
+        _watchdog_arm(f"epoch {epoch} validate()", timeout=60.0)
         val_loss, esr_list = validate(model, val_loader, criterion, device,
                                      val_passes=args.val_passes)
+        _watchdog_disarm()
         scheduler.step()
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
 
@@ -1193,6 +1232,7 @@ def main():
         for lbl in labels:
             e = esr_by[lbl]
             if e < best_esr[lbl]:
+                _watchdog_arm(f"epoch {epoch} best-checkpoint save ({lbl})", timeout=60.0)
                 best_esr[lbl] = e
                 best_state[lbl] = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                 new_best[lbl] = True
@@ -1209,6 +1249,7 @@ def main():
                     }, ckpt_dir / fname)
                 export_nam_state(model, best_state[lbl], dataset,
                                  nam_variant(args.output, f"best_{lbl}"), device)
+                _watchdog_disarm()
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
@@ -1234,6 +1275,7 @@ def main():
 
         # Save checkpoint every epoch (overwrite previous to save disk space)
         if ckpt_dir is not None:
+            _watchdog_arm(f"epoch {epoch} latest.pt save", timeout=60.0)
             ckpt_path = ckpt_dir / "latest.pt"
             torch.save({
                 "epoch": epoch,
@@ -1250,6 +1292,7 @@ def main():
                 "best_lite_state": best_state.get("lite"),
                 "args_dict": dict(vars(args)),
             }, ckpt_path)
+            _watchdog_disarm()
 
         completed += 1
         # Open-ended: stop gracefully on STOP file or SIGINT/SIGTERM.
