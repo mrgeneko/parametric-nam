@@ -33,36 +33,66 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
                          param_names: list[str], device: str, scale: float = 1.0,
-                         warmup_s: float = 1.0) -> list[dict]:
+                         warmup_s: float = 1.0, batch_perms: int = 12,
+                         chunk_s: float = 10.0, context_n: int = 8192) -> list[dict]:
     """Per-permutation ESR for `submodel` against full-length ground truth.
 
     `inp` must already be scaled to the same target_dbfs the model was trained
     on (ParamDataset.inp / ParamDataset._scale) -- this does not renormalize it.
     `outputs` is the RAW (unscaled) ground truth array (ParamDataset.outputs,
-    which may be memory-mapped) -- `scale` (ParamDataset._scale) is applied to
-    each permutation's row lazily inside the loop, not to the whole array up
-    front, so an mmap'd outputs.npy is never pulled fully into RAM here.
+    which may be memory-mapped) -- `scale` (ParamDataset._scale) is applied
+    lazily per chunk, so an mmap'd outputs.npy is never pulled fully into RAM.
     `samples` is a list of (row_index_into_outputs, {param_name: value}) pairs,
     matching ParamDataset.samples exactly.
+
+    BATCHED over permutations and CHUNKED over time -- this used to be one
+    full-length batch-1 forward per permutation per tier, by far the longest
+    post-training stage on big grids (a 1,944-perm JCM800 grid is hours; the
+    288-perm 5150 is ~an hour per tier). The input audio is identical across
+    permutations, so `batch_perms` param vectors ride one expanded input chunk;
+    time is processed in `chunk_s` windows with `context_n` samples of real
+    left-context prepended. The model is strictly causal with a 6,347-sample
+    receptive field, so with context_n >= RF every output sample outside the
+    context region sees exactly the samples a full-length forward would --
+    chunking is EXACT, not an approximation (verified against the unbatched
+    path). Numerator/denominator accumulate in float64 across chunks.
 
     Returns a list of {**params, "esr": float}, one entry per permutation,
     UNSORTED (caller sorts if it wants best/worst).
     """
     submodel.eval()
     warmup_n = int(warmup_s * 48000)
-    inp_t = torch.from_numpy(inp).float().unsqueeze(0).unsqueeze(0).to(device)  # [1,1,T]
+    chunk_n = max(int(chunk_s * 48000), context_n * 2)
+    sig_len = min(len(inp), outputs.shape[1])
+    inp_t = torch.from_numpy(inp[:sig_len]).float().to(device)
     results = []
     with torch.no_grad():
-        for row_i, params_dict in samples:
-            target = (np.asarray(outputs[row_i]) * scale).astype(np.float32)
-            sig_len = min(len(inp), len(target))
-            params = torch.tensor([[params_dict[n] for n in param_names]],
+        for b0 in range(0, len(samples), max(1, batch_perms)):
+            batch = samples[b0:b0 + max(1, batch_perms)]
+            B = len(batch)
+            rows = [ri for ri, _ in batch]
+            params = torch.tensor([[pd[n] for n in param_names] for _, pd in batch],
                                   dtype=torch.float32, device=device)
-            pred = submodel(inp_t[:, :, :sig_len], params).squeeze().cpu().numpy()
-            t = target[:sig_len]
-            p, t = pred[warmup_n:], t[warmup_n:]
-            esr = float(np.sum((p - t) ** 2) / (np.sum(t ** 2) + 1e-12))
-            results.append({**params_dict, "esr": esr})
+            num = torch.zeros(B, dtype=torch.float64)
+            den = torch.zeros(B, dtype=torch.float64)
+            for s in range(0, sig_len, chunk_n):
+                e = min(s + chunk_n, sig_len)
+                w = max(warmup_n - s, 0)
+                if w >= e - s:
+                    continue        # chunk lies entirely inside the warmup skip
+                c0 = max(0, s - context_n)
+                seg = inp_t[c0:e].reshape(1, 1, -1).expand(B, 1, -1)
+                pred = submodel(seg, params)[:, 0, s - c0:]              # [B, e-s]
+                tgt = torch.from_numpy(
+                    (np.asarray(outputs[rows, s:e]) * scale).astype(np.float32)).to(device)
+                # Per-chunk sums in float32 on-device (MPS has no float64; torch.sum's
+                # pairwise accumulation keeps a single chunk accurate), accumulated
+                # across chunks in float64 on the host.
+                diff = pred[:, w:] - tgt[:, w:]
+                num += (diff * diff).sum(dim=1).cpu().double()
+                den += (tgt[:, w:] ** 2).sum(dim=1).cpu().double()
+            for i, (_, pd) in enumerate(batch):
+                results.append({**pd, "esr": float(num[i] / (den[i] + 1e-12))})
     return results
 
 
