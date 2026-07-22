@@ -957,6 +957,73 @@ def write_probe_clip(sig, sr: int, path) -> int:
     sf.write(str(path), out.astype(_np.float32), sr)
     return lead
 
+def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = None) -> dict:
+    """Render many livespice jobs via the oracle's `--jobs` batch mode.
+
+    One livespice_cli process pays ~0.5 s of fixed cost (spawn, assembly load, schx parse,
+    input decode, cold-JIT symbolic solve) PER INVOCATION -- which rivals the render itself
+    for the probe tools that fire dozens of short-clip renders at one circuit. Batch mode
+    pays it once per WORKER instead of once per job: jobs are dealt round-robin into
+    `workers` chunks, each chunk runs serially inside one process, chunks run in parallel.
+    Same parallelism as one-process-per-job, a fraction of the fixed cost.
+
+    `jobs` entries need input/output/params/oversample/iterations. Returns
+    {output_path: None on success | error string}. If the oracle predates `--jobs`
+    (sibling checkout not rebuilt), falls back to one process per job, still parallel.
+    """
+    import tempfile as _tempfile
+    if not jobs:
+        return {}
+    workers = max(1, min(workers or os.cpu_count() or 4, len(jobs)))
+    chunks = [jobs[i::workers] for i in range(workers)]
+
+    def run_chunk(chunk):
+        fd, jl = _tempfile.mkstemp(suffix=".jsonl", text=True)
+        try:
+            with os.fdopen(fd, "w") as f:
+                for j in chunk:
+                    f.write(json.dumps(j) + "\n")
+            a = [str(LIVESPICE_CLI), "--circuit", schx, "--jobs", jl]
+            if speaker:
+                a += ["--speaker", speaker]
+            r = subprocess.run(a, capture_output=True, text=True)
+            out = {}
+            for ln in r.stdout.splitlines():
+                m = re.match(r"JOB (\d+) (OK|FAIL) ?(.*)", ln)
+                if m:
+                    j = chunk[int(m.group(1)) - 1]
+                    out[j["output"]] = None if m.group(2) == "OK" else (m.group(3) or "failed")
+            if not out and r.returncode != 0:
+                return None    # oracle without --jobs support -> caller falls back
+            for j in chunk:    # jobs the process never reached (died mid-batch)
+                out.setdefault(j["output"],
+                               f"batch process died: rc={r.returncode} {r.stderr[-200:]}")
+            return out
+        finally:
+            os.unlink(jl)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        chunk_results = list(ex.map(run_chunk, chunks))
+
+    if any(cr is None for cr in chunk_results):
+        # Old oracle. One process per job, the pre-batch behavior.
+        def single(j):
+            a = [str(LIVESPICE_CLI), "--circuit", schx, "--input", j["input"],
+                 "--output", j["output"], "--params", j["params"],
+                 "--oversample", str(j["oversample"]), "--iterations", str(j["iterations"])]
+            if speaker:
+                a += ["--speaker", speaker]
+            r = subprocess.run(a, capture_output=True, text=True)
+            return j["output"], None if r.returncode == 0 else (r.stderr[-200:] or "failed")
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return dict(ex.map(single, jobs))
+
+    res = {}
+    for cr in chunk_results:
+        res.update(cr)
+    return res
+
+
 def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
                       param_map: dict, fixed_params: str, speaker: str,
                       target: float, probe_s: float = 8.0, n_windows: int = 4,
@@ -1144,22 +1211,43 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
         # PRE-WARM THE CACHE IN PARALLEL. The measurement loop below reads renders
         # one at a time; rendered serially they use one core while the reference
         # renders alone cost ref_os/2 x a candidate each. All (clip, perm, os)
-        # renders at a given rung are independent, so fill the cache with a pool
-        # first and let the (unchanged) measurement math read it back. Keys are
-        # deduped before submission, and each batch completes before the serial
-        # loop runs, so the cache dict is never raced.
+        # renders at a given rung are independent, so fill the cache first and let
+        # the (unchanged) measurement math read it back. Keys are deduped before
+        # submission, and each batch completes before the serial loop runs, so the
+        # cache dict is never raced. livespice goes through the oracle's --jobs
+        # batch mode (fixed cost per worker, not per render); ngspice through a
+        # thread pool over render().
         def prewarm(os_list):
-            jobs, seen_keys = [], set()
+            todo, seen_keys = [], set()
             for p in uniq:
                 for clip in clips:
                     for o in os_list:
                         key = (str(clip), tuple(sorted(p.items())), o)
                         if key not in cache and key not in seen_keys:
                             seen_keys.add(key)
-                            jobs.append((clip, p, o))
-            if len(jobs) > 1:
+                            todo.append((clip, p, o))
+            if len(todo) <= 1:
+                return
+            if backend == "livespice":
+                jobs, keymap = [], {}
+                for clip, p, o in todo:
+                    key = (str(clip), tuple(sorted(p.items())), o)
+                    w = td / f"o{o}_{abs(hash(key))}.wav"   # same path render() would use
+                    swept = fmt_params(p, param_map)
+                    allp = f"{fixed_params},{swept}" if fixed_params else swept
+                    jobs.append({"input": str(clip), "output": str(w), "params": allp,
+                                 "oversample": o, "iterations": iterations})
+                    keymap[str(w)] = key
+                errs = _livespice_batch(schx, jobs, workers, speaker)
+                for wpath, key in keymap.items():
+                    v = None
+                    if errs.get(wpath) is None and Path(wpath).exists():
+                        d, _ = sf.read(wpath)
+                        v = np.asarray(d, dtype=np.float64)
+                    cache[key] = v
+            else:
                 with ThreadPoolExecutor(max_workers=workers or os.cpu_count()) as ex:
-                    list(ex.map(lambda j: render(*j), jobs))
+                    list(ex.map(lambda j: render(*j), todo))
 
         prewarm([ref_os])          # the expensive ones, all up front
 
@@ -1330,29 +1418,26 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
             lead_n = write_probe_clip(sig[st:st + win], sr, c)
             clips.append(c)
 
-        def render(pi, tag, os_, it_, wi):
-            p = uniq[pi]
+        # All (setting, variant, window) renders through the oracle's --jobs batch
+        # mode: parallel across workers, fixed cost paid per worker, not per render.
+        jobs, keymap = [], {}
+        for pi, p in enumerate(uniq):
             swept = fmt_params(p, param_map)
             allp = f"{fixed_params},{swept}" if fixed_params else swept
-            w = td / f"a{pi}_{tag}_w{wi}.wav"
-            a = [str(LIVESPICE_CLI), "--input", str(clips[wi]), "--output", str(w),
-                 "--circuit", schx, "--params", allp,
-                 "--oversample", str(os_), "--iterations", str(it_)]
-            if speaker:
-                a += ["--speaker", speaker]
-            r = subprocess.run(a, capture_output=True, text=True)
-            if r.returncode != 0 or not w.exists():
-                return f"rc={r.returncode} {r.stderr[:120]}"
-            s, _ = sf.read(str(w))
-            return np.asarray(s, dtype=np.float64)
-
-        jobs = [(pi, tag, os_, it_, wi)
-                for pi in range(len(uniq))
-                for tag, os_, it_ in variants
-                for wi in range(len(clips))]
-        with ThreadPoolExecutor(max_workers=workers or os.cpu_count()) as ex:
-            outs = dict(zip(((j[0], j[1], j[4]) for j in jobs),
-                            ex.map(lambda j: render(*j), jobs)))
+            for tag, os_, it_ in variants:
+                for wi in range(len(clips)):
+                    w = td / f"a{pi}_{tag}_w{wi}.wav"
+                    jobs.append({"input": str(clips[wi]), "output": str(w), "params": allp,
+                                 "oversample": os_, "iterations": it_})
+                    keymap[str(w)] = (pi, tag, wi)
+        errs = _livespice_batch(schx, jobs, workers, speaker)
+        outs = {}
+        for wpath, k in keymap.items():
+            if errs.get(wpath) is None and Path(wpath).exists():
+                s, _ = sf.read(wpath)
+                outs[k] = np.asarray(s, dtype=np.float64)
+            else:
+                outs[k] = errs.get(wpath) or "no output"
 
         for pi, p in enumerate(uniq):
             fails = [v for k, v in outs.items() if k[0] == pi and isinstance(v, str)]

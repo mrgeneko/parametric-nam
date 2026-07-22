@@ -44,17 +44,15 @@ from __future__ import annotations
 
 import argparse
 import os as _os
-import subprocess
 import sys
 import tempfile
 import tomllib
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from batch_harness import LIVESPICE_CLI, write_probe_clip
+from batch_harness import _livespice_batch, write_probe_clip
 
 REGISTRY = Path(_os.environ.get("PARAMETRIC_DEVICES") or _os.environ.get("SPICE_CIRCUITS")
                 or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
@@ -160,31 +158,31 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     across windows, so the reported number estimates the same whole-file quantity either way.
     """
     settings = probe_settings(knobs)
-    jobs = [(p, os_, wi) for p in settings for os_ in (*candidates, ref_os)
-            for wi in range(len(clips))]
 
-    def render(job) -> tuple[tuple, np.ndarray | None]:
-        p, os_, wi = job
-        key = (tuple(sorted(p.items())), os_, wi)
-        w = td / f"{abs(hash((str(schx), key)))}.wav"
-        cmd = [str(LIVESPICE_CLI), "--input", str(clips[wi]), "--output", str(w),
-               "--circuit", str(schx),
-               "--params", ",".join(f"{k}={v}" for k, v in p.items()),
-               "--oversample", str(os_), "--iterations", str(iterations)]
-        if speaker:
-            cmd += ["--speaker", speaker]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode == 0 and w.exists():
-            d, _ = sf.read(str(w))
-            return key, np.asarray(d, dtype=np.float64)
-        tail = r.stderr.strip().splitlines()[-1:] or ["(no stderr)"]
-        print(f"      render failed (os={os_}): {tail[0]}", file=sys.stderr)
-        return key, None
+    # All (setting, oversample, window) renders through the oracle's --jobs batch mode:
+    # parallel across workers, per-invocation fixed cost paid per worker, not per render.
+    def run_batch(triples) -> dict[tuple, np.ndarray | None]:
+        jobs, keymap = [], {}
+        for p, os_, wi in triples:
+            key = (tuple(sorted(p.items())), os_, wi)
+            w = td / f"{abs(hash((str(schx), key)))}.wav"
+            jobs.append({"input": str(clips[wi]), "output": str(w),
+                         "params": ",".join(f"{k}={v}" for k, v in p.items()),
+                         "oversample": os_, "iterations": iterations})
+            keymap[str(w)] = key
+        errs = _livespice_batch(str(schx), jobs, workers, speaker)
+        out: dict[tuple, np.ndarray | None] = {}
+        for wpath, key in keymap.items():
+            if errs.get(wpath) is None and Path(wpath).exists():
+                d, _ = sf.read(wpath)
+                out[key] = np.asarray(d, dtype=np.float64)
+            else:
+                print(f"      render failed (os={key[1]}): {errs.get(wpath)}", file=sys.stderr)
+                out[key] = None
+        return out
 
-    cache: dict[tuple, np.ndarray | None] = {}
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for key, v in ex.map(render, jobs):
-            cache[key] = v
+    cache = run_batch([(p, os_, wi) for p in settings for os_ in (*candidates, ref_os)
+                       for wi in range(len(clips))])
 
     def pooled_esr(k: tuple, os_a: int, os_b: int) -> float:
         num = den = 0.0
@@ -218,11 +216,8 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     # the reference's own error, the ratios go flat, and every entry is an UNDERSTATEMENT.
     _, at_worst = res[candidates[0]]
     if at_worst is not None:
-        k = tuple(sorted(at_worst.items()))
-        for wi in range(len(clips)):
-            key, v = render((at_worst, ref_os * 2, wi))
-            cache[key] = v
-        res["ref_error"] = pooled_esr(k, ref_os, ref_os * 2)
+        cache.update(run_batch([(at_worst, ref_os * 2, wi) for wi in range(len(clips))]))
+        res["ref_error"] = pooled_esr(tuple(sorted(at_worst.items())), ref_os, ref_os * 2)
     return res
 
 
