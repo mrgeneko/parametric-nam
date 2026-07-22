@@ -1221,9 +1221,20 @@ def main():
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10)
+        # Drain the MPS async queue between train (batch=args.batch_size) and val
+        # (batch=len(val_ds)%batch_size or smaller) -- two distinct batch shapes back
+        # to back, every epoch, with no sync between them. Matches a documented class
+        # of MPS deadlock (MPSGraph kernel re-specialization under shape-switching,
+        # e.g. github.com/jamiepine/voicebox#905) closely enough to be worth the
+        # near-zero cost: synchronize() drains the queue WITHOUT evicting the kernel
+        # cache (unlike empty_cache(), which would force full re-specialization).
+        if device == "mps":
+            torch.mps.synchronize()
         _watchdog_arm(f"epoch {epoch} validate()", timeout=60.0)
         val_loss, esr_list = validate(model, val_loader, criterion, device,
                                      val_passes=args.val_passes)
+        if device == "mps":
+            torch.mps.synchronize()
         _watchdog_disarm()
         scheduler.step()
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
