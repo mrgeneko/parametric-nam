@@ -38,6 +38,10 @@ def infer_widths(state) -> list[int]:
     def ch_of(prefix):
         return next(v.shape[0] for k, v in state.items()
                     if k.startswith(prefix + ".") and k.endswith("rechannel.weight"))
+    def has(prefix):
+        return any(k.startswith(prefix + ".") and k.endswith("rechannel.weight") for k in state)
+    if not has("lite"):        # single-width model: only the `full` tier exists
+        return [ch_of("full")]
     mids = sorted({int(k.split(".")[1]) for k in state
                    if k.startswith("mid.") and k.split(".")[1].isdigit()})
     return [ch_of("lite")] + [ch_of(f"mid.{i}") for i in mids] + [ch_of("full")]

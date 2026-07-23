@@ -448,7 +448,11 @@ K_DEFAULT_WIDTHS = [K_LITE_CHANNELS, K_FULL_CHANNELS]   # 2-tier default (back-c
 
 def parse_widths(spec) -> list[int]:
     """'3,4,8' -> [3,4,8]; None/'' -> the default [3,8]. Sorted, de-duplicated,
-    ascending (narrowest first = the 'lite' tier, widest last = the 'full' tier)."""
+    ascending (narrowest first = the 'lite' tier, widest last = the 'full' tier).
+    A single width ('5' -> [5]) is allowed: it trains ONE tier, exported as a
+    1-submodel container (see SlimmableParametricA2 for how the single tier maps
+    to the `full` role). Useful for training an extra width to later splice into
+    an existing container with tools/merge_tiers.py."""
     if not spec:
         return list(K_DEFAULT_WIDTHS)
     if isinstance(spec, (list, tuple)):
@@ -456,8 +460,8 @@ def parse_widths(spec) -> list[int]:
     else:
         vals = [int(x) for x in str(spec).split(",") if x.strip()]
     ws = sorted(set(int(w) for w in vals))
-    if len(ws) < 2:
-        raise ValueError(f"--widths needs >=2 distinct channel counts, got {ws}")
+    if not ws:
+        raise ValueError(f"--widths needs at least one channel count, got {ws}")
     return ws
 
 
@@ -478,13 +482,23 @@ class SlimmableParametricA2(nn.Module):
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
         # tiers live in `mid` (empty ModuleList when widths has just 2 entries).
-        self.lite = ParametricA2(self.widths[0], num_params)
-        self.full = ParametricA2(self.widths[-1], num_params)
-        self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
+        if len(self.widths) == 1:
+            # A single width is not really "slimmable": build ONE submodel under the
+            # `full` role (widest == only tier) so it saves as best.pt / `full.` state
+            # keys and exports as a 1-submodel container. `lite` is absent.
+            self.lite = None
+            self.full = ParametricA2(self.widths[0], num_params)
+            self.mid = nn.ModuleList()
+        else:
+            self.lite = ParametricA2(self.widths[0], num_params)
+            self.full = ParametricA2(self.widths[-1], num_params)
+            self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
 
     @property
     def submodels(self):
         """All tiers in ascending-width order."""
+        if self.lite is None:                 # single-width: only the `full` tier exists
+            return [self.full]
         return [self.lite, *self.mid, self.full]
 
     def forward(self, audio: torch.Tensor, params: torch.Tensor):
@@ -496,6 +510,8 @@ class SlimmableParametricA2(nn.Module):
         columns, best-checkpoint filenames, release naming — keeps working;
         middle tiers are labeled by width (e.g. 'w4')."""
         n = len(self.widths)
+        if n == 1:
+            return ["full"]          # single width lives under the `full` role
         labels = []
         for i, w in enumerate(self.widths):
             if i == 0:
@@ -514,6 +530,8 @@ class SlimmableParametricA2(nn.Module):
         """State-dict key prefix for the i-th tier (ascending width): the
         endpoints live under 'lite.'/'full.', middle tiers under 'mid.<k>.'."""
         n = len(self.widths)
+        if n == 1:
+            return "full."           # single width lives under the `full` role
         if i == 0:
             return "lite."
         if i == n - 1:
