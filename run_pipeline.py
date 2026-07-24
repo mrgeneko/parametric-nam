@@ -323,6 +323,8 @@ def reproduce_command(args):
     if args.widths:        c.append(f'    --widths {args.widths} \\')
     if not args.mmap:      c.append('    --no-mmap \\')
     if getattr(args, "knob_boost", None): c.append(f'    --knob-boost "{args.knob_boost}" \\')
+    if getattr(args, "per_tier_clip", False): c.append('    --per-tier-clip \\')
+    if getattr(args, "clip_norm", 1.0) != 1.0: c.append(f'    --clip-norm {args.clip_norm} \\')
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
@@ -681,6 +683,14 @@ def main():
     g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="off",
                    help="Mixed-precision training forward (opt-in, needs a per-device A/B "
                         "-- see param_train.py --help). Forwarded to param_train.py.")
+    g.add_argument("--per-tier-clip",  action="store_true",
+                   help="Slimmable only: clip_grad_norm_ each tier's own parameters "
+                        "separately instead of one joint call over every tier combined "
+                        "(default off, matches NAM's own PackedLightningModule -- see "
+                        "param_train.py --help). Forwarded to param_train.py.")
+    g.add_argument("--clip-norm",      type=float, default=1.0,
+                   help="Gradient clip norm, joint or per-tier depending on "
+                        "--per-tier-clip (default: %(default)s). Forwarded to param_train.py.")
     g.add_argument("--init-from",      type=Path,  default=None,
                    help="Weights-only warm start from a previous run's best.pt (fresh "
                         "optimizer/schedule/bests). Forwarded to param_train.py.")
@@ -976,6 +986,8 @@ def main():
             if args.init_from:           train_cmd += ["--init-from", args.init_from]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
             if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
+            if args.per_tier_clip:       train_cmd.append("--per-tier-clip")
+            if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------
