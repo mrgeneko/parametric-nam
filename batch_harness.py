@@ -339,6 +339,24 @@ class Result:
 # caught. A band-limited waveform physically cannot satisfy both at once, so this is a safe hard gate.
 SPIKE_NEIGHBOR_RATIO = 3.0
 SPIKE_BULK_RATIO = 2.0
+# Absolute floor: below this, don't even consider a sample a candidate spike, regardless of the
+# ratio checks. Found on the Boss DS-1 ([redacted]-sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
+# smooth, cross-solver-agreeing circuit response to genuine near-Nyquist sweep content (~12kHz,
+# only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
+# and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
+# convergence) peaks at ~0.3-0.38 -- comparable to or below this SAME circuit's own normal
+# full-dataset peak range (0.06-1.0 across the shipped 48-perm sweepv5 dataset). The ratio checks
+# above still flagged it: p99 ("bulk") is a whole-file statistic, and a brief energetic burst in
+# an otherwise-quiet 190s sweep doesn't move it much, so 2x bulk is a low bar to clear during
+# exactly that burst. A GENUINE solver divergence is not a scale question -- historically it
+# blows up to many times ANY circuit's legitimate operating range (an NAM inference divergence
+# case examined the same session hit peak=12.39 against a reference peak of 0.46; the docstring's
+# original "hundreds of volts against a ~72V rail" framing is the same idea). 2.0 sits comfortably
+# above every pedal-class circuit's normal peak (they normalize toward ~1.0) while staying far
+# below what an amp/high-voltage circuit's LEGITIMATE peak already is (tens of volts+) -- so it
+# changes nothing for those (their real spikes clear 2.0 whether legit-scale or diverged; the
+# ratio checks above keep doing the actual discriminating there, exactly as before).
+SPIKE_ABS_FLOOR = 2.0
 
 
 def sig_path(out_dir: Path, idx: int) -> Path:
@@ -385,7 +403,8 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
     asig = np.abs(stats_sig)
     neigh = np.maximum(np.concatenate(([0.0], asig[:-1])), np.concatenate((asig[1:], [0.0])))
     bulk = float(np.percentile(asig, 99.0))   # the perm's own "normal" ceiling (e.g. the clip rail)
-    spikes = (asig > SPIKE_NEIGHBOR_RATIO * neigh) & (asig > SPIKE_BULK_RATIO * bulk)
+    spikes = ((asig > SPIKE_NEIGHBOR_RATIO * neigh) & (asig > SPIKE_BULK_RATIO * bulk)
+              & (asig > SPIKE_ABS_FLOOR))
     n_spikes = int(spikes.sum())
     if n_spikes:
         wi = int(np.argmax(np.where(spikes, asig, 0.0)))
@@ -629,6 +648,26 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
             if r != out[-1]:          # only if it actually changes something
                 out.append(r)
 
+        # tmax: cheapest-first, tried BEFORE input_upsample. Found on the Boss DS-1 (Dist<=0.4,
+        # Tone>=0.6, [redacted]-sweep-v3-declicked.wav): a "ngspice killed by signal 11" crash at the
+        # default tmax (one audio period, 20.8333u) that input_upsample escalation never fixed
+        # (measured up to 4x -- no effect, consistent with input_upsample's OWN retirement note
+        # elsewhere: it densifies the filesource, it does not change the solver's internal step
+        # ceiling). Forcing finer internal steps directly is what fixed it -- 4x (5u) alone
+        # already stopped the crash; 8x (2.6u) tried as a second rung for margin. Halving further
+        # from here would just keep slowing every permutation for one already-fixed corner, so
+        # the ladder stops at 8x rather than continuing to escalate blindly.
+        c0 = dict(base.get("conv") or {})
+        tmax0_s = str(c0.get("tmax") or "20.8333u")
+        try:
+            tmax0 = float(tmax0_s[:-1]) if tmax0_s.endswith("u") else float(tmax0_s)
+        except ValueError:
+            tmax0 = 20.8333
+        for factor in (4, 8):
+            c = dict(out[-1].get("conv") or {})
+            c["tmax"] = f"{tmax0 / factor:.4f}u"
+            escalate(conv=c)
+
         up = int(base.get("input_upsample", 1) or 1)
         escalate(input_upsample=up * 2)          # BEYOND the default, not up to it
         escalate(input_upsample=up * 4)
@@ -636,7 +675,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         if base.get("method") != "gear":         # the DS-1's fix
             escalate(method="gear")
 
-        c = dict(base.get("conv") or {})         # the MT-2's fix
+        c = dict(out[-1].get("conv") or {})      # the MT-2's fix
         if "diode_cjo" not in c:
             c["diode_cjo"] = "100p"
             escalate(conv=c)
