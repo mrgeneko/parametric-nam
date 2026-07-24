@@ -818,7 +818,7 @@ class ParamLoss(nn.Module):
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
                 epoch: int = 0, total_epochs: int = 0, log_interval: int = 10,
-                amp_dtype=None, scaler=None):
+                amp_dtype=None, scaler=None, per_tier_clip=False):
     """One epoch. Two deliberate structural choices, both numerically identical to
     the naive form:
 
@@ -836,8 +836,20 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     Sequential frees each tier's activation graph before the next tier's forward
     runs, so peak memory is ~the LARGEST tier instead of the SUM of tiers — the
     sum is what forced 4-tier runs down to batch 32 on a 48 GB M4 Pro (Jetsam,
-    docs/multi_width_slimmable_plan.md §12). Grad clipping and optimizer.step()
-    still happen once per step over the accumulated grads, exactly as before."""
+    docs/multi_width_slimmable_plan.md §12).
+
+    GRAD CLIPPING: --per-tier-clip (default off) switches between one joint
+    clip_grad_norm_ call over every tier's parameters combined, vs a separate call
+    per tier over just that tier's own parameters. Joint clipping means a tier
+    with much larger gradients can dominate the shared norm and set the *other*
+    tier's effective step size almost entirely — measured directly on a live
+    [5,6]-width TS-9 run: the wider tier's mean grad norm was ~5x the narrower
+    tier's (96% of the combined squared norm from 58% of the combined parameter
+    count), and the joint clip triggered on every sampled step. NAM's own
+    PackedLightningModule has the identical joint-clip shape (no per-submodel
+    override found in its source), so this isn't a bug relative to upstream —
+    just an untested lever. optimizer.step() still happens once per step either
+    way, over whichever clip result each tier's grads end up with."""
     import contextlib
     model.train()
     slimmable = isinstance(model, SlimmableParametricA2)
@@ -876,7 +888,11 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
         if scaler is not None:
             scaler.unscale_(optimizer)   # so clip_grad_norm_ sees true gradients
         if clip_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+            if per_tier_clip and slimmable:
+                for m in model.submodels:
+                    torch.nn.utils.clip_grad_norm_(m.parameters(), clip_norm)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
         if scaler is not None:
             scaler.step(optimizer)
             scaler.update()
@@ -1172,6 +1188,21 @@ def main():
                     help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
                          "(default: 3,8). Narrowest = lite tier, widest = full tier; "
                          "middle tiers logged/checkpointed as w<N>.")
+    ap.add_argument("--per-tier-clip", action="store_true",
+                    help="Slimmable only: clip_grad_norm_ EACH tier's own parameters "
+                         "separately (each to --clip-norm) instead of one joint call over "
+                         "every tier's parameters combined. Default (off) matches NAM's own "
+                         "PackedLightningModule, which has no per-submodel clip override "
+                         "either. Motivation: measured on a live [5,6] TS-9 run, the wider "
+                         "tier's gradients had ~5x the norm of the narrower tier's (96%% of "
+                         "the combined squared norm from 58%% of the combined parameters) and "
+                         "the joint clip triggered on every sampled step -- the narrower "
+                         "tier's effective step size was being set almost entirely by the "
+                         "wider tier's gradient scale, not its own. Untested whether "
+                         "per-tier clipping changes final ESR; this flag exists to test it.")
+    ap.add_argument("--clip-norm", type=float, default=1.0,
+                    help="Gradient clip norm, joint or per-tier depending on --per-tier-clip "
+                         "(default: %(default)s)")
     ap.add_argument("--skip-param-sensitivity", action="store_true",
                     help="Skip the parameter sensitivity check after training (runs by default)")
     ap.add_argument("--skip-per-perm-esr", action="store_true",
@@ -1424,8 +1455,10 @@ def main():
         if not open_ended and epoch > args.epochs:
             break
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device,
+                                 clip_norm=args.clip_norm,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10,
-                                 amp_dtype=amp_dtype, scaler=scaler)
+                                 amp_dtype=amp_dtype, scaler=scaler,
+                                 per_tier_clip=args.per_tier_clip)
         # Drain the MPS async queue between train (batch=args.batch_size) and val
         # (batch=len(val_ds)%batch_size or smaller) -- two distinct batch shapes back
         # to back, every epoch, with no sync between them. Matches a documented class
