@@ -769,20 +769,48 @@ def _hann(win: int, device) -> torch.Tensor:
     return w
 
 
+_STFT_MAG_EPS = 1e-8  # matches auraloss's STFTLoss default `eps`
+
+
 def _stft_mags(x: torch.Tensor) -> list:
-    """The three MRSTFT magnitude spectra of [B, 1, T] audio."""
-    return [torch.abs(torch.stft(x.squeeze(1), fft, hop, win, _hann(win, x.device),
-                                 return_complex=True))
-            for fft, hop, win in _MRSTFT_RESOLUTIONS]
+    """The three MRSTFT magnitude spectra of [B, 1, T] audio. Clamped to sqrt(eps) at the
+    source (matching auraloss's `x_mag = sqrt(clamp(real**2+imag**2, min=eps))`) so a
+    log-magnitude loss downstream never sees log(0)."""
+    mags = []
+    for fft, hop, win in _MRSTFT_RESOLUTIONS:
+        s = torch.stft(x.squeeze(1), fft, hop, win, _hann(win, x.device), return_complex=True)
+        mags.append(torch.sqrt(torch.clamp(s.real**2 + s.imag**2, min=_STFT_MAG_EPS)))
+    return mags
+
+
+def _mrstft_combine(p_mags: list, t_mags: list) -> torch.Tensor:
+    """Spectral convergence + log-magnitude L1 per resolution, averaged across
+    resolutions -- matches auraloss's MultiResolutionSTFTLoss DEFAULT weights (w_sc=1.0,
+    w_log_mag=1.0, w_lin_mag=0.0 -- the official NAM trainer's own default, vendored
+    from auraloss). We used to compute ONLY the raw-linear-magnitude L1 term, i.e.
+    exactly the one component auraloss disables by default.
+
+    Both components are scale-invariant, unlike a raw-linear-magnitude L1: spectral
+    convergence is a Frobenius-norm RATIO (scale cancels top and bottom); log-magnitude
+    L1 is invariant to a uniform gain k on both signals because log(k*x) - log(k*y) =
+    log(x) - log(y) (the log(k) terms cancel). That matters here specifically because
+    ParamDataset no longer forces every dataset to a shared reference RMS (see
+    docs/LESSONS.md #18) -- each device now trains at its own native level, and a
+    scale-DEPENDENT loss term would silently carry a different effective weight per
+    device depending on how loud that device's own data happens to be. ESR (the other
+    term in ParamLoss) was already scale-invariant by construction; this closes the gap
+    on MRSTFT so it doesn't undermine that."""
+    total = torch.tensor(0.0, device=p_mags[0].device)
+    for pm, tm in zip(p_mags, t_mags):
+        sc = torch.norm(tm - pm, p="fro") / torch.norm(tm, p="fro")
+        log_mag = F.l1_loss(torch.log(pm), torch.log(tm))
+        total = total + sc + log_mag
+    return total / len(p_mags)
 
 
 def mrstft_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Multi-resolution STFT loss (L1 on magnitudes)."""
-    p_mags, t_mags = _stft_mags(pred), _stft_mags(target)
-    total = torch.tensor(0.0, device=pred.device)
-    for pm, tm in zip(p_mags, t_mags):
-        total += F.l1_loss(pm, tm)
-    return total / len(p_mags)
+    """Multi-resolution STFT loss -- see _mrstft_combine for the actual formula."""
+    return _mrstft_combine(_stft_mags(pred), _stft_mags(target))
 
 
 def pre_emphasis(x: torch.Tensor, coef: float) -> torch.Tensor:
