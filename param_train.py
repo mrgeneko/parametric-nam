@@ -270,8 +270,17 @@ def _schx_input_v0dbfs(schx_path) -> "float | None":
 
 def _input_level_dbu(v0dbfs_volts: float) -> float:
     """NAM's input_level_dbu: dBu RMS of a 1kHz sine at 0dBFS peak (see NAM's calibration
-    docs). V0dBFS is a peak-referenced volts-per-digital-sample scale (schx_to_ngspice.py),
-    so a 1kHz sine at digital peak 1.0 has RMS = V0dBFS/sqrt(2)."""
+    docs, which describe MEASURING this on a real interface: disconnect from the gear,
+    play a 0dBFS 1kHz sine, and read the analog output voltage with a multimeter). V0dBFS
+    is a peak-referenced volts-per-digital-sample scale (schx_to_ngspice.py), so a 1kHz
+    sine at digital peak 1.0 has RMS = V0dBFS/sqrt(2) -- the arithmetic here is identical
+    to NAM's own formula, but the INPUT to it is not a measurement. There is no physical
+    interface anywhere in this (ngspice/livespice) pipeline -- V0dBFS is the schx author's
+    ASSUMED nominal input level for the circuit, not anything measured. It's a plausible
+    stand-in (the DS-1's 0.1V is a commonly-cited "typical guitar pickup output" figure,
+    not an arbitrary constant) but its provenance has not been verified per-schx against a
+    documented source -- treat the exported input_level_dbu as an assumption a host's
+    calibration UI can act on, not a measured calibration reference."""
     rms = v0dbfs_volts / math.sqrt(2)
     return 20.0 * math.log10(rms / _DBU_0_RMS_VOLTS)
 
