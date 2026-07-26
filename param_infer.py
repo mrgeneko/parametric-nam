@@ -96,11 +96,9 @@ def main():
         audio = audio.mean(axis=1)
     audio = audio.astype(np.float32)
 
-    # Normalize to -18 dBFS (same as training)
-    rms = float(np.sqrt(np.mean(audio ** 2)))
-    target_rms = 10 ** (-18.0 / 20.0)
-    scale = target_rms / (rms + 1e-8)
-    audio_norm = audio * scale
+    # No level normalization -- training no longer rescales its input either (see
+    # ParamDataset in param_train.py), so this stays at native level to match.
+    audio_norm = audio
 
     if not args.params:
         # Default: a few representative combinations

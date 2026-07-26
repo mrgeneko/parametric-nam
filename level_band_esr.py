@@ -56,8 +56,14 @@ def main():
     ap.add_argument("--tier", default="full")
     ap.add_argument("--window-ms", type=float, default=100.0)
     ap.add_argument("--warmup-s", type=float, default=1.0)
-    ap.add_argument("--target-dbfs", type=float, default=-18.0,
-                    help="Must match ParamDataset's normalisation.")
+    ap.add_argument("--target-dbfs", type=float, default=None,
+                    help="Rescale the input to this RMS before inference. Default: none -- "
+                         "ParamDataset no longer rescales its input (see param_train.py; RMS "
+                         "rescaling taught a linearly-wrong input/output relationship for a "
+                         "nonlinear circuit, and broke on real-playing/high-crest-factor sweep "
+                         "files), so a bare invocation now matches current training. Pass this "
+                         "explicitly only to evaluate a checkpoint trained under the OLD -18dBFS "
+                         "convention.")
     ap.add_argument("--max-perms", type=int, default=0,
                     help="Evaluate only the N most distorted permutations (0 = all). "
                          "The fade-out bug is worst where the gain is highest.")
@@ -79,8 +85,9 @@ def main():
     x, sr = sf.read(str(d / "sweep.wav"), dtype="float32")
     if x.ndim > 1:
         x = x.mean(axis=1)
-    rms = float(np.sqrt(np.mean(x ** 2)))
-    x = x * (10 ** (args.target_dbfs / 20.0) / (rms + 1e-8))
+    if args.target_dbfs is not None:
+        rms = float(np.sqrt(np.mean(x ** 2)))
+        x = x * (10 ** (args.target_dbfs / 20.0) / (rms + 1e-8))
 
     outs = np.load(d / "outputs.npy", mmap_mode="r")
     import csv

@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse, csv, datetime, faulthandler, json, math, os, signal, sys, time, warnings
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,44 @@ class A2Layer(nn.Module):
         return residual_out, post_act
 
 
+_DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference (sqrt(0.6W * 600ohm), per NAM's own calibration docs)
+
+
+def _schx_input_v0dbfs(schx_path) -> "float | None":
+    """Read a .schx's Circuit.Input V0dBFS (volts a digital sample of 1.0 maps to -- see
+    schx_to_ngspice.py's Input handling), for computing input_level_dbu at export time.
+    Returns None if the file is missing, unparseable, or has no Input component -- the
+    metadata field is simply omitted rather than exported wrong."""
+    if not schx_path:
+        return None
+    try:
+        root = ET.parse(str(schx_path)).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    for el in root.iter("Element"):
+        comp = el.find("Component")
+        if comp is None:
+            continue
+        if "Circuit.Input" not in (comp.get("_Type") or ""):
+            continue
+        raw = comp.get("V0dBFS")
+        if not raw:
+            continue
+        try:
+            return float(raw.split()[0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _input_level_dbu(v0dbfs_volts: float) -> float:
+    """NAM's input_level_dbu: dBu RMS of a 1kHz sine at 0dBFS peak (see NAM's calibration
+    docs). V0dBFS is a peak-referenced volts-per-digital-sample scale (schx_to_ngspice.py),
+    so a 1kHz sine at digital peak 1.0 has RMS = V0dBFS/sqrt(2)."""
+    rms = v0dbfs_volts / math.sqrt(2)
+    return 20.0 * math.log10(rms / _DBU_0_RMS_VOLTS)
+
+
 class ParametricA2(nn.Module):
     """A2 (LeakyReLU, mixed kernels) with FiLM conditioning on knob params.
 
@@ -371,6 +410,16 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
+        # input_level_dbu: the real-world analog level (dBu) that the schematic's own
+        # Input V0dBFS convention says corresponds to 0dBFS peak -- see NAM's calibration
+        # docs. Lets a host's EXISTING input-calibration UI (inert without this field --
+        # see docs/RETRAINING.md or the training-optimization memory for how this was
+        # found) correct a real player's signal back toward the level this model actually
+        # trained at. Omitted (not exported wrong) if the schx has no Input component or
+        # can't be read from here.
+        v0dbfs = _schx_input_v0dbfs(config.get("schx"))
+        input_level_dbu = _input_level_dbu(v0dbfs) if v0dbfs else None
+
         param_map = config.get("param_map", {})
         bounds = config.get("bounds", {})
         defaults = config.get("defaults", {}) or {}
@@ -418,6 +467,7 @@ class ParametricA2(nn.Module):
             },
             "loudness": -18.0,
             "gain": gain,
+            "input_level_dbu": input_level_dbu,
             "name": config.get("name", config.get("circuit", "")),
             "modeled_by": config.get("modeled_by", ""),
             "gear_make": config.get("gear_make", ""),
@@ -426,7 +476,7 @@ class ParametricA2(nn.Module):
             "tone_type": config.get("tone_type", ""),
         }
         # Strip empty strings so absent fields don't clutter the file
-        nam_metadata = {k: v for k, v in nam_metadata.items() if v != ""}
+        nam_metadata = {k: v for k, v in nam_metadata.items() if v != "" and v is not None}
         return {
             "version": metadata.get("version", "0.7.0"),
             "architecture": "ParametricWaveNet",
@@ -577,7 +627,7 @@ class ParamDataset(torch.utils.data.Dataset):
             config.json      — must contain a "knobs" list
     """
     def __init__(self, dataset_dir: str, crop_len: int = 48000, repeats: int = 1,
-                 target_dbfs: float = -18.0, mmap: bool = False):
+                 mmap: bool = False):
         self.dir = Path(dataset_dir)
         with open(self.dir / "config.json") as f:
             self.config = json.load(f)
@@ -587,15 +637,33 @@ class ParamDataset(torch.utils.data.Dataset):
         self.crop_len = crop_len
         self.repeats = repeats
 
-        # Load input sweep and normalize to target_dbfs RMS
+        # Load input sweep AT ITS NATIVE LEVEL -- no RMS rescaling.
+        #
+        # This used to rescale the whole clip (and, in __getitem__, the target by the SAME
+        # scalar) so the file's overall RMS hit a fixed -18dBFS. That is only a valid operation
+        # for a LINEAR system: circuit_output(k*x) == k*circuit_output(x) is generally FALSE for
+        # a nonlinear distortion/clipping circuit, so any k != 1 taught the network a
+        # mathematically wrong input/output relationship at the rescaled level -- outputs.npy
+        # was rendered from the ORIGINAL unscaled file, not a k-times-louder one.
+        #
+        # It also silently broke on real-playing input. sweepv5/v6 (synthetic, sweep-tone-
+        # dominated, crest factor ~11-12dB, peak-normalized to 0.9 by their own build process)
+        # happen to scale DOWN under -18dBFS RMS and stay safe. [redacted]-sweep-v3.wav (real playing,
+        # pick-transient crest factor ~21.8dB, native peak already 0.967) scales UP 1.65x under
+        # the same formula, pushing its peak to 1.55 -- past 0dBFS in float terms, and (combined
+        # with the linear-rescale error above) a plausible root cause of the "unexpected noise,
+        # including low frequencies, at loud input levels" reported on both the DS-1 and JCM800
+        # retrains: the network trained overwhelmingly around whatever level -18dBFS RMS happened
+        # to rescale each file to, with no host-side input calibration to match it back at
+        # inference (see NAMProcessorWrapper.mm's updateInputCalibrationGain -- inert unless the
+        # .nam declares an input_level, which export_nam below has never written).
+        #
+        # k=1 has no such failure mode, for any file, by construction: the input the network
+        # trains on is EXACTLY the input that produced the stored target.
         inp_raw, _ = sf.read(str(self.dir / "sweep.wav"))
         if inp_raw.ndim > 1:
             inp_raw = inp_raw.mean(axis=1)
-        inp_raw = inp_raw.astype(np.float32)
-        rms = float(np.sqrt(np.mean(inp_raw ** 2)))
-        target_rms = 10 ** (target_dbfs / 20.0)
-        self._scale = target_rms / (rms + 1e-8)
-        self.inp = inp_raw * self._scale
+        self.inp = inp_raw.astype(np.float32)
 
         # Load combined outputs — fully into RAM (fast, high memory) or mmap (low memory, SSD-speed)
         out_path = self.dir / "outputs.npy"
@@ -660,13 +728,11 @@ class ParamDataset(torch.utils.data.Dataset):
         if sig_len > self.crop_len:
             start = np.random.randint(0, sig_len - self.crop_len)
             inp = inp[start:start + self.crop_len]
-            # Scale (scalar) only the crop window, not the whole 5.76M-sample
-            # row — avoids reading/processing 120x the data we actually use.
-            out = (out_row[start:start + self.crop_len] * self._scale).astype(np.float32)
+            out = out_row[start:start + self.crop_len].astype(np.float32)
         else:
             pad = self.crop_len - sig_len
             inp = np.pad(inp[:sig_len], (0, pad))
-            out = np.pad((out_row[:sig_len] * self._scale).astype(np.float32), (0, pad))
+            out = np.pad(out_row[:sig_len].astype(np.float32), (0, pad))
 
         inp_t = torch.from_numpy(inp.copy()).float().unsqueeze(0)
         out_t = torch.from_numpy(out.copy()).float().unsqueeze(0)
@@ -1662,7 +1728,7 @@ def main():
         print(f"\nPer-permutation ESR check ...", file=sys.stderr)
         for m, lbl in zip(model.submodels, model.tier_labels()):
             results = compute_per_perm_esr(m, dataset.inp, dataset.outputs, dataset.samples,
-                                           dataset.param_names, device, dataset._scale)
+                                           dataset.param_names, device)
             print(f"\n{summarize_per_perm_esr(results, lbl)}", file=sys.stderr)
             if ckpt_dir is not None:
                 csv_path = ckpt_dir / f"per_perm_esr_{lbl}.csv"

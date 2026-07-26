@@ -37,11 +37,12 @@ def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
                          chunk_s: float = 10.0, context_n: int = 8192) -> list[dict]:
     """Per-permutation ESR for `submodel` against full-length ground truth.
 
-    `inp` must already be scaled to the same target_dbfs the model was trained
-    on (ParamDataset.inp / ParamDataset._scale) -- this does not renormalize it.
-    `outputs` is the RAW (unscaled) ground truth array (ParamDataset.outputs,
-    which may be memory-mapped) -- `scale` (ParamDataset._scale) is applied
-    lazily per chunk, so an mmap'd outputs.npy is never pulled fully into RAM.
+    `inp` must already be at whatever level the model was trained on (ParamDataset.inp is
+    the sweep file's native level, no rescaling -- see param_train.py) -- this does not
+    renormalize it. `outputs` is the ground truth array (ParamDataset.outputs, which may be
+    memory-mapped) -- `scale` defaults to 1.0 (matching current training) and is applied
+    lazily per chunk, so an mmap'd outputs.npy is never pulled fully into RAM. Pass a non-1.0
+    `scale` only to evaluate a checkpoint trained under the old -18dBFS RMS convention.
     `samples` is a list of (row_index_into_outputs, {param_name: value}) pairs,
     matching ParamDataset.samples exactly.
 
@@ -129,8 +130,11 @@ def main():
                     help="Seconds to exclude from the start of each permutation before "
                          "computing ESR (matches the SPICE-generation warmup convention -- "
                          "avoids a startup transient skewing the number). (default: %(default)s)")
-    ap.add_argument("--target-dbfs", type=float, default=-18.0,
-                    help="Must match param_train.py's ParamDataset normalization (default: %(default)s)")
+    ap.add_argument("--target-dbfs", type=float, default=None,
+                    help="Rescale the input to this RMS before inference. Default: none -- "
+                         "ParamDataset no longer rescales (see param_train.py), so a bare "
+                         "invocation matches current training. Pass this explicitly only to "
+                         "evaluate a checkpoint trained under the OLD -18dBFS convention.")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("-o", "--output", type=Path, default=None, help="Write per-perm CSV here")
     args = ap.parse_args()
@@ -150,14 +154,17 @@ def main():
         config = json.load(f)
     param_names = config["knobs"]
 
-    # Same normalization ParamDataset.__init__ applies -- must match to get a
-    # comparable ESR to what training reported.
+    # Native level, matching ParamDataset.__init__ (no rescaling) -- unless --target-dbfs
+    # was passed explicitly, to evaluate a checkpoint trained under the old convention.
     inp_raw, _ = sf.read(str(dataset_dir / "sweep.wav"))
     if inp_raw.ndim > 1:
         inp_raw = inp_raw.mean(axis=1)
     inp_raw = inp_raw.astype(np.float32)
-    rms = float(np.sqrt(np.mean(inp_raw ** 2)))
-    scale = (10 ** (args.target_dbfs / 20.0)) / (rms + 1e-8)
+    if args.target_dbfs is not None:
+        rms = float(np.sqrt(np.mean(inp_raw ** 2)))
+        scale = (10 ** (args.target_dbfs / 20.0)) / (rms + 1e-8)
+    else:
+        scale = 1.0
     inp = inp_raw * scale
 
     outputs = np.load(str(dataset_dir / "outputs.npy"), mmap_mode="r")
