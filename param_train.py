@@ -240,6 +240,18 @@ class A2Layer(nn.Module):
 
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference (sqrt(0.6W * 600ohm), per NAM's own calibration docs)
 
+# input_level_dbu we EXPORT: the analog dBu that a host's input-calibration should treat
+# as this model's 0dBFS reference. It is an INTERFACE-calibration figure (dBu at 0dBFS),
+# NOT the schx's V0dBFS circuit-drive voltage -- conflating the two shipped every model at
+# ~-20.8 dBu, ~25-33 dB below any real interface reference, so a calibrating host over-drove
+# the model by exactly that (measured in [redacted]: NAMProcessorWrapper.mm computes
+# inputCalibrationGain_dB = userInterfaceCal_dBu - model.input_level_dbu). We standardize on
+# the Focusrite Scarlett 2i2 3rd Gen INSTRUMENT input's "max input level at min gain" =
+# +12.5 dBu (the level that reaches 0dBFS on that jack -- see its published spec). A user
+# who sets that same +12.5 dBu in the host's calibration field then gets UNITY makeup.
+# A schx/device may override via config["input_level_dbu"] when captured on other gear.
+INPUT_LEVEL_DBU_REF = 12.5
+
 
 def _schx_input_v0dbfs(schx_path) -> "float | None":
     """Read a .schx's Circuit.Input V0dBFS (volts a digital sample of 1.0 maps to -- see
@@ -419,15 +431,11 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
-        # input_level_dbu: the real-world analog level (dBu) that the schematic's own
-        # Input V0dBFS convention says corresponds to 0dBFS peak -- see NAM's calibration
-        # docs. Lets a host's EXISTING input-calibration UI (inert without this field --
-        # see docs/RETRAINING.md or the training-optimization memory for how this was
-        # found) correct a real player's signal back toward the level this model actually
-        # trained at. Omitted (not exported wrong) if the schx has no Input component or
-        # can't be read from here.
-        v0dbfs = _schx_input_v0dbfs(config.get("schx"))
-        input_level_dbu = _input_level_dbu(v0dbfs) if v0dbfs else None
+        # input_level_dbu: an INTERFACE 0dBFS reference (dBu) for a host's input-calibration
+        # UI -- see INPUT_LEVEL_DBU_REF above for why this is NOT derived from the schx's
+        # circuit-drive V0dBFS (doing so shipped every model ~25-33 dB hot). A device may
+        # override with a measured capture level via config["input_level_dbu"].
+        input_level_dbu = float(config.get("input_level_dbu", INPUT_LEVEL_DBU_REF))
 
         param_map = config.get("param_map", {})
         bounds = config.get("bounds", {})
