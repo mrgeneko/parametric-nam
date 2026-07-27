@@ -33,7 +33,7 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from batch_harness import LIVESPICE_CLI, parse_schx_controls, resolve_knobs  # noqa: E402
-from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
+from param_train import _schx_input_v0dbfs, _input_level_dbu, INPUT_LEVEL_DBU_REF  # noqa: E402
 
 SR = 48000
 # (name keywords, metric, human label). First match wins; order specific->general.
@@ -112,6 +112,9 @@ def main():
     ap.add_argument("--esr-dead", type=float, default=1e-3)
     ap.add_argument("--dir-margin", type=float, default=0.05,
                     help="min relative metric change to call a direction (else inconclusive)")
+    ap.add_argument("--input-level-dbu", type=float, default=None,
+                    help="override the exported interface reference for the check "
+                         "(default: param_train.INPUT_LEVEL_DBU_REF)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -184,29 +187,25 @@ def main():
             report["knobs"][knob] = rec
 
         # ---- input-level calibration ----
+        # What export_nam will actually WRITE (a device may override the standard ref).
+        exported_ild = float(args.input_level_dbu) if args.input_level_dbu is not None else INPUT_LEVEL_DBU_REF
         v0 = _schx_input_v0dbfs(args.schx)
         in_peak = float(np.abs(x).max())
-        ic = {"v0dbfs_volts": v0, "input_peak_dbfs": 20 * math.log10(in_peak + 1e-12)}
+        ic = {"v0dbfs_volts": v0, "input_peak_dbfs": 20 * math.log10(in_peak + 1e-12),
+              "exported_input_level_dbu": exported_ild}
         print("\n  input calibration:")
         print(f"    training input peak = {in_peak:.3f} ({ic['input_peak_dbfs']:.1f} dBFS)")
-        if in_peak < 0.5:
-            warn.append(f"training input peaks at {ic['input_peak_dbfs']:.1f} dBFS — model will expect quiet input; consider normalizing the sweep peak near 0 dBFS")
-        if v0 is None:
-            warn.append("schx has no Input V0dBFS — input_level_dbu will be omitted from the .nam")
-            print("    V0dBFS: none (input_level_dbu will be omitted)")
-        else:
-            ild = _input_level_dbu(v0)
-            ic.update({"input_level_dbu": ild})
-            print(f"    V0dBFS = {v0} V  ->  input_level_dbu = {ild:.2f} dBu")
-            # real interfaces put 0 dBFS at roughly +4..+24 dBu; anything far below that
-            # over-drives a calibrating host (Fulltone OCD was ~25 dB hot at -20.8 dBu).
-            if not (-10.0 <= ild <= 30.0):
-                gap_vs_plus4 = 4.0 - ild
-                warn.append(f"input_level_dbu={ild:.1f} dBu is outside the plausible interface range "
-                            f"(-10..+30 dBu): derived from a circuit-drive V0dBFS, not an interface "
-                            f"reference. A host calibrating a normal DI (~+4 dBu) will run the model "
-                            f"~{gap_vs_plus4:.0f} dB hot. Set a realistic input_level_dbu or omit it.")
-                print(f"    ^ IMPLAUSIBLE: a normal-DI host will be ~{gap_vs_plus4:.0f} dB hot")
+        if v0 is not None:
+            # V0dBFS is the circuit-drive voltage; report it as FYI only (NOT exported as dbu).
+            print(f"    schx V0dBFS = {v0} V (circuit drive; informational)")
+        print(f"    input_level_dbu to be EXPORTED = {exported_ild:.2f} dBu")
+        # A real interface's 0dBFS reference is ~+4..+24 dBu; outside that a calibrating host
+        # mis-gains (the old V0dBFS-derived -20.8 ran ~25-35 dB hot).
+        if not (-10.0 <= exported_ild <= 30.0):
+            warn.append(f"exported input_level_dbu={exported_ild:.1f} dBu is outside the plausible "
+                        f"interface range (-10..+30 dBu) — a calibrating host will mis-gain. "
+                        f"Check INPUT_LEVEL_DBU_REF / config['input_level_dbu'].")
+            print(f"    ^ IMPLAUSIBLE interface reference")
         report["input_calibration"] = ic
 
     print()
