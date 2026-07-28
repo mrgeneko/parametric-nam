@@ -240,17 +240,17 @@ class A2Layer(nn.Module):
 
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference (sqrt(0.6W * 600ohm), per NAM's own calibration docs)
 
-# input_level_dbu we EXPORT: the analog dBu that a host's input-calibration should treat
-# as this model's 0dBFS reference. It is an INTERFACE-calibration figure (dBu at 0dBFS),
-# NOT the schx's V0dBFS circuit-drive voltage -- conflating the two shipped every model at
-# ~-20.8 dBu, ~25-33 dB below any real interface reference, so a calibrating host over-drove
-# the model by exactly that (measured in [redacted]: NAMProcessorWrapper.mm computes
-# inputCalibrationGain_dB = userInterfaceCal_dBu - model.input_level_dbu). We standardize on
-# the Focusrite Scarlett 2i2 3rd Gen INSTRUMENT input's "max input level at min gain" =
-# +12.5 dBu (the level that reaches 0dBFS on that jack -- see its published spec). A user
-# who sets that same +12.5 dBu in the host's calibration field then gets UNITY makeup.
-# A schx/device may override via config["input_level_dbu"] when captured on other gear.
-INPUT_LEVEL_DBU_REF = 12.5
+# input_level_dbu we EXPORT is DERIVED from the schx Input V0dBFS (dBu of a full-scale sine:
+# 20*log10((V0dBFS/sqrt(2))/0.7746)). The derivation itself is correct -- what was wrong was
+# V0dBFS: our pedals shipped at 0.1V (amps at 0.03-0.05V), ~20 dB below the LiveSPICE ecosystem
+# convention of 1V (verified across upstream + 4 community repos, ~270/282 schx). That is why
+# input_level_dbu came out ~-20.8 dBu and a calibrating host over-drove every model ~13-33 dB
+# ([redacted]: inputCalibrationGain_dB = userInterfaceCal_dBu - input_level_dbu). With the schx
+# corrected to V0dBFS=1V the derivation yields ~-0.8 dBu, which matches the empirically-tuned
+# value and gives a Scarlett 2i2 (+12.5 dBu) the correct ~+13 dB makeup. So the fix is: keep
+# deriving from V0dBFS, and set V0dBFS to the 1V convention per device. A device captured on
+# real gear may still override with a measured level via config["input_level_dbu"].
+# See docs/input_calibration.md and LESSONS #20.
 
 
 def _schx_input_v0dbfs(schx_path) -> "float | None":
@@ -431,11 +431,16 @@ class ParametricA2(nn.Module):
             if out_rms > 1e-8:
                 gain = float(target_rms / out_rms)
 
-        # input_level_dbu: an INTERFACE 0dBFS reference (dBu) for a host's input-calibration
-        # UI -- see INPUT_LEVEL_DBU_REF above for why this is NOT derived from the schx's
-        # circuit-drive V0dBFS (doing so shipped every model ~25-33 dB hot). A device may
-        # override with a measured capture level via config["input_level_dbu"].
-        input_level_dbu = float(config.get("input_level_dbu", INPUT_LEVEL_DBU_REF))
+        # input_level_dbu: derived from the schx Input V0dBFS (see the module comment near
+        # _DBU_0_RMS_VOLTS). Correct only when V0dBFS follows the 1V ecosystem convention
+        # (then ~-0.8 dBu). A device captured on real gear may override with a measured value
+        # via config["input_level_dbu"]. Omitted if the schx has no readable Input V0dBFS.
+        override = config.get("input_level_dbu")
+        if override is not None:
+            input_level_dbu = float(override)
+        else:
+            v0dbfs = _schx_input_v0dbfs(config.get("schx"))
+            input_level_dbu = _input_level_dbu(v0dbfs) if v0dbfs else None
 
         param_map = config.get("param_map", {})
         bounds = config.get("bounds", {})

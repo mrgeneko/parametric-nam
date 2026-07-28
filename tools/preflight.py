@@ -33,7 +33,7 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from batch_harness import LIVESPICE_CLI, parse_schx_controls, resolve_knobs  # noqa: E402
-from param_train import _schx_input_v0dbfs, _input_level_dbu, INPUT_LEVEL_DBU_REF  # noqa: E402
+from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
 SR = 48000
 # (name keywords, metric, human label). First match wins; order specific->general.
@@ -113,8 +113,8 @@ def main():
     ap.add_argument("--dir-margin", type=float, default=0.05,
                     help="min relative metric change to call a direction (else inconclusive)")
     ap.add_argument("--input-level-dbu", type=float, default=None,
-                    help="override the exported interface reference for the check "
-                         "(default: param_train.INPUT_LEVEL_DBU_REF)")
+                    help="override the exported input_level_dbu for the check "
+                         "(default: derived from the schx V0dBFS)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -187,25 +187,34 @@ def main():
             report["knobs"][knob] = rec
 
         # ---- input-level calibration ----
-        # What export_nam will actually WRITE (a device may override the standard ref).
-        exported_ild = float(args.input_level_dbu) if args.input_level_dbu is not None else INPUT_LEVEL_DBU_REF
+        # What export_nam will actually WRITE: config override, else derived from V0dBFS.
         v0 = _schx_input_v0dbfs(args.schx)
+        if args.input_level_dbu is not None:
+            exported_ild = float(args.input_level_dbu)
+        elif v0 is not None:
+            exported_ild = _input_level_dbu(v0)
+        else:
+            exported_ild = None
         in_peak = float(np.abs(x).max())
         ic = {"v0dbfs_volts": v0, "input_peak_dbfs": 20 * math.log10(in_peak + 1e-12),
               "exported_input_level_dbu": exported_ild}
         print("\n  input calibration:")
         print(f"    training input peak = {in_peak:.3f} ({ic['input_peak_dbfs']:.1f} dBFS)")
         if v0 is not None:
-            # V0dBFS is the circuit-drive voltage; report it as FYI only (NOT exported as dbu).
-            print(f"    schx V0dBFS = {v0} V (circuit drive; informational)")
-        print(f"    input_level_dbu to be EXPORTED = {exported_ild:.2f} dBu")
-        # A real interface's 0dBFS reference is ~+4..+24 dBu; outside that a calibrating host
-        # mis-gains (the old V0dBFS-derived -20.8 ran ~25-35 dB hot).
-        if not (-10.0 <= exported_ild <= 30.0):
-            warn.append(f"exported input_level_dbu={exported_ild:.1f} dBu is outside the plausible "
-                        f"interface range (-10..+30 dBu) — a calibrating host will mis-gain. "
-                        f"Check INPUT_LEVEL_DBU_REF / config['input_level_dbu'].")
-            print(f"    ^ IMPLAUSIBLE interface reference")
+            print(f"    schx V0dBFS = {v0} V")
+        if exported_ild is None:
+            warn.append("schx has no readable Input V0dBFS — input_level_dbu will be omitted from the .nam")
+            print("    input_level_dbu to be EXPORTED = (omitted — no V0dBFS)")
+        else:
+            print(f"    input_level_dbu to be EXPORTED = {exported_ild:.2f} dBu")
+            # Ecosystem convention is V0dBFS=1V => ~-0.8 dBu. A value far outside a plausible
+            # interface reference (~-5..+24 dBu) means V0dBFS is off-convention (e.g. the old
+            # 0.1V pedals => -20.8, ~13-33 dB hot in a calibrating host).
+            if not (-5.0 <= exported_ild <= 24.0):
+                warn.append(f"input_level_dbu={exported_ild:.1f} dBu is off the plausible interface "
+                            f"range — V0dBFS is likely off the 1V ecosystem convention (1V => ~-0.8 dBu). "
+                            f"A calibrating host will mis-gain. Fix V0dBFS in the schx.")
+                print(f"    ^ OFF-CONVENTION V0dBFS (expected ~1V => ~-0.8 dBu)")
         report["input_calibration"] = ic
 
     print()
