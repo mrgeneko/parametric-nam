@@ -1285,19 +1285,21 @@ def main():
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
-    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="off",
-                    help="Mixed-precision TRAINING forward (default: off). The model forward "
+    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="fp16",
+                    help="Mixed-precision TRAINING forward (default: fp16). The model forward "
                          "runs under autocast in half precision; the LOSS is always computed "
                          "in fp32 (the MRSTFT magnitudes of near-silent fading tails are "
                          "exactly what the ESR loss exists to protect), and validate() always "
                          "runs fp32 so val ESR stays comparable across runs and matches the "
                          "exported (fp32) model. fp16 uses GradScaler loss scaling; bf16 "
                          "needs none (fp32 exponent range) but has fewer mantissa bits. "
-                         "OPT-IN pending a per-device A/B: judge on level_band_esr.py bands "
-                         "and per_perm_esr.py spread per docs/RETRAINING.md, never the "
-                         "headline val ESR. Worth trying because production-shape training "
-                         "measured COMPUTE-bound on MPS (KoT: ~1.7 s/step of conv work), "
-                         "where half precision roughly doubles throughput.")
+                         "Made default 2026-07-28 for the throughput win (production-shape "
+                         "training measured COMPUTE-bound on MPS, KoT: ~1.7 s/step of conv "
+                         "work, TS-9 w4+w8 measured ~2.9x s/step faster than fp32) -- the "
+                         "per-device quality A/B (judge on level_band_esr.py bands and "
+                         "per_perm_esr.py spread per docs/RETRAINING.md, never the headline "
+                         "val ESR) is still worth running per-device, but no longer gates "
+                         "opt-in. Pass --amp off to disable.")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--widths", type=str, default=None,

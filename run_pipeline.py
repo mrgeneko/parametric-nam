@@ -680,9 +680,10 @@ def main():
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.05,
                    help="Val fraction (was 0.1 -- see param_train.py --help for why 0.05)")
-    g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="off",
-                   help="Mixed-precision training forward (opt-in, needs a per-device A/B "
-                        "-- see param_train.py --help). Forwarded to param_train.py.")
+    g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="fp16",
+                   help="Mixed-precision training forward (default: fp16, ~2x throughput on "
+                        "MPS -- see param_train.py --help). Forwarded to param_train.py; "
+                        "pass --amp off to disable.")
     g.add_argument("--per-tier-clip",  action="store_true",
                    help="Slimmable only: clip_grad_norm_ each tier's own parameters "
                         "separately instead of one joint call over every tier combined "
