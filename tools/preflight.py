@@ -100,6 +100,64 @@ def spikes(y):
     return int(((a > 3 * ln) & (a > 2 * p99)).sum())
 
 
+def _loglog_interp(x1, y1, x2, y2, ytarget):
+    lx1, ly1 = math.log(x1), math.log(y1)
+    lx2, ly2 = math.log(x2), math.log(y2)
+    frac = (math.log(ytarget) - ly1) / (ly2 - ly1)
+    return math.exp(lx1 + frac * (lx2 - lx1))
+
+
+def find_saturation_point(schx, params, oversample, iterations, scratch,
+                           freq=200.0, dur=1.0, start_v=0.005, max_v=40.0, npoints=20,
+                           plateau_frac=0.005, plateau_run=3):
+    """Sweep a clean sine tone's input amplitude and find where output RMS stops
+    rising with more input -- the device's own saturation ceiling, matching the
+    methodology in docs/input_calibration.md (the OCD investigation). Not the same
+    as clipping-onset (THD-based); this is "where does volume stop increasing."
+
+    Stops early once `plateau_run` consecutive steps each change RMS by less than
+    `plateau_frac`, so pedal-scale (~1-2V ceiling) and amp-scale (~20-30V ceiling)
+    devices both run in a handful of renders instead of the full log sweep.
+    Returns None if every render fails.
+    """
+    t = np.arange(int(SR * dur)) / SR
+    log_amps = np.geomspace(start_v, max_v, npoints)
+    curve = []
+    flat_run = 0
+    for i, a in enumerate(log_amps):
+        x = (a * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+        in_wav = f"{scratch}/peak_in_{i}.wav"
+        sf.write(in_wav, x, SR)
+        y = render(schx, params, oversample, iterations, in_wav, scratch, f"peak_{i}")
+        if y is None:
+            continue
+        steady = y[int(SR * 0.5):]
+        if len(steady) == 0:
+            continue
+        rms = float(np.sqrt((steady ** 2).mean()))
+        curve.append((float(a), rms))
+        if len(curve) >= 2:
+            prev_rms = curve[-2][1]
+            if prev_rms > 0 and abs(rms - prev_rms) / prev_rms < plateau_frac:
+                flat_run += 1
+                if flat_run >= plateau_run:
+                    break
+            else:
+                flat_run = 0
+    if not curve:
+        return None
+    ceiling_a, ceiling = max(curve, key=lambda p: p[1])
+    target = 0.99 * ceiling
+    onset = None
+    for i in range(1, len(curve)):
+        a0, r0 = curve[i - 1]; a1, r1 = curve[i]
+        if r0 < target <= r1:
+            onset = _loglog_interp(a0, r0, a1, r1, target)
+            break
+    return {"ceiling_rms": ceiling, "ceiling_at_input_v": ceiling_a,
+            "onset_99pct_input_v": onset, "curve": curve}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--schx", required=True)
@@ -115,6 +173,13 @@ def main():
     ap.add_argument("--input-level-dbu", type=float, default=None,
                     help="override the exported input_level_dbu for the check "
                          "(default: derived from the schx V0dBFS)")
+    ap.add_argument("--find-peak", action="store_true",
+                    help="sweep a clean sine tone's input amplitude and report where output "
+                         "RMS stops rising (the device's own saturation ceiling) -- see "
+                         "docs/input_calibration.md. Uses --fixed-params for any knob not "
+                         "swept; other knobs default to 0.5.")
+    ap.add_argument("--peak-max-v", type=float, default=40.0,
+                    help="upper bound of the --find-peak amplitude sweep")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -216,6 +281,21 @@ def main():
                             f"A calibrating host will mis-gain. Fix V0dBFS in the schx.")
                 print(f"    ^ OFF-CONVENTION V0dBFS (expected ~1V => ~-0.8 dBu)")
         report["input_calibration"] = ic
+
+        if args.find_peak:
+            base = {k: 0.5 for k in knobs}; base.update(fixed)
+            print(f"\n  saturation sweep (params={base}):")
+            sat = find_saturation_point(args.schx, base, args.oversample, args.iterations,
+                                         scratch, max_v=args.peak_max_v)
+            if sat is None:
+                warn.append("--find-peak: all sweep renders failed")
+                print("    FAILED (all renders failed)")
+            else:
+                onset = sat["onset_99pct_input_v"]
+                print(f"    ceiling = {sat['ceiling_rms']:.3f} V_rms (reached by input={sat['ceiling_at_input_v']:.3f} V)")
+                print(f"    output reaches 99% of ceiling at input ~ {onset:.4g} V"
+                      if onset is not None else "    99% onset not bracketed by the sweep")
+                report["saturation"] = sat
 
     print()
     for w in warn:  print(f"  WARN: {w}")
