@@ -23,6 +23,17 @@ Direction convention: a knob turned UP (value 0->1) should INCREASE the quantity
 it is named for -- Gain/Drive -> more distortion+level, Tone/Treble -> more
 treble, Bass -> more lows, Volume/Level -> louder. Names we don't recognize are
 checked for responsiveness only (direction reported as 'unknown').
+
+Level-aware EQ checks: a passive tone stack's direction is level-independent, but hard
+clipping SWAMPS it -- on a clean amp driven near its ceiling, turning Treble up reads as
+a FALSE reversal (the extra HF becomes clipping mush, not clean treble). So when a
+saturation ceiling is available (--find-peak, or an explicit --clean-probe-peak), EQ/tone
+knobs (treble/bass/mid) are probed at BOTH a LINEAR level (half the top of the flat-gain
+region, which catches early preamp clipping AND gain-expansion, not just power-amp ceiling)
+and the native/driven level: PASS if EITHER shows a clear correct direction, hard-FAIL
+only if BOTH reverse, and WARN (not fail) when the two disagree (level-dependent). Drive/
+level knobs are always probed at the native level -- they must see the full range including
+saturation. Without a ceiling, all knobs use the native level (legacy behavior).
 """
 import argparse, json, math, subprocess, sys, tempfile
 from pathlib import Path
@@ -98,6 +109,26 @@ def spikes(y):
     a = np.abs(y); p99 = np.percentile(a, 99)
     ln = np.maximum(np.abs(np.roll(y, 1)), np.abs(np.roll(y, -1)))
     return int(((a > 3 * ln) & (a > 2 * p99)).sum())
+
+
+def _linear_region_top(curve, tol=0.05):
+    """Top of the constant-gain (linear) input region, from a find-peak curve
+    [(in_v, out_rms), ...] ascending. Returns the largest input whose small-signal
+    gain (out/in) still matches the lowest-level gain within `tol`. Unlike the
+    saturation onset (power-amp RMS ceiling), this catches EARLY preamp nonlinearity
+    AND gain-expansion regions -- the level below which the tone stack sees an
+    undistorted signal, so its EQ direction is measured cleanly. Returns None if the
+    curve is too short."""
+    pts = [(a, r) for a, r in curve if a > 0 and r > 0]
+    if len(pts) < 2:
+        return None
+    g0 = pts[0][1] / pts[0][0]          # small-signal gain (lowest input)
+    top = pts[0][0]
+    for a, r in pts:
+        if abs((r / a) / g0 - 1.0) > tol:
+            break
+        top = a
+    return top
 
 
 def _loglog_interp(x1, y1, x2, y2, ytarget):
@@ -180,6 +211,13 @@ def main():
                          "swept; other knobs default to 0.5.")
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                     help="upper bound of the --find-peak amplitude sweep")
+    ap.add_argument("--clean-probe-peak", type=float, default=None,
+                    help="probe EQ/tone knobs (treble/bass/mid) with the input scaled to this peak "
+                         "voltage — a level in the device's LINEAR region, so the tone-stack shaping "
+                         "isn't swamped by clipping harmonics (which can read as a false reversal on "
+                         "clean amps driven hot). Drive/level knobs stay at the native input level. "
+                         "If omitted, this is auto-derived from --find-peak's saturation onset; if "
+                         "neither is given, all knobs are probed at the native level (legacy behavior).")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -199,29 +237,128 @@ def main():
         if x.ndim > 1: x = x[:, 0]
         if sr != SR:
             sys.exit(f"input sample rate {sr} != {SR}")
-        probe = f"{scratch}/probe.wav"
-        sf.write(probe, x[: int(args.seconds * SR)], SR)
+        xprobe = x[: int(args.seconds * SR)]
+        native_probe = f"{scratch}/probe_native.wav"
+        sf.write(native_probe, xprobe, SR)
+        native_peak = float(np.abs(xprobe).max()) + 1e-12
 
         print(f"Preflight: {Path(args.schx).name}  knobs={knobs}  fixed={args.fixed_params or '-'}")
         print(f"  probe {args.seconds:.0f}s @ os={args.oversample} it={args.iterations}\n")
 
+        # ---- saturation sweep FIRST: its ceiling sets a clean (linear-region) probe level ----
+        sat = None
+        if args.find_peak:
+            base = {k: 0.5 for k in knobs}; base.update(fixed)
+            print(f"  saturation sweep (params={base}):")
+            sat = find_saturation_point(args.schx, base, args.oversample, args.iterations,
+                                         scratch, max_v=args.peak_max_v)
+            if sat is None:
+                warn.append("--find-peak: all sweep renders failed")
+                print("    FAILED (all renders failed)")
+            else:
+                onset = sat["onset_99pct_input_v"]
+                print(f"    ceiling = {sat['ceiling_rms']:.3f} V_rms (reached by input={sat['ceiling_at_input_v']:.3f} V)")
+                print(f"    output reaches 99% of ceiling at input ~ {onset:.4g} V"
+                      if onset is not None else "    99% onset not bracketed by the sweep")
+                report["saturation"] = sat
+
+        # ---- clean probe level for EQ/tone knobs (treble/bass/mid) ----
+        # A passive tone stack's DIRECTION is level-independent, but hard clipping SWAMPS it: on a
+        # clean amp driven near its ceiling, turning Treble up can read as a FALSE reversal because
+        # the extra HF just makes more clipping mush, not more clean treble (seen on the Deluxe
+        # Reverb: reversed at 0.9V, correct at 0.3V). So probe EQ knobs in the LINEAR region. Drive/
+        # level knobs are NOT scaled -- they must see the full range including saturation.
+        # Conservative: only deviate from native when we have a level to scale to (explicit
+        # --clean-probe-peak, or 0.3x the --find-peak onset); else legacy native-level behavior.
+        clean_peak = args.clean_probe_peak
+        if clean_peak is None and sat is not None and sat.get("curve"):
+            lin_top = _linear_region_top(sat["curve"])        # top of the flat-gain (linear) region
+            if lin_top is not None:
+                clean_peak = 0.5 * lin_top                     # comfortably inside the linear region
+        clean_probe = None
+        if clean_peak is not None:
+            clean_peak = min(clean_peak, native_peak)         # never AMPLIFY the sweep
+            if clean_peak < native_peak * 0.999:
+                sf.write(f"{scratch}/probe_clean.wav",
+                         (xprobe * (clean_peak / native_peak)).astype(np.float32), SR)
+                clean_probe = f"{scratch}/probe_clean.wav"
+        if clean_probe is not None:
+            print(f"\n  EQ/tone knobs probed at CLEAN {clean_peak:.3f} V (linear) AND driven "
+                  f"{native_peak:.3f} V; drive/level knobs at {native_peak:.3f} V.\n")
+        else:
+            print(f"\n  all knobs probed at native input level ({native_peak:.3f} V)"
+                  f"{' — pass --find-peak or --clean-probe-peak for level-aware EQ checks' if not sat else ''}.\n")
+
+        def render_at(probe_wav, knob, val, tag):
+            p = {k: 0.5 for k in knobs}; p.update(fixed); p[knob] = val
+            return render(args.schx, p, args.oversample, args.iterations, probe_wav, scratch, tag)
+
+        def probe_dir(probe_wav, knob, kind, tagbase):
+            """3-point (0.2/0.5/0.8) probe -> dict with esr/spikes/peak and (if kind) metrics+rel."""
+            ys = {tag: render_at(probe_wav, knob, val, f"{tagbase}_{tag}")
+                  for tag, val in (("lo", 0.2), ("mid", 0.5), ("hi", 0.8))}
+            if any(v is None for v in ys.values()):
+                return None
+            d = {"esr": esr(ys["hi"], ys["lo"]),
+                 "spikes": max(spikes(ys[t]) for t in ys),
+                 "peak": max(float(np.abs(ys[t]).max()) for t in ys)}
+            if kind is not None:
+                ml, mm, mh = metric(ys["lo"], kind), metric(ys["mid"], kind), metric(ys["hi"], kind)
+                d.update({"m_lo": ml, "m_mid": mm, "m_hi": mh,
+                          "rel": (mh - ml) / (abs(ml) + 1e-12),
+                          "mono": (ml <= mm <= mh) or (ml >= mm >= mh)})
+            return d
+
+        MARG = args.dir_margin
         for knob in knobs:
             kind, label = classify(knob)
-            base = {k: 0.5 for k in knobs}; base.update(fixed)
-            ys = {}
-            for tag, val in (("lo", 0.2), ("mid", 0.5), ("hi", 0.8)):
-                p = dict(base); p[knob] = val
-                ys[tag] = render(args.schx, p, args.oversample, args.iterations, probe, scratch, f"{knob}_{tag}")
-            if any(v is None for v in ys.values()):
-                hard_fail.append(f"{knob}: RENDER FAILED"); report["knobs"][knob] = {"status": "render_fail"}
-                print(f"  {knob:10} RENDER FAILED"); continue
+            is_eq = kind in ("hi", "lo", "mid")
+            rec = {"direction_metric": kind, "label": label}
 
-            e = esr(ys["hi"], ys["lo"])
-            sp = max(spikes(ys[t]) for t in ys)
-            peak = max(float(np.abs(ys[t]).max()) for t in ys)
-            rec = {"esr_hi_lo": e, "direction_metric": kind, "label": label,
-                   "spikes": sp, "peak": peak}
+            # === EQ/tone knob WITH a clean level: probe clean (primary) + driven (cross-check) ===
+            if is_eq and clean_probe is not None:
+                cl = probe_dir(clean_probe, knob, kind, f"{knob}_clean")
+                dr = probe_dir(native_probe, knob, kind, f"{knob}_drv")
+                if cl is None or dr is None:
+                    hard_fail.append(f"{knob}: RENDER FAILED"); rec["status"] = "render_fail"
+                    print(f"  {knob:10} RENDER FAILED"); report["knobs"][knob] = rec; continue
+                sp = max(cl["spikes"], dr["spikes"])
+                rec.update({"esr_hi_lo": cl["esr"], "spikes": sp, "peak": max(cl["peak"], dr["peak"]),
+                            "probe_peak_clean_v": clean_peak, "probe_peak_driven_v": native_peak,
+                            "metric_lo": cl["m_lo"], "metric_mid": cl["m_mid"], "metric_hi": cl["m_hi"],
+                            "metric_rel_change": cl["rel"], "metric_rel_change_driven": dr["rel"]})
+                rc, rd = cl["rel"], dr["rel"]
+                clean_ok, driven_ok = rc > MARG, rd > MARG
+                clean_rev, driven_rev = rc < -MARG, rd < -MARG
+                if cl["esr"] < args.esr_dead and dr["esr"] < args.esr_dead:
+                    hard_fail.append(f"{knob}: DEAD (ESR clean {cl['esr']:.4g}, driven {dr['esr']:.4g})")
+                    rec["status"] = "dead"
+                    print(f"  {knob:10} DEAD           ESR clean={cl['esr']:.4g} driven={dr['esr']:.4g}  (expected {label})")
+                elif clean_ok or driven_ok:
+                    rec["status"] = "ok"
+                    print(f"  {knob:10} OK             {label} clean {rc:+.1%} / driven {rd:+.1%}")
+                    if not (clean_ok and driven_ok):
+                        warn.append(f"{knob}: LEVEL-DEPENDENT — {label} clean {rc:+.1%} @ {clean_peak:.3f}V but "
+                                    f"{rd:+.1%} driven @ {native_peak:.3f}V (EQ swamped by clipping at the hot level; "
+                                    f"direction is correct where the stage is linear)")
+                elif clean_rev and driven_rev:
+                    hard_fail.append(f"{knob}: REVERSED at BOTH levels ({label} clean {rc:+.1%}, driven {rd:+.1%})")
+                    rec["status"] = "reversed"
+                    print(f"  {knob:10} REVERSED       {label} clean {rc:+.1%} / driven {rd:+.1%} (should RISE)")
+                else:
+                    warn.append(f"{knob}: direction inconclusive ({label} clean {rc:+.1%}, driven {rd:+.1%})")
+                    rec["status"] = "dir_inconclusive"
+                    print(f"  {knob:10} INCONCLUSIVE   {label} clean {rc:+.1%} / driven {rd:+.1%}")
+                if sp > 0: warn.append(f"{knob}: {sp} sample-spike(s) in probe renders")
+                report["knobs"][knob] = rec; continue
 
+            # === non-EQ knob, or EQ without a clean level: single native-level check (legacy) ===
+            d = probe_dir(native_probe, knob, kind, knob)
+            if d is None:
+                hard_fail.append(f"{knob}: RENDER FAILED"); rec["status"] = "render_fail"
+                print(f"  {knob:10} RENDER FAILED"); report["knobs"][knob] = rec; continue
+            e, sp = d["esr"], d["spikes"]
+            rec.update({"esr_hi_lo": e, "spikes": sp, "peak": d["peak"], "probe_peak_v": native_peak})
             if e < args.esr_dead:
                 hard_fail.append(f"{knob}: DEAD (ESR={e:.4g})"); rec["status"] = "dead"
                 print(f"  {knob:10} DEAD           ESR={e:.4g}  (expected to affect {label})")
@@ -230,11 +367,10 @@ def main():
                 rec["status"] = "responds_dir_unknown"
                 print(f"  {knob:10} responds       ESR={e:.4g}  direction UNCHECKED (unknown knob '{knob}')")
             else:
-                m_lo, m_hi, m_mid = (metric(ys["lo"], kind), metric(ys["hi"], kind), metric(ys["mid"], kind))
-                rel = (m_hi - m_lo) / (abs(m_lo) + 1e-12)
-                rec.update({"metric_lo": m_lo, "metric_mid": m_mid, "metric_hi": m_hi, "metric_rel_change": rel})
-                mono = (m_lo <= m_mid <= m_hi) or (m_lo >= m_mid >= m_hi)
-                if abs(rel) < args.dir_margin:
+                rel, mono = d["rel"], d["mono"]
+                rec.update({"metric_lo": d["m_lo"], "metric_mid": d["m_mid"], "metric_hi": d["m_hi"],
+                            "metric_rel_change": rel})
+                if abs(rel) < MARG:
                     warn.append(f"{knob}: responds (ESR={e:.4g}) but {label} metric barely moved ({rel:+.1%}) — direction inconclusive")
                     rec["status"] = "dir_inconclusive"
                     print(f"  {knob:10} responds       ESR={e:.4g}  {label} {rel:+.1%} INCONCLUSIVE")
@@ -244,7 +380,10 @@ def main():
                     print(f"  {knob:10} OK             ESR={e:.4g}  {label} {rel:+.1%} rising{tail}")
                     if not mono: warn.append(f"{knob}: direction OK but non-monotonic across 0.2/0.5/0.8")
                 else:
-                    hard_fail.append(f"{knob}: REVERSED ({label} {rel:+.1%} — falls as knob rises)")
+                    # EQ knob reversed but we had no clean level to disambiguate -> could be
+                    # clipping-swamp. Hard-fail (legacy/conservative) but point at the level fix.
+                    hint = " (try --find-peak/--clean-probe-peak — may be clipping-swamp at this level)" if is_eq else ""
+                    hard_fail.append(f"{knob}: REVERSED ({label} {rel:+.1%} — falls as knob rises){hint}")
                     rec["status"] = "reversed"
                     print(f"  {knob:10} REVERSED       ESR={e:.4g}  {label} {rel:+.1%} (should RISE)")
             if sp > 0:
@@ -281,21 +420,6 @@ def main():
                             f"A calibrating host will mis-gain. Fix V0dBFS in the schx.")
                 print(f"    ^ OFF-CONVENTION V0dBFS (expected ~1V => ~-0.8 dBu)")
         report["input_calibration"] = ic
-
-        if args.find_peak:
-            base = {k: 0.5 for k in knobs}; base.update(fixed)
-            print(f"\n  saturation sweep (params={base}):")
-            sat = find_saturation_point(args.schx, base, args.oversample, args.iterations,
-                                         scratch, max_v=args.peak_max_v)
-            if sat is None:
-                warn.append("--find-peak: all sweep renders failed")
-                print("    FAILED (all renders failed)")
-            else:
-                onset = sat["onset_99pct_input_v"]
-                print(f"    ceiling = {sat['ceiling_rms']:.3f} V_rms (reached by input={sat['ceiling_at_input_v']:.3f} V)")
-                print(f"    output reaches 99% of ceiling at input ~ {onset:.4g} V"
-                      if onset is not None else "    99% onset not bracketed by the sweep")
-                report["saturation"] = sat
 
     print()
     for w in warn:  print(f"  WARN: {w}")
