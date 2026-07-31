@@ -983,7 +983,13 @@ def main():
             if args.widths:              train_cmd += ["--widths", args.widths]
             if not args.mmap:             train_cmd.append("--no-mmap")
             if args.resume:              train_cmd += ["--resume", args.resume]
-            if args.amp != "off":        train_cmd += ["--amp", args.amp]
+            # ALWAYS forward --amp explicitly. The old `if args.amp != "off"` guard assumed
+            # param_train.py's own default matches "off" when the flag is omitted -- it doesn't
+            # (param_train.py --amp also defaults to "fp16"), so a caller's explicit --amp off
+            # request silently fell through to fp16 instead, with nothing reporting the mismatch.
+            # See the 2026-07-31 dumble-rock incident: this crashed training with an MPS/GradScaler
+            # TypeError that --amp off was specifically meant to avoid.
+            train_cmd += ["--amp", args.amp]
             if args.init_from:           train_cmd += ["--init-from", args.init_from]
             if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
             if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
