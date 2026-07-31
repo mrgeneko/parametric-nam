@@ -45,6 +45,12 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--realistic-peak", type=float, default=1.0,
                     help="peak (V, at V0dBFS=1) to scale the real-playing clip to")
+    ap.add_argument("--realistic-dur", type=float, default=None,
+                    help="seconds of --input to keep (prefix), default: the whole file. The "
+                         "realistic clip only needs to sample varied dynamics/perceptual content "
+                         "-- it is not what provides saturation coverage (the sweeps do) -- so a "
+                         "short prefix is normally enough, and every second of it costs a "
+                         "render-time multiplier across the whole permutation grid.")
     ap.add_argument("--sweep-peaks", default="0.5,1.0,1.5,2.0",
                     help="comma list of sine-sweep peak amplitudes (V); last = training max drive")
     ap.add_argument("--sweep-f0", type=float, default=40.0)
@@ -56,6 +62,8 @@ def main():
     x, sr = sf.read(args.input, dtype="float32")
     if x.ndim > 1: x = x[:, 0]
     if sr != SR: raise SystemExit(f"input sr {sr} != {SR}")
+    if args.realistic_dur is not None:
+        x = x[:int(SR * args.realistic_dur)]
 
     real = _fade((x / max(np.abs(x).max(), 1e-9) * args.realistic_peak).astype(np.float32), 10, 10)
     peaks = [float(p) for p in args.sweep_peaks.split(",") if p.strip()]
