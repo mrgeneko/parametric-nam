@@ -676,6 +676,18 @@ def main():
     g.add_argument("--grid-target",    type=float, default=0.03,
                    help="the interpolation ESR the knob grid must support (default 0.03, the "
                         "audibility floor -- NOT the training-fidelity ESR; see tools/grid_adequacy.py)")
+    g.add_argument("--skip-headroom-check", action="store_true",
+                   help="skip the STEP 0b input-headroom check. It finds the device's saturation "
+                        "onset (--find-peak, at default knob settings) and compares it against the "
+                        "excitation's own peak -- an excitation that stays well under the onset "
+                        "means the trained dataset may never explore the device's nonlinear/breakup "
+                        "region, no matter how dense the knob grid is. WARNS, does not abort (unlike "
+                        "the grid check): a low ratio can be a real gap or a genuine high-headroom "
+                        "device, and telling those apart needs a check at the grid's own hottest "
+                        "knob setting, not just this default-knobs probe. See "
+                        "tools/check_input_headroom.py.")
+    g.add_argument("--headroom-margin", type=float, default=0.8,
+                   help="WARN if excitation peak < margin * saturation onset (default 0.8)")
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.05,
@@ -795,6 +807,49 @@ def main():
                         "--config", str(args.config),
                         "--target", str(args.grid_target)],
                        fh, "grid-adequacy")
+
+        # ------------------------------------------------------------------
+        # Step 0b: does the excitation actually reach this device's own saturation ceiling?
+        #
+        # A dense knob grid is not the same question as an excitation that gets loud enough. A
+        # model can only learn what's in the data -- if every rendered permutation stays in the
+        # device's linear region, dataset and grid can both be perfect and the trained model still
+        # has no idea what the device's breakup/saturation character is. See
+        # tools/check_input_headroom.py's docstring for the TAD Blackface 85 Reverb case that
+        # exposed this gap (2026-07-31): nothing else in the pipeline would have caught it.
+        #
+        # WARN, don't abort: --find-peak probes at DEFAULT (0.5) knob settings, not the grid's own
+        # hottest corner, so a low ratio here can be a real gap OR a genuine high-headroom device --
+        # telling those apart needs a look at the grid's own extreme, which this quick check doesn't
+        # do. Unlike the grid-adequacy check above (a provable floor), this is a prompt to go look,
+        # not a verdict either way.
+        # ------------------------------------------------------------------
+        if run_generate and args.config and not args.skip_headroom_check:
+            section("STEP 0b / 3 — Input Headroom", fh)
+            log("Checking whether the excitation reaches this device's own saturation onset at "
+                "default knob settings. A WARN here is a prompt to check the grid's own hottest "
+                "corner directly, not an automatic verdict -- see tools/check_input_headroom.py. "
+                "Pass --skip-headroom-check to skip.", fh)
+            cmd = [PYTHON, str(HERE / "tools" / "check_input_headroom.py"),
+                   "--config", str(args.config), "--margin", str(args.headroom_margin)]
+            log(f"CMD: {' '.join(str(c) for c in cmd)}", fh)
+            fh.write("\n"); fh.flush()
+            proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                    env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            for line in proc.stdout:
+                out = f"[{ts()}] {line.rstrip(chr(10))}\n"
+                print(out, end="", flush=True); fh.write(out); fh.flush()
+            proc.wait()
+            if proc.returncode >= 2:
+                log(f"ERROR: input-headroom check itself failed (exit {proc.returncode}) — "
+                    f"aborting pipeline.", fh)
+                sys.exit(proc.returncode)
+            elif proc.returncode == 1:
+                log("input-headroom check: WARN (see above) — continuing, this does not block "
+                    "the pipeline.", fh)
+            else:
+                log("input-headroom check: OK.", fh)
 
         if run_generate:
             section("STEP 1 / 3 — Dataset Generation", fh)
