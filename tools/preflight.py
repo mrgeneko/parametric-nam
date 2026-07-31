@@ -79,6 +79,12 @@ def metric(y, kind):
 
 def classify(knob):
     n = knob.lower()
+    # An explicit volume/level name is a LEVEL control even when it also contains a tone word:
+    # "BrightVol"/"Bright Volume" is a VOLUME with a bright cap, not a treble knob. Its relative
+    # treble legitimately FALLS as it rises (the bright cap boosts most at low settings), which the
+    # treble rule would misread as REVERSED. Check the unambiguous volume tokens first.
+    if any(k in n for k in ("volume", "vol", "master")):
+        return "rms", "output level"
     for keys, kind, label in DIRECTION_RULES:
         if any(k in n for k in keys):
             return kind, label
