@@ -35,7 +35,8 @@ only if BOTH reverse, and WARN (not fail) when the two disagree (level-dependent
 level knobs are always probed at the native level -- they must see the full range including
 saturation. Without a ceiling, all knobs use the native level (legacy behavior).
 """
-import argparse, json, math, subprocess, sys, tempfile
+import argparse, hashlib, json, math, os, subprocess, sys, tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +112,24 @@ def render(schx, params, oversample, iterations, in_wav, scratch, tag):
         return None
 
 
+def render_many(jobs, workers=None):
+    """Run a list of independent render jobs concurrently. Each job is a dict with keys
+    schx, params, oversample, iterations, in_wav, scratch, tag. Every render is a
+    self-contained subprocess writing a unique-by-tag output file, so they parallelize
+    cleanly across a thread pool. Returns {tag: y_or_None}. This turns preflight's ~30-50
+    serial probe renders (~20-30 min on a full amp) into a handful of pool batches."""
+    if not jobs:
+        return {}
+    workers = max(1, min(workers or os.cpu_count() or 4, len(jobs)))
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(render, j["schx"], j["params"], j["oversample"], j["iterations"],
+                          j["in_wav"], j["scratch"], j["tag"]): j["tag"] for j in jobs}
+        for f in futs:
+            out[futs[f]] = f.result()
+    return out
+
+
 def spikes(y):
     a = np.abs(y); p99 = np.percentile(a, 99)
     ln = np.maximum(np.abs(np.roll(y, 1)), np.abs(np.roll(y, -1)))
@@ -146,41 +165,37 @@ def _loglog_interp(x1, y1, x2, y2, ytarget):
 
 def find_saturation_point(schx, params, oversample, iterations, scratch,
                            freq=200.0, dur=1.0, start_v=0.005, max_v=40.0, npoints=20,
-                           plateau_frac=0.005, plateau_run=3):
+                           plateau_frac=0.005, plateau_run=3, workers=None):
     """Sweep a clean sine tone's input amplitude and find where output RMS stops
     rising with more input -- the device's own saturation ceiling, matching the
     methodology in docs/input_calibration.md (the OCD investigation). Not the same
     as clipping-onset (THD-based); this is "where does volume stop increasing."
 
-    Stops early once `plateau_run` consecutive steps each change RMS by less than
-    `plateau_frac`, so pedal-scale (~1-2V ceiling) and amp-scale (~20-30V ceiling)
-    devices both run in a handful of renders instead of the full log sweep.
-    Returns None if every render fails.
+    All `npoints` amplitudes are rendered CONCURRENTLY (they're independent 1s tones),
+    which is faster across a thread pool than the old sequential-with-early-stop scan
+    and makes the plateau_frac/plateau_run params vestigial. Returns None if every
+    render fails.
     """
     t = np.arange(int(SR * dur)) / SR
     log_amps = np.geomspace(start_v, max_v, npoints)
-    curve = []
-    flat_run = 0
+    jobs = []
     for i, a in enumerate(log_amps):
         x = (a * np.sin(2 * np.pi * freq * t)).astype(np.float32)
         in_wav = f"{scratch}/peak_in_{i}.wav"
         sf.write(in_wav, x, SR)
-        y = render(schx, params, oversample, iterations, in_wav, scratch, f"peak_{i}")
+        jobs.append({"schx": schx, "params": params, "oversample": oversample,
+                     "iterations": iterations, "in_wav": in_wav, "scratch": scratch,
+                     "tag": f"peak_{i}"})
+    ys = render_many(jobs, workers=workers)
+    curve = []
+    for i, a in enumerate(log_amps):
+        y = ys.get(f"peak_{i}")
         if y is None:
             continue
         steady = y[int(SR * 0.5):]
         if len(steady) == 0:
             continue
-        rms = float(np.sqrt((steady ** 2).mean()))
-        curve.append((float(a), rms))
-        if len(curve) >= 2:
-            prev_rms = curve[-2][1]
-            if prev_rms > 0 and abs(rms - prev_rms) / prev_rms < plateau_frac:
-                flat_run += 1
-                if flat_run >= plateau_run:
-                    break
-            else:
-                flat_run = 0
+        curve.append((float(a), float(np.sqrt((steady ** 2).mean()))))
     if not curve:
         return None
     ceiling_a, ceiling = max(curve, key=lambda p: p[1])
@@ -193,6 +208,18 @@ def find_saturation_point(schx, params, oversample, iterations, scratch,
             break
     return {"ceiling_rms": ceiling, "ceiling_at_input_v": ceiling_a,
             "onset_99pct_input_v": onset, "curve": curve}
+
+
+def _findpeak_cache_path(schx, base, oversample, iterations, max_v):
+    """Stable cache location for a find-peak result, keyed on the schx CONTENT (so an
+    edited circuit re-sweeps automatically) plus the sweep-defining parameters."""
+    h = hashlib.sha256()
+    h.update(Path(schx).read_bytes())
+    h.update(repr(sorted((str(k), str(v)) for k, v in base.items())).encode())
+    h.update(f"os={oversample}|it={iterations}|maxv={max_v}".encode())
+    d = Path.home() / ".cache" / "parametric-nam" / "findpeak"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{h.hexdigest()[:16]}.json"
 
 
 def main():
@@ -225,6 +252,8 @@ def main():
                          "If omitted, this is auto-derived from --find-peak's saturation onset; if "
                          "neither is given, all knobs are probed at the native level (legacy behavior).")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore (and overwrite) any cached --find-peak saturation sweep for this schx")
     args = ap.parse_args()
 
     knobs = [k.strip() for k in args.knobs.split(",") if k.strip()]
@@ -255,9 +284,16 @@ def main():
         sat = None
         if args.find_peak:
             base = {k: 0.5 for k in knobs}; base.update(fixed)
-            print(f"  saturation sweep (params={base}):")
-            sat = find_saturation_point(args.schx, base, args.oversample, args.iterations,
-                                         scratch, max_v=args.peak_max_v)
+            cpath = _findpeak_cache_path(args.schx, base, args.oversample, args.iterations, args.peak_max_v)
+            if cpath.exists() and not args.no_cache:
+                sat = json.loads(cpath.read_text())
+                print(f"  saturation sweep: CACHED (params={base})  [{cpath.name}]")
+            else:
+                print(f"  saturation sweep (params={base}):")
+                sat = find_saturation_point(args.schx, base, args.oversample, args.iterations,
+                                             scratch, max_v=args.peak_max_v)
+                if sat is not None:
+                    cpath.write_text(json.dumps(sat))
             if sat is None:
                 warn.append("--find-peak: all sweep renders failed")
                 print("    FAILED (all renders failed)")
@@ -295,25 +331,45 @@ def main():
             print(f"\n  all knobs probed at native input level ({native_peak:.3f} V)"
                   f"{' — pass --find-peak or --clean-probe-peak for level-aware EQ checks' if not sat else ''}.\n")
 
-        def render_at(probe_wav, knob, val, tag):
-            p = {k: 0.5 for k in knobs}; p.update(fixed); p[knob] = val
-            return render(args.schx, p, args.oversample, args.iterations, probe_wav, scratch, tag)
+        LEVELS = (("lo", 0.2), ("mid", 0.5), ("hi", 0.8))
 
-        def probe_dir(probe_wav, knob, kind, tagbase):
-            """3-point (0.2/0.5/0.8) probe -> dict with esr/spikes/peak and (if kind) metrics+rel."""
-            ys = {tag: render_at(probe_wav, knob, val, f"{tagbase}_{tag}")
-                  for tag, val in (("lo", 0.2), ("mid", 0.5), ("hi", 0.8))}
-            if any(v is None for v in ys.values()):
+        def _knob_jobs(knob, probe_wav, tagbase):
+            jobs = []
+            for suf, val in LEVELS:
+                p = {k: 0.5 for k in knobs}; p.update(fixed); p[knob] = val
+                jobs.append({"schx": args.schx, "params": p, "oversample": args.oversample,
+                             "iterations": args.iterations, "in_wav": probe_wav,
+                             "scratch": scratch, "tag": f"{tagbase}_{suf}"})
+            return jobs
+
+        def probe_dir_from(ys, tagbase, kind):
+            """3-point (0.2/0.5/0.8) probe read from pre-rendered results {tag: y}."""
+            lo, mid, hi = (ys.get(f"{tagbase}_{s}") for s, _ in LEVELS)
+            if lo is None or mid is None or hi is None:
                 return None
-            d = {"esr": esr(ys["hi"], ys["lo"]),
-                 "spikes": max(spikes(ys[t]) for t in ys),
-                 "peak": max(float(np.abs(ys[t]).max()) for t in ys)}
+            d = {"esr": esr(hi, lo),
+                 "spikes": max(spikes(lo), spikes(mid), spikes(hi)),
+                 "peak": max(float(np.abs(v).max()) for v in (lo, mid, hi))}
             if kind is not None:
-                ml, mm, mh = metric(ys["lo"], kind), metric(ys["mid"], kind), metric(ys["hi"], kind)
+                ml, mm, mh = metric(lo, kind), metric(mid, kind), metric(hi, kind)
                 d.update({"m_lo": ml, "m_mid": mm, "m_hi": mh,
                           "rel": (mh - ml) / (abs(ml) + 1e-12),
                           "mono": (ml <= mm <= mh) or (ml >= mm >= mh)})
             return d
+
+        # Build EVERY probe render up front and run them across a thread pool -- the knob
+        # probes are all independent, so this is the big serial->parallel win (#1).
+        all_jobs = []
+        for knob in knobs:
+            kind, _ = classify(knob)
+            if kind in ("hi", "lo", "mid") and clean_probe is not None:
+                all_jobs += _knob_jobs(knob, clean_probe, f"{knob}_clean")
+                all_jobs += _knob_jobs(knob, native_probe, f"{knob}_drv")
+            else:
+                all_jobs += _knob_jobs(knob, native_probe, knob)
+        nworkers = max(1, min(os.cpu_count() or 4, len(all_jobs)))
+        print(f"  probing {len(knobs)} knob(s) via {len(all_jobs)} renders across {nworkers} workers...\n")
+        ys_all = render_many(all_jobs, workers=nworkers)
 
         MARG = args.dir_margin
         for knob in knobs:
@@ -323,8 +379,8 @@ def main():
 
             # === EQ/tone knob WITH a clean level: probe clean (primary) + driven (cross-check) ===
             if is_eq and clean_probe is not None:
-                cl = probe_dir(clean_probe, knob, kind, f"{knob}_clean")
-                dr = probe_dir(native_probe, knob, kind, f"{knob}_drv")
+                cl = probe_dir_from(ys_all, f"{knob}_clean", kind)
+                dr = probe_dir_from(ys_all, f"{knob}_drv", kind)
                 if cl is None or dr is None:
                     hard_fail.append(f"{knob}: RENDER FAILED"); rec["status"] = "render_fail"
                     print(f"  {knob:10} RENDER FAILED"); report["knobs"][knob] = rec; continue
@@ -359,7 +415,7 @@ def main():
                 report["knobs"][knob] = rec; continue
 
             # === non-EQ knob, or EQ without a clean level: single native-level check (legacy) ===
-            d = probe_dir(native_probe, knob, kind, knob)
+            d = probe_dir_from(ys_all, knob, kind)
             if d is None:
                 hard_fail.append(f"{knob}: RENDER FAILED"); rec["status"] = "render_fail"
                 print(f"  {knob:10} RENDER FAILED"); report["knobs"][knob] = rec; continue
