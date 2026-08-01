@@ -18,10 +18,44 @@ Written float32 so values >1.0 survive (they represent >1 V drive, which is legi
 See docs/input_calibration.md.
 """
 import argparse
+import hashlib
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 
 SR = 48000
+
+
+def _audio_provenance(path, x=None):
+    """Same identity fields as batch_harness.py's input_provenance() (name/path/sha1 of the
+    MONO SAMPLE BYTES/samplerate/frames/duration) -- deliberately duplicated, not imported,
+    so this tool has no dependency on the harness and the two hashes stay independently
+    verifiable against each other (same audio -> same hash, computed two different ways)."""
+    if x is None:
+        x, _ = sf.read(str(path), dtype="float32")
+    mono = x if x.ndim == 1 else x.mean(axis=1)
+    mono = np.asarray(mono, dtype=np.float32)
+    return {
+        "name": Path(path).name,
+        "path": str(path),
+        "audio_sha1": hashlib.sha1(mono.tobytes()).hexdigest(),
+        "samplerate": SR,
+        "frames": int(len(mono)),
+        "duration_s": round(len(mono) / SR, 3),
+    }
+
+
+def _tool_git_rev():
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent,
+                            capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def _fade(y, ms_in, ms_out):
@@ -79,6 +113,34 @@ def main():
     print(f"wrote {args.output}  dur {len(comp)/SR:.1f}s  peak {a.max():.3f}  rms {np.sqrt((comp**2).mean()):.4f}")
     for thr in sorted(set([0.5] + peaks)):
         print(f"  time >= {thr:.2f} V : {100*np.mean(a >= thr):6.3f}%")
+
+    # Recipe sidecar: HOW this excitation was built, not just which bytes it is. Without this,
+    # a derived excitation's provenance chain stops at "some file named *_[redacted]95.wav" -- the exact
+    # window/args used to cut it from the source are lost the moment the config-file comment that
+    # (informally, inconsistently) recorded them is out of date or missing. batch_harness.py's
+    # input_provenance() picks this up automatically (same directory, <stem>.recipe.json) and
+    # embeds it in every dataset's config.json -> parametric-nam-models' dataset_config.json.
+    recipe = {
+        "tool": "build_excitation.py",
+        "tool_git_rev": _tool_git_rev(),
+        "built_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "args": {
+            "realistic_peak": args.realistic_peak,
+            "realistic_dur": args.realistic_dur,
+            "sweep_peaks": peaks,
+            "sweep_f0": args.sweep_f0,
+            "sweep_f1": args.sweep_f1,
+            "sweep_dur": args.sweep_dur,
+            "fade_out_ms": args.fade_out_ms,
+        },
+        "source": _audio_provenance(args.input),
+        "output": {**_audio_provenance(args.output, x=comp),
+                   "peak": round(float(a.max()), 6),
+                   "rms": round(float(np.sqrt((comp ** 2).mean())), 6)},
+    }
+    recipe_path = Path(args.output).with_suffix(".recipe.json")
+    recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
+    print(f"wrote {recipe_path}  (build recipe -- picked up automatically by batch_harness.py)")
 
 
 if __name__ == "__main__":

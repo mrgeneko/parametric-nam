@@ -946,7 +946,7 @@ def input_provenance(wav: Path) -> dict:
     x, sr = sf.read(str(wav), dtype="float32")
     mono = x if x.ndim == 1 else x.mean(axis=1)
     d = np.asarray(mono, dtype=np.float32)
-    return {
+    prov = {
         "name": wav.name,
         "path": str(wav),
         "audio_sha1": hashlib.sha1(d.tobytes()).hexdigest(),
@@ -956,6 +956,20 @@ def input_provenance(wav: Path) -> dict:
         "peak": round(float(np.abs(d).max()), 6),
         "rms": round(float(np.sqrt((d.astype(np.float64) ** 2).mean())), 6),
     }
+    # BUILD RECIPE: if this excitation was constructed (not the raw licensed source itself --
+    # e.g. tools/build_excitation.py's composite/trimmed outputs), it writes a sidecar
+    # <stem>.recipe.json next to the WAV recording exactly how (source file + hash, tool git rev,
+    # every CLI arg). Embed it here so it rides along automatically into every dataset's
+    # config.json -> parametric-nam-models' dataset_config.json, with no per-device wiring.
+    # Absent for a raw/undevired source (e.g. [redacted]-sweep-v3.wav used directly) -- correctly, since
+    # there is no recipe for something that wasn't built.
+    recipe_path = wav.with_suffix(".recipe.json")
+    if recipe_path.exists():
+        try:
+            prov["build_recipe"] = json.loads(recipe_path.read_text())
+        except Exception as e:
+            prov["build_recipe_error"] = f"{recipe_path.name} exists but failed to parse: {e}"
+    return prov
 
 
 

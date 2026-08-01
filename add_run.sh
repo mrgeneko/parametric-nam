@@ -134,6 +134,14 @@ emit("OVERSAMPLE", cfg.get("oversample", "?"))
 emit("BACKEND", cfg.get("backend", "?"))
 emit("NPERM", cfg.get("permutation_count", "?"))
 emit("INPUT_WAV", Path(str(cfg.get("input_wav", "?"))).name)
+# Build-recipe surfacing (2026-08-01): if the input excitation was constructed by
+# tools/build_excitation.py, input_provenance() (batch_harness.py) embeds the sidecar recipe
+# under cfg["input"]["build_recipe"] -- name the source file here so it's visible in MANIFEST.md
+# without opening dataset_config.json; the full recipe (every arg, both hashes) lives there.
+_recipe = (cfg.get("input") or {}).get("build_recipe")
+emit("RECIPE_NOTE",
+     f" (built via `tools/build_excitation.py` from `{_recipe['source']['name']}`; full recipe in `dataset_config.json`'s `input.build_recipe`)"
+     if _recipe else "")
 emit("FIXED", cfg.get("fixed_params", "") or "none")
 emit("IS_CAPTURE", "1" if is_capture else "0")
 emit("GEAR_MAKE", cfg.get("gear_make", "?"))
@@ -496,7 +504,7 @@ $PROVENANCE_LINE
 - **Parameters (${#KNOBS[@]}):** \`$KNOB_LIST\`.  **Fixed:** \`$FIXED\`.
 
 ## Dataset
-- **Grid:** $NPERM permutations. Input \`$INPUT_WAV\`.
+- **Grid:** $NPERM permutations. Input \`$INPUT_WAV\`$RECIPE_NOTE.
   See \`dataset_config.json\` / \`dataset_params.csv\`.
 
 ## Training
