@@ -40,9 +40,16 @@ EMBED_KEY = "embedded_parametric"
 
 
 def _submodels(nam: dict, source: str = ".param.nam"):
-    """Per-submodel (channels, num_params, param_metas, weights) for a ParametricWaveNet or
-    SlimmableContainer .param.nam. check_parametric_schema rejects legacy residual/untagged
-    models, so anything we return here is a supported skip model."""
+    """Per-submodel (channels, num_params, param_metas, weights, film_gamma_bound) for a
+    ParametricWaveNet or SlimmableContainer .param.nam. check_parametric_schema rejects
+    legacy residual/untagged models, so anything we return here is a supported skip model.
+
+    film_gamma_bound: NOT a weight -- FiLM's gamma bound (see param_train.py's FiLM,
+    "A1") is a forward-pass formula parameter, so it must be read back from the export
+    and passed into ParametricA2() below, or a reconstructed model would silently use
+    the wrong (unbounded) gamma over correctly-trained-bounded conv/mixin/l1x1 weights.
+    Defaults to 0.0 (off) for older exports that predate this field.
+    """
     entries = ([s["model"] for s in nam["config"]["submodels"]]
                if nam.get("architecture") == "SlimmableContainer" else [nam])
     out = []
@@ -53,7 +60,8 @@ def _submodels(nam: dict, source: str = ".param.nam"):
         metas = par.get("parameters", [])
         out.append((int(cfg["layers"]),
                     int(par.get("condition_size", len(metas))),
-                    metas, m["weights"]))
+                    metas, m["weights"],
+                    float(par.get("film_gamma_bound", 0.0))))
     return out
 
 
@@ -91,11 +99,10 @@ def main():
     match = next((s for s in subs if s[0] == target), None)
     if match is None:
         ap.error(f"width {target} not found; available: {widths}")
-    channels, num_params, metas, weights = match
+    channels, num_params, metas, weights, film_gamma_bound = match
     names = [m["name"] for m in metas]
 
-
-    a2 = ParametricA2(channels=channels, num_params=num_params)
+    a2 = ParametricA2(channels=channels, num_params=num_params, film_gamma_bound=film_gamma_bound)
     a2.load_weights(weights)
 
     kv = dict(x.split("=", 1) for x in a.params.split(",") if "=" in x)

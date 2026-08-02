@@ -55,7 +55,13 @@ def fold_film(model: ParametricA2, params) -> ParametricA2:
         for layer in m.layers:
             if layer.film is None:
                 continue
-            gamma, beta = layer.film.net(cond).squeeze(0).chunk(2)   # [C], [C]
+            # Via FiLM.gamma_beta(), NOT a reimplemented affine step -- this used to
+            # independently recompute gamma/beta inline here, duplicating FiLM.forward()'s
+            # formula. That divergence is exactly what let an unbounded-gamma investigation
+            # (docs/film_runaway_investigation.md) find gamma bounded in training but NOT
+            # in what actually got baked and shipped. One shared implementation now.
+            gamma, beta = layer.film.gamma_beta(cond)
+            gamma, beta = gamma.squeeze(0), beta.squeeze(0)   # [C], [C]
             g = gamma.view(-1, 1, 1)
             # h = conv(x) + mixin(inp);  film(h) = gamma*h + beta
             layer.conv.weight.mul_(g)

@@ -19,6 +19,7 @@ import soundfile as sf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import spectral_norm as apply_spectral_norm
 
 from per_perm_esr import compute_per_perm_esr, summarize as summarize_per_perm_esr, write_csv as write_per_perm_esr_csv
 
@@ -132,9 +133,26 @@ K_DILATIONS = [
 # ---------------------------------------------------------------------------
 
 class FiLM(nn.Module):
-    """Feature-wise Linear Modulation: gamma * x + beta."""
-    def __init__(self, channels: int, cond_dim: int):
+    """Feature-wise Linear Modulation: gamma * x + beta.
+
+    gamma_bound: 0.0 (default) = today's raw, unbounded gamma -- exactly the old
+    behavior, bit-identical for existing checkpoints. A positive R bounds gamma to
+    (1-R, 1+R) via gamma = 1 + R*tanh(raw_gamma/R): see docs/film_runaway_investigation.md
+    ("A1"). This alone does NOT prevent the runaway (the investigation found gamma
+    smooth and unremarkable at the blow-up corner; the mechanism is in the conv/l1x1/
+    residual pathway -- see A2Layer's spectral_norm) but closes off one real
+    amplification vector cheaply, and A2's guarantee needs it: gamma sits structurally
+    between two of A2's bounded stages and can defeat the guarantee alone if unbounded.
+
+    gamma_beta() is the ONE place this formula is computed -- forward() (training/live
+    inference) and nam_standard.fold_film() (baking) both call it. fold_film() used to
+    reimplement this affine step inline, independently of FiLM; that silent duplication
+    is exactly the kind of two-place divergence a bound added to only one of them would
+    reintroduce, so both now share this method instead.
+    """
+    def __init__(self, channels: int, cond_dim: int, gamma_bound: float = 0.0):
         super().__init__()
+        self.gamma_bound = gamma_bound
         self.net = nn.Linear(cond_dim, 2 * channels)
         # Small NON-zero weight so the knob modulates from step 0. A pure-zero init
         # leaves FiLM at identity for ALL cond, and it then under-learns subtle /
@@ -143,11 +161,24 @@ class FiLM(nn.Module):
         # near-identity: gamma≈1, beta≈0.
         nn.init.normal_(self.net.weight, std=0.1)
         nn.init.zeros_(self.net.bias)
-        self.net.bias.data[:channels].fill_(1.0)
+        if gamma_bound <= 0.0:
+            self.net.bias.data[:channels].fill_(1.0)
+        # else: leave the gamma half of bias at 0 -- gamma_beta()'s tanh(0/R)=0
+        # already gives gamma≈1 at init, so no extra bias offset is needed (a
+        # fill_(1.0) here would instead start gamma≈1+R*tanh(1/R), off-identity).
+
+    def gamma_beta(self, cond: torch.Tensor):
+        params = self.net(cond)
+        raw_gamma, beta = params.chunk(2, dim=-1)
+        if self.gamma_bound > 0.0:
+            R = self.gamma_bound
+            gamma = 1.0 + R * torch.tanh(raw_gamma / R)
+        else:
+            gamma = raw_gamma
+        return gamma, beta
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        params = self.net(cond)
-        gamma, beta = params.chunk(2, dim=-1)
+        gamma, beta = self.gamma_beta(cond)
         gamma = gamma.unsqueeze(-1)
         beta = beta.unsqueeze(-1)
         return gamma * x + beta
@@ -206,8 +237,26 @@ def register_knob_boost_hooks(model: nn.Module, param_names: list[str],
 
 
 class A2Layer(nn.Module):
-    """Single A2 dilated conv layer with optional FiLM."""
-    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int):
+    """Single A2 dilated conv layer with optional FiLM.
+
+    spectral_norm: constrains conv/mixin/l1x1's spectral norm (Lipschitz bound) via
+    PyTorch's parametrization system -- see docs/film_runaway_investigation.md ("A2"),
+    the fix that actually addresses the traced blow-up mechanism (unbounded gain
+    compounding through these three stages across the 23-layer residual stack).
+    Default False: existing checkpoints/training runs are unaffected until opted in.
+    Applying it to ALL THREE stages (not just conv/l1x1) matters -- omitting `mixin`
+    (the direct 1x1 injection of the raw audio input) leaves an unbounded parallel
+    path into the residual stream that the other two bounds don't cover.
+
+    NOTE: while this flag is set, `.weight` on these three submodules is a COMPUTED
+    property (from the parametrization's `weight_orig`/power-iteration buffers), not a
+    plain leaf Parameter -- code that does `.weight.data.copy_(...)` or in-place
+    `.weight.mul_(...)` on them (state-dict loading, nam_standard.fold_film()) will
+    silently target the wrong thing. ParametricA2.export_nam() strips this back to a
+    plain already-bounded weight via _bake_spectral_norm() before either ever runs.
+    """
+    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int,
+                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
         super().__init__()
         # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
         # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
@@ -221,10 +270,17 @@ class A2Layer(nn.Module):
         # bit-equal on CPU against the pad-then-crop form; state-dict layout unchanged --
         # padding is not a parameter.)
         self.pad = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
-        self.mixin = nn.Conv1d(1, channels, 1, bias=False)
-        self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
-        self.l1x1 = nn.Conv1d(channels, channels, 1)
+        conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
+        mixin = nn.Conv1d(1, channels, 1, bias=False)
+        l1x1 = nn.Conv1d(channels, channels, 1)
+        if spectral_norm:
+            conv = apply_spectral_norm(conv)
+            mixin = apply_spectral_norm(mixin)
+            l1x1 = apply_spectral_norm(l1x1)
+        self.conv = conv
+        self.mixin = mixin
+        self.l1x1 = l1x1
+        self.film = FiLM(channels, cond_dim, gamma_bound=film_gamma_bound) if cond_dim > 0 else None
 
     def forward(self, x: torch.Tensor, inp_audio: torch.Tensor, cond: torch.Tensor):
         """Returns (residual_out, post_activation). post_activation is the pre-layer1x1
@@ -303,13 +359,19 @@ class ParametricA2(nn.Module):
     Architecture matches the C++ A2FastModel with additional FiLM layers
     for parametric knob control.
     """
-    def __init__(self, channels: int, num_params: int):
+    def __init__(self, channels: int, num_params: int,
+                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
+        # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
+        # anything to strip -- see docs/film_runaway_investigation.md ("A1"/"A2").
+        self.spectral_norm = spectral_norm
+        self.film_gamma_bound = film_gamma_bound
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
-            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
+            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params,
+                    spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -412,8 +474,50 @@ class ParametricA2(nn.Module):
     def load_weights(self, weights: list[float]):
         self._load_weight_block(iter(weights))
 
+    def _bake_spectral_norm(self) -> "ParametricA2":
+        """Build a fresh, plain (non-parametrized) copy of this model with conv/mixin/
+        l1x1's CURRENT computed (already spectral-norm-bounded) weights baked in as
+        ordinary leaf Parameters -- see docs/film_runaway_investigation.md ("A2"). Must
+        run before anything reads `.weight` as a plain leaf tensor: `_export_weight_block()`
+        (below), `nam_standard.fold_film()`'s in-place `.mul_()`, and `load_weights()`'s
+        reconstruction from exported floats all assume that shape.
+
+        NOT `copy.deepcopy(self)` + `remove_parametrizations(..., leave_parametrized=True)`:
+        confirmed empirically that stripping a parametrization off a deep copy of a
+        spectral_norm-wrapped Conv1d corrupts the ORIGINAL module too (`is_parametrized`
+        still reports True for it, but its next forward() raises `AttributeError: ...
+        has no attribute 'weight'` anyway) -- a torch.nn.utils.parametrize internals
+        quirk, not something we can rely on. Building fresh and copying computed VALUES
+        only ever *reads* the live model (confirmed side-effect-free), so a model
+        mid-training keeps working normally (and can still be resumed/optimized) after
+        an intermediate export.
+        """
+        if not self.spectral_norm:
+            return self
+        baked = ParametricA2(self.channels, self.num_params,
+                             spectral_norm=False, film_gamma_bound=self.film_gamma_bound)
+        with torch.no_grad():
+            baked.rechannel.weight.copy_(self.rechannel.weight)
+            baked.head.weight.copy_(self.head.weight)
+            baked.head.bias.copy_(self.head.bias)
+            baked.head_scale.copy_(self.head_scale)
+            for src, dst in zip(self.layers, baked.layers):
+                dst.conv.weight.copy_(src.conv.weight)
+                dst.conv.bias.copy_(src.conv.bias)
+                dst.mixin.weight.copy_(src.mixin.weight)
+                dst.l1x1.weight.copy_(src.l1x1.weight)
+                dst.l1x1.bias.copy_(src.l1x1.bias)
+                if src.film is not None:
+                    dst.film.net.weight.copy_(src.film.net.weight)
+                    dst.film.net.bias.copy_(src.film.net.bias)
+        return baked
+
     def export_nam(self, config: dict, metadata: dict, sample_rate: int,
                    input_audio: "np.ndarray | None" = None) -> dict:
+        # Rebinding the local `self` (not mutating the instance) so every existing
+        # line below transparently reads/exports from the baked copy when this model
+        # was trained with spectral_norm=True; a no-op (returns self) otherwise.
+        self = self._bake_spectral_norm()
         weights = self.export_weights()
 
         # Compute gain: run at default knobs (all 0.5), target -18 dBFS output.
@@ -479,6 +583,14 @@ class ParametricA2(nn.Module):
                 "head_mode": "skip",
                 "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
                 "parameters": param_defs,
+                # A1 (docs/film_runaway_investigation.md): 0.0 = off, today's raw unbounded
+                # gamma. NOT a weight -- gamma_beta()'s bound is a forward-pass formula, so
+                # this MUST travel with the export for any reconstruction (bake_nam.py,
+                # scan_film_runaway.py) to apply the same formula the model was trained
+                # with; a reconstruction that silently defaults to 0.0 here would replay an
+                # unbounded gamma over correctly-trained-bounded weights and diverge from
+                # what training actually produced.
+                "film_gamma_bound": self.film_gamma_bound,
             },
         }
         now = datetime.datetime.now()
@@ -546,10 +658,15 @@ class SlimmableParametricA2(nn.Module):
     index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
     2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
     """
-    def __init__(self, num_params: int, widths=None):
+    def __init__(self, num_params: int, widths=None,
+                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
+        # Both flags: see docs/film_runaway_investigation.md ("A1"/"A2"). Passed
+        # through identically to every tier -- the runaway was found across widths
+        # (Tweed's 8ch full tier and DS-1's 8ch tier both), not one specific tier.
+        kw = dict(spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
@@ -559,12 +676,12 @@ class SlimmableParametricA2(nn.Module):
             # `full` role (widest == only tier) so it saves as best.pt / `full.` state
             # keys and exports as a 1-submodel container. `lite` is absent.
             self.lite = None
-            self.full = ParametricA2(self.widths[0], num_params)
+            self.full = ParametricA2(self.widths[0], num_params, **kw)
             self.mid = nn.ModuleList()
         else:
-            self.lite = ParametricA2(self.widths[0], num_params)
-            self.full = ParametricA2(self.widths[-1], num_params)
-            self.mid = nn.ModuleList(ParametricA2(w, num_params) for w in self.widths[1:-1])
+            self.lite = ParametricA2(self.widths[0], num_params, **kw)
+            self.full = ParametricA2(self.widths[-1], num_params, **kw)
+            self.mid = nn.ModuleList(ParametricA2(w, num_params, **kw) for w in self.widths[1:-1])
 
     @property
     def submodels(self):
@@ -1306,6 +1423,24 @@ def main():
                     help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
                          "(default: 3,8). Narrowest = lite tier, widest = full tier; "
                          "middle tiers logged/checkpointed as w<N>.")
+    ap.add_argument("--spectral-norm", action="store_true",
+                    help="Constrain every A2Layer's conv/mixin/l1x1 to spectral norm <=1 "
+                         "(Lipschitz-bounded), closing the unbounded gain-compounding "
+                         "mechanism behind the FiLM/LeakyReLU runaway instability -- see "
+                         "docs/film_runaway_investigation.md ('A2'). Default off: existing "
+                         "training runs are unaffected until opted in and validated "
+                         "(measure aggregate + per-perm ESR before/after on a per-model "
+                         "basis; this is a real capacity constraint, not free). Combine "
+                         "with --film-gamma-bound for the full guarantee -- A2 alone can "
+                         "still be defeated by an unbounded gamma sitting between two of "
+                         "its bounded stages.")
+    ap.add_argument("--film-gamma-bound", type=float, default=0.0,
+                    help="Bound FiLM's gamma to (1-R, 1+R) via gamma = 1 + R*tanh(raw/R), "
+                         "R = this value (e.g. 32.0; 0.0 = off, today's unbounded gamma). "
+                         "See docs/film_runaway_investigation.md ('A1'). Cheap and mostly "
+                         "harmless alone (near-identity for R chosen above the observed "
+                         "benign gamma range) but NOT sufficient by itself against the "
+                         "runaway -- combine with --spectral-norm.")
     ap.add_argument("--per-tier-clip", action="store_true",
                     help="Slimmable only: clip_grad_norm_ EACH tier's own parameters "
                          "separately (each to --clip-norm) instead of one joint call over "
@@ -1424,7 +1559,9 @@ def main():
     # Build model
     # ------------------------------------------------------------------
     num_params = dataset.num_params
-    model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths))
+    model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
+                                  spectral_norm=args.spectral_norm,
+                                  film_gamma_bound=args.film_gamma_bound)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)

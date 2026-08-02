@@ -43,10 +43,17 @@ def load_widest_submodel(nam_path: str):
     subs = d["config"]["submodels"]
     sub = subs[-1]  # widest tier (SlimmableContainer stores ascending by max_value)
     channels = sub["model"]["config"]["layers"]
-    param_metas = sub["model"]["config"]["parametric"]["parameters"]
+    parametric = sub["model"]["config"]["parametric"]
+    param_metas = parametric["parameters"]
     param_names = [p["name"] for p in param_metas]
     weights = sub["model"]["weights"]
-    model = ParametricA2(channels=channels, num_params=len(param_names))
+    # film_gamma_bound is a forward-pass formula parameter (docs/film_runaway_investigation.md,
+    # "A1"), not a weight -- must be read back from the export or this reconstruction would
+    # silently apply the wrong (unbounded) gamma to a model actually trained bounded, which
+    # would corrupt exactly the thing this scanner exists to check. 0.0 (off) for older exports.
+    film_gamma_bound = float(parametric.get("film_gamma_bound", 0.0))
+    model = ParametricA2(channels=channels, num_params=len(param_names),
+                         film_gamma_bound=film_gamma_bound)
     expected = model.weight_count()
     if len(weights) != expected:
         raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "
