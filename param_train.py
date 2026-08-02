@@ -1949,7 +1949,12 @@ def main():
     for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
                                  model.tier_labels(), model.submodels):
         ch = sm_data["model"]["config"]["layers"]
-        m2 = ParametricA2(ch, num_params)
+        # film_gamma_bound (docs/film_runaway_investigation.md, "A1") is a forward-pass formula
+        # parameter, not a weight -- reconstructing with the default (0.0/unbounded) here while
+        # `src` was trained bounded is a REAL divergence, not export corruption. Same bug class
+        # already fixed in export_checkpoint.py/param_infer.py; missed here originally.
+        film_gamma_bound = float(sm_data["model"]["config"]["parametric"].get("film_gamma_bound", 0.0))
+        m2 = ParametricA2(ch, num_params, film_gamma_bound=film_gamma_bound)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():
