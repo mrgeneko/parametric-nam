@@ -635,6 +635,14 @@ def main():
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
+    g.add_argument("--timeout-mult", type=float, default=1.0,
+                   help="Scale batch_harness.py's auto-computed per-permutation timeout "
+                        "(default: %(default)s). Some circuits have a genuine, reproducible "
+                        "solver slowdown at specific corners (e.g. the EVH 5150 family at low "
+                        "Lead Pre, ~20-40x slower without ever actually diverging) -- set this "
+                        "per-circuit via `timeout-mult = N` in --config once measured, rather "
+                        "than discovering it from a failed run and re-running with the flag. "
+                        "Forwarded to batch_harness.py.")
     g.add_argument("--skip-transient-check", action="store_true",
                    help="Skip batch_harness.py's pre-generation transient/saturation coverage "
                         "gate -- see docs/film_runaway_investigation.md. Forwarded to batch_harness.py.")
@@ -886,6 +894,7 @@ def main():
             if args.skip_transient_check: gen_cmd += ["--skip-transient-check"]
             if args.transient_peak is not None: gen_cmd += ["--transient-peak", args.transient_peak]
             if args.transient_margin != 1.0: gen_cmd += ["--transient-margin", args.transient_margin]
+            if args.timeout_mult != 1.0: gen_cmd += ["--timeout-mult", args.timeout_mult]
             if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
             if args.koren:         gen_cmd += ["--koren"]
             if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
