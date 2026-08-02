@@ -248,15 +248,28 @@ class A2Layer(nn.Module):
     (the direct 1x1 injection of the raw audio input) leaves an unbounded parallel
     path into the residual stream that the other two bounds don't cover.
 
-    NOTE: while this flag is set, `.weight` on these three submodules is a COMPUTED
-    property (from the parametrization's `weight_orig`/power-iteration buffers), not a
-    plain leaf Parameter -- code that does `.weight.data.copy_(...)` or in-place
-    `.weight.mul_(...)` on them (state-dict loading, nam_standard.fold_film()) will
-    silently target the wrong thing. ParametricA2.export_nam() strips this back to a
-    plain already-bounded weight via _bake_spectral_norm() before either ever runs.
+    NOTE: while spectral_norm is applied (see enable_spectral_norm() below), `.weight` on
+    these three submodules is a COMPUTED property (from the parametrization's `weight_orig`/
+    power-iteration buffers), not a plain leaf Parameter -- code that does `.weight.data.
+    copy_(...)` or in-place `.weight.mul_(...)` on them (state-dict loading, nam_standard.
+    fold_film()) will silently target the wrong thing. ParametricA2.export_nam() strips this
+    back to a plain already-bounded weight via _bake_spectral_norm() before either ever runs.
+
+    Construction ALWAYS builds plain conv/mixin/l1x1 -- spectral_norm wrapping, if wanted, is
+    applied via a SEPARATE, later call to enable_spectral_norm(), not here. Why: spectral_norm's
+    power-iteration buffers (`_u`/`_v`) are randomly initialized, consuming extra draws from the
+    shared global RNG stream. Wrapping inline here would shift every LATER layer's (and, for
+    SlimmableParametricA2, every later TIER's) weight initialization relative to an otherwise-
+    identical unconstrained run with the same seed -- confirmed empirically (2026-08-02):
+    with spectral_norm applied inline, `head.weight` differed between two SlimmableParametricA2
+    instances built with identical torch.manual_seed() calls, purely because of this. Deferring
+    the wrap to after ALL of a model's raw modules exist (see ParametricA2.enable_spectral_norm()
+    and SlimmableParametricA2.__init__) makes every real parameter's initial value bit-identical
+    to an unconstrained run with the same seed, isolating A2's actual training-time effect from
+    an accidental initialization-lottery difference in side-by-side comparisons.
     """
     def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int,
-                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
+                film_gamma_bound: float = 0.0):
         super().__init__()
         # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
         # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
@@ -270,17 +283,17 @@ class A2Layer(nn.Module):
         # bit-equal on CPU against the pad-then-crop form; state-dict layout unchanged --
         # padding is not a parameter.)
         self.pad = (kernel_size - 1) * dilation
-        conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
-        mixin = nn.Conv1d(1, channels, 1, bias=False)
-        l1x1 = nn.Conv1d(channels, channels, 1)
-        if spectral_norm:
-            conv = apply_spectral_norm(conv)
-            mixin = apply_spectral_norm(mixin)
-            l1x1 = apply_spectral_norm(l1x1)
-        self.conv = conv
-        self.mixin = mixin
-        self.l1x1 = l1x1
+        self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
+        self.mixin = nn.Conv1d(1, channels, 1, bias=False)
+        self.l1x1 = nn.Conv1d(channels, channels, 1)
         self.film = FiLM(channels, cond_dim, gamma_bound=film_gamma_bound) if cond_dim > 0 else None
+
+    def enable_spectral_norm(self):
+        """Wrap conv/mixin/l1x1 with spectral_norm. Call ONLY after every raw module this
+        model will ever have already exists -- see the class docstring."""
+        self.conv = apply_spectral_norm(self.conv)
+        self.mixin = apply_spectral_norm(self.mixin)
+        self.l1x1 = apply_spectral_norm(self.l1x1)
 
     def forward(self, x: torch.Tensor, inp_audio: torch.Tensor, cond: torch.Tensor):
         """Returns (residual_out, post_activation). post_activation is the pre-layer1x1
@@ -366,12 +379,12 @@ class ParametricA2(nn.Module):
         self.num_params = num_params
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
         # anything to strip -- see docs/film_runaway_investigation.md ("A1"/"A2").
-        self.spectral_norm = spectral_norm
+        self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
         self.film_gamma_bound = film_gamma_bound
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
             A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params,
-                    spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
+                    film_gamma_bound=film_gamma_bound)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -384,6 +397,20 @@ class ParametricA2(nn.Module):
         # bit-alignment with the whole NAM ecosystem. Weight shapes are unchanged.
         self.head = nn.Conv1d(channels, 1, K_HEAD_KERNEL)
         self.head_scale = nn.Parameter(torch.tensor(1.0))
+        # Applied LAST, after every raw module above already exists -- see A2Layer's docstring
+        # for why (spectral_norm's extra RNG draws must not land between other parameters'
+        # initialization). Standalone-construction convenience only: SlimmableParametricA2
+        # does NOT rely on this (it always passes spectral_norm=False here and calls
+        # enable_spectral_norm() itself afterward, once, across ALL tiers -- see its __init__).
+        if spectral_norm:
+            self.enable_spectral_norm()
+
+    def enable_spectral_norm(self):
+        """Wrap every layer's conv/mixin/l1x1 with spectral_norm. Call only after every raw
+        module this instance will ever have already exists (see A2Layer.enable_spectral_norm())."""
+        for layer in self.layers:
+            layer.enable_spectral_norm()
+        self.spectral_norm = True
 
     def forward(self, audio: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         x = self.rechannel(audio)
@@ -663,10 +690,11 @@ class SlimmableParametricA2(nn.Module):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
-        # Both flags: see docs/film_runaway_investigation.md ("A1"/"A2"). Passed
-        # through identically to every tier -- the runaway was found across widths
-        # (Tweed's 8ch full tier and DS-1's 8ch tier both), not one specific tier.
-        kw = dict(spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
+        # film_gamma_bound: see docs/film_runaway_investigation.md ("A1"). Passed through
+        # identically to every tier -- the runaway was found across widths (Tweed's 8ch full
+        # tier and DS-1's 8ch tier both), not one specific tier. spectral_norm is DELIBERATELY
+        # NOT passed here (always False per-tier) -- see below.
+        kw = dict(spectral_norm=False, film_gamma_bound=film_gamma_bound)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
@@ -682,6 +710,17 @@ class SlimmableParametricA2(nn.Module):
             self.lite = ParametricA2(self.widths[0], num_params, **kw)
             self.full = ParametricA2(self.widths[-1], num_params, **kw)
             self.mid = nn.ModuleList(ParametricA2(w, num_params, **kw) for w in self.widths[1:-1])
+        # spectral_norm applied HERE, in one pass across every tier, only after every tier's raw
+        # modules already exist -- see A2Layer's docstring (docs/film_runaway_investigation.md,
+        # "A2"). Each ParametricA2 above was built with spectral_norm=False specifically so this
+        # is the ONLY point any spectral_norm-related RNG draw happens; doing it per-tier during
+        # construction (the old behavior) would shift the LATER tiers' raw weight initialization
+        # relative to an otherwise-identical unconstrained run with the same seed -- confirmed
+        # empirically (2026-08-02): `full.head.weight` differed between two SlimmableParametricA2
+        # instances built with identical torch.manual_seed() calls, purely from this ordering.
+        if spectral_norm:
+            for m in self.submodels:
+                m.enable_spectral_norm()
 
     @property
     def submodels(self):
