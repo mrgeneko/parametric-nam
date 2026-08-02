@@ -532,7 +532,10 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
              f"(only {len(rows) - len(failed)} succeeded):"]
     for r in failed:
         knobs = ", ".join(f"{k}={v}" for k, v in r.items() if k not in skip_cols)
-        lines.append(f"  idx={r['idx']}  {knobs}  -> {r.get('error', '?')}")
+        # r.get, not r['idx'] -- a malformed/headerless params.csv (batch_harness.py now repairs
+        # this case in place, but defend here too) makes every dict key garbage instead of raising
+        # cleanly; report what's missing rather than crashing on it.
+        lines.append(f"  idx={r.get('idx', '?')}  {knobs}  -> {r.get('error', '?')}")
     body = "\n".join(lines)
     if allow_missing:
         log(f"WARNING: proceeding with missing permutations (--allow-missing-perms):\n{body}", fh)

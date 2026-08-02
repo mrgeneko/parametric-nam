@@ -1752,6 +1752,15 @@ def main():
                     help="With --oversample auto: the truncation ESR to get under (default 1e-3). "
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
                          "not the limiting factor. A model cannot be more right than its target.")
+    ap.add_argument("--timeout-mult", type=float, default=1.0,
+                    help="Scale the auto-computed per-permutation timeout (default 1.0 = unscaled, "
+                         "e.g. 100s audio at oversample 8 -> 4000s). The timeout is not there because "
+                         "a stuck render is expected to hang forever -- it's a circuit-breaker so one "
+                         "slow-converging operating point can't stall the whole batch indefinitely; "
+                         "some real corners (e.g. a very low-gain amp setting) can be a genuine "
+                         "20-40x slower than typical without ever actually diverging. Raise this "
+                         "(e.g. 2.0-3.0) to retry permutations that timed out but were plausibly just "
+                         "slow, not stuck -- confirm with a direct timed re-render first.")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
     ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
     ap.add_argument("--bounds",  action="append", metavar="KNOB=lo,hi",
@@ -1933,11 +1942,11 @@ def main():
 
     # 10x realtime at the default 2x oversample; scale up with oversample since
     # sim cost is ~proportional to it (e.g. 32x -> ~160x audio length).
-    timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2)))
+    timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2) * args.timeout_mult))
     if args.backend == "ngspice":
         # ngspice adaptive sim can run ~5-50x realtime on stiff amps; be generous
         # (a divergent perm aborts near t=0 anyway, so this mainly guards hangs).
-        timeout_s = max(600, int(audio_frames / sr * 120))
+        timeout_s = max(600, int(audio_frames / sr * 120 * args.timeout_mult))
 
     bytes_per_perm = audio_frames * 4  # float32
     total_bytes = bytes_per_perm * len(perms) + in_wav.stat().st_size  # npy + sweep.wav copy
@@ -2057,7 +2066,7 @@ def main():
                 args.speaker, args.trunc_target, backend="ngspice", ng=ng,
                 workers=args.workers)
             ng["oversample"] = args.oversample
-            timeout_s = max(600, int(audio_frames / sr * 120 * max(1, args.oversample / 2)))
+            timeout_s = max(600, int(audio_frames / sr * 120 * max(1, args.oversample / 2) * args.timeout_mult))
 
         print(f"ngspice: netlist + filesource input ready ({'Koren' if args.koren else 'DempwolfZolzer'} "
               f"tubes, method={_method}, ot_damp={args.ot_damp}, oversample={args.oversample}x + anti-alias"
@@ -2112,7 +2121,32 @@ def main():
     (out_dir / "sweep.wav").write_bytes(in_wav.read_bytes())
 
     csv_path = out_dir / "params.csv"
-    fresh = not csv_path.exists()
+    # "fresh" used to mean bare existence -- if a stale/partial params.csv from an interrupted
+    # earlier run (different excitation/config, or killed before writing a single row) already
+    # sat in this dataset dir, existence alone was true and the header got silently skipped
+    # forever. Every later row then landed in a file with NO header, and any downstream
+    # csv.DictReader (e.g. run_pipeline.py's check_missing_permutations) silently misreads the
+    # first DATA row as the header -- every dict key becomes garbage, no error until something
+    # tries r['idx'] and KeyErrors. (2026-08-02: hit exactly this on the EVH 5150 v30 dataset --
+    # a killed first attempt left a headerless params.csv the resumed run appended onto.)
+    #
+    # Check content, not just existence, and REPAIR in place if headerless (append-mode alone
+    # would land a new header AFTER the stale rows, not fix the ordering) -- read what's there,
+    # rewrite with the header first, so old rows survive and a fresh DictReader downstream works.
+    fresh = True
+    if csv_path.exists() and csv_path.stat().st_size > 0:
+        with open(csv_path, newline="") as _f:
+            first_line = _f.readline()
+            existing_body = first_line + _f.read()
+        fresh = not first_line.startswith("idx,")
+        if fresh:
+            print(f"WARNING: {csv_path} exists but has no header (stale/interrupted prior run?) "
+                  f"-- repairing in place (prepending the header, keeping existing rows)",
+                  file=sys.stderr)
+            header = ",".join(["idx"] + knobs +
+                              ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver"])
+            csv_path.write_text(header + "\n" + existing_body)
+            fresh = False  # header now written by the repair above; append normally from here
     csv_fh = open(csv_path, "a", newline="")
     csv_w = csv.writer(csv_fh)
     if fresh:
