@@ -1733,6 +1733,22 @@ def main():
                          "the host renders a stepped control and quantizes to N positions. Set "
                          "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
+    ap.add_argument("--skip-transient-check", action="store_true",
+                    help="skip the pre-generation transient/saturation coverage gate (livespice "
+                         "backend only). See docs/film_runaway_investigation.md: this refuses to "
+                         "start generation if the excitation's transient-bearing content never "
+                         "reaches saturation at some knob-grid corner (checked via "
+                         "tools/check_transient_coverage.py against a reduced hypercube corner "
+                         "set) -- exactly the gap that under-covered Tweed 5F6-A's high-gain "
+                         "corners and produced a 80-260x FiLM/LeakyReLU runaway there.")
+    ap.add_argument("--transient-peak", type=float, default=None,
+                    help="excitation's transient/real-playing segment peak, in volts at "
+                         "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "
+                         "build_excitation.py's --realistic-peak). Required for the transient "
+                         "check unless a recipe sidecar exists.")
+    ap.add_argument("--transient-margin", type=float, default=1.0,
+                    help="transient check: require transient-peak >= per-corner onset * this "
+                         "(default 1.0 = must just reach onset)")
     ap.add_argument("--defaults", help="per-knob DEFAULT value, k=v,... (in trained units). "
                     "Recorded in the .nam's parameters[].default so a bake with no --params "
                     "uses the circuit's real default position, not the range midpoint "
@@ -1991,6 +2007,36 @@ def main():
         if len(perms) > 5:
             print(f"  ... and {len(perms) - 5} more")
         return
+
+    # ------------------------------------------------------------------
+    # Transient/saturation coverage gate (see docs/film_runaway_investigation.md).
+    # Hard-fails BEFORE the (slow, expensive) generation run starts if the excitation's
+    # transient-bearing content never reaches saturation at some knob-grid corner --
+    # exactly the gap that under-covered Tweed 5F6-A and produced the FiLM/LeakyReLU
+    # runaway there, found only after a full ~16h training run. Only supported for the
+    # livespice backend (tools/preflight.py's find_saturation_point is livespice_cli-only).
+    # ------------------------------------------------------------------
+    if not args.skip_transient_check and args.backend == "livespice" and not args.random:
+        from tools.check_transient_coverage import check_coverage, _transient_peak_from_recipe
+        transient_peak = args.transient_peak
+        if transient_peak is None:
+            transient_peak = _transient_peak_from_recipe(in_wav)
+        if transient_peak is None:
+            print(f"Transient check: SKIPPED -- no --transient-peak given and no "
+                  f"{in_wav.with_suffix('.recipe.json').name} sidecar found. Pass --transient-peak "
+                  f"explicitly (the value used for build_excitation.py's --realistic-peak), or "
+                  f"--skip-transient-check to proceed unchecked.", file=sys.stderr)
+            sys.exit(1)
+        fixed_kv = {}
+        for kv in filter(None, (s.strip() for s in (args.fixed_params or "").split(","))):
+            k, v = kv.split("="); fixed_kv[k.strip()] = float(v)
+        result = check_coverage(schx, values_per_knob, fixed_kv,
+                                args.oversample, transient_peak, margin=args.transient_margin)
+        print()
+        if not result["ok"]:
+            print("Transient check FAILED -- refusing to start generation (--skip-transient-check "
+                  "to override). See the per-corner report above.", file=sys.stderr)
+            sys.exit(1)
 
     if args.backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)

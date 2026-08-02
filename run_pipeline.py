@@ -635,6 +635,14 @@ def main():
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
+    g.add_argument("--skip-transient-check", action="store_true",
+                   help="Skip batch_harness.py's pre-generation transient/saturation coverage "
+                        "gate -- see docs/film_runaway_investigation.md. Forwarded to batch_harness.py.")
+    g.add_argument("--transient-peak", type=float, default=None,
+                   help="Excitation's transient-segment peak, volts (auto from <input>.recipe.json "
+                        "if omitted). Forwarded to batch_harness.py.")
+    g.add_argument("--transient-margin", type=float, default=1.0,
+                   help="Transient check margin (default: %(default)s). Forwarded to batch_harness.py.")
     g.add_argument("--defaults", help="Per-knob baked-tone default k=v,... (in trained units); "
                    "recorded in the .nam so a no-args bake uses the circuit's real default")
     g.add_argument("--speaker",      help="Speaker name (e.g. S1)")
@@ -875,6 +883,9 @@ def main():
             if args.input:         gen_cmd += ["--input",        args.input]
             if args.values:        gen_cmd += ["--values",       args.values]
             if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
+            if args.skip_transient_check: gen_cmd += ["--skip-transient-check"]
+            if args.transient_peak is not None: gen_cmd += ["--transient-peak", args.transient_peak]
+            if args.transient_margin != 1.0: gen_cmd += ["--transient-margin", args.transient_margin]
             if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
             if args.koren:         gen_cmd += ["--koren"]
             if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]

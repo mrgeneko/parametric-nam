@@ -44,7 +44,11 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from run_pipeline import load_config  # noqa: E402
-from preflight import find_saturation_point, _findpeak_cache_path  # noqa: E402
+# Package-qualified (not `from preflight import ...`): direct script execution auto-adds HERE
+# (tools/) to sys.path so either form works, but importing this module as tools.check_transient_
+# coverage (e.g. from batch_harness.py) does NOT add tools/ itself -- only `from run_pipeline
+# import ...` above (repo root) would resolve; `preflight` bare would 404. This form works both ways.
+from tools.preflight import find_saturation_point, _findpeak_cache_path  # noqa: E402
 
 SR = 48000
 
@@ -81,6 +85,63 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
         return float(recipe["args"]["realistic_peak"])
     except (KeyError, ValueError, json.JSONDecodeError):
         return None
+
+
+def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
+                   transient_peak: float, margin: float = 1.0, iterations: int = 256,
+                   peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False) -> dict:
+    """Core check, importable directly (batch_harness.py's hard gate uses this in-process --
+    no subprocess, no re-parsing a config, and it can't be silently skipped by someone calling
+    batch_harness.py without going through run_pipeline.py / this tool's own CLI first).
+
+    Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
+    couldn't be determined (a render failure is not a pass -- see main()'s same convention).
+    """
+    corners = _corners(knob_ranges)
+    if not quiet:
+        print(f"Transient saturation coverage: {Path(schx).name}")
+        print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners (reduced "
+              f"hypercube set)  margin={margin}x\n")
+
+    rows = []
+    with tempfile.TemporaryDirectory() as scratch:
+        for label, vals in corners:
+            params = dict(vals); params.update(fixed)
+            cpath = _findpeak_cache_path(schx, params, oversample, iterations, peak_max_v)
+            if cpath.exists() and not no_cache:
+                sat = json.loads(cpath.read_text())
+            else:
+                sat = find_saturation_point(schx, params, oversample, iterations,
+                                            scratch, max_v=peak_max_v)
+                if sat is not None:
+                    cpath.write_text(json.dumps(sat))
+            onset = sat.get("onset_99pct_input_v") if sat else None
+            if onset is None:
+                status = "SKIP (onset not bracketed / render failed)"
+                ok = None
+            else:
+                ok = transient_peak >= onset * margin
+                status = "OK" if ok else "FAIL -- transient never reaches saturation here"
+            if not quiet:
+                print(f"  {label:16} onset={onset if onset is None else f'{onset:.3f} V':>10}  {status}")
+            rows.append({"corner": label, "params": params, "onset_v": onset, "ok": ok})
+
+    failed = [r for r in rows if r["ok"] is False]
+    skipped = [r for r in rows if r["ok"] is None]
+    if not quiet:
+        print()
+        if failed:
+            print(f"FAILED: {len(failed)}/{len(rows)} corners never see a transient past their own "
+                  f"saturation onset -- the model can go out-of-distribution there on real playing. "
+                  f"Raise --realistic-peak (build_excitation.py) past the highest FAILED onset, or "
+                  f"lengthen --realistic-dur for more varied transient shapes, and rebuild.")
+        if skipped:
+            print(f"WARNING: {len(skipped)}/{len(rows)} corners' onset could not be determined "
+                  f"(render failures or onset above --peak-max-v) -- treat as unverified, not passing.")
+        if not failed and not skipped:
+            print(f"PASSED: transient content reaches saturation at every checked corner.")
+
+    return {"ok": not (failed or skipped), "rows": rows}
 
 
 def main():
@@ -123,54 +184,18 @@ def main():
     for kv in filter(None, (s.strip() for s in (cfg.get("fixed_params") or "").split(","))):
         k, v = kv.split("="); fixed[k.strip()] = float(v)
 
-    corners = _corners(knob_ranges)
-    print(f"Transient saturation coverage: {Path(schx).name}")
-    print(f"  excitation: {input_wav.name}  transient peak = {transient_peak:.3f} V")
-    print(f"  {len(corners)} corners (reduced hypercube set)  margin={args.margin}x\n")
-
-    rows = []
-    with tempfile.TemporaryDirectory() as scratch:
-        for label, vals in corners:
-            params = dict(vals); params.update(fixed)
-            cpath = _findpeak_cache_path(schx, params, oversample, args.iterations, args.peak_max_v)
-            if cpath.exists() and not args.no_cache:
-                sat = json.loads(cpath.read_text())
-            else:
-                sat = find_saturation_point(schx, params, oversample, args.iterations,
-                                            scratch, max_v=args.peak_max_v)
-                if sat is not None:
-                    cpath.write_text(json.dumps(sat))
-            onset = sat.get("onset_99pct_input_v") if sat else None
-            if onset is None:
-                status = "SKIP (onset not bracketed / render failed)"
-                ok = None
-            else:
-                ok = transient_peak >= onset * args.margin
-                status = "OK" if ok else "FAIL -- transient never reaches saturation here"
-            print(f"  {label:16} onset={onset if onset is None else f'{onset:.3f} V':>10}  {status}")
-            rows.append({"corner": label, "params": params, "onset_v": onset, "ok": ok})
-
-    failed = [r for r in rows if r["ok"] is False]
-    skipped = [r for r in rows if r["ok"] is None]
-    print()
-    if failed:
-        print(f"FAILED: {len(failed)}/{len(rows)} corners never see a transient past their own "
-              f"saturation onset -- the model can go out-of-distribution there on real playing. "
-              f"Raise --realistic-peak (build_excitation.py) past the highest FAILED onset, or "
-              f"lengthen --realistic-dur for more varied transient shapes, and rebuild.")
-    if skipped:
-        print(f"WARNING: {len(skipped)}/{len(rows)} corners' onset could not be determined "
-              f"(render failures or onset above --peak-max-v) -- treat as unverified, not passing.")
-    if not failed and not skipped:
-        print(f"PASSED: transient content reaches saturation at every checked corner.")
+    print(f"  excitation: {input_wav.name}")
+    result = check_coverage(schx, knob_ranges, fixed, oversample, transient_peak,
+                            margin=args.margin, iterations=args.iterations,
+                            peak_max_v=args.peak_max_v, no_cache=args.no_cache)
 
     if args.json:
         Path(args.json).write_text(json.dumps({
             "schx": schx, "input": str(input_wav), "transient_peak_v": transient_peak,
-            "margin": args.margin, "corners": rows,
+            "margin": args.margin, "corners": result["rows"],
         }, indent=2))
 
-    return 1 if (failed or skipped) else 0
+    return 0 if result["ok"] else 1
 
 
 if __name__ == "__main__":
