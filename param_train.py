@@ -1625,6 +1625,47 @@ def main():
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     model.to(device)
 
+    # --init-from MUST run (including its enable_spectral_norm() call) BEFORE film_params/
+    # other_params/optimizer are built below -- not just before the load, which was the
+    # original bug's near-miss fix. Reason: nn.Module.named_parameters()'s ENUMERATION ORDER
+    # differs between a plain and a spectral_norm-wrapped conv -- plain yields weight-then-bias
+    # (nn.Conv1d.__init__'s own registration order, both direct params); wrapped yields
+    # bias-then-weight_orig (bias stays a direct param, weight moves into a `parametrizations`
+    # submodule, and named_parameters() yields a module's own direct params before recursing
+    # into submodules). The optimizer's state dict is POSITION-indexed, not name-indexed, so if
+    # the optimizer's param list were captured in PLAIN order (built before wrapping, the
+    # original code's order) and a LATER --resume of this same run builds ITS optimizer in
+    # WRAPPED order (spectral_norm=True from construction, since --init-from is None on
+    # resume), positions silently swap. Confirmed empirically (2026-08-03): the first
+    # --resume after a clip-then-fine-tune run crashed inside Adam's exp_avg.lerp_() with a
+    # shape mismatch, traced to exactly this. Doing the load+wrap here, before optimizer
+    # construction, means the optimizer's param order is captured in its FINAL (wrapped, if
+    # requested) form from the very first step -- consistent with what any future --resume of
+    # this exact run will also produce.
+    if args.init_from is not None:
+        if args.resume is not None:
+            sys.exit("--init-from and --resume are mutually exclusive: one starts a NEW run "
+                     "from old weights, the other continues an old run. Pick one.")
+        print(f"Warm start (weights only) from {args.init_from} ...", file=sys.stderr)
+        init_ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        try:
+            model.load_state_dict(init_ckpt["model"])
+        except RuntimeError as e:
+            sys.exit(f"--init-from checkpoint does not fit this model (widths/knob-count "
+                     f"mismatch?): {e}")
+        src_best = init_ckpt.get("best_esr_by_tier") or {"full": init_ckpt.get("best_esr")}
+        print(f"  Loaded weights (source run's best ESR: "
+              f"{ {k: round(v, 6) for k, v in src_best.items() if v is not None} }). "
+              f"Optimizer, schedule, and best-ESR tracking start FRESH.", file=sys.stderr)
+        if args.spectral_norm:
+            model.enable_spectral_norm()
+            print(f"  Applied --spectral-norm AFTER loading (clip-then-fine-tune retrofit, "
+                  f"docs/film_runaway_investigation.md 'A2') -- any conv/mixin/l1x1 layer whose "
+                  f"spectral norm exceeded 1 in the loaded weights is now clipped to 1; training "
+                  f"from here fine-tunes the whole model to adapt to the constraint, not just "
+                  f"the clipped layers.", file=sys.stderr)
+            model.to(device)
+
     # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
     # small (knob effects are subtle vs the overall signal), so at the shared LR
     # they under-learn and the knob goes near-dead.
@@ -1689,30 +1730,6 @@ def main():
                 best_esr["lite"] = ckpt["best_lite_esr"]; best_state["lite"] = ckpt.get("best_lite_state")
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
-
-    if args.init_from is not None:
-        if args.resume is not None:
-            sys.exit("--init-from and --resume are mutually exclusive: one starts a NEW run "
-                     "from old weights, the other continues an old run. Pick one.")
-        print(f"Warm start (weights only) from {args.init_from} ...", file=sys.stderr)
-        init_ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        try:
-            model.load_state_dict(init_ckpt["model"])
-        except RuntimeError as e:
-            sys.exit(f"--init-from checkpoint does not fit this model (widths/knob-count "
-                     f"mismatch?): {e}")
-        src_best = init_ckpt.get("best_esr_by_tier") or {"full": init_ckpt.get("best_esr")}
-        print(f"  Loaded weights (source run's best ESR: "
-              f"{ {k: round(v, 6) for k, v in src_best.items() if v is not None} }). "
-              f"Optimizer, schedule, and best-ESR tracking start FRESH.", file=sys.stderr)
-        if args.spectral_norm:
-            model.enable_spectral_norm()
-            print(f"  Applied --spectral-norm AFTER loading (clip-then-fine-tune retrofit, "
-                  f"docs/film_runaway_investigation.md 'A2') -- any conv/mixin/l1x1 layer whose "
-                  f"spectral norm exceeded 1 in the loaded weights is now clipped to 1; training "
-                  f"from here fine-tunes the whole model to adapt to the constraint, not just "
-                  f"the clipped layers.", file=sys.stderr)
-            model.to(device)
 
     open_ended = (args.epochs == 0)
 
