@@ -22,9 +22,19 @@ Usage:
   python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
       [--reference ~/Downloads/[redacted]-sweep-v3.wav] [--chunk-s 5.0] \
       [--flag-ratio 8.0] [--flag-abs 3.0]
+
+  # full trained grid instead of the reduced corner set (see docs/film_runaway_investigation.md
+  # for measured cost: the default reduced set is ~2 min for 13 corners on a 190s reference;
+  # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
+  # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
+  python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
+      --config configs/tweed-5f6-a-full-sag.toml
 """
 import argparse
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +44,8 @@ import torch
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from param_train import ParametricA2
+from run_pipeline import load_config
+from batch_harness import grid_permutations
 
 SR = 48000
 
@@ -77,6 +89,33 @@ def hypercube_corners(param_names):
     return corners
 
 
+def full_grid_corners(config_path, param_names):
+    """The FULL Cartesian product of --config's own [knobs] grid -- the exact permutations
+    batch_harness.py rendered for training (e.g. 972 for Tweed), not a reduced sample.
+    Needs --config because a .nam's own metadata only carries min/max/default per knob
+    (config.parametric.parameters), not the discrete grid VALUES actually trained on --
+    that's a batch_harness.py/config.toml-level fact this tool has no other way to recover.
+    """
+    cfg = load_config(Path(config_path))
+    knob_ranges = {}
+    for entry in cfg.get("ranges", []):
+        name, vals = entry.split("=", 1)
+        knob_ranges[name.strip()] = [float(v) for v in vals.split(",")]
+    missing = [n for n in param_names if n not in knob_ranges]
+    if missing:
+        raise SystemExit(f"--config's [knobs] is missing {missing} (has: {list(knob_ranges)}) "
+                         f"-- the .nam's own parameters are {param_names}")
+    perms = grid_permutations(param_names, knob_ranges)  # dicts keyed by param_names already
+    return [(",".join(f"{n}={p[n]:g}" for n in param_names), [p[n] for n in param_names])
+            for p in perms]
+
+
+def _batched(seq, n):
+    it = iter(seq)
+    while batch := list(islice(it, n)):
+        yield batch
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nam", required=True)
@@ -86,7 +125,33 @@ def main():
                     help="flag a window if its peak exceeds this multiple of the model's own median peak")
     ap.add_argument("--flag-abs", type=float, default=3.0,
                     help="...AND exceeds this absolute volts floor (avoids flagging near-silent models)")
+    ap.add_argument("--config", default=None,
+                    help="per-circuit TOML -- if given, scan the FULL trained grid (exact "
+                         "permutations batch_harness.py rendered, e.g. 972 for Tweed) instead "
+                         "of the reduced hypercube corner set. Needs --batch-size's batching "
+                         "to stay fast at that scale -- see the module docstring for measured cost.")
+    ap.add_argument("--batch-size", type=int, default=64,
+                    help="corners per batched forward call (default: %(default)s). Batching "
+                         "across corners (not just chunks) is what makes --config's full-grid "
+                         "mode tractable -- one forward call per (chunk, batch-of-corners) pair "
+                         "instead of one per (chunk, corner).")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="concurrent (chunk, corner-batch) forward calls (default: cpu_count). "
+                         "This model is too narrow (few channels) for PyTorch's own intra-op "
+                         "threading to bother splitting a single conv1d across cores -- confirmed "
+                         "empirically (2026-08-02): a single scan used ~1.3 of 14 cores despite "
+                         "torch.get_num_threads()==10. Running independent forward calls "
+                         "concurrently across threads works instead, because PyTorch's C++ conv/ "
+                         "matmul kernels release the GIL during compute -- this is the same 'many "
+                         "small independent ops, not one big one' shape as batch_harness.py's "
+                         "render_many() ThreadPoolExecutor pattern, just for inference instead of "
+                         "subprocesses. torch.set_num_threads(1) below is required alongside this: "
+                         "without it, each of --workers concurrent calls would ALSO try to spawn "
+                         "its own intra-op threads, oversubscribing the machine.")
     args = ap.parse_args()
+
+    workers = args.workers or os.cpu_count() or 4
+    torch.set_num_threads(1)  # see --workers help: avoid oversubscribing against the thread pool
 
     model, param_names, channels = load_widest_submodel(args.nam)
     print(f"{Path(args.nam).name}: channels={channels} params={param_names}")
@@ -96,20 +161,35 @@ def main():
     if sr != SR:
         raise SystemExit(f"reference sr {sr} != {SR}")
 
-    corners = hypercube_corners(param_names)
+    corners = (full_grid_corners(args.config, param_names) if args.config
+              else hypercube_corners(param_names))
     chunk_n = int(args.chunk_s * SR)
     n_chunks = len(x) // chunk_n
+    n_batches = -(-len(corners) // args.batch_size)  # ceil
+    print(f"  scanning {len(corners)} corners x {n_chunks} chunks "
+          f"({n_batches} corner-batches/chunk, batch-size={args.batch_size}, workers={workers})"
+          f"{' [full grid]' if args.config else ' [reduced hypercube]'}")
 
+    def score(job):
+        c, batch = job
+        seg = x[c * chunk_n:(c + 1) * chunk_n]
+        B = len(batch)
+        inp = torch.from_numpy(seg).float().unsqueeze(0).unsqueeze(0).repeat(B, 1, 1)  # [B,1,T]
+        cond = torch.tensor([vals for _, vals in batch], dtype=torch.float32)          # [B,num_params]
+        with torch.no_grad():
+            pred = model(inp, cond)                                                    # [B,1,T]
+        pk = pred.abs().amax(dim=(1, 2))                                                # [B]
+        return [(float(pk[i]), label, c) for i, (label, _) in enumerate(batch)]
+
+    jobs = [(c, batch) for c in range(n_chunks) for batch in _batched(corners, args.batch_size)]
     results = []
-    with torch.no_grad():
-        for label, vals in corners:
-            cond = torch.tensor([vals], dtype=torch.float32)
-            for c in range(n_chunks):
-                seg = x[c * chunk_n:(c + 1) * chunk_n]
-                inp = torch.from_numpy(seg).float().reshape(1, 1, -1)
-                pred = model(inp, cond)[0, 0].numpy()
-                pk = float(np.abs(pred).max())
-                results.append((pk, label, c))
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for batch_results in ex.map(score, jobs):
+            results.extend(batch_results)
+            done += 1
+            if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
+                print(f"    {done}/{len(jobs)} corner-batches done")
 
     peaks = np.array([r[0] for r in results])
     median = float(np.median(peaks))
