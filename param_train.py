@@ -719,8 +719,17 @@ class SlimmableParametricA2(nn.Module):
         # empirically (2026-08-02): `full.head.weight` differed between two SlimmableParametricA2
         # instances built with identical torch.manual_seed() calls, purely from this ordering.
         if spectral_norm:
-            for m in self.submodels:
-                m.enable_spectral_norm()
+            self.enable_spectral_norm()
+
+    def enable_spectral_norm(self):
+        """Wrap every tier's conv/mixin/l1x1 with spectral_norm. Call only after every raw
+        module across every tier already exists -- see A2Layer.enable_spectral_norm(). Also
+        the entry point for the --init-from clip-then-fine-tune retrofit path: apply this
+        AFTER loading an old (unconstrained) checkpoint's weights, not before, so the initial
+        clip uses the trained weights rather than requiring load_state_dict() to match an
+        already-wrapped (and therefore differently-keyed) state dict."""
+        for m in self.submodels:
+            m.enable_spectral_norm()
 
     @property
     def submodels(self):
@@ -1598,8 +1607,18 @@ def main():
     # Build model
     # ------------------------------------------------------------------
     num_params = dataset.num_params
+    # --init-from + --spectral-norm (the "clip-then-fine-tune" retrofit path, docs/
+    # film_runaway_investigation.md "A2"): the checkpoint being warm-started from was trained
+    # WITHOUT spectral_norm, so its conv/mixin/l1x1 state_dict keys are plain (`.weight`), not
+    # the parametrized form (`.parametrizations.weight.original`/`._u`/`._v`). Building the model
+    # already-wrapped here would make the --init-from load below hard-fail on a key mismatch --
+    # see the same bug class already fixed in export_checkpoint.py/param_infer.py. Deferred to
+    # right after the load succeeds instead (enable_spectral_norm() there), which immediately
+    # clips any layer whose spectral norm exceeds 1 using the just-loaded trained weights as the
+    # starting point -- not a fresh random init, so fine-tuning under the now-active constraint
+    # only needs to ADAPT, not relearn the whole function.
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
-                                  spectral_norm=args.spectral_norm,
+                                  spectral_norm=(args.spectral_norm and args.init_from is None),
                                   film_gamma_bound=args.film_gamma_bound)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
@@ -1686,6 +1705,14 @@ def main():
         print(f"  Loaded weights (source run's best ESR: "
               f"{ {k: round(v, 6) for k, v in src_best.items() if v is not None} }). "
               f"Optimizer, schedule, and best-ESR tracking start FRESH.", file=sys.stderr)
+        if args.spectral_norm:
+            model.enable_spectral_norm()
+            print(f"  Applied --spectral-norm AFTER loading (clip-then-fine-tune retrofit, "
+                  f"docs/film_runaway_investigation.md 'A2') -- any conv/mixin/l1x1 layer whose "
+                  f"spectral norm exceeded 1 in the loaded weights is now clipped to 1; training "
+                  f"from here fine-tunes the whole model to adapt to the constraint, not just "
+                  f"the clipped layers.", file=sys.stderr)
+            model.to(device)
 
     open_ended = (args.epochs == 0)
 
