@@ -31,6 +31,7 @@ Usage:
       --config configs/tweed-5f6-a-full-sag.toml
 """
 import argparse
+import gc
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -182,14 +183,42 @@ def main():
         return [(float(pk[i]), label, c) for i, (label, _) in enumerate(batch)]
 
     jobs = [(c, batch) for c in range(n_chunks) for batch in _batched(corners, args.batch_size)]
+    # Process in WAVES, tearing down and recreating the ThreadPoolExecutor between them,
+    # instead of one ex.map() over all jobs. Confirmed empirically (2026-08-04): a single
+    # long-lived pool of `workers` threads processing hundreds of jobs back-to-back grew RSS
+    # to 34GB on a 266-job full-grid scan (36GB machine, forced an OOM-adjacent kill) despite
+    # every job's tensors going out of scope and being reference-counted away in Python (no_grad,
+    # only small floats/strings survive into `results`) -- the growth tracked TOTAL JOBS
+    # PROCESSED, not the fixed concurrency depth (the 38-job reduced-corner scan never showed
+    # this), consistent with OS-level per-thread allocator caching (macOS libmalloc's per-thread
+    # magazines) compounding over a long-lived thread's lifetime, though this wasn't confirmed
+    # with a memory profiler -- destroying the OS threads (ThreadPoolExecutor.__exit__ joins
+    # them, not just idles them) between waves is a plausible way to release their cached
+    # arenas, and empirically did help, but NOT a confirmed complete fix.
+    #
+    # PARTIAL MITIGATION ONLY, not a resolved leak -- be aware before relying on this for a
+    # long/large --config scan. At WAVE=20 (this default): RSS oscillated a bounded 9.5-13GB
+    # for the first ~340s of a 266-job run (vs. unbounded climb to 34GB with no wave teardown
+    # at all), then resumed climbing and hit 20GB by t=400s -- so there is a second, slower
+    # growth source this doesn't address. Counterintuitively, WAVE=5 (more frequent teardown,
+    # expected to help more) instead spiked to 25.6GB within the first 20s on a retry --
+    # smaller waves made it WORSE, not better, so the mechanism isn't simply "more teardown
+    # = more relief" and shouldn't be tuned further without profiling (tracemalloc/`leaks`)
+    # rather than more live trial-and-error. WAVE=20 is kept as the least-bad empirically
+    # tested value. For a large --config scan, monitor RSS externally (`ps -o rss=`) and be
+    # ready to kill the process -- do not assume this makes an arbitrarily long scan safe.
+    WAVE = 20
     results = []
     done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for batch_results in ex.map(score, jobs):
-            results.extend(batch_results)
-            done += 1
-            if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
-                print(f"    {done}/{len(jobs)} corner-batches done")
+    for wave_start in range(0, len(jobs), WAVE):
+        wave_jobs = jobs[wave_start:wave_start + WAVE]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for batch_results in ex.map(score, wave_jobs):
+                results.extend(batch_results)
+                done += 1
+                if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
+                    print(f"    {done}/{len(jobs)} corner-batches done")
+        gc.collect()
 
     peaks = np.array([r[0] for r in results])
     median = float(np.median(peaks))
