@@ -148,6 +148,14 @@ emit("GEAR_MAKE", cfg.get("gear_make", "?"))
 emit("GEAR_MODEL", cfg.get("gear_model", "?"))
 emit("GEAR_TYPE", cfg.get("gear_type", "?"))
 emit("N_SOURCE_FILES", len(cfg.get("source_nam_files") or []))
+# film_gamma_bound (docs/film_runaway_investigation.md "A1") is a forward-pass formula
+# parameter, not detectable from weight shapes the way spectral_norm is (export_checkpoint.py's
+# own detect_spectral_norm() comment) -- must be read back from args_dict and threaded through
+# explicitly, or export_checkpoint.py --compose silently defaults to 0.0 (unbounded gamma),
+# baking a DIFFERENT formula than the one actually trained. Confirmed missing (2026-08-04): a
+# real run against a spectral_norm=True, film_gamma_bound=32.0 checkpoint composed successfully
+# but with only a WARNING, not a failure -- the wrong value would have shipped silently.
+emit("FILM_GAMMA_BOUND", a.get("film_gamma_bound", 0.0))
 PY
 FACTS="$("$PY_BIN" "$TMPD/facts.py" "$CKPT" "$DS" "$RUN.log" "$HERE")"
 eval "$FACTS"
@@ -222,7 +230,7 @@ spec=""
 for t in "${TIERS[@]}"; do spec="${spec:+$spec,}$t=$(ckpt_of "$t")"; done
 echo "==> composing optimal container: $spec"
 "$PY_BIN" "$HERE/export_checkpoint.py" --compose "$spec" --dataset "$DS" \
-          --output "$RUN.optimal.param.nam"
+          --output "$RUN.optimal.param.nam" --film-gamma-bound "$FILM_GAMMA_BOUND"
 
 echo "==> validating the composite ..."
 "$PY_BIN" "$TMPD/validate.py" "$RUN" optimal || exit 1
@@ -254,7 +262,19 @@ _, val_ds = torch.utils.data.random_split(
     ds, [n_train, n_val], generator=torch.Generator().manual_seed(args["seed"]))
 loader = torch.utils.data.DataLoader(val_ds, batch_size=args["batch_size"],
                                      shuffle=False, num_workers=0)
-m = SlimmableParametricA2(len(ds.param_names), widths=widths).to(dev)
+# Must match the checkpoint's own training-time construction (docs/film_runaway_investigation.md
+# "A1+A2") or load_state_dict() can't match keys at all: a spectral_norm-trained checkpoint's
+# state dict carries "*.parametrizations.weight.original"/"_u"/"_v" keys that only exist once
+# enable_spectral_norm() has wrapped conv/mixin/l1x1 -- a plain (unwrapped) construction has
+# "*.weight" directly instead, a hard mismatch, not a numerical difference. Confirmed via a real
+# add_run.sh run against a spectral_norm=True checkpoint (2026-08-04): the old unconditional
+# `SlimmableParametricA2(..., widths=widths)` here crashed load_state_dict with every conv/
+# mixin/l1x1 key mismatched. film_gamma_bound is passed through too since it's an ordinary,
+# already-supported constructor arg (see SlimmableParametricA2.__init__) -- the incomplete part
+# of A1 is the separate C++ live-playback path, not this pure-Python export/verify step.
+m = SlimmableParametricA2(len(ds.param_names), widths=widths,
+                          spectral_norm=args.get("spectral_norm", False),
+                          film_gamma_bound=args.get("film_gamma_bound", 0.0)).to(dev)
 labels = m.tier_labels()
 
 def state(p):
