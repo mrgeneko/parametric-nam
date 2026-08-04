@@ -1774,9 +1774,17 @@ def main():
     else:
         print(f"\nTraining {args.epochs} epochs ...", file=sys.stderr)
     if log_csv is not None:
+        # "a" if args.resume assumed --resume always continues the SAME metrics.csv a prior
+        # run of THIS checkpoint-dir already wrote a header into -- false when --resume points
+        # at a checkpoint from a DIFFERENT run/checkpoint-dir (e.g. warm-starting a fresh
+        # open-ended continuation without touching the source run's own checkpoint dir).
+        # Confirmed real (2026-08-04): such a run wrote 208 headerless data rows, which
+        # add_run.sh's facts.py couldn't match any val_esr_w<N> column against at all. Gate on
+        # whether THIS FILE already has a header, not on whether --resume was passed at all.
+        needs_header = not (log_csv.exists() and log_csv.stat().st_size > 0)
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
         log_w = csv.writer(log_f)
-        if not args.resume:
+        if needs_header:
             log_w.writerow(["epoch", "train_loss", "val_loss",
                             *[f"val_esr_{wlabel[lbl]}" for lbl in labels], "lr", "elapsed_s"])
 
