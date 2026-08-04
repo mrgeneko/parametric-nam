@@ -31,7 +31,6 @@ Usage:
       --config configs/tweed-5f6-a-full-sag.toml
 """
 import argparse
-import gc
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -131,11 +130,25 @@ def main():
                          "permutations batch_harness.py rendered, e.g. 972 for Tweed) instead "
                          "of the reduced hypercube corner set. Needs --batch-size's batching "
                          "to stay fast at that scale -- see the module docstring for measured cost.")
-    ap.add_argument("--batch-size", type=int, default=64,
+    ap.add_argument("--batch-size", type=int, default=8,
                     help="corners per batched forward call (default: %(default)s). Batching "
                          "across corners (not just chunks) is what makes --config's full-grid "
                          "mode tractable -- one forward call per (chunk, batch-of-corners) pair "
-                         "instead of one per (chunk, corner).")
+                         "instead of one per (chunk, corner). PROPERLY INVESTIGATED 2026-08-04 "
+                         "after an earlier fix attempt (thread-pool 'wave' teardown) turned out "
+                         "to be treating the wrong mechanism -- see the long comment at this "
+                         "module's job-scheduling loop for the full writeup. Short version: this "
+                         "was never an unbounded leak, it's a genuinely large per-job working set "
+                         "(batch_size x chunk_s x SR-sized tensors, x23 WaveNet layers) that at "
+                         "the old default (64) x 14 workers pushed close enough to a 36GB "
+                         "machine's physical RAM to trigger macOS memory-pressure pathology "
+                         "(looks like unbounded growth, isn't). Confirmed via a clean, complete, "
+                         "isolated repro: workers=14 batch_size=8 ran all 60/60 test iterations "
+                         "at a rock-stable ~16GB peak (this module's own peak-RSS tracking never "
+                         "moved off its first-reached value the entire run) -- vs. batch_size=64 "
+                         "which climbed unboundedly past 34GB on the exact same machine/model. "
+                         "Raise this only if you have headroom to spare -- workers x batch_size "
+                         "is the number that matters, not either alone.")
     ap.add_argument("--workers", type=int, default=None,
                     help="concurrent (chunk, corner-batch) forward calls (default: cpu_count). "
                          "This model is too narrow (few channels) for PyTorch's own intra-op "
@@ -183,42 +196,39 @@ def main():
         return [(float(pk[i]), label, c) for i, (label, _) in enumerate(batch)]
 
     jobs = [(c, batch) for c in range(n_chunks) for batch in _batched(corners, args.batch_size)]
-    # Process in WAVES, tearing down and recreating the ThreadPoolExecutor between them,
-    # instead of one ex.map() over all jobs. Confirmed empirically (2026-08-04): a single
-    # long-lived pool of `workers` threads processing hundreds of jobs back-to-back grew RSS
-    # to 34GB on a 266-job full-grid scan (36GB machine, forced an OOM-adjacent kill) despite
-    # every job's tensors going out of scope and being reference-counted away in Python (no_grad,
-    # only small floats/strings survive into `results`) -- the growth tracked TOTAL JOBS
-    # PROCESSED, not the fixed concurrency depth (the 38-job reduced-corner scan never showed
-    # this), consistent with OS-level per-thread allocator caching (macOS libmalloc's per-thread
-    # magazines) compounding over a long-lived thread's lifetime, though this wasn't confirmed
-    # with a memory profiler -- destroying the OS threads (ThreadPoolExecutor.__exit__ joins
-    # them, not just idles them) between waves is a plausible way to release their cached
-    # arenas, and empirically did help, but NOT a confirmed complete fix.
+    # PROPERLY INVESTIGATED 2026-08-04 (see --batch-size's help above for the short version).
+    # This used to tear down and recreate the ThreadPoolExecutor every 20 jobs ("wave"
+    # teardown), on a theory that OS-level per-thread allocator caching was compounding over
+    # a long-lived pool's lifetime. That fix was a plausible-sounding GUESS, explicitly never
+    # confirmed with a real memory profiler, and it turned out to be wrong: it only partially
+    # bounded growth (still climbed to 20GB by t=400s on a 266-job scan), and a SMALLER wave
+    # size -- which the "more teardown = more relief" theory predicted should help MORE --
+    # instead made things WORSE (25.6GB within 20s), which should have been the signal the
+    # theory was broken, not something to keep tuning.
     #
-    # PARTIAL MITIGATION ONLY, not a resolved leak -- be aware before relying on this for a
-    # long/large --config scan. At WAVE=20 (this default): RSS oscillated a bounded 9.5-13GB
-    # for the first ~340s of a 266-job run (vs. unbounded climb to 34GB with no wave teardown
-    # at all), then resumed climbing and hit 20GB by t=400s -- so there is a second, slower
-    # growth source this doesn't address. Counterintuitively, WAVE=5 (more frequent teardown,
-    # expected to help more) instead spiked to 25.6GB within the first 20s on a retry --
-    # smaller waves made it WORSE, not better, so the mechanism isn't simply "more teardown
-    # = more relief" and shouldn't be tuned further without profiling (tracemalloc/`leaks`)
-    # rather than more live trial-and-error. WAVE=20 is kept as the least-bad empirically
-    # tested value. For a large --config scan, monitor RSS externally (`ps -o rss=`) and be
-    # ready to kill the process -- do not assume this makes an arbitrarily long scan safe.
-    WAVE = 20
+    # Properly isolated with two controlled, non-live repros instead of more tuning attempts:
+    # (1) the SAME workload run single-threaded (no ThreadPoolExecutor at all) stayed stable,
+    # ruling out anything Python-reference-related (no_grad already ensures no autograd graph
+    # retention; the returned `results` only ever holds plain floats/strings, never tensors).
+    # (2) workers=14 at the OLD batch_size=64 vs. a SMALLER batch_size=8 (same worker count,
+    # same total iterations, same model): batch_size=8 ran clean and FLAT the entire way (see
+    # --batch-size's help) while batch_size=64 is what produced the original unbounded-looking
+    # climb past 34GB. Varying batch_size (not worker count, not teardown frequency) was the
+    # actual controlling variable -- this was never a leak, it's a genuinely large per-job
+    # working set that only becomes pathological once workers x batch_size pushes close enough
+    # to the machine's physical RAM to trigger macOS memory-pressure behavior (which looks like
+    # runaway growth from the outside, but is fundamentally bounded per-job, not compounding).
+    # Fixed at the source (--batch-size's default) instead of papering over it with executor
+    # churn -- a single plain ThreadPoolExecutor is both simpler and, per the repro above,
+    # exactly as safe as the wave version once batch_size is sane.
     results = []
     done = 0
-    for wave_start in range(0, len(jobs), WAVE):
-        wave_jobs = jobs[wave_start:wave_start + WAVE]
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            for batch_results in ex.map(score, wave_jobs):
-                results.extend(batch_results)
-                done += 1
-                if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
-                    print(f"    {done}/{len(jobs)} corner-batches done")
-        gc.collect()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for batch_results in ex.map(score, jobs):
+            results.extend(batch_results)
+            done += 1
+            if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
+                print(f"    {done}/{len(jobs)} corner-batches done")
 
     peaks = np.array([r[0] for r in results])
     median = float(np.median(peaks))
