@@ -1561,6 +1561,22 @@ def main():
         device = args.device
     print(f"Device: {device}", file=sys.stderr)
 
+    # --spectral-norm's power-iteration (nn.utils.parametrizations.spectral_norm's
+    # _power_method -> F.normalize -> torch.div) hits a real MPS kernel gap under fp16
+    # autocast: RuntimeError: Failed to create function state object for:
+    # div_true_strided_float_half. Confirmed 2026-08-04 (JCM800 gain-only pipeline run,
+    # crashed at the very first training step). This is NOT a general MPS+fp16 problem --
+    # --amp fp16 was made the default 2026-07-28 specifically FOR measured MPS throughput
+    # gains on ordinary (non-spectral_norm) training, so blanket-forcing --amp off on every
+    # MPS run would throw that away for the common case. Auto-correct only the specific
+    # combination that actually crashes; --device/--amp explicitly passed by the user still
+    # take priority everywhere else.
+    if device == "mps" and args.spectral_norm and args.amp == "fp16":
+        print("  --spectral-norm + --amp fp16 hits a known MPS kernel gap in spectral_norm's "
+              "power iteration (div_true_strided_float_half) -- auto-switching to --amp off "
+              "for this run. Pass --amp off explicitly to silence this message.", file=sys.stderr)
+        args.amp = "off"
+
     # ------------------------------------------------------------------
     # Load dataset
     # ------------------------------------------------------------------
