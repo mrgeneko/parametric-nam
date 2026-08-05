@@ -18,6 +18,14 @@ standard "real playing with hard attacks" reference) in windowed chunks, and
 flag any window where the predicted peak is anomalous relative to that
 model's OWN typical output level.
 
+Scans EVERY submodel in the container, not just the widest tier. The runaway mechanism is a
+property of a tier's own layer weights, which differ per tier -- a clean widest-tier scan says
+nothing about a narrower tier's weights (found the hard way: this tool used to load only
+subs[-1], and every best_<tier>.param.nam in this fleet is a full multi-tier snapshot from
+that tier's own best epoch, not a size-reduced single-tier export -- so there was previously no
+way to reach a narrower tier's weights through this CLI at all). Works for any tier count (a
+3-way [3,5,8] slimmable container scans all three), not just 2.
+
 Usage:
   python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
       [--reference ~/Downloads/[redacted]-sweep-v3.wav] [--chunk-s 5.0] \
@@ -50,29 +58,34 @@ from batch_harness import grid_permutations
 SR = 48000
 
 
-def load_widest_submodel(nam_path: str):
+def load_all_submodels(nam_path: str):
+    """Every submodel in the container, narrowest first (SlimmableContainer's own storage
+    order, ascending by max_value) -- see the module docstring for why ALL of them, not just
+    the widest. Returns a list of (model, param_names, channels) tuples, one per tier."""
     d = json.loads(Path(nam_path).read_text())
     subs = d["config"]["submodels"]
-    sub = subs[-1]  # widest tier (SlimmableContainer stores ascending by max_value)
-    channels = sub["model"]["config"]["layers"]
-    parametric = sub["model"]["config"]["parametric"]
-    param_metas = parametric["parameters"]
-    param_names = [p["name"] for p in param_metas]
-    weights = sub["model"]["weights"]
-    # film_gamma_bound is a forward-pass formula parameter (docs/film_runaway_investigation.md,
-    # "A1"), not a weight -- must be read back from the export or this reconstruction would
-    # silently apply the wrong (unbounded) gamma to a model actually trained bounded, which
-    # would corrupt exactly the thing this scanner exists to check. 0.0 (off) for older exports.
-    film_gamma_bound = float(parametric.get("film_gamma_bound", 0.0))
-    model = ParametricA2(channels=channels, num_params=len(param_names),
-                         film_gamma_bound=film_gamma_bound)
-    expected = model.weight_count()
-    if len(weights) != expected:
-        raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "
-                          f"-- export format assumption may not hold for this file")
-    model.load_weights(weights)
-    model.eval()
-    return model, param_names, channels
+    out = []
+    for sub in subs:
+        channels = sub["model"]["config"]["layers"]
+        parametric = sub["model"]["config"]["parametric"]
+        param_metas = parametric["parameters"]
+        param_names = [p["name"] for p in param_metas]
+        weights = sub["model"]["weights"]
+        # film_gamma_bound is a forward-pass formula parameter (docs/film_runaway_investigation.md,
+        # "A1"), not a weight -- must be read back from the export or this reconstruction would
+        # silently apply the wrong (unbounded) gamma to a model actually trained bounded, which
+        # would corrupt exactly the thing this scanner exists to check. 0.0 (off) for older exports.
+        film_gamma_bound = float(parametric.get("film_gamma_bound", 0.0))
+        model = ParametricA2(channels=channels, num_params=len(param_names),
+                             film_gamma_bound=film_gamma_bound)
+        expected = model.weight_count()
+        if len(weights) != expected:
+            raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "
+                              f"-- export format assumption may not hold for this file")
+        model.load_weights(weights)
+        model.eval()
+        out.append((model, param_names, channels))
+    return out
 
 
 def hypercube_corners(param_names):
@@ -167,8 +180,16 @@ def main():
     workers = args.workers or os.cpu_count() or 4
     torch.set_num_threads(1)  # see --workers help: avoid oversubscribing against the thread pool
 
-    model, param_names, channels = load_widest_submodel(args.nam)
-    print(f"{Path(args.nam).name}: channels={channels} params={param_names}")
+    submodels = load_all_submodels(args.nam)
+    param_names = submodels[0][1]
+    for _, p, ch in submodels[1:]:
+        if p != param_names:
+            raise SystemExit(f"{args.nam}: submodels disagree on params ({param_names} at "
+                              f"channels={submodels[0][2]} vs {p} at channels={ch}) -- "
+                              f"container may be malformed")
+    tier_channels = [ch for _, _, ch in submodels]
+    print(f"{Path(args.nam).name}: {len(submodels)} submodel(s), channels={tier_channels} "
+          f"params={param_names}")
 
     x, sr = sf.read(args.reference, dtype="float32")
     if x.ndim > 1: x = x[:, 0]
@@ -180,31 +201,33 @@ def main():
     chunk_n = int(args.chunk_s * SR)
     n_chunks = len(x) // chunk_n
     n_batches = -(-len(corners) // args.batch_size)  # ceil
-    print(f"  scanning {len(corners)} corners x {n_chunks} chunks "
+    print(f"  {len(corners)} corners x {n_chunks} chunks each "
           f"({n_batches} corner-batches/chunk, batch-size={args.batch_size}, workers={workers})"
           f"{' [full grid]' if args.config else ' [reduced hypercube]'}")
 
-    def score(job):
-        c, batch = job
-        seg = x[c * chunk_n:(c + 1) * chunk_n]
-        B = len(batch)
-        inp = torch.from_numpy(seg).float().unsqueeze(0).unsqueeze(0).repeat(B, 1, 1)  # [B,1,T]
-        cond = torch.tensor([vals for _, vals in batch], dtype=torch.float32)          # [B,num_params]
-        with torch.no_grad():
-            pred = model(inp, cond)                                                    # [B,1,T]
-        pk = pred.abs().amax(dim=(1, 2))                                                # [B]
-        return [(float(pk[i]), label, c) for i, (label, _) in enumerate(batch)]
+    def make_score(model):
+        def score(job):
+            c, batch = job
+            seg = x[c * chunk_n:(c + 1) * chunk_n]
+            B = len(batch)
+            inp = torch.from_numpy(seg).float().unsqueeze(0).unsqueeze(0).repeat(B, 1, 1)  # [B,1,T]
+            cond = torch.tensor([vals for _, vals in batch], dtype=torch.float32)          # [B,num_params]
+            with torch.no_grad():
+                pred = model(inp, cond)                                                    # [B,1,T]
+            pk = pred.abs().amax(dim=(1, 2))                                                # [B]
+            return [(float(pk[i]), label, c) for i, (label, _) in enumerate(batch)]
+        return score
 
     jobs = [(c, batch) for c in range(n_chunks) for batch in _batched(corners, args.batch_size)]
     # PROPERLY INVESTIGATED 2026-08-04 (see --batch-size's help above for the short version).
-    # This used to tear down and recreate the ThreadPoolExecutor every 20 jobs ("wave"
-    # teardown), on a theory that OS-level per-thread allocator caching was compounding over
-    # a long-lived pool's lifetime. That fix was a plausible-sounding GUESS, explicitly never
-    # confirmed with a real memory profiler, and it turned out to be wrong: it only partially
-    # bounded growth (still climbed to 20GB by t=400s on a 266-job scan), and a SMALLER wave
-    # size -- which the "more teardown = more relief" theory predicted should help MORE --
-    # instead made things WORSE (25.6GB within 20s), which should have been the signal the
-    # theory was broken, not something to keep tuning.
+    # An earlier fix attempt tore down and recreated the ThreadPoolExecutor every 20 jobs
+    # ("wave" teardown), on a theory that OS-level per-thread allocator caching was compounding
+    # over a long-lived pool's lifetime. That fix was a plausible-sounding GUESS, explicitly
+    # never confirmed with a real memory profiler, and it turned out to be wrong: it only
+    # partially bounded growth (still climbed to 20GB by t=400s on a 266-job scan), and a
+    # SMALLER wave size -- which the "more teardown = more relief" theory predicted should help
+    # MORE -- instead made things WORSE (25.6GB within 20s), which should have been the signal
+    # the theory was broken, not something to keep tuning.
     #
     # Properly isolated with two controlled, non-live repros instead of more tuning attempts:
     # (1) the SAME workload run single-threaded (no ThreadPoolExecutor at all) stayed stable,
@@ -220,31 +243,53 @@ def main():
     # runaway growth from the outside, but is fundamentally bounded per-job, not compounding).
     # Fixed at the source (--batch-size's default) instead of papering over it with executor
     # churn -- a single plain ThreadPoolExecutor is both simpler and, per the repro above,
-    # exactly as safe as the wave version once batch_size is sane.
-    results = []
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for batch_results in ex.map(score, jobs):
-            results.extend(batch_results)
-            done += 1
-            if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
-                print(f"    {done}/{len(jobs)} corner-batches done")
+    # exactly as safe as the wave version once batch_size is sane. Applies per-tier below too:
+    # each tier gets its own fresh ThreadPoolExecutor over the identical `jobs` list, so the
+    # working set (batch_size x workers) never grows across tiers, and each pool is fully torn
+    # down (not just idled) before the next tier's begins.
 
-    peaks = np.array([r[0] for r in results])
-    median = float(np.median(peaks))
-    results.sort(key=lambda r: -r[0])
-    flagged = [r for r in results if r[0] > args.flag_ratio * median and r[0] > args.flag_abs]
+    total_flagged = 0
+    tier_summaries = []
+    for tier_i, (model, _, channels) in enumerate(submodels):
+        tag = f"w{channels}"
+        print(f"  -- tier {tier_i + 1}/{len(submodels)} ({tag}) --")
+        results = []
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for batch_results in ex.map(make_score(model), jobs):
+                results.extend(batch_results)
+                done += 1
+                if len(jobs) > 10 and done % max(1, len(jobs) // 10) == 0:
+                    print(f"    {done}/{len(jobs)} corner-batches done")
 
-    print(f"  {len(results)} (corner x {args.chunk_s:.0f}s-chunk) probes, "
-          f"{len(corners)} corners x {n_chunks} chunks over {len(x)/SR:.0f}s")
-    print(f"  median peak={median:.4f}  max peak={peaks.max():.4f}  min peak={peaks.min():.4f}")
-    if flagged:
-        print(f"  FLAGGED ({len(flagged)} windows > {args.flag_ratio}x median AND > {args.flag_abs}V):")
-        for pk, label, c in flagged[:10]:
-            print(f"    peak={pk:10.3f}  corner={label:16}  t={c*args.chunk_s:.0f}-{(c+1)*args.chunk_s:.0f}s")
+        peaks = np.array([r[0] for r in results])
+        median = float(np.median(peaks))
+        results.sort(key=lambda r: -r[0])
+        flagged = [r for r in results if r[0] > args.flag_ratio * median and r[0] > args.flag_abs]
+        total_flagged += len(flagged)
+        tier_summaries.append((tag, len(flagged), median, float(peaks.max()), float(peaks.min())))
+
+        print(f"    {len(results)} (corner x {args.chunk_s:.0f}s-chunk) probes, "
+              f"{len(corners)} corners x {n_chunks} chunks over {len(x)/SR:.0f}s")
+        print(f"    median peak={median:.4f}  max peak={peaks.max():.4f}  min peak={peaks.min():.4f}")
+        if flagged:
+            print(f"    FLAGGED ({len(flagged)} windows > {args.flag_ratio}x median AND > {args.flag_abs}V):")
+            for pk, label, c in flagged[:10]:
+                print(f"      peak={pk:10.3f}  corner={label:16}  t={c*args.chunk_s:.0f}-{(c+1)*args.chunk_s:.0f}s")
+        else:
+            print("    clean -- no anomalous windows")
+
+    print(f"\n  summary ({len(submodels)} tier(s)):")
+    for tag, n_flagged, median, pk_max, pk_min in tier_summaries:
+        verdict = f"FLAGGED ({n_flagged})" if n_flagged else "clean"
+        print(f"    {tag:>6}  median={median:.4f}  max={pk_max:.4f}  min={pk_min:.4f}  {verdict}")
+    if total_flagged:
+        flagged_tiers = [tag for tag, n, *_ in tier_summaries if n]
+        print(f"  {total_flagged} total flagged window(s) across {len(flagged_tiers)} "
+              f"tier(s): {', '.join(flagged_tiers)}")
     else:
-        print("  clean -- no anomalous windows")
-    return len(flagged)
+        print("  all tiers clean -- no anomalous windows")
+    return total_flagged
 
 
 if __name__ == "__main__":
