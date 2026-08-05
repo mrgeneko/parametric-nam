@@ -81,6 +81,17 @@ def parse_setting(s: str) -> dict:
     return out
 
 
+def setting_to_filename(setting: dict, gear_model: str = "") -> str:
+    """'Bass=0.5, Gain=0.7' -> 'Bass0.50_Gain0.70.nam' -- sorted alphabetically for
+    determinism (two captures of the same setting always produce the same name,
+    regardless of --setting's argument order), 2 decimal places (avoids ambiguous
+    trailing-zero differences, e.g. 0.7 vs 0.70 meaning the same knob position)."""
+    prefix = re.sub(r"[^A-Za-z0-9]+", "", gear_model)
+    parts = [f"{k}{v:.2f}" for k, v in sorted(setting.items())]
+    name = "_".join(([prefix] if prefix else []) + parts)
+    return f"{name}.nam"
+
+
 def validate_setting_complete(schx: str, setting: dict):
     """Every real control must be pinned -- a static capture has no 'left at
     default' concept; each control's value is part of the run's identity."""
@@ -225,7 +236,9 @@ def write_model_and_learning_configs(channels: int, max_epochs: int, configs_dir
         "train_dataloader": {"batch_size": 16, "shuffle": True, "pin_memory": True,
                               "drop_last": True, "num_workers": 0},
         "val_dataloader": {},
-        "trainer": {"accelerator": "mps", "devices": 1, "max_epochs": max_epochs},
+        # "auto" (Lightning's own default) picks CUDA/MPS/CPU at runtime -- was
+        # hardcoded "mps" (Apple-Silicon-only), broken on Linux/CUDA machines.
+        "trainer": {"accelerator": "auto", "devices": 1, "max_epochs": max_epochs},
         "trainer_fit_kwargs": {},
     }
     with open(configs_dir / "learning.json", "w") as f:
@@ -364,6 +377,13 @@ def main():
 
     threshold_esr = args.threshold_esr if args.threshold_esr > 0 else None
     result = run_nam_full(data_cfg, model_cfg, learning_cfg, nam_out_dir, threshold_esr=threshold_esr)
+
+    # nam-full always names its output "model.nam" -- rename in place (same dir) to
+    # encode the setting, so a directory of captures is browsable without opening
+    # each manifest.json.
+    named_path = result["nam_path"].with_name(setting_to_filename(setting, args.gear_model))
+    result["nam_path"].rename(named_path)
+    result["nam_path"] = named_path
 
     manifest = {
         "schx": args.schx,
