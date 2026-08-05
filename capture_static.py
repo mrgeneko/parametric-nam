@@ -138,8 +138,14 @@ def detect_standard_input(input_wav: Path):
     (content-hash match, nam.train.core._detect_input_version). If so, we get its
     real blip-based latency calibration and correct train/val split points for free
     instead of guessing at either."""
-    from nam.train.core import _detect_input_version
-    version, strong_match = _detect_input_version(str(input_wav))
+    from nam.train.core import _detect_input_version, _InputValidationError
+    try:
+        version, strong_match = _detect_input_version(str(input_wav))
+    except _InputValidationError:
+        # Despite the (version, strong_match) return signature implying a graceful
+        # None for "no match", it actually RAISES when neither a strong nor weak
+        # match is found -- confirmed by hitting this directly on sweepv5.wav.
+        return None
     if version is None:
         return None
     print(f"[capture_static] input matches NAM standard version {version} "
@@ -228,16 +234,7 @@ def write_model_and_learning_configs(channels: int, max_epochs: int, configs_dir
     return configs_dir / "model.json", configs_dir / "learning.json"
 
 
-def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Path) -> Path:
-    if not NAM_FULL.exists():
-        raise SystemExit(f"nam-full not found at {NAM_FULL} -- is neural-amp-modeler set up there?")
-    outdir.mkdir(parents=True, exist_ok=True)
-    cmd = [str(NAM_FULL), str(data_cfg), str(model_cfg), str(learning_cfg), str(outdir), "--no-show"]
-    print(f"[capture_static] training: {' '.join(cmd)}")
-    t0 = time.time()
-    subprocess.run(cmd, check=True)
-    wall_s = time.time() - t0
-
+def _find_result(outdir: Path, wall_s: float) -> dict:
     run_dirs = sorted(glob.glob(str(outdir / "*")))
     if not run_dirs:
         raise SystemExit("nam-full produced no output directory")
@@ -260,6 +257,68 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
     return {"nam_path": nam_files[0], "run_dir": run_dir, "wall_s": wall_s, "best_esr": best_esr}
 
 
+def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Path,
+                  threshold_esr: float = None, poll_interval_s: float = 15.0) -> dict:
+    """Run nam-full as a subprocess (kept as a genuine subprocess boundary, not
+    reimplemented in-process -- full.py's own callback list is hardcoded in Python
+    with no way to inject a threshold-stop via config, and reimplementing its
+    training loop by hand risks drifting from the real thing's edge-case handling).
+
+    Open-ended in practice: learning_config's max_epochs is a generous ceiling, not
+    the real stop condition. Poll checkpoint filenames (which already embed ESR,
+    e.g. '..._ESR=6.771e-03_...ckpt') and send SIGINT once the best crosses
+    threshold_esr. nam-full's own main() catches KeyboardInterrupt specifically and
+    ALWAYS exports the best checkpoint in its `finally` block -- confirmed by reading
+    it -- so this is a graceful stop, not a kill, and behaves exactly like a normal
+    completion. Same idea as this ecosystem's own `touch <ckpt-dir>/STOP` convention
+    for open-ended parametric training: an external signal, not a baked-in trainer
+    feature."""
+    import signal
+
+    if not NAM_FULL.exists():
+        raise SystemExit(f"nam-full not found at {NAM_FULL} -- is neural-amp-modeler set up there?")
+    outdir.mkdir(parents=True, exist_ok=True)
+    cmd = [str(NAM_FULL), str(data_cfg), str(model_cfg), str(learning_cfg), str(outdir), "--no-show"]
+    print(f"[capture_static] training: {' '.join(cmd)}")
+    t0 = time.time()
+
+    if threshold_esr is None:
+        subprocess.run(cmd, check=True)
+        return _find_result(outdir, time.time() - t0)
+
+    proc = subprocess.Popen(cmd)
+    stopped_early = False
+    try:
+        while proc.poll() is None:
+            time.sleep(poll_interval_s)
+            run_dirs = sorted(glob.glob(str(outdir / "*")))
+            if not run_dirs:
+                continue
+            ckpt_dir = Path(run_dirs[-1]) / "lightning_logs" / "version_0" / "checkpoints"
+            if not ckpt_dir.exists():
+                continue
+            esrs = [float(m.group(1)) for p in ckpt_dir.glob("*ESR=*")
+                    if (m := re.search(r"ESR=([0-9.e+-]+)", p.name))]
+            if esrs and min(esrs) <= threshold_esr:
+                print(f"[capture_static] best ESR {min(esrs):.4g} <= threshold "
+                      f"{threshold_esr:.4g} -- sending SIGINT for a graceful stop")
+                proc.send_signal(signal.SIGINT)
+                stopped_early = True
+                break
+        proc.wait(timeout=300)
+    finally:
+        if proc.poll() is None:
+            print("[capture_static] WARNING: nam-full didn't exit after SIGINT within "
+                  "300s, terminating (may not have exported cleanly)")
+            proc.terminate()
+            proc.wait(timeout=30)
+
+    wall_s = time.time() - t0
+    result = _find_result(outdir, wall_s)
+    result["stopped_early"] = stopped_early
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--schx", required=True)
@@ -269,7 +328,14 @@ def main():
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
     ap.add_argument("--channels", type=int, default=8, help="fleet 'full' tier width")
-    ap.add_argument("--max-epochs", type=int, default=100)
+    ap.add_argument("--threshold-esr", type=float, default=0.01,
+                     help="stop training once best val ESR crosses this (default 0.01 -- "
+                          "looser than the fleet's typical 0.007-0.009 parametric-model "
+                          "target, appropriate for a quick static capture). Set to 0/negative "
+                          "to disable and just run --max-epochs.")
+    ap.add_argument("--max-epochs", type=int, default=1000,
+                     help="ceiling, not the primary stop condition when --threshold-esr is "
+                          "set (default) -- training stops at whichever comes first")
     ap.add_argument("--val-seconds", type=float, default=9.0)
     ap.add_argument("--gear-make", default="")
     ap.add_argument("--gear-model", default="")
@@ -296,7 +362,8 @@ def main():
         args.channels, args.max_epochs, configs_dir)
     data_cfg = configs_dir / "data.json"
 
-    result = run_nam_full(data_cfg, model_cfg, learning_cfg, nam_out_dir)
+    threshold_esr = args.threshold_esr if args.threshold_esr > 0 else None
+    result = run_nam_full(data_cfg, model_cfg, learning_cfg, nam_out_dir, threshold_esr=threshold_esr)
 
     manifest = {
         "schx": args.schx,
@@ -308,7 +375,9 @@ def main():
         "input_version": calibration["input_version"],
         "calibration_source": calibration["calibration_source"],
         "channels": args.channels,
-        "max_epochs": args.max_epochs,
+        "max_epochs_ceiling": args.max_epochs,
+        "threshold_esr": threshold_esr,
+        "stopped_early_at_threshold": result.get("stopped_early", False),
         "val_seconds": args.val_seconds,
         "best_val_esr": result["best_esr"],
         "wall_clock_s": result["wall_s"],
