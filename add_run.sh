@@ -382,8 +382,11 @@ KNOB_LIST="$(join_with ', ' "${KNOBS[@]}")"
 # Open-ended SGDR runs carry epochs=0 (no fixed budget) -- describe them honestly, not "of 0".
 STOPPED=""
 if [ "$PLANNED" = "0" ] || [ "$PLANNED" = "?" ]; then
-  EPOCHS_LINE="open-ended SGDR (restart every 50 epochs) — no fixed budget, stopped manually at epoch $LAST"
-  REACHED="**epoch $LAST** (open-ended SGDR run — stopped manually; no fixed epoch budget)"
+  # Don't claim HOW it stopped (manual `touch STOP` vs. the --stale-cycles auto-stop) --
+  # param_train.py doesn't persist the stop reason anywhere this script can read (only prints it
+  # to the run's own stderr log), so asserting "manually" here would be a guess stated as fact.
+  EPOCHS_LINE="open-ended SGDR (restart every 50 epochs) — no fixed budget, stopped at epoch $LAST"
+  REACHED="**epoch $LAST** (open-ended SGDR run — no fixed epoch budget)"
 else
   EPOCHS_LINE="epochs $PLANNED planned"
   REACHED="**epoch $LAST of $PLANNED**"
@@ -644,6 +647,13 @@ else
   # directory-name-drift protection for this class of device).
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --capture-source)
 fi
+# VARIANT (override via env, default empty): required by the models repo's own add-run.sh whenever
+# the circuit has switches -- a switch changes the TOPOLOGY, so its position is part of WHICH MODEL
+# this is, not a training detail (see that script's own comment). Also the right place for a
+# switchless device's pinned-knob/swept-range/speaker variants, same doc. Left empty by default so
+# switchless single-release circuits (e.g. Big Muff) are unaffected.
+VARIANT="${VARIANT:-}"
+[ -n "$VARIANT" ] && args+=(--variant "$VARIANT")
 if [ "$do_push" -eq 1 ]; then args+=(--push); elif [ "$do_commit" -eq 1 ]; then args+=(--commit); fi
 
 if [ "$dry" -eq 1 ]; then
