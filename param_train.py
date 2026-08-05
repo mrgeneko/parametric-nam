@@ -1795,9 +1795,17 @@ def main():
         # at a checkpoint from a DIFFERENT run/checkpoint-dir (e.g. warm-starting a fresh
         # open-ended continuation without touching the source run's own checkpoint dir).
         # Confirmed real (2026-08-04): such a run wrote 208 headerless data rows, which
-        # add_run.sh's facts.py couldn't match any val_esr_w<N> column against at all. Gate on
-        # whether THIS FILE already has a header, not on whether --resume was passed at all.
-        needs_header = not (log_csv.exists() and log_csv.stat().st_size > 0)
+        # add_run.sh's facts.py couldn't match any val_esr_w<N> column against at all. First
+        # fix gated needs_header on "does the file already have content" alone -- WRONG, missed
+        # that a non-resumed run always opens in "w" (truncate) mode regardless: a crashed
+        # first attempt (e.g. the MPS/spectral_norm fp16 kernel gap, elsewhere in this file) can
+        # write the header before dying mid-epoch-1, leaving a header-only file; on relaunch
+        # (still no --resume) the old check saw "already has content" and skipped rewriting the
+        # header, but the "w" open then truncated the file anyway, wiping the header with
+        # nothing to replace it -- same missing-header failure, different trigger. A non-resumed
+        # run ALWAYS needs a fresh header (mode="w" destroys whatever was there); only a resumed
+        # run's pre-existing-content check matters at all.
+        needs_header = (not args.resume) or not (log_csv.exists() and log_csv.stat().st_size > 0)
         log_f = open(log_csv, "a" if args.resume else "w", newline="")
         log_w = csv.writer(log_f)
         if needs_header:
