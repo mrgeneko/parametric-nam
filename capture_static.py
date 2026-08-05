@@ -341,11 +341,12 @@ def main():
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
     ap.add_argument("--channels", type=int, default=8, help="fleet 'full' tier width")
-    ap.add_argument("--threshold-esr", type=float, default=0.01,
-                     help="stop training once best val ESR crosses this (default 0.01 -- "
-                          "looser than the fleet's typical 0.007-0.009 parametric-model "
-                          "target, appropriate for a quick static capture). Set to 0/negative "
-                          "to disable and just run --max-epochs.")
+    ap.add_argument("--threshold-esr", type=float, default=0.003,
+                     help="stop training once best val ESR crosses this (default 0.003 -- "
+                          "tighter than the fleet's typical 0.007-0.009 parametric-model "
+                          "target; a static capture spends its whole capacity on one setting "
+                          "instead of sharing it across a knob space, so a tighter bar is "
+                          "reasonable). Set to 0/negative to disable and just run --max-epochs.")
     ap.add_argument("--max-epochs", type=int, default=1000,
                      help="ceiling, not the primary stop condition when --threshold-esr is "
                           "set (default) -- training stops at whichever comes first")
