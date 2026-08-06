@@ -412,12 +412,12 @@ def main():
                           "jointly and exports a single SlimmableContainer .nam with one "
                           "submodel per width; a single width (e.g. '8') trains a plain "
                           "WaveNet, matching this script's pre-slimmable behavior")
-    ap.add_argument("--threshold-esr", type=float, default=0.0015,
-                     help="stop training once best val ESR crosses this (default 0.0015 -- "
-                          "tighter than the fleet's typical 0.007-0.009 parametric-model "
-                          "target; a static capture spends its whole capacity on one setting "
-                          "instead of sharing it across a knob space, so a tighter bar is "
-                          "reasonable). Set to 0/negative to disable and just run --max-epochs.")
+    ap.add_argument("--threshold-esr", type=float, default=0.005,
+                     help="stop training once best val ESR crosses this (default 0.005 -- "
+                          "with the default --widths 3,8, this compares against nam-full's "
+                          "packed-run monitor, which SUMS every submodel's own val ESR, not "
+                          "one width's ESR -- see write_model_and_learning_configs' "
+                          "docstring). Set to 0/negative to disable and just run --max-epochs.")
     ap.add_argument("--max-epochs", type=int, default=1000,
                      help="ceiling, not the primary stop condition when --threshold-esr is "
                           "set (default) -- training stops at whichever comes first")
