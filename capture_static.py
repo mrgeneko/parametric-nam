@@ -360,8 +360,8 @@ def main():
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
     ap.add_argument("--channels", type=int, default=8, help="fleet 'full' tier width")
-    ap.add_argument("--threshold-esr", type=float, default=0.003,
-                     help="stop training once best val ESR crosses this (default 0.003 -- "
+    ap.add_argument("--threshold-esr", type=float, default=0.0015,
+                     help="stop training once best val ESR crosses this (default 0.0015 -- "
                           "tighter than the fleet's typical 0.007-0.009 parametric-model "
                           "target; a static capture spends its whole capacity on one setting "
                           "instead of sharing it across a knob space, so a tighter bar is "
