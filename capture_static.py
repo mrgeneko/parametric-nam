@@ -214,21 +214,68 @@ def calibrate_and_write_data_config(input_wav: Path, dry_wav: Path, wet_wav: Pat
             "calibration_source": source}
 
 
-def write_model_and_learning_configs(channels: int, max_epochs: int, configs_dir: Path):
-    model_config = {
-        "net": {"name": "WaveNet", "config": {
-            "layers_configs": [{
-                "input_size": 1, "condition_size": 1, "channels": channels,
-                "kernel_sizes": K_KERNEL_SIZES, "dilations": K_DILATIONS,
-                "activation": "LeakyReLU", "gated": False,
-                "head": {"out_channels": 1, "kernel_size": 16, "bias": True},
-            }],
-            "head_scale": 0.01,
-        }},
-        "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
-        "optimizer": {"lr": 0.004, "weight_decay": 3.17e-07},
-        "lr_scheduler": {"class": "ExponentialLR", "kwargs": {"gamma": 0.994}},
+# Human-readable submodel names for the fleet's usual two widths -- purely cosmetic
+# (shows up in nam-full's own logging/checkpoint bookkeeping, not in the exported
+# .nam), falls back to "w<N>" for anything outside the usual pair.
+_SUBMODEL_NAMES = {3: "lite", 8: "full"}
+
+
+def _layer_config(channels: int) -> dict:
+    return {
+        "input_size": 1, "condition_size": 1, "channels": channels,
+        "kernel_sizes": K_KERNEL_SIZES, "dilations": K_DILATIONS,
+        "activation": "LeakyReLU", "gated": False,
+        "head": {"out_channels": 1, "kernel_size": 16, "bias": True},
     }
+
+
+def write_model_and_learning_configs(widths: list, max_epochs: int, configs_dir: Path):
+    """widths=[8] (a single value) trains one plain WaveNet, same as before. The
+    default, widths=[3, 8], trains a PackedWaveNet instead: every listed width
+    jointly, as one masked model in one nam-full run (net.name="PackedWaveNet",
+    per nam_full_configs/models/wavenet_packed.json), exporting a single
+    SlimmableContainer .nam with one discrete submodel per width -- verified
+    against a real released model (Deluxe Reverb.nam: 2 submodels, channels 3 and
+    8, max_value 0.5/1.0) to be the same shape this produces. Matches the fleet's
+    own lite/full split without needing a separate capture per width.
+
+    NOTE on --threshold-esr with 2+ widths: nam-full's own best-checkpoint monitor
+    (whose filename this script's SIGINT-threshold polling reads) tracks val_loss =
+    SUM of every submodel's own val ESR for a packed run, not one width's ESR --
+    the same numeric threshold does not mean the same thing it does for a single
+    width. Left as-is (best available reference point) rather than guessed at;
+    expect this default to need retuning once real packed-run behavior is seen,
+    same as --threshold-esr's own history (0.01 -> 0.003 -> 0.0015)."""
+    if len(widths) == 1:
+        model_config = {
+            "net": {"name": "WaveNet", "config": {
+                "layers_configs": [_layer_config(widths[0])],
+                "head_scale": 0.01,
+            }},
+            "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
+            "optimizer": {"lr": 0.004, "weight_decay": 3.17e-07},
+            "lr_scheduler": {"class": "ExponentialLR", "kwargs": {"gamma": 0.994}},
+        }
+    else:
+        model_config = {
+            "net": {"name": "PackedWaveNet", "config": {
+                "submodels": [
+                    {
+                        "name": _SUBMODEL_NAMES.get(w, f"w{w}"),
+                        "config": {
+                            "layers_configs": [_layer_config(w)],
+                            "head": None,
+                            "head_scale": 0.01,
+                        },
+                    }
+                    for w in widths
+                ],
+                "export": {"container_max_values": "uniform"},
+            }},
+            "loss": {"val_loss": "esr", "mrstft_weight": 0.0005},
+            "optimizer": {"lr": 0.004, "weight_decay": 3.17e-07},
+            "lr_scheduler": {"class": "ExponentialLR", "kwargs": {"gamma": 0.994}},
+        }
     with open(configs_dir / "model.json", "w") as f:
         json.dump(model_config, f, indent=4)
 
@@ -359,7 +406,12 @@ def main():
     ap.add_argument("--oversample", default="auto")
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
-    ap.add_argument("--channels", type=int, default=8, help="fleet 'full' tier width")
+    ap.add_argument("--widths", default="3,8",
+                     help="comma-separated channel widths to train (default '3,8', the "
+                          "fleet's lite/full split) -- 2+ widths trains one PackedWaveNet "
+                          "jointly and exports a single SlimmableContainer .nam with one "
+                          "submodel per width; a single width (e.g. '8') trains a plain "
+                          "WaveNet, matching this script's pre-slimmable behavior")
     ap.add_argument("--threshold-esr", type=float, default=0.0015,
                      help="stop training once best val ESR crosses this (default 0.0015 -- "
                           "tighter than the fleet's typical 0.007-0.009 parametric-model "
@@ -381,6 +433,10 @@ def main():
     nam_out_dir = out / "nam_out"
     out.mkdir(parents=True, exist_ok=True)
 
+    widths = sorted({int(w.strip()) for w in args.widths.split(",") if w.strip()})
+    if not widths:
+        raise SystemExit("--widths produced no valid channel counts")
+
     setting = parse_setting(args.setting)
     validate_setting_complete(args.schx, setting)
 
@@ -392,7 +448,7 @@ def main():
     calibration = calibrate_and_write_data_config(
         Path(args.input), dry_wav, wet_wav, configs_dir, args.val_seconds)
     model_cfg, learning_cfg = write_model_and_learning_configs(
-        args.channels, args.max_epochs, configs_dir)
+        widths, args.max_epochs, configs_dir)
     data_cfg = configs_dir / "data.json"
 
     threshold_esr = args.threshold_esr if args.threshold_esr > 0 else None
@@ -414,7 +470,7 @@ def main():
         "delay_samples": calibration["delay"],
         "input_version": calibration["input_version"],
         "calibration_source": calibration["calibration_source"],
-        "channels": args.channels,
+        "widths": widths,
         "max_epochs_ceiling": args.max_epochs,
         "threshold_esr": threshold_esr,
         "stopped_early_at_threshold": result.get("stopped_early", False),
