@@ -301,29 +301,48 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
 
     proc = subprocess.Popen(cmd)
     stopped_early = False
-    try:
-        while proc.poll() is None:
-            time.sleep(poll_interval_s)
-            run_dirs = sorted(glob.glob(str(outdir / "*")))
-            if not run_dirs:
-                continue
-            ckpt_dir = Path(run_dirs[-1]) / "lightning_logs" / "version_0" / "checkpoints"
-            if not ckpt_dir.exists():
-                continue
-            esrs = [float(m.group(1)) for p in ckpt_dir.glob("*ESR=*")
-                    if (m := re.search(r"ESR=([0-9.e+-]+)", p.name))]
-            if esrs and min(esrs) <= threshold_esr:
-                print(f"[capture_static] best ESR {min(esrs):.4g} <= threshold "
-                      f"{threshold_esr:.4g} -- sending SIGINT for a graceful stop")
-                proc.send_signal(signal.SIGINT)
-                stopped_early = True
-                break
-        proc.wait(timeout=300)
-    finally:
-        if proc.poll() is None:
-            print("[capture_static] WARNING: nam-full didn't exit after SIGINT within "
-                  "300s, terminating (may not have exported cleanly)")
-            proc.terminate()
+    while proc.poll() is None:
+        time.sleep(poll_interval_s)
+        run_dirs = sorted(glob.glob(str(outdir / "*")))
+        if not run_dirs:
+            continue
+        ckpt_dir = Path(run_dirs[-1]) / "lightning_logs" / "version_0" / "checkpoints"
+        if not ckpt_dir.exists():
+            continue
+        esrs = [float(m.group(1)) for p in ckpt_dir.glob("*ESR=*")
+                if (m := re.search(r"ESR=([0-9.e+-]+)", p.name))]
+        if esrs and min(esrs) <= threshold_esr:
+            print(f"[capture_static] best ESR {min(esrs):.4g} <= threshold "
+                  f"{threshold_esr:.4g} -- sending SIGINT for a graceful stop")
+            proc.send_signal(signal.SIGINT)
+            stopped_early = True
+            break
+
+    # Graceful export after SIGINT (checkpoint reload + comparison plots + .nam write)
+    # took >300s on a heavy circuit (EVH 5150 Lead Full sag v30: still legitimately
+    # working, not stuck -- confirmed by the .nam existing and loading cleanly once it
+    # did finish). A single blocking proc.wait(timeout=...) that raises
+    # TimeoutExpired is also the wrong shape here regardless of the exact number: it's
+    # not exception-safe (a naive try/finally around it re-raises after cleanup runs,
+    # crashing the script even when the export subsequently succeeds -- hit exactly
+    # this). Poll in a loop instead, generous grace period, only escalate if it's
+    # truly still running after that, and never let a wait() timeout propagate.
+    grace_s, poll_s, waited = 1800, 15, 0
+    while proc.poll() is None and waited < grace_s:
+        time.sleep(poll_s)
+        waited += poll_s
+        if waited % 60 == 0:
+            print(f"[capture_static] waiting for nam-full's graceful export... {waited}s")
+    if proc.poll() is None:
+        print(f"[capture_static] WARNING: nam-full still running {grace_s}s after SIGINT -- "
+              "terminating. This likely means an incomplete/missing export, unlike the "
+              "normal case above (which just needs patience, not intervention).")
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            print("[capture_static] WARNING: didn't exit after terminate(), killing")
+            proc.kill()
             proc.wait(timeout=30)
 
     wall_s = time.time() - t0
