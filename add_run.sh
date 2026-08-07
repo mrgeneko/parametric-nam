@@ -35,6 +35,10 @@ PREFIX="${PREFIX:-bigmuff}"
 CONFIG="${CONFIG:-configs/big-muff-v1.toml}"        # training config, for reproduce.sh
 PY_BIN="${PY_BIN:-$HERE/.venv/bin/python}"
 STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
+# Moved up from the args-construction site (its only other use) so PRIOR_STATE detection below
+# can also see it -- a variant-keyed circuit's prior release lives under CURRENT.<variant>, not
+# the bare CURRENT, and PRIOR_STATE needs to run before this var existed to find it.
+VARIANT="${VARIANT:-}"
 
 do_commit=0 do_push=0 dry=0 verify=1 BLURB=""
 while [ $# -gt 0 ]; do
@@ -416,7 +420,12 @@ CIRCDIR="$MODELS/$CATEGORY/$CIRCUIT"
 PRIOR_STATE=none
 if [ -d "$CIRCDIR" ] && [ -n "$(ls -A "$CIRCDIR" 2>/dev/null)" ]; then
   PRIOR_STATE=unknown
-  _cur="$(cat "$CIRCDIR/CURRENT" 2>/dev/null || true)"
+  # A variant-keyed circuit's CURRENT pointer is CURRENT.<variant> (models-repo add-run.sh's own
+  # convention -- see its "A device with SWITCHES needs a --variant" comment), not the bare
+  # CURRENT -- that file doesn't even exist for such a circuit (confirmed: dumble-ots-183-full has
+  # only CURRENT.rock-2knob on disk). Falling back to bare CURRENT keeps this working for
+  # switchless/no-variant circuits, unchanged.
+  _cur="$(cat "$CIRCDIR/CURRENT${VARIANT:+.$VARIANT}" 2>/dev/null || cat "$CIRCDIR/CURRENT" 2>/dev/null || true)"
   _pn=""
   [ -n "$_cur" ] && _pn="$(ls "$CIRCDIR/$_cur"/*optimal*.param.nam "$CIRCDIR/$_cur"/*best_full*.param.nam 2>/dev/null | head -1 || true)"
   if [ -n "$_pn" ]; then
@@ -647,12 +656,12 @@ else
   # directory-name-drift protection for this class of device).
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --capture-source)
 fi
-# VARIANT (override via env, default empty): required by the models repo's own add-run.sh whenever
-# the circuit has switches -- a switch changes the TOPOLOGY, so its position is part of WHICH MODEL
-# this is, not a training detail (see that script's own comment). Also the right place for a
-# switchless device's pinned-knob/swept-range/speaker variants, same doc. Left empty by default so
-# switchless single-release circuits (e.g. Big Muff) are unaffected.
-VARIANT="${VARIANT:-}"
+# VARIANT: required by the models repo's own add-run.sh whenever the circuit has switches -- a
+# switch changes the TOPOLOGY, so its position is part of WHICH MODEL this is, not a training
+# detail (see that script's own comment). Also the right place for a switchless device's
+# pinned-knob/swept-range/speaker variants, same doc. (Declared up near RUN/CKPT/etc -- PRIOR_STATE
+# detection above needs it too.) Left empty by default so switchless single-release circuits
+# (e.g. Big Muff) are unaffected.
 [ -n "$VARIANT" ] && args+=(--variant "$VARIANT")
 if [ "$do_push" -eq 1 ]; then args+=(--push); elif [ "$do_commit" -eq 1 ]; then args+=(--commit); fi
 
