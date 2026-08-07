@@ -342,11 +342,30 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
     print(f"[capture_static] training: {' '.join(cmd)}")
     t0 = time.time()
 
+    # SIGINT silently did nothing on a real run: sent it twice, 15 min apart, while
+    # training kept advancing through 45+ epochs with no "KeyboardInterrupt" ever
+    # printed -- nam-full's own except/finally in full.py (which DOES catch it and
+    # export) never even ran. Root cause, confirmed by checking a live process's own
+    # signal.getsignal(signal.SIGINT): it was SIG_IGN from the moment the process
+    # started, before any of nam's code ran. POSIX shells set SIGINT (and SIGQUIT) to
+    # be ignored for background jobs (this project routinely launches long captures
+    # via `cmd &`/nohup) -- CPython's own startup respects an inherited SIG_IGN rather
+    # than overriding it with the normal KeyboardInterrupt-raising handler, and nothing
+    # downstream (nam-full, Lightning) ever restores it, since Lightning's own signal
+    # handling only touches SIGTERM/SIGUSR1 (SLURM requeue), not SIGINT. So the
+    # ordinary case -- capture_static.py itself started as (or descended from) a
+    # background job -- silently produces a subprocess that can NEVER be interrupted
+    # gracefully. Fix: force the child back to the default disposition explicitly,
+    # regardless of what it inherited. Confirmed fixed: with this, a real run exited
+    # in <1s of SIGINT with "Detected KeyboardInterrupt, attempting graceful
+    # shutdown ..." printed and a real .nam exported.
+    restore_sigint = lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     if threshold_esr is None:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, preexec_fn=restore_sigint)
         return _find_result(outdir, time.time() - t0)
 
-    proc = subprocess.Popen(cmd)
+    proc = subprocess.Popen(cmd, preexec_fn=restore_sigint)
     stopped_early = False
     while proc.poll() is None:
         time.sleep(poll_interval_s)
