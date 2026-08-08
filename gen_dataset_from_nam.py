@@ -20,18 +20,18 @@ are usually a scattered handful of points, not a dense grid, and most filename t
 batch will not vary at all.
 
 Each .nam file is loaded and run once against the shared sweep input (same convention as the
-.schx pipeline: batch_harness.py's `input` config, e.g. sweep-files/sweepv5.wav), producing exactly
+.schx pipeline: gen_dataset_from_schx.py's `input` config, e.g. sweep-files/sweepv5.wav), producing exactly
 one permutation per file. This is a SCATTERED point-sample dataset, not a Cartesian grid --
 tools/grid_adequacy.py's interpolation-adequacy reasoning does not apply here; there is nothing to
 interpolate between systematically with only a handful of arbitrary points.
 
-Output directory has the exact same contract batch_harness.py produces (config.json, sweep.wav,
+Output directory has the exact same contract gen_dataset_from_schx.py produces (config.json, sweep.wav,
 params.csv, sig/<shard>/<idx>.npy -> outputs.npy after --combine), so param_train.py's
 ParamDataset reads it unmodified -- this file only builds config.json + params.csv + audio, then
-calls batch_harness.combine()/run_post_generation_checks() directly rather than reimplementing
+calls gen_dataset_from_schx.combine()/run_post_generation_checks() directly rather than reimplementing
 either.
 
-    python gen_dataset_from_nam.py --combine /tmp/5150_ds     # same --combine flag as batch_harness.py
+    python gen_dataset_from_nam.py --combine /tmp/5150_ds     # same --combine flag as gen_dataset_from_schx.py
 """
 import argparse
 import csv
@@ -45,7 +45,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-import batch_harness as bh
+import gen_dataset_from_schx as bh
 from capture_common import add_knob_parsing_args, check_scale_collisions, parse_all_filenames, resolve_knob_maps
 from nam.models import init_from_nam
 
@@ -77,7 +77,7 @@ def _run_model(model, x: np.ndarray) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("--combine", type=Path, help="combine sharded .npy files (delegates to batch_harness.combine)")
+    ap.add_argument("--combine", type=Path, help="combine sharded .npy files (delegates to gen_dataset_from_schx.combine)")
     ap.add_argument("--nam", nargs="+", help="glob pattern(s) or explicit .nam file paths")
     ap.add_argument("--output", type=Path, help="output dataset directory")
     ap.add_argument("--input", default="~/work/sweep-files/sweepv5.wav",
@@ -94,7 +94,7 @@ def main():
                      help="circuit/device label; default: first file's metadata gear_model, "
                           "falling back to its (per-setting) metadata name")
     ap.add_argument("--max-crest", type=float, default=20.0,
-                     help="reject a capture whose crest factor exceeds this (see batch_harness._finalize_wav)")
+                     help="reject a capture whose crest factor exceeds this (see gen_dataset_from_schx._finalize_wav)")
     ap.add_argument("--restricted-input", action="store_true",
                      help="mark --input as licensed for local training only, not redistribution "
                           "(e.g. a [redacted]-derived sweep) -- a trained/shipped model is fine, the raw "
@@ -190,7 +190,7 @@ def main():
     if ok_count == 0:
         sys.exit("ERROR: every capture failed integrity checks -- nothing to write")
 
-    # 4. config.json + params.csv, matching batch_harness.py's own schema exactly so
+    # 4. config.json + params.csv, matching gen_dataset_from_schx.py's own schema exactly so
     # param_train.py's ParamDataset (which only requires config.json["knobs"], sweep.wav,
     # params.csv, outputs.npy) reads this unmodified.
     device_name = args.device_name or meta0.get("gear_model") or meta0.get("name") or out_dir.name

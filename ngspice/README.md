@@ -4,7 +4,7 @@ An **offline** ngspice dataset-generation backend, as an alternative to
 `livespice_cli` for the **stiff / high-gain / combined** circuits where
 LiveSPICE's fixed-timestep solver diverges and needs extreme oversampling.
 
-**Now wired into `batch_harness`** as `--backend ngspice` (see "Status" below).
+**Now wired into `gen_dataset_from_schx`** as `--backend ngspice` (see "Status" below).
 `gen_evh5150_ngspice.py` remains as the original standalone prototype; the
 general path is `schx_to_ngspice.py` (any `.schx`) driven by the harness.
 
@@ -140,7 +140,7 @@ Wired end to end. Usage:
 
 ```bash
 # moderate amp (e.g. JCM800 power amp) — exact DempwolfZolzer tubes:
-python batch_harness.py --backend ngspice --schx "<amp>.schx" \
+python gen_dataset_from_schx.py --backend ngspice --schx "<amp>.schx" \
     --knobs presence --values 0.2,0.5,0.8 --input guitar.wav --output ds
 
 # stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp.
@@ -148,7 +148,7 @@ python batch_harness.py --backend ngspice --schx "<amp>.schx" \
 # operating point -> the solver hangs). presence excluded (subtle + NFB-comp alters it).
 # (config "L" — the re-tuned minimal recipe: no NFB-comp cap; it is stable
 #  without one and the cap is a tone-shaper, not just a stabilizer)
-python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 100n \
+python gen_dataset_from_schx.py --backend ngspice --koren --ot-damp 3k --ot-snub 100n \
     --oversample 2 --schx "EVH 5150 Lead Full.schx" \
     --knobs leadpre,leadpost,high,low,mid --bounds leadpost=0.05,1.0 \
     --fixed-params "Presence=0.5" --random 200 --input guitar.wav --output ds
@@ -165,7 +165,7 @@ Done:
    48 kHz grid; `--oversample N` solves at N×48 kHz and FIR-decimates back (removes
    the ~20% aliasing; default 1× is naive).
 3. ✅ **XSPICE filesource** input — feeds full-length WAVs (no giant inline PWL).
-4. ✅ **`batch_harness --backend ngspice`** — per-perm translate → run → resample
+4. ✅ **`gen_dataset_from_schx --backend ngspice`** — per-perm translate → run → resample
    → `.npy`, with the crest-factor divergence check.
 5. ✅ **Bounded memory** — `save v(<out>)` stores only the probed node, so long +
    oversampled runs don't OOM (see Caveats for the `--workers` guidance).

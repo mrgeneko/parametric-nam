@@ -19,7 +19,7 @@ find_saturation_point) and compare it against the excitation's transient peak.
 
 Exit status is nonzero if any corner fails, so a generation script can gate on it
 (same convention as preflight.py):
-  python tools/check_transient_coverage.py ... && python batch_harness.py ...
+  python tools/check_transient_coverage.py ... && python gen_dataset_from_schx.py ...
 
 Usage:
   python tools/check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
@@ -46,7 +46,7 @@ sys.path.insert(0, str(HERE.parent))
 from run_pipeline import load_config  # noqa: E402
 # Package-qualified (not `from preflight import ...`): direct script execution auto-adds HERE
 # (tools/) to sys.path so either form works, but importing this module as tools.check_transient_
-# coverage (e.g. from batch_harness.py) does NOT add tools/ itself -- only `from run_pipeline
+# coverage (e.g. from gen_dataset_from_schx.py) does NOT add tools/ itself -- only `from run_pipeline
 # import ...` above (repo root) would resolve; `preflight` bare would 404. This form works both ways.
 from tools.preflight import find_saturation_point, _findpeak_cache_path  # noqa: E402
 
@@ -90,9 +90,9 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
 def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False) -> dict:
-    """Core check, importable directly (batch_harness.py's hard gate uses this in-process --
+    """Core check, importable directly (gen_dataset_from_schx.py's hard gate uses this in-process --
     no subprocess, no re-parsing a config, and it can't be silently skipped by someone calling
-    batch_harness.py without going through run_pipeline.py / this tool's own CLI first).
+    gen_dataset_from_schx.py without going through run_pipeline.py / this tool's own CLI first).
 
     Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
     couldn't be determined (a render failure is not a pass -- see main()'s same convention).

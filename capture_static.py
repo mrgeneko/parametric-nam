@@ -11,10 +11,10 @@ reserialized model loads in a stock plugin but sounds wrong (measured round-trip
 correlation ~0.18). Training directly through nam-full sidesteps this entirely: there
 is no translation step, so nothing can get lost in translation.
 
-WHAT THIS REUSES, UNCHANGED. Rendering goes through batch_harness.py's own CLI (the
+WHAT THIS REUSES, UNCHANGED. Rendering goes through gen_dataset_from_schx.py's own CLI (the
 documented "pin everything but one knob" workaround for its lack of a literal 0-knob
 mode) -- not by importing its internals, to stay decoupled from its process-owning
-thread-pool/signal-handler assumptions. batch_harness.py's own post-generation checks
+thread-pool/signal-handler assumptions. gen_dataset_from_schx.py's own post-generation checks
 (crest-factor divergence detection, convergence audit) already run as part of the
 render. preflight.py's find_saturation_point IS imported directly (see
 ensure_adequate_excitation) -- see EXCITATION ADEQUACY below for why that one's worth
@@ -78,7 +78,7 @@ import soundfile as sf
 
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
-from batch_harness import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
+from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
 from param_train import _schx_input_v0dbfs  # noqa: E402
 from tools.preflight import find_saturation_point  # noqa: E402
 
@@ -135,7 +135,7 @@ def validate_setting_complete(schx: str, setting: dict):
 
 def render(schx: str, setting: dict, input_wav: str, oversample: str,
            trunc_target: float, output_dir: Path) -> dict:
-    """Shell out to batch_harness.py's documented single-permutation workaround:
+    """Shell out to gen_dataset_from_schx.py's documented single-permutation workaround:
     pin every control but one via --fixed-params, sweep that one remaining control
     with a single value via --knobs/--values. Produces exactly 1 permutation through
     the harness's normal render/retry/spike-detection/normalization path, unmodified."""
@@ -143,7 +143,7 @@ def render(schx: str, setting: dict, input_wav: str, oversample: str,
     sweep_knob, sweep_val = items[0]
     fixed = ",".join(f"{k}={v}" for k, v in items[1:])
 
-    cmd = [sys.executable, str(REPO_ROOT / "batch_harness.py"),
+    cmd = [sys.executable, str(REPO_ROOT / "gen_dataset_from_schx.py"),
            "--backend", "livespice", "--schx", schx,
            "--knobs", sweep_knob, "--values", str(sweep_val),
            "--input", input_wav, "--output", str(output_dir),
@@ -157,7 +157,7 @@ def render(schx: str, setting: dict, input_wav: str, oversample: str,
 
     print(f"[capture_static] rendering: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
-    subprocess.run([sys.executable, str(REPO_ROOT / "batch_harness.py"),
+    subprocess.run([sys.executable, str(REPO_ROOT / "gen_dataset_from_schx.py"),
                     "--combine", str(output_dir)], check=True)
 
     cfg = json.loads((output_dir / "config.json").read_text())

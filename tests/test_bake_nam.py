@@ -57,7 +57,7 @@ def test_export_nam_propagates_steps_for_discrete_knobs():
 
 
 def test_export_nam_propagates_gear_and_attribution_metadata():
-    """gear_make/gear_model/gear_type (from batch_harness.py's --gear-make/--gear-model/
+    """gear_make/gear_model/gear_type (from gen_dataset_from_schx.py's --gear-make/--gear-model/
     --gear-type, baked into the dataset's config.json) and modeled_by (from param_train.py's
     --modeled-by, merged into dataset.config at train time) must all reach the exported .nam's
     metadata -- these were previously readable by export_nam() but had no CLI path to set them

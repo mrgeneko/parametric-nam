@@ -34,7 +34,7 @@ from pathlib import Path
 
 HERE    = Path(__file__).resolve().parent
 PYTHON  = sys.executable
-BATCH   = HERE / "batch_harness.py"
+BATCH   = HERE / "gen_dataset_from_schx.py"
 TRAIN   = HERE / "param_train.py"
 
 # argparse dests whose config values are filesystem paths (argparse's type=Path is
@@ -533,7 +533,7 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
              f"(only {len(rows) - len(failed)} succeeded):"]
     for r in failed:
         knobs = ", ".join(f"{k}={v}" for k, v in r.items() if k not in skip_cols)
-        # r.get, not r['idx'] -- a malformed/headerless params.csv (batch_harness.py now repairs
+        # r.get, not r['idx'] -- a malformed/headerless params.csv (gen_dataset_from_schx.py now repairs
         # this case in place, but defend here too) makes every dict key garbage instead of raising
         # cleanly; report what's missing rather than crashing on it.
         lines.append(f"  idx={r.get('idx', '?')}  {knobs}  -> {r.get('error', '?')}")
@@ -593,7 +593,7 @@ def main():
                         "(caffeinate on macOS, systemd-inhibit on Linux; "
                         "inhibiting is on by default)")
 
-    # --- generation (batch_harness.py) ---
+    # --- generation (gen_dataset_from_schx.py) ---
     g = ap.add_argument_group("generation")
     g.add_argument("--backend",      choices=["cpp", "livespice", "ngspice"], default="livespice")
     g.add_argument("--koren",        action="store_true",
@@ -617,7 +617,7 @@ def main():
     g.add_argument("--oversample",   type=str, default="2",
                    help="oversampling factor, or 'auto' to measure the truncation-error-minimizing "
                         "value per circuit (ngspice and livespice both supported -- see "
-                        "batch_harness.py --oversample auto). Default 2; high-gain amps need more "
+                        "gen_dataset_from_schx.py --oversample auto). Default 2; high-gain amps need more "
                         "for stability, e.g. EVH 5150 Lead full = 32.")
     g.add_argument("--trunc-target", type=float, default=1e-3,
                    help="with --oversample auto: the truncation ESR to get under (default 1e-3)")
@@ -638,21 +638,21 @@ def main():
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
     g.add_argument("--timeout-mult", type=float, default=1.0,
-                   help="Scale batch_harness.py's auto-computed per-permutation timeout "
+                   help="Scale gen_dataset_from_schx.py's auto-computed per-permutation timeout "
                         "(default: %(default)s). Some circuits have a genuine, reproducible "
                         "solver slowdown at specific corners (e.g. the EVH 5150 family at low "
                         "Lead Pre, ~20-40x slower without ever actually diverging) -- set this "
                         "per-circuit via `timeout-mult = N` in --config once measured, rather "
                         "than discovering it from a failed run and re-running with the flag. "
-                        "Forwarded to batch_harness.py.")
+                        "Forwarded to gen_dataset_from_schx.py.")
     g.add_argument("--skip-transient-check", action="store_true",
-                   help="Skip batch_harness.py's pre-generation transient/saturation coverage "
-                        "gate -- see internal engineering notes. Forwarded to batch_harness.py.")
+                   help="Skip gen_dataset_from_schx.py's pre-generation transient/saturation coverage "
+                        "gate -- see internal engineering notes. Forwarded to gen_dataset_from_schx.py.")
     g.add_argument("--transient-peak", type=float, default=None,
                    help="Excitation's transient-segment peak, volts (auto from <input>.recipe.json "
-                        "if omitted). Forwarded to batch_harness.py.")
+                        "if omitted). Forwarded to gen_dataset_from_schx.py.")
     g.add_argument("--transient-margin", type=float, default=1.0,
-                   help="Transient check margin (default: %(default)s). Forwarded to batch_harness.py.")
+                   help="Transient check margin (default: %(default)s). Forwarded to gen_dataset_from_schx.py.")
     g.add_argument("--defaults", help="Per-knob baked-tone default k=v,... (in trained units); "
                    "recorded in the .nam so a no-args bake uses the circuit's real default")
     g.add_argument("--speaker",      help="Speaker name (e.g. S1)")

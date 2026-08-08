@@ -164,7 +164,7 @@ def main():
             for _, pt in chosen:
                 w.writerow([f"{v:.4f}" for v in pt])
         print(f"\nWrote {len(chosen)} suggested fill points -> {args.emit_fill}")
-        print("  (feeding these back needs a --perms-csv ingest in batch_harness; "
+        print("  (feeding these back needs a --perms-csv ingest in gen_dataset_from_schx; "
               "or just widen --random and re-run, the sampler is seed-extensible.)")
 
 

@@ -31,7 +31,7 @@ SR = 48000
 
 
 def _audio_provenance(path, x=None):
-    """Same identity fields as batch_harness.py's input_provenance() (name/path/sha1 of the
+    """Same identity fields as gen_dataset_from_schx.py's input_provenance() (name/path/sha1 of the
     MONO SAMPLE BYTES/samplerate/frames/duration) -- deliberately duplicated, not imported,
     so this tool has no dependency on the harness and the two hashes stay independently
     verifiable against each other (same audio -> same hash, computed two different ways)."""
@@ -117,7 +117,7 @@ def main():
     # Recipe sidecar: HOW this excitation was built, not just which bytes it is. Without this,
     # a derived excitation's provenance chain stops at "some file named *_[redacted]95.wav" -- the exact
     # window/args used to cut it from the source are lost the moment the config-file comment that
-    # (informally, inconsistently) recorded them is out of date or missing. batch_harness.py's
+    # (informally, inconsistently) recorded them is out of date or missing. gen_dataset_from_schx.py's
     # input_provenance() picks this up automatically (same directory, <stem>.recipe.json) and
     # embeds it in every dataset's config.json -> parametric-nam-models' dataset_config.json.
     recipe = {
@@ -140,7 +140,7 @@ def main():
     }
     recipe_path = Path(args.output).with_suffix(".recipe.json")
     recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
-    print(f"wrote {recipe_path}  (build recipe -- picked up automatically by batch_harness.py)")
+    print(f"wrote {recipe_path}  (build recipe -- picked up automatically by gen_dataset_from_schx.py)")
 
 
 if __name__ == "__main__":

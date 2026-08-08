@@ -84,7 +84,7 @@ class TestLeadInSilence:
     retry rung, no output. Verified: the Boss DS-1 at Dist=0.2 fails on an 8 s slice of this sweep and
     succeeds on the whole file, and giving that same slice 250 ms of silence makes it converge.
 
-    THE WARMUP CONVENTION. batch_harness discards the first warmup_s=1.0 when computing stats and ESR.
+    THE WARMUP CONVENTION. gen_dataset_from_schx discards the first warmup_s=1.0 when computing stats and ESR.
     A shorter lead means THE SKIP EATS REAL SIGNAL: at 0.25 s of silence it was discarding 0.75 s of
     the clean 20 Hz chirp -- the low end of the quiet sweep -- from every measurement, silently.
     """

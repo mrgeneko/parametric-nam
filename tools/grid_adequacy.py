@@ -78,7 +78,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from batch_harness import LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice, write_probe_clip
+from gen_dataset_from_schx import LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice, write_probe_clip
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -108,7 +108,7 @@ class Renderer:
     sum(sig) is exactly the whole-file ESR restricted to the sampled windows, and an unbiased estimate
     of it.
 
-    This is the same trap, and the same fix, as choose_oversample in batch_harness.py.
+    This is the same trap, and the same fix, as choose_oversample in gen_dataset_from_schx.py.
 
     BACKEND: ngspice needed the same three fixes choose_oversample already required --
     (1) probe clips carry a quiet lead-in (write_probe_clip) so the solver has an
@@ -117,7 +117,7 @@ class Renderer:
     _run_ngspice's caller reads as "diverged") on shorter ones, discovered on the DS-1
     at exactly the 2.00s the old 4-window/8s-probe default produced; (3) a per-circuit
     netlist dump + NGSPICE_CIRCUIT_DEFAULTS lookup (method/conv/input_upsample), done
-    once up front, same as batch_harness.main() does for the real dataset render.
+    once up front, same as gen_dataset_from_schx.main() does for the real dataset render.
     """
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
@@ -168,14 +168,14 @@ class Renderer:
         else:
             # evenly-spaced CENTRES, not endpoints -- endpoints land on the sweep's leading silence
             # and its near-silent decay tail, and the probe then measures nothing. Same bug, same fix,
-            # as choose_oversample in batch_harness.
+            # as choose_oversample in gen_dataset_from_schx.
             span = total - win
             starts = [int((i + 0.5) * span / n_windows) for i in range(n_windows)]
 
         # Probe clips carry a QUIET LEAD-IN. A window cut from the middle of a sweep starts at
         # whatever amplitude the signal happened to be at -- often full scale, mid-chirp -- which asks
         # the simulator to jump to a large-signal solution from an uninitialised state at t=0. ngspice
-        # simply diverges ("diverged at t~0", every rung, no output). See batch_harness.
+        # simply diverges ("diverged at t~0", every rung, no output). See gen_dataset_from_schx.
         self.clips = []
         self.lead_n = 0
         for i, st in enumerate(starts):

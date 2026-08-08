@@ -138,7 +138,7 @@ emit("BACKEND", cfg.get("backend", "?"))
 emit("NPERM", cfg.get("permutation_count", "?"))
 emit("INPUT_WAV", Path(str(cfg.get("input_wav", "?"))).name)
 # Build-recipe surfacing (2026-08-01): if the input excitation was constructed by
-# tools/build_excitation.py, input_provenance() (batch_harness.py) embeds the sidecar recipe
+# tools/build_excitation.py, input_provenance() (gen_dataset_from_schx.py) embeds the sidecar recipe
 # under cfg["input"]["build_recipe"] -- name the source file here so it's visible in MANIFEST.md
 # without opening dataset_config.json; the full recipe (every arg, both hashes) lives there.
 _recipe = (cfg.get("input") or {}).get("build_recipe")

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Parallel batch processor for LiveSPICE harness.
+Build a parametric training dataset by simulating a .schx circuit across a knob-permutation
+grid, one WAV per permutation (parallel batch processor for LiveSPICE/ngspice/cpp harnesses).
 
 livespice backend (no code changes needed for new circuits):
-    python batch_harness.py --backend livespice \\
+    python gen_dataset_from_schx.py --backend livespice \\
         --schx "/path/to/Overdrive Special Preamp.schx" \\
         --knobs volume \\
         --input sweep.wav --output ./training_data
 
     # List all pots in a schx (omit --knobs):
-    python batch_harness.py --backend livespice --schx circuit.schx
+    python gen_dataset_from_schx.py --backend livespice --schx circuit.schx
 
 cpp backend:
-    python batch_harness.py --backend cpp --circuit marshall_jcm800_2203_preamp_modded \\
+    python gen_dataset_from_schx.py --backend cpp --circuit marshall_jcm800_2203_preamp_modded \\
         --input sweep.wav --output ./training_data
 
 Output (sharded by 2-digit prefix — ~100 files per dir):
@@ -24,7 +25,7 @@ Output (sharded by 2-digit prefix — ~100 files per dir):
         ...
 
 Post-processing:
-    python batch_harness.py --combine training_data/
+    python gen_dataset_from_schx.py --combine training_data/
         → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
 """
 
@@ -978,7 +979,7 @@ def input_provenance(wav: Path) -> dict:
 
 # Probe clips must not start mid-signal. See write_probe_clip.
 PROBE_LEAD_S = 1.00          # silence, so the solver can find its operating point.
-                             # 1.0 s deliberately: it is the SAME warmup convention batch_harness
+                             # 1.0 s deliberately: it is the SAME warmup convention gen_dataset_from_schx
                              # already uses (warmup_s=1.0) and that the sweeps themselves open with.
                              # 0.25 s was empirically enough for the DS-1, but having two different
                              # "how long until the circuit has settled" constants is how you end up
@@ -1624,7 +1625,7 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
 def acquire_generation_lock(out_dir: Path):
     """Take an exclusive, non-blocking lock on out_dir for the lifetime of a generation run.
 
-    WHY: two batch_harness generations pointed at one dir corrupt it SILENTLY. params.csv is
+    WHY: two gen_dataset_from_schx generations pointed at one dir corrupt it SILENTLY. params.csv is
     opened in append mode with no lock, so a second run re-logs its resume set as duplicate
     rows; meanwhile the idx-named .npy files (last-writer-wins) look perfect. The dataset then
     passes every render/RMS/convergence check but its params.csv no longer lines up 1:1 with the
@@ -1644,7 +1645,7 @@ def acquire_generation_lock(out_dir: Path):
     except OSError:
         fh.close()
         sys.exit(
-            f"ERROR: another batch_harness is already generating into {out_dir}\n"
+            f"ERROR: another gen_dataset_from_schx is already generating into {out_dir}\n"
             f"       (exclusive lock held on {lock_path}). Two concurrent generations corrupt\n"
             f"       params.csv. Wait for the running one to finish, or use a different --output."
         )
@@ -2294,7 +2295,7 @@ def main():
                       _rung0.get("oversample", args.oversample),
                       _rung0.get("iterations", 8), workers=args.workers)
 
-    print(f"\nPost-process with:  python batch_harness.py --combine {out_dir}")
+    print(f"\nPost-process with:  python gen_dataset_from_schx.py --combine {out_dir}")
 
 
 if __name__ == "__main__":

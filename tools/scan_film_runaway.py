@@ -52,7 +52,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from param_train import ParametricA2
 from run_pipeline import load_config
-from batch_harness import grid_permutations
+from gen_dataset_from_schx import grid_permutations
 
 SR = 48000
 
@@ -97,10 +97,10 @@ def hypercube_corners(param_names):
 
 def full_grid_corners(config_path, param_names):
     """The FULL Cartesian product of --config's own [knobs] grid -- the exact permutations
-    batch_harness.py rendered for training (e.g. 972 for Tweed), not a reduced sample.
+    gen_dataset_from_schx.py rendered for training (e.g. 972 for Tweed), not a reduced sample.
     Needs --config because a .nam's own metadata only carries min/max/default per knob
     (config.parametric.parameters), not the discrete grid VALUES actually trained on --
-    that's a batch_harness.py/config.toml-level fact this tool has no other way to recover.
+    that's a gen_dataset_from_schx.py/config.toml-level fact this tool has no other way to recover.
     """
     cfg = load_config(Path(config_path))
     knob_ranges = {}
@@ -135,7 +135,7 @@ def main():
                     help="...AND exceeds this absolute volts floor (avoids flagging near-silent models)")
     ap.add_argument("--config", default=None,
                     help="per-circuit TOML -- if given, scan the FULL trained grid (exact "
-                         "permutations batch_harness.py rendered, e.g. 972 for Tweed) instead "
+                         "permutations gen_dataset_from_schx.py rendered, e.g. 972 for Tweed) instead "
                          "of the reduced hypercube corner set. Needs --batch-size's batching "
                          "to stay fast at that scale -- see the module docstring for measured cost.")
     ap.add_argument("--batch-size", type=int, default=8,
@@ -165,7 +165,7 @@ def main():
                          "torch.get_num_threads()==10. Running independent forward calls "
                          "concurrently across threads works instead, because PyTorch's C++ conv/ "
                          "matmul kernels release the GIL during compute -- this is the same 'many "
-                         "small independent ops, not one big one' shape as batch_harness.py's "
+                         "small independent ops, not one big one' shape as gen_dataset_from_schx.py's "
                          "render_many() ThreadPoolExecutor pattern, just for inference instead of "
                          "subprocesses. torch.set_num_threads(1) below is required alongside this: "
                          "without it, each of --workers concurrent calls would ALSO try to spawn "

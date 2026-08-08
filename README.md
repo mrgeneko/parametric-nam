@@ -94,16 +94,16 @@ python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
 ## How it works
 
 ```
-.schx schematic                       fixed-setting .nam captures (real hardware/amp-modeler)
-    ↓  batch_harness.py                   ↓  gen_dataset_from_nam.py
-    (simulate: sweep × N permutations)    (run each capture against a shared sweep, 1 perm/file)
-                    ╲                    ╱
-                     Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
-                         ↓  param_train.py  (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
-                     .param.nam  (SlimmableContainer)
-                         ↓  param_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
-                         ↓  NeuralAmpModelerCore  (ParametricWaveNet factory, C++ inference)
-                     Real-time inference in a compatible host app
+.schx schematic                             fixed-setting .nam captures (real hardware/amp-modeler)
+    ↓  gen_dataset_from_schx.py                  ↓  gen_dataset_from_nam.py
+    (simulate: sweep × N permutations)           (run each capture against a shared sweep, 1/file)
+                        ╲                        ╱
+                         Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
+                             ↓  param_train.py  (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
+                         .param.nam  (SlimmableContainer)
+                             ↓  param_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
+                             ↓  NeuralAmpModelerCore  (ParametricWaveNet factory, C++ inference)
+                         Real-time inference in a compatible host app
 ```
 
 Two ways to reach the same dataset contract: simulate a circuit, or point at a folder of
@@ -133,7 +133,7 @@ python run_pipeline.py \
   `.param.nam`, the `.schx`, `metrics.csv`, a provenance `MANIFEST.md` (params +
   timing + hardware + git revs), and a runnable `reproduce.sh`. `--no-release` skips it.
 - Generation flags (`--random`, `--bounds`, `--oversample`, ngspice `--koren` etc.)
-  are forwarded to `batch_harness`; training flags to `param_train`.
+  are forwarded to `gen_dataset_from_schx`; training flags to `param_train`.
 
 ### Per-circuit configs (`--config`)
 
@@ -161,28 +161,28 @@ fully worked, annotated example of the format.
 
 ## Scripts
 
-### `batch_harness.py` — generate the dataset
+### `gen_dataset_from_schx.py` — generate the dataset
 
 Simulates the circuit across knob permutations, one WAV per permutation, then combines
 them into `outputs.npy`.
 
 ```bash
 # List the pots/switches in a schx:
-python batch_harness.py --backend livespice --schx "<circuit>.schx"
+python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx"
 
 # Grid sweep (factorial — fine for 1–3 knobs):
-python batch_harness.py --backend livespice --schx "<circuit>.schx" \
+python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx" \
     --knobs drive,tone --range "drive=0,0.5,1" --range "tone=0.2,0.5,0.8" \
     --input guitar.wav --output <ds> --dry-run   # check perm count + disk first
 
 # Random sampling (for high knob counts — grids explode past ~3 knobs):
-python batch_harness.py --backend livespice --schx "<amp>.schx" \
+python gen_dataset_from_schx.py --backend livespice --schx "<amp>.schx" \
     --knobs gain,bass,mid,treble,master --random 200 \
     --bounds bass=0.15,0.85 --bounds mid=0.15,0.85 --bounds treble=0.15,0.85 \
     --input guitar.wav --output <ds>
 
 # Combine per-permutation WAVs into outputs.npy:
-python batch_harness.py --combine <ds>
+python gen_dataset_from_schx.py --combine <ds>
 ```
 
 - **`--random N`** samples N points in the knob hypercube (+ deterministic boundary
@@ -205,7 +205,7 @@ Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `
 
 ### `gen_dataset_from_nam.py` — build a dataset from real hardware captures, no `.schx` needed
 
-An alternative to `batch_harness.py` for devices with **no SPICE model** — a set of
+An alternative to `gen_dataset_from_schx.py` for devices with **no SPICE model** — a set of
 already-captured, fixed-setting `.nam` files (real hardware or amp-modeler exports, one file
 per knob setting) instead of a circuit to simulate:
 
@@ -214,7 +214,7 @@ python gen_dataset_from_nam.py \
     --nam "~/Downloads/5150 DST *.nam" \
     --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
 
-python gen_dataset_from_nam.py --combine /tmp/5150_ds   # same --combine flag as batch_harness.py
+python gen_dataset_from_nam.py --combine /tmp/5150_ds   # same --combine flag as gen_dataset_from_schx.py
 ```
 
 - **Filenames encode the knob settings.** `"5150 DST G2, B5, M5, T5.nam"` → `Gain=0.2,
@@ -230,7 +230,7 @@ python gen_dataset_from_nam.py --combine /tmp/5150_ds   # same --combine flag as
   This is a **scattered point-sample dataset**, not a Cartesian grid — `grid_adequacy.py`'s
   interpolation reasoning doesn't apply; there's nothing systematic to interpolate between a
   handful of arbitrary points.
-- Output has the **same directory contract** `batch_harness.py` produces (`config.json`,
+- Output has the **same directory contract** `gen_dataset_from_schx.py` produces (`config.json`,
   `sweep.wav`, `params.csv`, `outputs.npy` after `--combine`), so `run_pipeline.py --config`
   and `param_train.py` read it completely unmodified — from here on it's the identical
   training path as a SPICE-rendered dataset.
@@ -322,7 +322,7 @@ and the important fidelity caveats.
 
 ## What a run produces
 
-A **dataset** directory (`batch_harness --combine` format):
+A **dataset** directory (`gen_dataset_from_schx --combine` format):
 ```
 config.json   # {"knobs": [...], "bounds": {...}, "param_map": {...}, ...}
 sweep.wav     # the dry input used
@@ -538,7 +538,7 @@ cd livespice-cli && ./build.sh
 (.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS. `--recurse-submodules`
 matters — LiveSPICE has its own nested submodule; a plain clone leaves it empty and the build fails.)
 
-`batch_harness.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
+`gen_dataset_from_schx.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
 `../livespice-cli/publish/livespice_cli`. Set the env var if your checkout lives
 elsewhere.
 

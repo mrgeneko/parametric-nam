@@ -80,7 +80,7 @@ echo "    installed into .venv:"
 say "done. Activate with:  . .venv/bin/activate"
 if [ "$BUILD_CLI" -eq 1 ]; then
   "$REPO/.venv/bin/python" -c "
-from batch_harness import LIVESPICE_CLI
+from gen_dataset_from_schx import LIVESPICE_CLI
 print(f'Oracle: {LIVESPICE_CLI}  (exists={LIVESPICE_CLI.exists()})')"
 fi
 exit 0

@@ -17,7 +17,7 @@ across the prior ad hoc uses. Peak is still reported for the chosen window so it
 either way; --metric lets you rank by peak or peak*rms instead if a future case wants that.
 
 Writes a <output-stem>.recipe.json sidecar (same convention as build_excitation.py) so
-batch_harness.py's input_provenance() picks it up automatically when this window is later
+gen_dataset_from_schx.py's input_provenance() picks it up automatically when this window is later
 used (directly, or as build_excitation.py's own --input) as a training config's excitation.
 """
 import argparse
@@ -126,7 +126,7 @@ def main():
     }
     recipe_path = Path(args.output).with_suffix(".recipe.json")
     recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
-    print(f"wrote {recipe_path}  (build recipe -- picked up automatically by batch_harness.py)")
+    print(f"wrote {recipe_path}  (build recipe -- picked up automatically by gen_dataset_from_schx.py)")
 
 
 if __name__ == "__main__":

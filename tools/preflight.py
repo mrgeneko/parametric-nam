@@ -12,7 +12,7 @@ three failure modes that have each cost us a full render + train cycle:
                       voltage, not an interface reference)
 
 Exit status is nonzero if any HARD check fails, so a generation script can gate
-on it:  `python tools/preflight.py ... && python batch_harness.py ...`
+on it:  `python tools/preflight.py ... && python gen_dataset_from_schx.py ...`
 
 Usage:
   python tools/preflight.py --schx DEVICE.schx --knobs Gain,Tone --input sweep.wav \
@@ -44,7 +44,7 @@ import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from batch_harness import LIVESPICE_CLI, parse_schx_controls, resolve_knobs  # noqa: E402
+from gen_dataset_from_schx import LIVESPICE_CLI, parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
 SR = 48000

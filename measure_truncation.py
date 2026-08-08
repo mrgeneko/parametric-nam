@@ -62,7 +62,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from batch_harness import _livespice_batch, write_probe_clip
+from gen_dataset_from_schx import _livespice_batch, write_probe_clip
 
 
 def esr_terms(a: np.ndarray, b: np.ndarray, lead_n: int, sr: int) -> tuple[float, float]:

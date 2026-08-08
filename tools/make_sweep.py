@@ -110,7 +110,7 @@ def build_excitation(sr: int = SR) -> np.ndarray:
         #   ("diverged at t~0", every rung, no output). The Boss DS-1 fails on an 8 s slice of this
         #   very sweep and succeeds on the whole file, for exactly this reason.
         #
-        #   THE WARMUP CONVENTION is 1.0 s. batch_harness discards the first warmup_s=1.0 when it
+        #   THE WARMUP CONVENTION is 1.0 s. gen_dataset_from_schx discards the first warmup_s=1.0 when it
         #   computes stats and ESR, to keep a startup transient out of the number. sweepv4 opens with
         #   1.048 s of silence and satisfies both. My first cut used 0.25 s -- which meant the 1 s
         #   warmup skip was EATING 0.75 s OF REAL SIGNAL: the opening of the clean 20 Hz chirp, i.e.

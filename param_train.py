@@ -2,7 +2,7 @@
 """
 param_train.py — Train a parametric A2 + FiLM Neural Amp Modeler.
 
-Loads a dataset produced by batch_harness.py, trains an A2 architecture
+Loads a dataset produced by gen_dataset_from_schx.py, trains an A2 architecture
 with FiLM conditioning on knob parameters, and exports a .param.nam file
 loadable by the C++ ParametricWaveNet subclass.
 
@@ -768,7 +768,7 @@ class SlimmableParametricA2(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ParamDataset(torch.utils.data.Dataset):
-    """Loads dataset produced by batch_harness.py (livespice backend).
+    """Loads dataset produced by gen_dataset_from_schx.py (livespice backend).
 
     Expected directory structure:
         dataset/
@@ -821,7 +821,7 @@ class ParamDataset(torch.utils.data.Dataset):
         if not out_path.exists():
             raise FileNotFoundError(
                 f"outputs.npy not found. Run first:\n"
-                f"  python batch_harness.py --combine {self.dir}"
+                f"  python gen_dataset_from_schx.py --combine {self.dir}"
             )
         if mmap:
             print(f"  Memory-mapping outputs.npy (mmap mode) ...", file=sys.stderr, flush=True)
@@ -831,7 +831,7 @@ class ParamDataset(torch.utils.data.Dataset):
             self.outputs = np.load(str(out_path))
 
         # Load params.csv — successful rows only, ordered by permutation idx.
-        # outputs.npy (built by batch_harness.py --combine) is COMPACTED: row i
+        # outputs.npy (built by gen_dataset_from_schx.py --combine) is COMPACTED: row i
         # is the i-th surviving .npy in sorted-filename order, not row `idx`. If
         # any permutation failed, the raw CSV `idx` has gaps and is no longer a
         # valid row index -- use the post-sort enumeration position instead.
@@ -862,7 +862,7 @@ class ParamDataset(torch.utils.data.Dataset):
                     warnings.warn(
                         f"Outputs {idx_i} and {idx_j} are identical "
                         f"— dataset may be invalid. Check param_map names "
-                        "in batch_harness.py match circuit component names."
+                        "in gen_dataset_from_schx.py match circuit component names."
                     )
 
     def __len__(self):
@@ -1322,7 +1322,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--dataset", required=True, type=Path,
-                    help="Dataset directory from batch_harness.py")
+                    help="Dataset directory from gen_dataset_from_schx.py")
     ap.add_argument("--output", "-o", required=True, type=Path,
                     help="Output .param.nam file path")
     ap.add_argument("--epochs", type=int, default=100,
@@ -1497,7 +1497,7 @@ def main():
                          ".nam's metadata (e.g. --modeled-by 'Gene Ko'). A training run is who's "
                          "doing this specific capture, not a property of the reusable dataset, so "
                          "this is a param_train.py flag rather than something baked into the "
-                         "dataset's config.json by batch_harness.py -- overrides anything already "
+                         "dataset's config.json by gen_dataset_from_schx.py -- overrides anything already "
                          "there if both are set.")
     args = ap.parse_args()
 
