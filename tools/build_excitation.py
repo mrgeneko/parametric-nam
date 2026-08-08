@@ -15,7 +15,7 @@ is genuinely learned. Under the V0dBFS=1V convention a sample value == drive vol
 --sweep-peaks in volts and set the max to the device's saturation/max-output point + headroom.
 Written float32 so values >1.0 survive (they represent >1 V drive, which is legitimate).
 
-See docs/input_calibration.md.
+See internal engineering notes.
 """
 import argparse
 import hashlib

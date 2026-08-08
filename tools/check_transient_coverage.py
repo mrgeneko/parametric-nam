@@ -2,7 +2,7 @@
 """Pre-generation gate: does the excitation's TRANSIENT content actually reach
 saturation at every knob-grid corner, not just the excitation's overall peak?
 
-Background (docs/film_runaway_investigation.md): a device can have a peak level
+Background (internal engineering notes): a device can have a peak level
 (from its synthetic sweep tail) that comfortably clears its saturation onset, while
 the TRANSIENT-bearing (real-playing) segment -- built independently, at its own
 `--realistic-peak` -- never does, at some corners. Tweed 5F6-A is the exact case
@@ -57,7 +57,7 @@ def _corners(knob_ranges: dict) -> list:
     """Reduced hypercube corner set: all-min, all-max, center, each knob solo-
     extreme (rest at their own center). Same convention as
     scan_film_runaway.py's hypercube_corners() and this fleet's existing
-    knob-grid-design practice (docs/tweed5f6a_training_notes.md) -- NOT the full
+    knob-grid-design practice (internal engineering notes) -- NOT the full
     grid, which would be 972 renders x 20 amplitude points for Tweed alone.
     Uses each knob's OWN grid min/max/center (not a blanket 0/1/0.5), since
     swept ranges are frequently narrowed (e.g. Tweed's tone stack is 0.2..0.8).

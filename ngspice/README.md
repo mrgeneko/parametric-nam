@@ -98,7 +98,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
   **Default is 1× (naive) — pass `--oversample 2` (or more) to enable anti-aliasing.**
   Verified 2× on the 5150: near-Nyquist (18–24 kHz) 12.3%→9.2%. Note the aliasing is
   mostly above a cab's rolloff (largely inaudible cab'd) but inflates the full-band
-  ESR. See [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
+  ESR. See the project's internal engineering notes.
 - **MEMORY — long inputs need `save` (now automatic) + a sane `--workers`.** ngspice
   keeps *every node's* full transient in RAM until it writes. The translator now
   emits `save v(<out>)` so only the probed node is stored (~150 MB for 120 s @ 2×
@@ -155,7 +155,7 @@ python batch_harness.py --backend ngspice --koren --ot-damp 3k --ot-snub 100n \
 ```
 
 Full write-up of the 5150 run (convergence recipe, training, aliasing, the
-generalization gap, knob analysis): **[`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md)**.
+generalization gap, knob analysis) lives in the project's internal engineering notes.
 
 Done:
 1. ✅ **General translator** — `livespice_cli --netlist` (authoritative parse) →
@@ -191,7 +191,7 @@ Open:
   reference exists): a 5-knob model reached validation ESR ~0.19 but **~0.43 on a
   new DI** — "sounds like the amp, not production-close." Root causes: aliasing +
   training-input under-coverage (a 30 s sweep slice) + 5-knob capacity spread. Full
-  analysis + improvement plan in [`../docs/evh5150_training_notes.md`](../docs/evh5150_training_notes.md).
+  analysis + improvement plan in the project's internal engineering notes.
 - **Per-circuit tuning is manual** — `--ot-damp`/`--nfb-comp` values and the NFB
   node name are hand-set for the 5150; not auto-derived.
 - Tube **inter-electrode capacitances** and **pentode grid current** are omitted
@@ -206,8 +206,7 @@ Open:
   Also evaluated **LTspice** (its "modified trap" integration) — not pursued
   to a final convergence test (reasoned unlikely to help, since it removes
   numerical damping rather than adding it; and hit an unrelated Wine
-  automation-reliability problem first). See
-  [`../docs/ltspice_evaluation.md`](../docs/ltspice_evaluation.md).
+  automation-reliability problem first). See the project's internal engineering notes.
 
 ## When to prefer which backend
 

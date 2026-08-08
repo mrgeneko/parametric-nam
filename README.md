@@ -418,7 +418,7 @@ Validation ESR (error-to-signal ratio) as a rough quality guide:
 
 Treat these as a sanity check, not a substitute for listening — a model's
 perceptual quality and its full-band ESR can diverge quite a bit,
-especially on high-gain amps (see [`docs/evh5150_training_notes.md`](docs/evh5150_training_notes.md)).
+especially on high-gain amps (see the project's internal engineering notes).
 
 ---
 
@@ -546,7 +546,7 @@ host-app integration.
 > single guitar DI is only a *subset* of that coverage. And don't skimp on length —
 > training a high-gain amp (5150) on a **30 s slice** of the sweep left the model
 > unable to clean up on darker/more-dynamic real playing (false breakup). Use the
-> full sweep. See [`docs/evh5150_training_notes.md`](docs/evh5150_training_notes.md).
+> full sweep (see the project's internal engineering notes).
 
 ## Related Repos
 

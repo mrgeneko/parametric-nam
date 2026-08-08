@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scan a published .nam bundle for the FiLM/LeakyReLU runaway instability.
 
-Background: see docs/film_runaway_investigation.md. Two published models (Tweed
+Background: see internal engineering notes. Two published models (Tweed
 5F6-A Full sag, and the old pre-fix Boss DS-1) were found to blow up 80-260x at a
 narrow (knob-corner x real-transient) combination the training excitation
 under-covered. This tool reproduces that check generically, against ANY
@@ -11,7 +11,7 @@ _load_weight_block round-trips this exactly).
 
 Method: enumerate the knob-space hypercube corners (all-min, all-max, each
 knob solo-extreme -- the same reduced corner set already used elsewhere in
-this fleet for knob-grid design, e.g. docs/tweed5f6a_training_notes.md) plus
+this fleet for knob-grid design, per internal engineering notes) plus
 the center, run each corner against a real-transient reference clip
 (--reference; any local real-playing clip with hard attacks -- no bundled
 default, bring your own) in windowed chunks, and flag any window where the
@@ -30,7 +30,7 @@ Usage:
       --reference PATH/TO/real_playing.wav [--chunk-s 5.0] \
       [--flag-ratio 8.0] [--flag-abs 3.0]
 
-  # full trained grid instead of the reduced corner set (see docs/film_runaway_investigation.md
+  # full trained grid instead of the reduced corner set (see internal engineering notes
   # for measured cost: the default reduced set is ~2 min for 13 corners on a 190s reference;
   # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
   # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
@@ -84,7 +84,7 @@ def load_all_submodels(nam_path: str):
 def hypercube_corners(param_names):
     """All-min, all-max, each knob solo-extreme (rest at 0.5), and the center --
     the same reduced corner set already used for knob-grid design in this fleet
-    (see docs/tweed5f6a_training_notes.md), not the full 2^n hypercube."""
+    (per internal engineering notes), not the full 2^n hypercube."""
     n = len(param_names)
     corners = [("all-min", [0.0] * n), ("all-max", [1.0] * n), ("center", [0.5] * n)]
     for i, name in enumerate(param_names):

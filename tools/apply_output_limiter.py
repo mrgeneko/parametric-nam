@@ -2,7 +2,7 @@
 """Opt-in post-processing step: soft-limit a rendered (wet) training-target WAV so the
 NAM trainer sees an explicit output ceiling near the top of its own training range, instead
 of a purely linear relationship that a WaveNet then extrapolates unboundedly past the
-training input peak. See docs/input_calibration.md for why input-side calibration alone
+training input peak. See internal engineering notes for why input-side calibration alone
 doesn't fix this for a gain setting whose own real saturation point sits far above any
 realistic input level (e.g. SLO-100 Normal Gain=0.1, ~20V input needed -- never reachable
 in real use, so its whole training range stays linear with no hint of a ceiling).

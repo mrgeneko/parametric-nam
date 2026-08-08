@@ -50,7 +50,7 @@ def load_config(p: Path) -> dict:
 
 def read_peak_v(wav_path: str) -> float:
     """Peak sample value of a WAV file. Under this fleet's V0dBFS=1V convention (see
-    docs/input_calibration.md), a full-scale sample of 1.0 IS 1 volt at the schx's Input --
+    internal engineering notes), a full-scale sample of 1.0 IS 1 volt at the schx's Input --
     so the raw peak (no separate conversion) is directly comparable to preflight's onset_99pct_input_v.
     Handles 16-bit int, 24-bit int, and 32-bit float PCM (this fleet's three actual formats)."""
     with open(wav_path, "rb") as f:

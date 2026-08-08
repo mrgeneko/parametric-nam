@@ -1738,7 +1738,7 @@ def main():
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
     ap.add_argument("--skip-transient-check", action="store_true",
                     help="skip the pre-generation transient/saturation coverage gate (livespice "
-                         "backend only). See docs/film_runaway_investigation.md: this refuses to "
+                         "backend only). See internal engineering notes: this refuses to "
                          "start generation if the excitation's transient-bearing content never "
                          "reaches saturation at some knob-grid corner (checked via "
                          "tools/check_transient_coverage.py against a reduced hypercube corner "
@@ -2012,7 +2012,7 @@ def main():
         return
 
     # ------------------------------------------------------------------
-    # Transient/saturation coverage gate (see docs/film_runaway_investigation.md).
+    # Transient/saturation coverage gate (see internal engineering notes).
     # Hard-fails BEFORE the (slow, expensive) generation run starts if the excitation's
     # transient-bearing content never reaches saturation at some knob-grid corner --
     # exactly the gap that under-covered Tweed 5F6-A and produced the FiLM/LeakyReLU

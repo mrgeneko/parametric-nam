@@ -168,7 +168,7 @@ def find_saturation_point(schx, params, oversample, iterations, scratch,
                            plateau_frac=0.005, plateau_run=3, workers=None):
     """Sweep a clean sine tone's input amplitude and find where output RMS stops
     rising with more input -- the device's own saturation ceiling, matching the
-    methodology in docs/input_calibration.md (the OCD investigation). Not the same
+    methodology in internal engineering notes (the OCD investigation). Not the same
     as clipping-onset (THD-based); this is "where does volume stop increasing."
 
     All `npoints` amplitudes are rendered CONCURRENTLY (they're independent 1s tones),
@@ -250,7 +250,7 @@ def main():
     ap.add_argument("--find-peak", action="store_true",
                     help="sweep a clean sine tone's input amplitude and report where output "
                          "RMS stops rising (the device's own saturation ceiling) -- see "
-                         "docs/input_calibration.md. Uses --fixed-params for any knob not "
+                         "internal engineering notes. Uses --fixed-params for any knob not "
                          "swept; other knobs default to 0.5.")
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                     help="upper bound of the --find-peak amplitude sweep")

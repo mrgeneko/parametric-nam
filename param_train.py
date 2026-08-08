@@ -61,7 +61,7 @@ def _watchdog_disarm():
 # A2 architecture constants (num layers / kernel sizes / dilations / LeakyReLU) — match
 # C++ a2_fast.h and NAM's A2 config.
 #
-# HEAD — SKIP-ONLY (migrated 2026-07; see docs/rearchitecture_skip_accumulation.md):
+# HEAD — SKIP-ONLY (migrated 2026-07; see internal engineering notes):
 #   * The head reads the SUM of every layer's post-activation — the standard WaveNet skip
 #     connections that NAM, nam_wavenet.metal, the static a2_fast path and every stock NAM
 #     plugin already compute. It is the only head that exports faithfully to stock plugins
@@ -221,7 +221,7 @@ class A2Layer(nn.Module):
     """Single A2 dilated conv layer with optional FiLM.
 
     spectral_norm: constrains conv/mixin/l1x1's spectral norm (Lipschitz bound) via
-    PyTorch's parametrization system -- see docs/film_runaway_investigation.md ("A2"),
+    PyTorch's parametrization system -- see internal engineering notes ("A2"),
     the fix that actually addresses the traced blow-up mechanism (unbounded gain
     compounding through these three stages across the 23-layer residual stack).
     Default False: existing checkpoints/training runs are unaffected until opted in.
@@ -299,7 +299,7 @@ _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference (sqrt(0.6W * 600ohm), per NAM's own 
 # value and gives a Scarlett 2i2 (+12.5 dBu) the correct ~+13 dB makeup. So the fix is: keep
 # deriving from V0dBFS, and set V0dBFS to the 1V convention per device. A device captured on
 # real gear may still override with a measured level via config["input_level_dbu"].
-# See docs/input_calibration.md and LESSONS #20.
+# See internal engineering notes and LESSONS #20.
 
 
 def _schx_input_v0dbfs(schx_path) -> "float | None":
@@ -357,7 +357,7 @@ class ParametricA2(nn.Module):
         self.channels = channels
         self.num_params = num_params
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
-        # anything to strip -- see docs/film_runaway_investigation.md ("A2").
+        # anything to strip -- see internal engineering notes ("A2").
         self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
@@ -481,7 +481,7 @@ class ParametricA2(nn.Module):
     def _bake_spectral_norm(self) -> "ParametricA2":
         """Build a fresh, plain (non-parametrized) copy of this model with conv/mixin/
         l1x1's CURRENT computed (already spectral-norm-bounded) weights baked in as
-        ordinary leaf Parameters -- see docs/film_runaway_investigation.md ("A2"). Must
+        ordinary leaf Parameters -- see internal engineering notes ("A2"). Must
         run before anything reads `.weight` as a plain leaf tensor: `_export_weight_block()`
         (below), `nam_standard.fold_film()`'s in-place `.mul_()`, and `load_weights()`'s
         reconstruction from exported floats all assume that shape.
@@ -675,7 +675,7 @@ class SlimmableParametricA2(nn.Module):
             self.full = ParametricA2(self.widths[-1], num_params, **kw)
             self.mid = nn.ModuleList(ParametricA2(w, num_params, **kw) for w in self.widths[1:-1])
         # spectral_norm applied HERE, in one pass across every tier, only after every tier's raw
-        # modules already exist -- see A2Layer's docstring (docs/film_runaway_investigation.md,
+        # modules already exist -- see A2Layer's docstring (internal engineering notes,
         # "A2"). Each ParametricA2 above was built with spectral_norm=False specifically so this
         # is the ONLY point any spectral_norm-related RNG draw happens; doing it per-tier during
         # construction (the old behavior) would shift the LATER tiers' raw weight initialization
@@ -1081,7 +1081,7 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     Sequential frees each tier's activation graph before the next tier's forward
     runs, so peak memory is ~the LARGEST tier instead of the SUM of tiers — the
     sum is what forced 4-tier runs down to batch 32 on a 48 GB M4 Pro (Jetsam,
-    docs/multi_width_slimmable_plan.md §12).
+    internal engineering notes §12).
 
     GRAD CLIPPING: --per-tier-clip (default off) switches between one joint
     clip_grad_norm_ call over every tier's parameters combined, vs a separate call
@@ -1439,7 +1439,7 @@ def main():
                     help="Constrain every A2Layer's conv/mixin/l1x1 to spectral norm <=1 "
                          "(Lipschitz-bounded), closing the unbounded gain-compounding "
                          "mechanism behind the FiLM/LeakyReLU runaway instability -- see "
-                         "docs/film_runaway_investigation.md ('A2'). Default off: existing "
+                         "internal engineering notes ('A2'). Default off: existing "
                          "training runs are unaffected until opted in and validated "
                          "(measure aggregate + per-perm ESR before/after on a per-model "
                          "basis; this is a real capacity constraint, not free).")
@@ -1578,7 +1578,7 @@ def main():
     # ------------------------------------------------------------------
     num_params = dataset.num_params
     # --init-from + --spectral-norm (the "clip-then-fine-tune" retrofit path, docs/
-    # film_runaway_investigation.md "A2"): the checkpoint being warm-started from was trained
+    # internal engineering notes "A2"): the checkpoint being warm-started from was trained
     # WITHOUT spectral_norm, so its conv/mixin/l1x1 state_dict keys are plain (`.weight`), not
     # the parametrized form (`.parametrizations.weight.original`/`._u`/`._v`). Building the model
     # already-wrapped here would make the --init-from load below hard-fail on a key mismatch --
@@ -1629,7 +1629,7 @@ def main():
         if args.spectral_norm:
             model.enable_spectral_norm()
             print(f"  Applied --spectral-norm AFTER loading (clip-then-fine-tune retrofit, "
-                  f"docs/film_runaway_investigation.md 'A2') -- any conv/mixin/l1x1 layer whose "
+                  f"internal engineering notes 'A2') -- any conv/mixin/l1x1 layer whose "
                   f"spectral norm exceeded 1 in the loaded weights is now clipped to 1; training "
                   f"from here fine-tunes the whole model to adapt to the constraint, not just "
                   f"the clipped layers.", file=sys.stderr)

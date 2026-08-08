@@ -647,7 +647,7 @@ def main():
                         "Forwarded to batch_harness.py.")
     g.add_argument("--skip-transient-check", action="store_true",
                    help="Skip batch_harness.py's pre-generation transient/saturation coverage "
-                        "gate -- see docs/film_runaway_investigation.md. Forwarded to batch_harness.py.")
+                        "gate -- see internal engineering notes. Forwarded to batch_harness.py.")
     g.add_argument("--transient-peak", type=float, default=None,
                    help="Excitation's transient-segment peak, volts (auto from <input>.recipe.json "
                         "if omitted). Forwarded to batch_harness.py.")
@@ -740,7 +740,7 @@ def main():
                         "a [knob-boost] table in --config. Generic over any knob name.")
     g.add_argument("--spectral-norm",  action="store_true",
                    help="Lipschitz-bound every A2Layer's conv/mixin/l1x1 -- see "
-                        "docs/film_runaway_investigation.md ('A2'). Default off. "
+                        "internal engineering notes ('A2'). Default off. "
                         "Forwarded to param_train.py.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.

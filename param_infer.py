@@ -37,7 +37,7 @@ def load_model(checkpoint_path: str):
     num_params = len(param_names)
     args_dict["param_names"] = param_names
 
-    # A2 (docs/film_runaway_investigation.md): args_dict already captures this from the
+    # A2 (internal engineering notes): args_dict already captures this from the
     # training CLI (it's saved from vars(args)), so this recovers it for free -- no separate
     # detection needed the way export_checkpoint.py has to (it doesn't get an args_dict when
     # composing across checkpoints from possibly different runs).

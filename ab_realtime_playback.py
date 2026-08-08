@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ab_realtime_playback.py — A/B our Python forward against the host app's C++ playback.
 
-This is the FiLM-on parity check (docs/rearchitecture_skip_accumulation.md §4.2/4.3): the
+This is the FiLM-on parity check (internal engineering notes §4.2/4.3): the
 last unverified link between how we TRAIN a parametric model and how the product PLAYS it.
 The static round-trip test (tests/test_nam_standard.py) folds FiLM away, so it does NOT
 cover conditioning; this does.

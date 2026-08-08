@@ -257,7 +257,7 @@ _, val_ds = torch.utils.data.random_split(
     ds, [n_train, n_val], generator=torch.Generator().manual_seed(args["seed"]))
 loader = torch.utils.data.DataLoader(val_ds, batch_size=args["batch_size"],
                                      shuffle=False, num_workers=0)
-# Must match the checkpoint's own training-time construction (docs/film_runaway_investigation.md
+# Must match the checkpoint's own training-time construction (internal engineering notes
 # "A2") or load_state_dict() can't match keys at all: a spectral_norm-trained checkpoint's
 # state dict carries "*.parametrizations.weight.original"/"_u"/"_v" keys that only exist once
 # enable_spectral_norm() has wrapped conv/mixin/l1x1 -- a plain (unwrapped) construction has
