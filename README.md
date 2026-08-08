@@ -34,28 +34,17 @@ python run_pipeline.py --config examples/muff/config.toml \
 This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 `examples/muff/Big Muff Pi V1 (66#5).md` for the circuit notes.
 
-### Full setup — training your own devices
+### Bring your own circuit
 
-Beyond the bundled example, **this repo is not self-contained.** It needs sibling checkouts.
-Clone them side by side:
-
-```bash
-mkdir -p ~/work && cd ~/work
-
-gh repo clone mrgeneko/parametric-nam        # this repo — the toolchain
-gh repo clone mrgeneko/parametric-devices      # the .schx library + devices.toml registry — PRIVATE
-gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README) — PRIVATE
-gh repo clone mrgeneko/parametric-nam-models    # where trained runs are archived — PRIVATE
-
-# THE ORACLE (livespice_cli) — public, no PRIVATE-repo auth needed. Recursive: it has its own
-# nested submodule.
-git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
-
-cd parametric-nam && ./setup.sh && . .venv/bin/activate
-```
+The bundled example above needs nothing beyond what it already cloned. To train your own
+circuit, all you need on top of that is your own `.schx` (e.g. from
+`LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it —
+see **Per-circuit configs** below for the format, and `grid_adequacy.py`/
+`measure_truncation.py` (Scripts, below) for measuring good values instead of guessing them.
+No other repos are required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
-skip) and creates the venv. If your checkouts are not siblings, point at them explicitly:
+skip). If your checkout isn't a sibling of this repo, point at it explicitly:
 
 ```bash
 export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
@@ -64,10 +53,10 @@ export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ### Train a device
 
 ```bash
-python run_pipeline.py --config ~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml \
-    --dataset-dir    ~/work/tmp/bigmuff_ds \
-    --nam-output     ~/work/tmp/bigmuff.param.nam \
-    --checkpoint-dir ~/work/tmp/bigmuff_ckpt
+python run_pipeline.py --config path/to/your-device/config.toml \
+    --dataset-dir    /tmp/ds \
+    --nam-output     /tmp/model.param.nam \
+    --checkpoint-dir /tmp/ckpt
 ```
 
 One command runs **four** steps:
@@ -87,7 +76,7 @@ that fleet rather than to using this toolchain standalone.
 ### Listen
 
 ```bash
-python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
+python param_infer.py --checkpoint /tmp/ckpt/best.pt \
     --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
 ```
 
@@ -152,14 +141,39 @@ Any CLI flag overrides the config (config is loaded as argparse defaults). The `
 table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 `--fixed-params`, and `widths = [3,4,8]` to `--widths`.
 
-**This repo carries no per-device configs of its own.** Each device's recipe lives as
-`config.toml[.<variant>]` next to its trained models in
-[`parametric-nam-models`](https://github.com/mrgeneko/parametric-nam-models)
-(`<category>/<device-id>/config.toml`) — the *living* recipe, distinct from a specific
-archived run's *frozen* `reproduce.sh`. `examples/muff/config.toml` is a
-fully worked, annotated example of the format.
+**This repo carries no per-device configs of its own** beyond the bundled example — a
+`config.toml` is a *living* recipe you maintain alongside your own circuits, distinct from
+a specific run's *frozen* `reproduce.sh` output. `examples/muff/config.toml` is a fully
+worked, annotated example of the format.
 
 ## Scripts
+
+### `tools/grid_adequacy.py` — measure whether a knob grid is dense enough
+
+```bash
+./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
+./tools/grid_adequacy.py --config ... --suggest       # propose a regrid
+```
+
+Renders the circuit's true output at each grid cell's midpoint and compares it against
+interpolating the two neighboring points — the residual is the interpolation error **the
+grid imposes**, independent of any model. Run this before training, not after: a cell
+whose residual exceeds `--target` is a floor that no training capacity or time can lift,
+since the information was never sampled. `--suggest` proposes a denser/sparser grid and
+prints it as TOML, ready to paste into `[knobs]`.
+
+### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
+
+```bash
+./measure_truncation.py --input examples/sweepv5.wav --config path/to/device-config.toml
+```
+
+LiveSPICE integrates with BDF2 (O(h²)), so the simulated circuit is never quite the real
+one — the gap is **truncation error**, and it shrinks as `--oversample` rises. Measures it
+against a high-oversample reference (not the next rung up, which understates the error
+~3x) so you can pick an `oversample` whose truncation sits comfortably below the model ESR
+you're chasing — training past that point just teaches the model the integrator's own
+mistakes.
 
 ### `gen_dataset_from_schx.py` — generate the dataset
 
@@ -311,9 +325,9 @@ where embedding the full master in every tone just multiplies size.
 
 ### `release_run.sh` — verify + stage a finished run
 
-Its defaults assume the private fleet layout (`parametric-devices`/`parametric-nam-models`);
-override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the bundled
-`examples/muff/` one — continuing straight from the "Try it now" run above:
+Its defaults assume a private archive layout you don't have; override `RUN`/`DS`/`SCHX`/
+`CONFIG` to point at any recipe instead, including the bundled `examples/muff/` one —
+continuing straight from the "Try it now" run above:
 
 ```bash
 RUN=/tmp/muff DS=/tmp/muff_ds \
@@ -327,8 +341,8 @@ what the composite buys, and writes `MANIFEST.md` + `reproduce.sh`. Nothing abou
 model shape is hardcoded — tiers/widths/config are all derived from the run itself.
 
 No git or network dependency — it never touches another repo. Publishing the resulting
-bundle somewhere (e.g. a `parametric-nam-models`-style archive) is a separate, optional
-step; the script prints the command for that at the end rather than running it.
+bundle somewhere (e.g. your own model archive) is a separate, optional step; the script
+prints the command for that at the end rather than running it.
 
 ---
 
