@@ -254,6 +254,21 @@ def detect_standard_input(input_wav: Path):
         # None for "no match", it actually RAISES when neither a strong nor weak
         # match is found -- confirmed by hitting this directly on sweepv5.wav.
         return None
+    except Exception as e:
+        # A FLOAT-subtype WAV (e.g. ensure_adequate_excitation's scaled copy) isn't a
+        # NAM standard file anyway -- that's already the documented, accepted tradeoff
+        # -- but detecting that "isn't a match" can itself crash first: nam.data's
+        # primary reader (wavio -> stdlib `wave`) doesn't support IEEE-float WAVs
+        # (wave.Error: unknown format: 3), and its own librosa fallback is broken in
+        # THIS repo's venv from a cross-venv cffi version mismatch (this script mixes
+        # parametric-nam/.venv's compiled _cffi_backend with neural-amp-modeler/venv's
+        # pure-Python cffi via NAM_SITE_PACKAGES on sys.path -- a real, separate
+        # environment wart, not worth fixing just to reach the same "not a standard
+        # file" conclusion this except clause already reaches for the expected case).
+        # Treat any such failure the same as "no match": fall back to delay=0.
+        print(f"[capture_static] WARNING: standard-input detection failed ({type(e).__name__}: "
+              f"{e}) -- treating as not-a-standard-file, falling back to delay=0.")
+        return None
     if version is None:
         return None
     print(f"[capture_static] input matches NAM standard version {version} "
