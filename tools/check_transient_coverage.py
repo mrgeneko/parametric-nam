@@ -22,7 +22,7 @@ Exit status is nonzero if any corner fails, so a generation script can gate on i
   python tools/check_transient_coverage.py ... && python batch_harness.py ...
 
 Usage:
-  python tools/check_transient_coverage.py --config configs/DEVICE.toml \
+  python tools/check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
       [--transient-peak 0.2] [--margin 1.0] [--oversample 8] [--iterations 256] \
       [--json report.json] [--no-cache]
 

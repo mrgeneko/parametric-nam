@@ -35,7 +35,7 @@ Usage:
   # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
   # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
   python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
-      --config configs/tweed-5f6-a-full-sag.toml
+      --config ~/work/parametric-nam-models/amps/tweed-5f6-a-full-sag/config.toml
 """
 import argparse
 import json

@@ -59,7 +59,7 @@ nothing else corrects for it (loss weighting, tier width, or -- the blunt instru
 the starved knob more grid points so it has more to learn from per epoch). Grid density and training
 balance are separate problems; this tool only measures the first one.
 
-    ./tools/grid_adequacy.py --config configs/big-muff-v1.toml --target 0.009
+    ./tools/grid_adequacy.py --config ~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml --target 0.009
     ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid
 """
 from __future__ import annotations

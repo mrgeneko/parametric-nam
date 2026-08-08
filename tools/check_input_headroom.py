@@ -27,8 +27,8 @@ Volume rather than at high input level. Treat a WARN here as "go investigate at 
 corner directly" (see docs/adding-a-device.md), not as an automatic verdict either way.
 
 Usage:
-    ./tools/check_input_headroom.py --config configs/my-device.toml
-    ./tools/check_input_headroom.py --config configs/my-device.toml --margin 0.9
+    ./tools/check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml
+    ./tools/check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml --margin 0.9
 """
 import argparse
 import json
