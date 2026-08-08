@@ -37,14 +37,17 @@ WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the B
 is ReverseLinear, so all-max is MINIMUM drive.
 
 Usage:
-    ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --device big-muff-pi-v1-66-5
+    ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav \
+        --config ../parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml
 
-One device per invocation, on purpose -- a fleet-wide table is rare (it matters only when
+`--config` is the same TOML `run_pipeline.py`/`grid_adequacy.py` take (schx + knobs come straight
+from it, like every other analysis tool here) -- no registry, no `parametric-devices` dependency.
+One device per invocation, on purpose: a fleet-wide table is rare (it matters only when
 re-deriving the shared oversample floor, or auditing every device after a measurement-methodology
 change; see docs/convergence.md) and is just as easy from the outside:
 
-    for d in $(python3 -c "import tomllib,sys; print(*tomllib.load(open('../parametric-devices/devices.toml','rb')))"); do
-        ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --device "$d"
+    for f in ../parametric-nam-models/*/*/config.toml*; do
+        ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --config "$f"
     done
 """
 from __future__ import annotations
@@ -60,9 +63,6 @@ import numpy as np
 import soundfile as sf
 
 from batch_harness import _livespice_batch, write_probe_clip
-
-REGISTRY = Path(_os.environ.get("PARAMETRIC_DEVICES") or _os.environ.get("SPICE_CIRCUITS")
-                or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
 
 
 def esr_terms(a: np.ndarray, b: np.ndarray, lead_n: int, sr: int) -> tuple[float, float]:
@@ -135,17 +135,23 @@ def probe_settings(knobs: list[str]) -> list[dict]:
     return uniq
 
 
-def load_device(device_id: str) -> tuple[str, Path, list[str]] | None:
-    reg = tomllib.loads(REGISTRY.read_text())
-    root = REGISTRY.parent
-    d = reg.get(device_id)
-    if not isinstance(d, dict):
-        return None
-    # Only real knobs. A switch changes the TOPOLOGY, so it is not a point on a knob sweep.
-    knobs = [k["name"] for k in d.get("knobs", []) if k.get("kind") != "switch"]
+def load_device(config_path: Path) -> tuple[str, Path, list[str]]:
+    """(name, schx, knobs) from a config.toml -- the same file run_pipeline.py trains from.
+
+    knobs come from the config's own [knobs] table, not every real control on the device: a
+    recipe that pins a control in [fixed] (e.g. the Big Muff's Volume) isn't swept in training,
+    so it shouldn't be swept here either -- this measures the truncation error THIS RECIPE will
+    actually see, not a hypothetical full-control sweep.
+    """
+    cfg = tomllib.loads(config_path.read_text())
+    if "schx" not in cfg:
+        raise ValueError(f"{config_path}: no [schx] -- not a SPICE-backed config "
+                          "(e.g. a real-hardware-capture recipe); truncation doesn't apply to it")
+    knobs = list((cfg.get("knobs") or {}).keys())
     if not knobs:
-        return None
-    return (d["name"], root / d["schx"], knobs)
+        raise ValueError(f"{config_path}: no [knobs] -- nothing to sweep")
+    schx = Path(_os.path.expanduser(cfg["schx"]))
+    return (config_path.parent.name, schx, knobs)
 
 
 def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: int,
@@ -233,7 +239,7 @@ def main() -> None:
                     help="the sweep to measure on. Truncation ESR is INPUT-DEPENDENT (a quiet tail "
                          "shrinks the denominator), so the table is only meaningful with the input "
                          "named. Use the sweep the datasets were actually rendered with.")
-    ap.add_argument("--device", required=True, help="one device id from devices.toml")
+    ap.add_argument("--config", type=Path, required=True, help="the same TOML the pipeline uses")
     ap.add_argument("--ref-os", type=int, default=32, help="reference oversample (default 32)")
     ap.add_argument("--candidates", default="2,4,8",
                     help="oversamples to score against the reference (default 2,4,8)")
@@ -260,10 +266,10 @@ def main() -> None:
         ap.error(f"--candidates must all be below --ref-os ({args.ref_os}): you cannot measure the "
                  f"reference against itself")
 
-    dev = load_device(args.device)
-    if not dev:
-        ap.error(f"device {args.device!r} not found, or has no real knobs (registry: {REGISTRY})")
-    name, schx, knobs = dev
+    try:
+        name, schx, knobs = load_device(args.config)
+    except ValueError as e:
+        ap.error(str(e))
     if not schx.exists():
         ap.error(f"{name}: MISSING {schx}")
 
