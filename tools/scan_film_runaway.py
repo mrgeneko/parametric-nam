@@ -13,10 +13,9 @@ Method: enumerate the knob-space hypercube corners (all-min, all-max, each
 knob solo-extreme -- the same reduced corner set already used elsewhere in
 this fleet for knob-grid design, e.g. docs/tweed5f6a_training_notes.md) plus
 the center, run each corner against a real-transient reference clip
-([redacted]-sweep-v3.wav by convention -- local-only, licensed, already the fleet's
-standard "real playing with hard attacks" reference) in windowed chunks, and
-flag any window where the predicted peak is anomalous relative to that
-model's OWN typical output level.
+(--reference; any local real-playing clip with hard attacks -- no bundled
+default, bring your own) in windowed chunks, and flag any window where the
+predicted peak is anomalous relative to that model's OWN typical output level.
 
 Scans EVERY submodel in the container, not just the widest tier. The runaway mechanism is a
 property of a tier's own layer weights, which differ per tier -- a clean widest-tier scan says
@@ -28,7 +27,7 @@ way to reach a narrower tier's weights through this CLI at all). Works for any t
 
 Usage:
   python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
-      [--reference ~/Downloads/[redacted]-sweep-v3.wav] [--chunk-s 5.0] \
+      --reference PATH/TO/real_playing.wav [--chunk-s 5.0] \
       [--flag-ratio 8.0] [--flag-abs 3.0]
 
   # full trained grid instead of the reduced corner set (see docs/film_runaway_investigation.md
@@ -132,7 +131,9 @@ def _batched(seq, n):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nam", required=True)
-    ap.add_argument("--reference", default=str(Path.home() / "Downloads/[redacted]-sweep-v3.wav"))
+    ap.add_argument("--reference", required=True,
+                    help="a real-transient reference clip -- local-only, any real playing with "
+                         "hard attacks (e.g. a guitar DI). No bundled default; bring your own.")
     ap.add_argument("--chunk-s", type=float, default=5.0)
     ap.add_argument("--flag-ratio", type=float, default=8.0,
                     help="flag a window if its peak exceeds this multiple of the model's own median peak")
