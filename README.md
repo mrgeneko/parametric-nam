@@ -22,8 +22,8 @@ it. A good input covers the top of the band (real playing alone rarely does) and
 transient attacks, not just steady tones. The only external piece is the oracle, which is public:
 
 ```bash
-git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli ../livespice-cli
 git clone https://github.com/mrgeneko/parametric-nam
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
 
 python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
@@ -123,7 +123,7 @@ python run_pipeline.py \
     --dataset-dir <ds> --nam-output <model.param.nam> --checkpoint-dir <ckpt> \
     --backend livespice --schx "<amp>.schx" \
     --knobs gain,tone,volume --random 200 --bounds tone=0.15,0.85 \
-    --input guitar.wav --slimmable --mmap \
+    --input guitar.wav --mmap \
     --crop-len 24000 --epochs 0 --restart-period 50 --batch-size 64
 ```
 
@@ -242,12 +242,13 @@ python gen_dataset_from_nam.py --combine /tmp/5150_ds   # same --combine flag as
 
 ```bash
 python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir <ckpt> \
-    --slimmable --mmap --crop-len 24000 --batch-size 64 --repeats 8 \
+    --mmap --crop-len 24000 --batch-size 64 --repeats 8 \
     --lr 3e-4 --epochs 200
 ```
 
-- **`--slimmable`** (always use it) trains an A2 **Lite 3ch + Full 8ch** jointly and
-  exports both tiers in one SlimmableContainer.
+- Training is **always slimmable**: it jointly trains an A2 **Lite 3ch + Full 8ch**
+  and exports both tiers in one SlimmableContainer. `--widths` overrides the tier
+  channel counts (default `3,8`).
 - **Dual best-checkpointing**: the best-full and best-lite epochs (which differ) are
   each saved and exported live to `<output>.best_full.param.nam` /
   `<output>.best_lite.param.nam`, plus `best.pt` / `best_lite.pt` and per-epoch
@@ -454,9 +455,10 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 - **Delivering parametric tones to standard plugins = snapshot baking.** FiLM is
   affine over the layer's linear ops, so freezing a knob setting folds `γ,β` exactly
   into `conv.weight/bias` + `mixin.weight`, yielding an identical *static* A2 with no
-  FiLM. Our host app keeps live knobs; "export this tone" bakes the setting into a
-  stock-standard `.nam`. Works on **already-trained** parametric `.nam`s offline (no
-  retrain) — pure weight transform.
+  FiLM. A parametric-aware host (`NAMix`, `NeuralAmpModelerPlugin`) keeps live knobs;
+  `bake_nam.py` "exports this tone" into a stock-standard `.nam` for hosts that don't.
+  Works on **already-trained** parametric `.nam`s offline (no retrain) — pure weight
+  transform.
 
 ---
 
@@ -604,7 +606,9 @@ This toolchain builds on several open-source projects and published models:
   (Steven Atkinson, MIT) — the `.nam` format, the WaveNet ("A2") architecture, and the
   `SlimmableContainer` that this project targets.
 - **[auraloss](https://github.com/csteinmetz1/auraloss)** (Christian Steinmetz, Apache-2.0)
-  — the multi-resolution STFT loss in `param_train.py`.
+  — not a dependency, but `param_train.py`'s multi-resolution STFT loss is a from-scratch
+  reimplementation ported to match its `MultiResolutionSTFTLoss` formulas and default
+  weights (themselves vendored into the official NAM trainer).
 - **Ideal-transformer technique** — the ngspice output transformer uses the standard
   controlled-source (E+F) ideal-transformer method; the specific center-tapped
   equations are ported from LiveSPICE (above).

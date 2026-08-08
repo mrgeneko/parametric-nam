@@ -25,7 +25,7 @@ Example — full Dumble clean pipeline:
         --fixed-params "Rock=0" \\
         --speaker S1 \\
         --input ~/work/sweep-files/sweepv5.wav \\
-        --slimmable --mmap --epochs 200
+        --mmap --epochs 200
 """
 
 import argparse, csv, json, math, os, platform, shutil, subprocess, sys, time, tomllib
