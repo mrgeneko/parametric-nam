@@ -14,9 +14,33 @@ is no translation step, so nothing can get lost in translation.
 WHAT THIS REUSES, UNCHANGED. Rendering goes through batch_harness.py's own CLI (the
 documented "pin everything but one knob" workaround for its lack of a literal 0-knob
 mode) -- not by importing its internals, to stay decoupled from its process-owning
-thread-pool/signal-handler assumptions. preflight.py's calibration logic is not
-imported directly here; batch_harness.py's own post-generation checks (crest-factor
-divergence detection, convergence audit) already run as part of the render.
+thread-pool/signal-handler assumptions. batch_harness.py's own post-generation checks
+(crest-factor divergence detection, convergence audit) already run as part of the
+render. preflight.py's find_saturation_point IS imported directly (see
+ensure_adequate_excitation) -- see EXCITATION ADEQUACY below for why that one's worth
+the coupling.
+
+EXCITATION ADEQUACY: A GIVEN INPUT FILE ISN'T AUTOMATICALLY A GOOD FIT FOR A GIVEN
+CIRCUIT. Hit this for real on the JCM800 2203 power amp (sag): trained "in" 2.5
+minutes (18 epochs) to a suspiciously good val ESR. Cause: T3K-sweep-v3.wav peaks at
+0.99 V, but a preflight sweep of that exact circuit showed it doesn't reach 99% of its
+own saturation ceiling until ~11.64 V input -- the standard excitation is calibrated
+for a PREAMP's input level, and this schx has no preceding gain stage to drive it
+that hard. The whole 190s render stayed in the linear region; the network learned an
+easy near-linear function and never saw the amp's actual nonlinearity. Same failure
+mode as the JCM800 gain-only PARAMETRIC excitation issue (see that config's blurb),
+just discovered later because a static capture has no grid_adequacy-style pre-check.
+
+Fix: ensure_adequate_excitation() runs a saturation sweep (preflight.py's own
+find_saturation_point, at the EXACT pinned --setting -- not a generic probe) before
+every render, compares the given excitation's peak against the measured onset, and
+transparently scales the excitation up if it falls short. This is NOT opt-in; it runs
+by default for every capture, because "does this excitation actually exercise this
+circuit's nonlinearity" is not something a caller should have to remember to check by
+hand -- that's exactly how the power-amp incident happened. A scaled excitation loses
+NAM's exact-hash standard-input match (delay falls back to 0 -- an already-existing,
+disclosed path, not a new one), which is a reasonable trade for training on a model
+that has actually seen saturation.
 
 DELAY: PREFER NAM'S OWN BLIP-BASED CALIBRATION, DON'T HAND-ROLL IT. A prototype run's
 own envelope cross-correlation found a suspiciously clean, consistent ~24-sample peak
@@ -45,6 +69,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -54,6 +79,8 @@ import soundfile as sf
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 from batch_harness import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
+from param_train import _schx_input_v0dbfs  # noqa: E402
+from tools.preflight import find_saturation_point  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
 NAM_FULL = NAM_VENV / "bin" / "nam-full"
@@ -135,6 +162,76 @@ def render(schx: str, setting: dict, input_wav: str, oversample: str,
 
     cfg = json.loads((output_dir / "config.json").read_text())
     return cfg
+
+
+def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_dir: Path,
+                                margin: float = 1.2, probe_oversample: int = 8,
+                                probe_iterations: int = 256) -> tuple:
+    """Check whether `input_wav` actually drives this circuit (at the exact pinned
+    `setting`) past its own saturation onset -- and if not, scale it up until it does.
+    See the module docstring's EXCITATION ADEQUACY section for why this exists and why
+    it isn't opt-in. Returns (report_dict_for_the_manifest, effective_input_path).
+
+    margin=1.2: target the excitation's peak at 1.2x the measured 99%-onset voltage --
+    comfortably past the point output stops growing (the JCM800 gain-only parametric
+    fix used a similar ~1.1x margin against its own worst-case onset; 1.2x here since
+    a static capture has just one setting to clear, not a whole knob grid's worst
+    corner)."""
+    v0dbfs = _schx_input_v0dbfs(schx)
+    x, sr = sf.read(input_wav, dtype="float32")
+    if x.ndim > 1:
+        x = x[:, 0]
+    peak_raw = float(np.abs(x).max())
+
+    report = {"checked": False, "adjusted": False, "excitation_peak_v": None,
+              "onset_99pct_v": None, "ceiling_v": None, "scale_applied": None}
+
+    if v0dbfs is None:
+        print("[capture_static] WARNING: schx has no V0dBFS -- skipping the "
+              "excitation-adequacy check (can't reliably interpret levels).")
+        return report, input_wav
+
+    peak_v = peak_raw * v0dbfs
+    print(f"[capture_static] excitation-adequacy check: probing saturation onset at "
+          f"setting={setting} ...")
+    with tempfile.TemporaryDirectory() as scratch:
+        sat = find_saturation_point(schx, setting, probe_oversample, probe_iterations, scratch)
+    report["checked"] = True
+    report["excitation_peak_v"] = peak_v
+
+    if sat is None or sat.get("onset_99pct_input_v") is None:
+        print("[capture_static] WARNING: could not measure a saturation onset (all "
+              "probe renders failed, or the circuit never plateaus within the probe "
+              "range) -- proceeding with the excitation as given, unchecked.")
+        return report, input_wav
+
+    onset_v = sat["onset_99pct_input_v"]
+    report["onset_99pct_v"] = onset_v
+    report["ceiling_v"] = sat["ceiling_rms"]
+    target_v = margin * onset_v
+    print(f"[capture_static] saturation onset ~{onset_v:.3g} V, excitation peaks at "
+          f"{peak_v:.3g} V (target >= {target_v:.3g} V, {margin}x onset)")
+
+    if peak_v >= target_v:
+        print("[capture_static] excitation adequately drives this circuit into saturation.")
+        return report, input_wav
+
+    scale = target_v / peak_v if peak_v > 1e-9 else 1.0
+    scaled_path = work_dir / "excitation_scaled.wav"
+    # subtype='FLOAT' is NOT optional: sf.write's default WAV subtype is PCM_16,
+    # which silently clips anything outside +/-1.0 -- exactly the amplitude range this
+    # scaled excitation needs to represent. Caught this the hard way in
+    # find_saturation_point (tools/preflight.py) -- see that fix's comment.
+    sf.write(str(scaled_path), (x * scale).astype(np.float32), sr, subtype="FLOAT")
+    print(f"[capture_static] excitation too quiet for this circuit at this setting -- "
+          f"scaling x{scale:.3g} ({peak_v:.3g} V -> {target_v:.3g} V peak), using the "
+          f"scaled copy. This breaks NAM's exact-hash standard-input match; delay "
+          f"calibration falls back to 0 (an existing, disclosed path -- see "
+          f"calibrate_and_write_data_config), not a new failure mode.")
+    report["adjusted"] = True
+    report["scale_applied"] = scale
+    report["scaled_excitation_path"] = str(scaled_path)
+    return report, str(scaled_path)
 
 
 def extract_wet_wav(output_dir: Path, out_path: Path) -> Path:
@@ -459,7 +556,10 @@ def main():
     setting = parse_setting(args.setting)
     validate_setting_complete(args.schx, setting)
 
-    cfg = render(args.schx, setting, args.input, args.oversample, args.trunc_target, ds_dir)
+    excitation_report, effective_input = ensure_adequate_excitation(
+        args.schx, setting, args.input, out)
+
+    cfg = render(args.schx, setting, effective_input, args.oversample, args.trunc_target, ds_dir)
 
     wet_wav = extract_wet_wav(ds_dir, out / "wet.wav")
     dry_wav = ds_dir / "sweep.wav"
@@ -483,6 +583,7 @@ def main():
     manifest = {
         "schx": args.schx,
         "setting": setting,
+        "excitation_adequacy": excitation_report,
         "oversample_config": cfg.get("oversample"),
         "input_provenance": input_provenance(dry_wav),
         "output_scale": cfg.get("output_scale"),

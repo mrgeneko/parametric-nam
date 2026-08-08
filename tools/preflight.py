@@ -182,7 +182,17 @@ def find_saturation_point(schx, params, oversample, iterations, scratch,
     for i, a in enumerate(log_amps):
         x = (a * np.sin(2 * np.pi * freq * t)).astype(np.float32)
         in_wav = f"{scratch}/peak_in_{i}.wav"
-        sf.write(in_wav, x, SR)
+        # subtype MUST be explicit: sf.write's default WAV subtype is PCM_16, which
+        # silently clips anything outside +/-1.0 -- and every amplitude above start_v's
+        # first ~doubling exceeds that (max_v defaults to 40.0). Without this, every
+        # probe tone above 1V rendered as an ~identical clipped square wave, not the
+        # amplitude it claimed to be -- confirmed directly (write 14.0, read back
+        # 0.9999695) and by tracing render_many -> render, which hands the file straight
+        # to livespice_cli with no Python-side rescaling in between. This silently
+        # invalidated every reported onset/ceiling above ~1V for as long as the bug
+        # existed -- caught via the JCM800 power-amp static capture converging in 18
+        # epochs to a suspiciously good ESR (see capture_static.py's module docstring).
+        sf.write(in_wav, x, SR, subtype="FLOAT")
         jobs.append({"schx": schx, "params": params, "oversample": oversample,
                      "iterations": iterations, "in_wav": in_wav, "scratch": scratch,
                      "tag": f"peak_{i}"})
