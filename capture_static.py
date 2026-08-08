@@ -352,12 +352,13 @@ def write_model_and_learning_configs(widths: list, max_epochs: int, configs_dir:
     own lite/full split without needing a separate capture per width.
 
     NOTE on --threshold-esr with 2+ widths: nam-full's own best-checkpoint monitor
-    (whose filename this script's SIGINT-threshold polling reads) tracks val_loss =
-    SUM of every submodel's own val ESR for a packed run, not one width's ESR --
-    the same numeric threshold does not mean the same thing it does for a single
-    width. Left as-is (best available reference point) rather than guessed at;
-    expect this default to need retuning once real packed-run behavior is seen,
-    same as --threshold-esr's own history (0.01 -> 0.003 -> 0.0015)."""
+    (whose filename used to be what this script's SIGINT-threshold polling read)
+    tracks val_loss = the MEAN of every submodel's own val ESR for a packed run, not
+    one width's ESR. Confirmed this actually mattered on a real run: the mean crossed
+    0.005 while the narrower tier was still at 0.0066 and hadn't converged, stopping
+    training early on the wider tier's good score masking the narrower one. Fixed by
+    having run_nam_full's polling read each tier's own ESR from the tfevents log
+    directly and require the WORST of them below threshold -- see _worst_tier_esr."""
     if len(widths) == 1:
         model_config = {
             "net": {"name": "WaveNet", "config": {
@@ -429,22 +430,75 @@ def _find_result(outdir: Path, wall_s: float) -> dict:
     return {"nam_path": nam_files[0], "run_dir": run_dir, "wall_s": wall_s, "best_esr": best_esr}
 
 
+def _worst_tier_esr(run_dir: Path) -> "float | None":
+    """The checkpoint FILENAME's ESR (what the polling loop used to check directly) is
+    only the whole run's aggregate val_loss -- for a packed [3,8]-style run, nam-full
+    logs it as the MEAN of every submodel's own ESR (ESR_packed_0, ESR_packed_1, ... in
+    the tfevents), not any one tier's real accuracy. Confirmed on a real run: averaged
+    ESR dipped to 0.00488 (crossing a 0.005 threshold) while the narrower tier was
+    still at 0.00663 and hadn't converged -- the wider tier's good score was masking it,
+    and training stopped early on a lucky dip in the average, not real convergence.
+
+    Reads the tfevents file directly for the latest value of every ESR_packed_N tag and
+    returns the WORST (max) of them -- crossing the threshold now means every tier
+    actually cleared the bar, not just their average. Falls back to the plain 'ESR' tag
+    (single-width runs have no _packed_ tags at all, so there's no ambiguity to correct)
+    if none are found. Returns None if the tfevents file doesn't exist yet or has no
+    usable scalars (too early in training -- caller should just keep waiting)."""
+    tf_glob = list(run_dir.glob("lightning_logs/version_0/events.out.tfevents.*"))
+    if not tf_glob:
+        return None
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+        ea = EventAccumulator(str(tf_glob[0]), size_guidance={"scalars": 0})
+        ea.Reload()
+        tags = ea.Tags().get("scalars", [])
+        packed_tags = [t for t in tags if re.match(r"ESR_packed_\d+$", t)]
+        use_tags = packed_tags if packed_tags else (["ESR"] if "ESR" in tags else [])
+        if not use_tags:
+            return None
+        values = []
+        for t in use_tags:
+            pts = ea.Scalars(t)
+            if pts:
+                values.append(pts[-1].value)
+        return max(values) if values else None
+    except Exception:
+        return None
+
+
+def _current_epoch(ckpt_dir: Path) -> int:
+    """Latest epoch reached, from the per-epoch checkpoint nam-full writes every epoch
+    (checkpoint_epoch_epoch=NNNN.ckpt) -- unlike the top-k 'best' checkpoints, this one
+    always exists and always reflects the current epoch, even once training has
+    plateaued and stopped producing new bests."""
+    epochs = [int(m.group(1)) for p in ckpt_dir.glob("checkpoint_epoch_epoch=*.ckpt")
+              if (m := re.search(r"epoch=(\d+)", p.name))]
+    return max(epochs) if epochs else 0
+
+
 def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Path,
-                  threshold_esr: float = None, poll_interval_s: float = 15.0) -> dict:
+                  threshold_esr: float = None, poll_interval_s: float = 15.0,
+                  min_epochs: int = 500) -> dict:
     """Run nam-full as a subprocess (kept as a genuine subprocess boundary, not
     reimplemented in-process -- full.py's own callback list is hardcoded in Python
     with no way to inject a threshold-stop via config, and reimplementing its
     training loop by hand risks drifting from the real thing's edge-case handling).
 
     Open-ended in practice: learning_config's max_epochs is a generous ceiling, not
-    the real stop condition. Poll checkpoint filenames (which already embed ESR,
-    e.g. '..._ESR=6.771e-03_...ckpt') and send SIGINT once the best crosses
-    threshold_esr. nam-full's own main() catches KeyboardInterrupt specifically and
-    ALWAYS exports the best checkpoint in its `finally` block -- confirmed by reading
-    it -- so this is a graceful stop, not a kill, and behaves exactly like a normal
-    completion. Same idea as this ecosystem's own `touch <ckpt-dir>/STOP` convention
-    for open-ended parametric training: an external signal, not a baked-in trainer
-    feature."""
+    the real stop condition. Poll for the WORST tier's own ESR (see _worst_tier_esr)
+    once at least min_epochs have run, and send SIGINT once it crosses threshold_esr.
+    nam-full's own main() catches KeyboardInterrupt specifically and ALWAYS exports the
+    best checkpoint in its `finally` block -- confirmed by reading it -- so this is a
+    graceful stop, not a kill, and behaves exactly like a normal completion. Same idea
+    as this ecosystem's own `touch <ckpt-dir>/STOP` convention for open-ended
+    parametric training: an external signal, not a baked-in trainer feature.
+
+    min_epochs=500 default: a threshold crossing in the first handful of epochs is far
+    more likely to be an early noisy dip (exactly what happened on a real packed run --
+    see _worst_tier_esr) than genuine, stable convergence; this is a floor under the
+    threshold check, not a substitute for it -- crossing still requires threshold_esr,
+    just not before min_epochs has given training a real chance to settle."""
     import signal
 
     if not NAM_FULL.exists():
@@ -484,14 +538,18 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
         run_dirs = sorted(glob.glob(str(outdir / "*")))
         if not run_dirs:
             continue
-        ckpt_dir = Path(run_dirs[-1]) / "lightning_logs" / "version_0" / "checkpoints"
+        run_dir = Path(run_dirs[-1])
+        ckpt_dir = run_dir / "lightning_logs" / "version_0" / "checkpoints"
         if not ckpt_dir.exists():
             continue
-        esrs = [float(m.group(1)) for p in ckpt_dir.glob("*ESR=*")
-                if (m := re.search(r"ESR=([0-9.e+-]+)", p.name))]
-        if esrs and min(esrs) <= threshold_esr:
-            print(f"[capture_static] best ESR {min(esrs):.4g} <= threshold "
-                  f"{threshold_esr:.4g} -- sending SIGINT for a graceful stop")
+        epoch = _current_epoch(ckpt_dir)
+        if epoch < min_epochs:
+            continue
+        worst = _worst_tier_esr(run_dir)
+        if worst is not None and worst <= threshold_esr:
+            print(f"[capture_static] worst tier's ESR {worst:.4g} <= threshold "
+                  f"{threshold_esr:.4g} at epoch {epoch} (>= min_epochs {min_epochs}) "
+                  f"-- sending SIGINT for a graceful stop")
             proc.send_signal(signal.SIGINT)
             stopped_early = True
             break
@@ -544,11 +602,17 @@ def main():
                           "submodel per width; a single width (e.g. '8') trains a plain "
                           "WaveNet, matching this script's pre-slimmable behavior")
     ap.add_argument("--threshold-esr", type=float, default=0.005,
-                     help="stop training once best val ESR crosses this (default 0.005 -- "
-                          "with the default --widths 3,8, this compares against nam-full's "
-                          "packed-run monitor, which SUMS every submodel's own val ESR, not "
-                          "one width's ESR -- see write_model_and_learning_configs' "
-                          "docstring). Set to 0/negative to disable and just run --max-epochs.")
+                     help="stop training once the WORST tier's own val ESR crosses this "
+                          "(default 0.005) -- for a packed (--widths with 2+ values) run, "
+                          "checked per-tier via the tfevents log, not nam-full's own "
+                          "checkpoint-filename ESR (that's the MEAN across tiers, which lets "
+                          "a strong wide tier mask a still-undertrained narrow one -- see "
+                          "_worst_tier_esr's docstring). Set to 0/negative to disable and "
+                          "just run --max-epochs.")
+    ap.add_argument("--min-epochs", type=int, default=500,
+                     help="don't act on --threshold-esr before this many epochs (default "
+                          "500) -- a crossing in the first handful of epochs is far more "
+                          "likely to be an early noisy dip than genuine convergence")
     ap.add_argument("--max-epochs", type=int, default=1000,
                      help="ceiling, not the primary stop condition when --threshold-esr is "
                           "set (default) -- training stops at whichever comes first")
@@ -586,7 +650,8 @@ def main():
     data_cfg = configs_dir / "data.json"
 
     threshold_esr = args.threshold_esr if args.threshold_esr > 0 else None
-    result = run_nam_full(data_cfg, model_cfg, learning_cfg, nam_out_dir, threshold_esr=threshold_esr)
+    result = run_nam_full(data_cfg, model_cfg, learning_cfg, nam_out_dir,
+                           threshold_esr=threshold_esr, min_epochs=args.min_epochs)
 
     # nam-full always names its output "model.nam" -- rename in place (same dir) to
     # encode the setting, so a directory of captures is browsable without opening
