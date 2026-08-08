@@ -40,7 +40,7 @@ export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ### Train a device
 
 ```bash
-python run_pipeline.py --config configs/big-muff-v1.toml \
+python run_pipeline.py --config ~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml \
     --dataset-dir    ~/work/tmp/bigmuff_ds \
     --nam-output     ~/work/tmp/bigmuff.param.nam \
     --checkpoint-dir ~/work/tmp/bigmuff_ckpt
@@ -122,20 +122,27 @@ python run_pipeline.py \
 ### Per-circuit configs (`--config`)
 
 A circuit's *recipe* — schematic, input, knob grid, fixed params, widths, and
-hyperparameters — lives in a declarative TOML under [`configs/`](configs/), so the
-pipeline stays generic (one `run_pipeline.py`, one small reviewable file per circuit)
-instead of a script per `.schx`. Only the per-run output paths stay on the CLI:
+hyperparameters — lives in a declarative TOML, so the pipeline stays generic (one
+`run_pipeline.py`, one small reviewable file per circuit) instead of a script per
+`.schx`. Only the per-run output paths stay on the CLI:
 
 ```bash
-python run_pipeline.py --config configs/big-muff-v1.toml \
+python run_pipeline.py --config /path/to/device-config.toml \
     --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
     --checkpoint-dir /tmp/bigmuff_ckpt
 ```
 
 Any CLI flag overrides the config (config is loaded as argparse defaults). The `[knobs]`
 table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
-`--fixed-params`, and `widths = [3,4,8]` to `--widths`. See `configs/big-muff-v1.toml`
-for a worked example (with the reasoning behind the knob sampling).
+`--fixed-params`, and `widths = [3,4,8]` to `--widths`.
+
+**This repo carries no per-device configs of its own.** Each device's recipe lives as
+`config.toml[.<variant>]` next to its trained models in
+[`parametric-nam-models`](https://github.com/mrgeneko/parametric-nam-models)
+(`<category>/<device-id>/config.toml`) — the *living* recipe, distinct from a specific
+archived run's *frozen* `reproduce.sh`. See
+[`docs/adding-a-device.md`](docs/adding-a-device.md) for a fully worked example of the
+format when writing a new one.
 
 ## Scripts
 
