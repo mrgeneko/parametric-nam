@@ -1,0 +1,43 @@
+# Template for a new device's config.toml. Copy this, fill in the fields, and see
+# "Per-circuit configs" in the README for the full field-to-CLI mapping. For a real,
+# fully worked (non-template) example, see examples/muff/config.toml.
+#
+#   python run_pipeline.py --config path/to/your-device/config.toml \
+#       --dataset-dir /tmp/ds --nam-output /tmp/model.param.nam \
+#       --checkpoint-dir /tmp/ckpt
+
+schx       = "path/to/your-circuit.schx"   # e.g. from LiveSPICE-Amp-Collection, or your own
+
+input      = "examples/sweepv5.wav"   # ours, freely licensed -- or substitute your own
+                                       # sweep/DI. A good one covers the top of the band
+                                       # (real playing alone rarely does) and includes real
+                                       # transient attacks, not just steady tones.
+backend    = "livespice"
+
+# MEASURED, not guessed -- see measure_truncation.py (README: Scripts). The argparse
+# default (2) is too low for most real circuits; this is a reasonable starting point.
+oversample = 8
+
+# widths = [4, 8]   # DEFAULT (lite + full) -- this is param_train.py's own default, so
+                     # omitting this line does the same thing. Add a middle tier (e.g.
+                     # [4, 5, 8]) only if you actually need a w5 intermediate.
+
+epochs     = 0       # open-ended: trains with SGDR warm restarts until you `touch
+                      # <ckpt>/STOP`, exporting the best model continuously. Use this
+                      # first run to find the training budget (see run_pipeline.py
+                      # --target-steps), then set epochs to that schedule's real length
+                      # for the production run.
+batch-size = 64
+lr         = 3e-4
+crop-len   = 48000    # must EXCEED the receptive field (2483 samples / 52 ms @ 48 kHz
+                        # for the standard A2 stack) -- 48000 (1 s) is comfortable.
+
+# MEASURED, not tuned by ear -- see tools/grid_adequacy.py --suggest (README: Scripts).
+[knobs]
+Knob1 = [0.0, 0.5, 1.0]
+Knob2 = [0.0, 0.5, 1.0]
+
+# Any control NOT listed in [knobs] is left at its schx default. To pin one explicitly --
+# which makes this config a VARIANT of the device, not "the device"; state that if you do:
+# [fixed]
+# SomeControl = 1.0

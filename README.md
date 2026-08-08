@@ -39,9 +39,9 @@ This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 The bundled example above needs nothing beyond what it already cloned. To train your own
 circuit, all you need on top of that is your own `.schx` (e.g. from
 `LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it —
-see **Per-circuit configs** below for the format, and `grid_adequacy.py`/
-`measure_truncation.py` (Scripts, below) for measuring good values instead of guessing them.
-No other repos are required.
+copy `examples/template.config.toml` to start (see **Per-circuit configs** below for the
+format), and use `grid_adequacy.py`/`measure_truncation.py` (Scripts, below) to measure
+good values instead of guessing them. No other repos are required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip). If your checkout isn't a sibling of this repo, point at it explicitly:
@@ -144,7 +144,8 @@ table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 **This repo carries no per-device configs of its own** beyond the bundled example — a
 `config.toml` is a *living* recipe you maintain alongside your own circuits, distinct from
 a specific run's *frozen* `reproduce.sh` output. `examples/muff/config.toml` is a fully
-worked, annotated example of the format.
+worked, annotated example of the format; `examples/template.config.toml` is a minimal
+blank one to copy for a new device.
 
 ## Scripts
 
