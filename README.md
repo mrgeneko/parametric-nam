@@ -570,14 +570,6 @@ host-app integration.
 > **Input formats**: any WAV (16/24/32-bit) and any content read correctly — an earlier
 > O(N²) bug in `livespice_cli`'s WAV reader (fixed in `fa90d57`) once made non-24-bit
 > inputs stall.
->
-> **Training input — use a comprehensive coverage signal, and enough of it.** The
-> standard NAM capture sweep (the one used to train most public NAM models) is the
-> right choice: it spans the amp's input space (amplitude, frequency, transients). A
-> single guitar DI is only a *subset* of that coverage. And don't skimp on length —
-> training a high-gain amp (5150) on a **30 s slice** of the sweep left the model
-> unable to clean up on darker/more-dynamic real playing (false breakup). Use the
-> full sweep (see the project's internal engineering notes).
 
 ## Related Repos
 
