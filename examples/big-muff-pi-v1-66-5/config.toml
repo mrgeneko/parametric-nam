@@ -1,0 +1,112 @@
+# Big Muff Pi V1 (66#5) — worked example, fully self-contained.
+#
+# Everything this config needs (schx, input) is bundled alongside it in this directory / the
+# examples/ dir — no sibling parametric-devices or sweep-files checkout required. See
+# "Big Muff Pi V1 (66#5).md" next to this file for the circuit notes.
+#
+#   python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
+#       --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
+#       --checkpoint-dir /tmp/bigmuff_ckpt
+#
+# Output paths (--dataset-dir/--nam-output/--checkpoint-dir) stay on the CLI so one
+# recipe drives many runs; any value here is overridden by a CLI flag.
+
+schx       = "examples/big-muff-pi-v1-66-5/Big Muff Pi V1 (66#5).schx"
+
+# sweepv5.wav: ours outright -- original Logic Pro material plus a synthesised excitation
+# section (see tools/make_sweep.py) -- so it can be bundled and published directly, unlike the
+# licence-restricted sweeps this project also has in its (private) sweep-files repo. It prepends
+# three log chirps (at three drive levels, because a nonlinear circuit's response is a curve PER
+# level) to cover the top of the band real playing barely excites.
+input      = "examples/sweepv5.wav"
+backend    = "livespice"
+
+# oversample=2 was NOT free. BDF2 is O(h^2), so the simulated circuit is not the real circuit and the
+# gap is truncation error. At os=2 that error is 9.33e-03 on this pedal -- THE SAME SIZE AS THE 0.0090
+# ESR OF THE MODEL WE FIT TO IT. The target was as wrong as the model, and capacity was being spent
+# learning the integrator's mistakes. At os=8 it is 3.71e-04, ~25x below the model. A model cannot be
+# more right than its target. Measured with measure_truncation.py; see docs/convergence.md.
+#
+# RAISED 8 -> 16 (2026-07-14). Two things moved, and both made the target harder:
+#   * The probe's stratified windows used to be placed at i*span/(n-1) -- i.e. the FIRST window at
+#     t=0 and the LAST at the very end, which on our sweeps is the leading silence and the near-silent
+#     decay tail. Two of four windows were measuring near-nothing, so the old figure was UNDERSTATED.
+#     Evenly-spaced centres now.
+#   * sweepv5's log chirps run to 20 kHz at 0.9 -- genuinely harder to integrate than a guitar-only
+#     sweep. Better coverage for the model, more work for BDF2.
+# Re-measured: 3.28e-02 at os=2, and it takes os=16 to get truncation (1.40e-04) clear of the 0.009
+# ESR we are chasing. `--oversample auto` picks 16 unprompted.
+oversample = 16
+
+# --- model / training (slimmable [3,4,8], early-stop at the ESR floor) ---
+# slimmable + mmap are on by default (param_train.py) -- no need to set them here.
+widths     = [3, 5, 8]
+epochs     = 450
+# No early stopping -- the feature was removed from param_train.py entirely (2026-07-19).
+# It fired once (patience=15) and cut this run off at ep202; the cosine tail (ep202-400) it
+# cut off then improved every tier by 17-22%. Always let the full schedule run.
+batch-size = 64
+lr         = 3e-4
+# crop-len must EXCEED THE RECEPTIVE FIELD or the model cannot see its own context. The A2 stack is
+# 23 dilated layers (dilations to 239), so RF = 1 + sum((k-1)*d) = 2483 samples = 52 ms @ 48 kHz.
+# 48000 (1 s) is 19x that — comfortable. (The 44100 default is a legacy 44.1 kHz number.)
+crop-len   = 48000
+
+# THE TRAINING BUDGET IS THE PARAMETER. `repeats` is DERIVED from it.
+#
+# What determines how much a model learns is total gradient steps:
+#
+#     steps = epochs * n_perms * repeats * (1 - val_split) / batch_size
+#
+# That depends on n_perms, so hand-setting repeats means THE KNOB GRID SILENTLY SETS THE TRAINING
+# BUDGET. Regridding this pedal from 14x9=126 to 12x5=60 perms halved it (24,300 -> 11,700 steps) with
+# repeats and epochs untouched -- the model would have come out worse and THE REGRID WOULD HAVE BEEN
+# BLAMED, exactly inverting the truth.
+#
+# `epochs` stays a knob because it is NOT a budget quantity: it is the LR SCHEDULE LENGTH
+# (CosineAnnealingLR, T_max=epochs, one step per epoch). Deriving IT instead breaks on a large grid --
+# the JCM800's 1944 perms would give nine epochs, i.e. nine points on the cosine curve.
+#
+# DETERMINE IT WITH AN OPEN-ENDED RUN:  --epochs 0 --restart-period 50
+# That switches to SGDR warm restarts -- the LR cycles down and RESTARTS -- so you get a BEST-PER-CYCLE
+# sequence instead of one guaranteed best-at-the-end. When two consecutive cycles fail to improve the
+# best val ESR, that is the budget, measured under the loss you are actually training with. Then set
+# target-steps from it. See docs/training-budget.md.
+#
+# --epochs / --repeats on the CLI still override, explicitly.
+target-steps = 25000
+# device intentionally omitted -> --device auto (cuda / mps / cpu)
+
+# --- knob grid (12 x 5 = 60 perms) ---
+#
+# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/big-muff-pi-v1-66-5/config.toml --target 0.009
+# It renders the circuit's TRUE output at each cell's midpoint and compares it against interpolating
+# the two neighbours. The residual is the error the GRID imposes -- no model in it. Above the ESR you
+# are chasing, the grid is the limiting factor and no amount of training can fix it.
+#
+# The previous grid (14 x 9 = 126) was hand-tuned dense at the BOTTOM of Sustain, reasoning that a
+# linear-taper pot puts most of its audible change in the bottom decade. That is true of LEVEL and
+# BACKWARDS for WAVEFORM SHAPE, which is what the model actually has to learn -- and which changes
+# fastest at the TOP, where the pedal is deep into clipping. Measured:
+#
+#     Sustain 0.001-0.70   11 cells, all <= 0.0005      oversampled 20-100x
+#     Sustain 0.85-1.00                     0.0899      10x OVER TARGET -- unlearnable
+#     Tone    all 8 cells                   0.0000      perfectly interpolable
+#
+# So it was simultaneously too dense almost everywhere and too coarse in the one place a Big Muff
+# actually lives. This grid has HALF the permutations and ZERO cells over target (worst: 0.0051).
+# Tone stays at 5 rather than the 3 the measurement permits: its points are nearly free, and 3
+# conditioning points is thin for a shipped model. Its linearity is not luck -- the tone control is a
+# passive blend of two filter paths, so its output really is close to a linear interpolation.
+[knobs]
+Sustain = [0.001, 0.008, 0.03, 0.12, 0.4, 0.55, 0.7, 0.8, 0.88, 0.94, 0.97, 1.0]
+Tone    = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+# Volume is a passive output divider (level only, no tone) — fixed, not trained.
+#
+# This makes this a VARIANT of the device, not "the Big Muff": it freezes a knob a user would
+# expect to turn. That is a deliberate choice (a level control teaches the model nothing a gain
+# stage does not), but it is a property of the product and it should be stated rather than
+# discovered.
+[fixed]
+Volume = 1.0

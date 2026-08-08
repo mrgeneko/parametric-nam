@@ -13,7 +13,29 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 
 ## Quick Start
 
-**This repo is not self-contained.** It needs sibling checkouts. Clone them side by side:
+### Try it now — no sibling repos needed
+
+`examples/big-muff-pi-v1-66-5/` bundles a real, complete recipe: the `.schx` circuit, the
+`sweepv5.wav` excitation (ours outright, freely licensed), and an annotated `config.toml`. The
+only external piece is the oracle, which is public:
+
+```bash
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli ../livespice-cli
+git clone https://github.com/mrgeneko/parametric-nam
+cd parametric-nam && ./setup.sh && . .venv/bin/activate
+
+python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
+    --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
+    --checkpoint-dir /tmp/bigmuff_ckpt
+```
+
+This trains an actual Big Muff Pi V1 (66#5) model end to end. See
+`examples/big-muff-pi-v1-66-5/Big Muff Pi V1 (66#5).md` for the circuit notes.
+
+### Full setup — training your own devices
+
+Beyond the bundled example, **this repo is not self-contained.** It needs sibling checkouts.
+Clone them side by side:
 
 ```bash
 mkdir -p ~/work && cd ~/work
