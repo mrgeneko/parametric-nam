@@ -94,18 +94,21 @@ python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
 ## How it works
 
 ```
-.schx schematic
-    ↓  batch_harness.py        (simulate: input sweep × N knob permutations)
-Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
-    ↓  param_train.py          (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
-.param.nam  (SlimmableContainer)
-    ↓  param_infer.py          (PyTorch inference at arbitrary knob positions — no C++)
-    ↓  NeuralAmpModelerCore    (ParametricWaveNet factory, C++ inference)
-Real-time inference in a compatible host app
+.schx schematic                       fixed-setting .nam captures (real hardware/amp-modeler)
+    ↓  batch_harness.py                   ↓  gen_dataset_from_nam.py
+    (simulate: sweep × N permutations)    (run each capture against a shared sweep, 1 perm/file)
+                    ╲                    ╱
+                     Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
+                         ↓  param_train.py  (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
+                     .param.nam  (SlimmableContainer)
+                         ↓  param_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
+                         ↓  NeuralAmpModelerCore  (ParametricWaveNet factory, C++ inference)
+                     Real-time inference in a compatible host app
 ```
 
-`run_pipeline.py` orchestrates the first three steps in one command; you can also run
-each script directly (below).
+Two ways to reach the same dataset contract: simulate a circuit, or point at a folder of
+real captures — see `gen_dataset_from_nam.py` below. `run_pipeline.py` orchestrates the
+`.schx` path's three steps in one command; you can also run each script directly (below).
 
 ---
 
@@ -199,6 +202,41 @@ python batch_harness.py --combine <ds>
 `Name` matches the swept knob. To model a mechanically-ganged control (e.g. a dual-gang
 Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `.schx`;
 `--knobs Gain` then moves both wipers in lockstep, and the knob appears once downstream.
+
+### `gen_dataset_from_nam.py` — build a dataset from real hardware captures, no `.schx` needed
+
+An alternative to `batch_harness.py` for devices with **no SPICE model** — a set of
+already-captured, fixed-setting `.nam` files (real hardware or amp-modeler exports, one file
+per knob setting) instead of a circuit to simulate:
+
+```bash
+python gen_dataset_from_nam.py \
+    --nam "~/Downloads/5150 DST *.nam" \
+    --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
+
+python gen_dataset_from_nam.py --combine /tmp/5150_ds   # same --combine flag as batch_harness.py
+```
+
+- **Filenames encode the knob settings.** `"5150 DST G2, B5, M5, T5.nam"` → `Gain=0.2,
+  Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated `PrefixDigit` tokens, digit → value/10).
+  Override the prefix→knob-name map and the digit→value scale per batch with `--knob-map`
+  (e.g. `--knob-map D=Drive`) / `--knob-scale`, or skip filename parsing entirely with
+  `--mapping-csv` for conventions too irregular to tokenize.
+- **A knob that never changes across the batch is auto-fixed**, not swept — real capture
+  batches are a scattered handful of points, not a dense grid, and most tokens in any given
+  set of files won't vary at all.
+- Each `.nam` is run once against a **shared sweep input** (`--input`, same convention as the
+  `.schx` pipeline — defaults to `sweepv5.wav`), producing exactly one permutation per file.
+  This is a **scattered point-sample dataset**, not a Cartesian grid — `grid_adequacy.py`'s
+  interpolation reasoning doesn't apply; there's nothing systematic to interpolate between a
+  handful of arbitrary points.
+- Output has the **same directory contract** `batch_harness.py` produces (`config.json`,
+  `sweep.wav`, `params.csv`, `outputs.npy` after `--combine`), so `run_pipeline.py --config`
+  and `param_train.py` read it completely unmodified — from here on it's the identical
+  training path as a SPICE-rendered dataset.
+- **`--restricted-input`** marks the sweep as licence-restricted-for-training-only (not
+  redistributable) if that's what you're feeding it — writes a `NOTICE` file and an
+  `input_restricted` flag into `config.json` so the dataset directory is self-documenting.
 
 ### `param_train.py` — train a parametric NAM
 
