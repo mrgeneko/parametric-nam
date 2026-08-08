@@ -92,7 +92,7 @@ def main() -> int:
         p = par_of(sub)
         if p.get("head_mode") != "skip":
             raise SystemExit(f"tier w{w} ({by_width[w][1]}): head_mode={p.get('head_mode')!r} "
-                             f"(must be 'skip' — [redacted] rejects other heads)")
+                             f"(must be 'skip' — the host app rejects other heads)")
         if sub["model"].get("version") != "0.7.0":
             raise SystemExit(f"tier w{w} ({by_width[w][1]}): version="
                              f"{sub['model'].get('version')!r} (must be 0.7.0)")

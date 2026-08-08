@@ -16,7 +16,7 @@
 # So [3,5,8], [3,4,8], [3,8] and [2,4,6,8] all work without edits.
 #
 # Two things it refuses to pass as valid, because both have already bitten us:
-#   * NAM version != 0.7.0   -> [redacted] rejects the file as "A1"
+#   * NAM version != 0.7.0   -> the host app rejects the file as "A1"
 #   * head_mode != "skip"    -> legacy residual head; renders the wrong function
 #
 # Usage:
@@ -180,7 +180,7 @@ for t in names:
     d = json.load(open(p))
     errs = []
     if d.get("version") != "0.7.0":
-        errs.append(f"version={d.get('version')!r} ([redacted] rejects <0.7.0 as 'A1')")
+        errs.append(f"version={d.get('version')!r} (the host app rejects <0.7.0 as 'A1')")
     subs = d.get("config", {}).get("submodels", [])
     if not subs:
         errs.append("no submodels")

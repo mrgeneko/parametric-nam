@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""ab_realtime_playback.py — A/B our Python forward against [redacted]'s C++ playback.
+"""ab_realtime_playback.py — A/B our Python forward against the host app's C++ playback.
 
 This is the FiLM-on parity check (docs/rearchitecture_skip_accumulation.md §4.2/4.3): the
 last unverified link between how we TRAIN a parametric model and how the product PLAYS it.
 The static round-trip test (tests/test_nam_standard.py) folds FiLM away, so it does NOT
 cover conditioning; this does.
 
-  # 1. render the C++ side (in the [redacted] core repo)
+  # 1. render the C++ side (in the host app's core repo)
   ./build/tools/render_parametric model.param.nam in.wav cpp.wav --knobs 0.75,0.30
 
   # 2. compare against our Python forward at the same knobs
@@ -157,7 +157,7 @@ def main():
     print(f"max|diff| : {max_abs:.3e}   rms(py)/rms(cpp) = {rms_ratio:.4f}")
 
     ok = corr >= a.corr_min
-    print("\n" + ("PASS — Python forward matches [redacted] C++ playback with FiLM active."
+    print("\n" + ("PASS — Python forward matches the host app's C++ playback with FiLM active."
                   if ok else
                   f"FAIL — correlation {corr:.6f} < {a.corr_min}. Training and playback DISAGREE; "
                   "do not retrain/ship until this is resolved."))

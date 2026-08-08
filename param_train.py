@@ -66,7 +66,7 @@ def _watchdog_disarm():
 #     connections that NAM, nam_wavenet.metal, the static a2_fast path and every stock NAM
 #     plugin already compute. It is the only head that exports faithfully to stock plugins
 #     (corr 1.0; the old residual head scored 0.31), and it costs no accuracy.
-#   * The legacy "residual" head (head reads the final residual) was a [redacted]-only
+#   * The legacy "residual" head (head reads the final residual) was a host-app-only
 #     convention. It is GONE — one head, no mode to choose. Models carrying it are REJECTED
 #     on load (check_parametric_schema), never silently played: residual weights under a skip
 #     head produce garbage with no error.
@@ -294,7 +294,7 @@ _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference (sqrt(0.6W * 600ohm), per NAM's own 
 # V0dBFS: our pedals shipped at 0.1V (amps at 0.03-0.05V), ~20 dB below the LiveSPICE ecosystem
 # convention of 1V (verified across upstream + 4 community repos, ~270/282 schx). That is why
 # input_level_dbu came out ~-20.8 dBu and a calibrating host over-drove every model ~13-33 dB
-# ([redacted]: inputCalibrationGain_dB = userInterfaceCal_dBu - input_level_dbu). With the schx
+# (the host app: inputCalibrationGain_dB = userInterfaceCal_dBu - input_level_dbu). With the schx
 # corrected to V0dBFS=1V the derivation yields ~-0.8 dBu, which matches the empirically-tuned
 # value and gives a Scarlett 2i2 (+12.5 dBu) the correct ~+13 dB makeup. So the fix is: keep
 # deriving from V0dBFS, and set V0dBFS to the 1V convention per device. A device captured on
@@ -806,7 +806,7 @@ class ParamDataset(torch.utils.data.Dataset):
         # including low frequencies, at loud input levels" reported on both the DS-1 and JCM800
         # retrains: the network trained overwhelmingly around whatever level -18dBFS RMS happened
         # to rescale each file to, with no host-side input calibration to match it back at
-        # inference (see NAMProcessorWrapper.mm's updateInputCalibrationGain -- inert unless the
+        # inference (see the host app's updateInputCalibrationGain -- inert unless the
         # .nam declares an input_level, which export_nam below has never written).
         #
         # k=1 has no such failure mode, for any file, by construction: the input the network
