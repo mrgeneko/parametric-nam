@@ -462,19 +462,11 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 
 ## System Requirements
 
-Training parametric NAM models is GPU- and memory-intensive. Below are guidelines
-based on real-world testing.
-
-### Minimum (CPU training, works but slow)
-
-- **RAM**: 18 GB — sufficient for dataset generation (48 permutations, 60s sweep)
-  and CPU training.
-- **GPU**: none — CPU-only training works reliably.
-- **Training speed**: ~80 s/epoch for a 4-width slimmable model (3,4,5,8ch) at
-  batch-size 16, crop-len 24000, 60s sweep.
-- **200 epochs**: ~4–5 hours on CPU.
-
-### Recommended (GPU training)
+Training parametric NAM models is GPU- and memory-intensive; a GPU is required in
+practice. Real device grids run into hundreds or thousands of permutations (e.g. the
+JCM800 hot-rod's 1944), and real training budgets run into the tens of thousands of
+gradient steps (see `--target-steps` above) — CPU-only training is too slow to
+realistically finish a real run.
 
 - **GPU VRAM**: 16 GB+ — needed for comfortable training of slimmable models
   with 4 widths at batch-size 16+.
@@ -511,8 +503,9 @@ If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
 
 Even with these workarounds, GPUs with only 4 GB VRAM (e.g. RX 6400) are
 **not sufficient** for training slimmable WaveNet models — they consistently
-fail with `illegal memory access` regardless of batch size or crop length.
-Use CPU training on such hardware.
+fail with `illegal memory access` regardless of batch size or crop length, and
+CPU training isn't a realistic fallback (see System Requirements above). You
+need a GPU with more VRAM.
 
 ---
 
