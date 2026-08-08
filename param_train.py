@@ -1748,7 +1748,7 @@ def main():
         # at a checkpoint from a DIFFERENT run/checkpoint-dir (e.g. warm-starting a fresh
         # open-ended continuation without touching the source run's own checkpoint dir).
         # Confirmed real (2026-08-04): such a run wrote 208 headerless data rows, which
-        # add_run.sh's facts.py couldn't match any val_esr_w<N> column against at all. First
+        # publish_run.sh's facts.py couldn't match any val_esr_w<N> column against at all. First
         # fix gated needs_header on "does the file already have content" alone -- WRONG, missed
         # that a non-resumed run always opens in "w" (truncate) mode regardless: a crashed
         # first attempt (e.g. the MPS/spectral_norm fp16 kernel gap, elsewhere in this file) can

@@ -16,7 +16,7 @@
 #   * head_mode != "skip"    -> legacy residual head; renders the wrong function
 #
 # Usage:
-#   ./add_run.sh [--commit] [--push] [--dry-run] [--skip-verify] [--blurb FILE]
+#   ./publish_run.sh [--commit] [--push] [--dry-run] [--skip-verify] [--blurb FILE]
 #
 # Override via env: RUN, CKPT, DS, SCHX, CATEGORY, CIRCUIT, PREFIX, MODELS, PY_BIN
 #
@@ -271,7 +271,7 @@ loader = torch.utils.data.DataLoader(val_ds, batch_size=args["batch_size"],
 # state dict carries "*.parametrizations.weight.original"/"_u"/"_v" keys that only exist once
 # enable_spectral_norm() has wrapped conv/mixin/l1x1 -- a plain (unwrapped) construction has
 # "*.weight" directly instead, a hard mismatch, not a numerical difference. Confirmed via a real
-# add_run.sh run against a spectral_norm=True checkpoint (2026-08-04): the old unconditional
+# run of this script against a spectral_norm=True checkpoint (2026-08-04): the old unconditional
 # `SlimmableParametricA2(..., widths=widths)` here crashed load_state_dict with every conv/
 # mixin/l1x1 key mismatched.
 m = SlimmableParametricA2(len(ds.param_names), widths=widths,
