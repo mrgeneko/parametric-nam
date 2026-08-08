@@ -2045,7 +2045,18 @@ def main():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
         sys.exit(1)
     if args.backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
-        print(f"livespice_cli not found at {LIVESPICE_CLI}. Build it first.", file=sys.stderr)
+        env = os.environ.get("LIVESPICE_CLI")
+        print(f"ERROR: livespice_cli not found at {LIVESPICE_CLI}", file=sys.stderr)
+        if env:
+            print("       ($LIVESPICE_CLI is set to this path -- check it's correct and built)",
+                  file=sys.stderr)
+        else:
+            print("       Clone it (recursively -- it has its own nested submodule) as a "
+                  "SIBLING of this repo:", file=sys.stderr)
+            print("         git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli",
+                  file=sys.stderr)
+            print("         cd ../livespice-cli && ./build.sh", file=sys.stderr)
+            print("       ...or point $LIVESPICE_CLI at an existing build.", file=sys.stderr)
         sys.exit(1)
     if args.backend == "ngspice" and not shutil.which("ngspice"):
         print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
