@@ -54,6 +54,16 @@ done
 [ -f "$CONFIG" ] || { echo "no training config at $CONFIG (set CONFIG=)" >&2; exit 1; }
 [ -f "$CKPT/metrics.csv" ] || { echo "no metrics.csv in $CKPT" >&2; exit 1; }
 [ -f "$CKPT/best.pt" ]     || { echo "no best.pt in $CKPT" >&2; exit 1; }
+# Fail NOW, not after staging/verifying/composing the release: this script's whole job is
+# to publish into a parametric-nam-models-style archive (MODELS), which is optional -- you
+# don't need one to train with run_pipeline.py, only to use this specific publish step.
+[ -f "$MODELS/add-run.sh" ] || {
+  echo "no $MODELS/add-run.sh -- this hands off to a parametric-nam-models-style archive repo," >&2
+  echo "which is separate from parametric-nam and not required to train a model. Set MODELS= to" >&2
+  echo "point at your own archive (see parametric-nam-models' add-run.sh for the expected shape)," >&2
+  echo "or don't use this script if you don't want one." >&2
+  exit 1
+}
 
 # ---------------------------------------------------------------------------
 # 1. DERIVE the facts. Nothing below is hand-typed.
