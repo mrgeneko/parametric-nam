@@ -32,7 +32,7 @@ MODELS="${MODELS:-$HOME/work/parametric-nam-models}"
 CATEGORY="${CATEGORY:-pedals}"
 CIRCUIT="${CIRCUIT:-big-muff-pi-v1-66-5}"
 PREFIX="${PREFIX:-bigmuff}"
-CONFIG="${CONFIG:-configs/big-muff-v1.toml}"        # training config, for reproduce.sh
+CONFIG="${CONFIG:-$MODELS/$CATEGORY/$CIRCUIT/config.toml}"   # training config, for reproduce.sh -- lives in parametric-nam-models, not here
 PY_BIN="${PY_BIN:-$HERE/.venv/bin/python}"
 STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
 # Moved up from the args-construction site (its only other use) so PRIOR_STATE detection below
@@ -51,9 +51,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
-[ -z "$BLURB" ] && [ -f "$HERE/configs/blurbs/$CIRCUIT.md" ] && BLURB="$HERE/configs/blurbs/$CIRCUIT.md"
-
-[ -f "$HERE/$CONFIG" ] || { echo "no training config at $HERE/$CONFIG (set CONFIG=)" >&2; exit 1; }
+[ -f "$CONFIG" ] || { echo "no training config at $CONFIG (set CONFIG=)" >&2; exit 1; }
 [ -f "$CKPT/metrics.csv" ] || { echo "no metrics.csv in $CKPT" >&2; exit 1; }
 [ -f "$CKPT/best.pt" ]     || { echo "no best.pt in $CKPT" >&2; exit 1; }
 
@@ -621,7 +619,7 @@ SPICE_TO_NAM="\${SPICE_TO_NAM:-\$HOME/work/parametric-nam}"
 OUT="\${OUT:-\$HOME/work/tmp/${PREFIX}_rerun}"
 cd "\$SPICE_TO_NAM"
 
-python run_pipeline.py --config $CONFIG \\
+python run_pipeline.py --config "$CONFIG" \\
   --dataset-dir "$DS" \\
   --nam-output  "\$OUT.param.nam" \\
   --checkpoint-dir "\${OUT}_ckpt" \\
