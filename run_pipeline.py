@@ -267,7 +267,7 @@ def portable(p) -> str:
     """Rewrite an absolute path into an env-anchored one, so a generated reproduce.sh RUNS.
 
     They did not. Every archived reproduce.sh baked in the absolute paths of whatever machine made
-    it -- `REPO="/home/USER/work/..."`, `INPUT="/Volumes/DATA/work/sweep120s.wav"` -- so a script
+    it -- `REPO="/home/someuser/work/..."`, `INPUT="/Volumes/DATA/work/sweep120s.wav"` -- so a script
     whose entire purpose is reproducibility could not be run anywhere but the one box that wrote it,
     and in one case pointed at an input file that has since been PURGED for licensing.
 
