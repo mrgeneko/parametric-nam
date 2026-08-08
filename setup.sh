@@ -10,13 +10,16 @@
 #   1. locate (and if needed build) THE ORACLE — livespice_cli
 #   2. create .venv and install pinned Python deps
 #
-# THE ORACLE LIVES IN hotspice, NOT HERE.
+# THE ORACLE LIVES IN mrgeneko/livespice-cli, NOT HERE.
 # This repo used to vendor its own livespice_cli plus a patched LiveSPICE submodule. The copy
-# drifted from the emitter's: a fix making an unknown --params name a hard error (instead of
-# silently rendering at the defaults, so every "swept" permutation comes out IDENTICAL and the
-# trainer learns the knob does nothing) landed in one and not the other. Two tools built from one
-# schematic, disagreeing about what the device's knobs ARE. There is now exactly one, and it builds
-# against PRISTINE upstream LiveSPICE — an oracle built from the thing under test is not an oracle.
+# drifted from hotspice's emitter-testing copy: a fix making an unknown --params name a hard
+# error (instead of silently rendering at the defaults, so every "swept" permutation comes out
+# IDENTICAL and the trainer learns the knob does nothing) landed in one and not the other. Two
+# tools built from one schematic, disagreeing about what the device's knobs ARE. There is now
+# exactly one, in its own small standalone repo (originally extracted from hotspice/oracle/, which
+# has no other functional connection to this project) — it builds against PRISTINE upstream
+# LiveSPICE, never a patched fork, because an oracle built from the thing under test is not an
+# oracle.
 #
 # The micro-sign patch is gone too: livespice_cli now normalises U+00B5 MICRO SIGN -> U+03BC GREEK
 # MU when it loads a schematic. (Upstream's Quantity parser knows U+03BC but not U+00B5, so it reads
@@ -26,7 +29,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-EMITTER="${HOTSPICE:-${LIVESPICE_EMITTER:-$REPO/../hotspice}}"   # LIVESPICE_EMITTER: old name, still honoured
+ORACLE_REPO="${LIVESPICE_CLI_REPO:-${LIVESPICE_EMITTER:-${HOTSPICE:-$REPO/../livespice-cli}}}"   # LIVESPICE_EMITTER/HOTSPICE: old names, still honoured
 BUILD_CLI=1
 for a in "$@"; do [ "$a" = "--no-cli" ] && BUILD_CLI=0; done
 
@@ -42,24 +45,24 @@ if [ "$BUILD_CLI" -eq 1 ]; then
     fi
     echo "    using \$LIVESPICE_CLI: $LIVESPICE_CLI"
   else
-    if [ ! -d "$EMITTER/oracle" ]; then
-      echo "ERROR: the oracle lives in hotspice, which was not found at:" >&2
-      echo "         $EMITTER" >&2
-      echo "       Clone it as a SIBLING of this repo:" >&2
-      echo "         git clone https://github.com/mrgeneko/hotspice" >&2
-      echo "       ...or point \$LIVESPICE_EMITTER / \$LIVESPICE_CLI at your checkout." >&2
+    if [ ! -f "$ORACLE_REPO/build.sh" ]; then
+      echo "ERROR: the oracle lives in mrgeneko/livespice-cli, which was not found at:" >&2
+      echo "         $ORACLE_REPO" >&2
+      echo "       Clone it (recursively — it has its own nested submodule) as a SIBLING of this repo:" >&2
+      echo "         git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli" >&2
+      echo "       ...or point \$LIVESPICE_CLI_REPO / \$LIVESPICE_CLI at your checkout." >&2
       exit 1
     fi
-    if [ -x "$EMITTER/oracle/publish/livespice_cli" ]; then
-      echo "    already built: $EMITTER/oracle/publish/livespice_cli"
+    if [ -x "$ORACLE_REPO/publish/livespice_cli" ]; then
+      echo "    already built: $ORACLE_REPO/publish/livespice_cli"
     else
       if ! command -v dotnet >/dev/null 2>&1; then
         echo "ERROR: 'dotnet' not found. Install the .NET SDK (>=8):" >&2
         echo "       macOS: brew install --cask dotnet-sdk   |   Linux: https://dotnet.microsoft.com/download" >&2
         exit 1
       fi
-      echo "    building via $EMITTER/oracle/build.sh"
-      ( cd "$EMITTER/oracle" && ./build.sh )
+      echo "    building via $ORACLE_REPO/build.sh"
+      ( cd "$ORACLE_REPO" && ./build.sh )
     fi
   fi
 else

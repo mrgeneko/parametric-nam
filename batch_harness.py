@@ -53,24 +53,27 @@ def _find_livespice_cli() -> Path:
     from one schematic, disagreeing about what the device's knobs ARE -- the same failure the
     emitter's ParamExtractor had.
 
-    So there is now one, in hotspice/oracle/, where the discipline is written down: it
-    builds against PRISTINE LiveSPICE, never our fork, because an oracle built from the thing under
-    test is not an oracle.
+    So there is now one: mrgeneko/livespice-cli, a small standalone public repo (extracted from
+    hotspice/oracle/, which used to build the identical binary in place -- see its history if you
+    need the "why here, not there" reasoning). It builds against PRISTINE LiveSPICE, never a
+    patched fork, because an oracle built from the thing under test is not an oracle. This repo has
+    no functional dependency on hotspice itself -- only on this small CLI wrapper.
 
-    Order: $LIVESPICE_CLI, then a sibling hotspice checkout, then the local legacy copy.
+    Order: $LIVESPICE_CLI, then a sibling livespice-cli checkout, then the local legacy copy.
     """
     env = os.environ.get("LIVESPICE_CLI")
     if env:
         return Path(env)
 
-    oracle = HERE.parent / "hotspice" / "oracle" / "publish" / "livespice_cli"
+    oracle = HERE.parent / "livespice-cli" / "publish" / "livespice_cli"
     if oracle.exists():
         return oracle
 
     legacy = HERE / "livespice_cli/publish/livespice_cli"
     if legacy.exists():
         print("warning: using this repo's legacy livespice_cli. The oracle lives in "
-              "hotspice/oracle -- build it there, or set $LIVESPICE_CLI.", file=sys.stderr)
+              "https://github.com/mrgeneko/livespice-cli -- build it there, or set "
+              "$LIVESPICE_CLI.", file=sys.stderr)
         return legacy
 
     return oracle  # report the path we WANT when it is missing

@@ -35,7 +35,7 @@ Usage:
 --render-bin defaults to $RENDER_PARAMETRIC, else the first render_parametric found on PATH
 or in a couple of known build dirs. If none is found the tool exits 0 with a warning (so a
 release pipeline can call it best-effort without the C++ fork built). --oracle likewise
-defaults to $LIVESPICE_CLI / PATH / the hotspice oracle build; if --schx is given but no
+defaults to $LIVESPICE_CLI / PATH / the livespice-cli oracle build; if --schx is given but no
 oracle is found, the overlay is skipped and the plain model-only chart is produced instead.
 """
 import argparse, json, math, os, shutil, subprocess, sys, tempfile
@@ -139,7 +139,7 @@ def find_oracle_bin(explicit):
     which = shutil.which("livespice_cli")
     if which:
         return which
-    hit = Path.home() / "work/hotspice/oracle/publish/livespice_cli"
+    hit = Path.home() / "work/livespice-cli/publish/livespice_cli"
     return str(hit) if hit.is_file() else None
 
 
@@ -273,7 +273,7 @@ def main():
     ap.add_argument("--drive-value", type=float, help="value for the drive knob (default: 25%% of its range)")
     ap.add_argument("--include-drive", action="store_true", help="also sweep the drive knob")
     ap.add_argument("--schx", help="overlay the real circuit (ground truth) via the LiveSPICE oracle")
-    ap.add_argument("--oracle", help="livespice_cli path (else $LIVESPICE_CLI / PATH / hotspice build)")
+    ap.add_argument("--oracle", help="livespice_cli path (else $LIVESPICE_CLI / PATH / livespice-cli build)")
     ap.add_argument("--oversample", type=int, help="oracle oversample (default: config's, else 4)")
     ap.add_argument("--iterations", type=int, default=20, help="oracle Newton iterations (default 20)")
     args = ap.parse_args()

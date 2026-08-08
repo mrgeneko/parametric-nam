@@ -13,26 +13,28 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 
 ## Quick Start
 
-**This repo is not self-contained.** It needs three sibling checkouts. Clone them side by side:
+**This repo is not self-contained.** It needs sibling checkouts. Clone them side by side:
 
 ```bash
 mkdir -p ~/work && cd ~/work
 
-# All of these are PRIVATE repos — use `gh` (or SSH), not a plain https clone.
 gh repo clone mrgeneko/parametric-nam        # this repo — the toolchain
-gh repo clone mrgeneko/parametric-devices      # the .schx library + devices.toml registry
-gh repo clone mrgeneko/hotspice   # THE ORACLE (livespice_cli) lives here
-gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README)
-gh repo clone mrgeneko/parametric-nam-models    # where trained runs are archived
+gh repo clone mrgeneko/parametric-devices      # the .schx library + devices.toml registry — PRIVATE
+gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README) — PRIVATE
+gh repo clone mrgeneko/parametric-nam-models    # where trained runs are archived — PRIVATE
+
+# THE ORACLE (livespice_cli) — public, no PRIVATE-repo auth needed. Recursive: it has its own
+# nested submodule.
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
 
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
 ```
 
-`setup.sh` builds the oracle from `../hotspice/oracle` (needs the .NET SDK; `--no-cli` to
+`setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip) and creates the venv. If your checkouts are not siblings, point at them explicitly:
 
 ```bash
-export LIVESPICE_CLI=/path/to/hotspice/oracle/publish/livespice_cli
+export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ```
 
 ### Train a device
@@ -446,26 +448,30 @@ For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
 
 ### .NET SDK + the oracle (for dataset generation)
 
-`livespice_cli` — **the oracle** — lives in **`hotspice/oracle/`**, not here. This repo
-used to carry its own near-copy, and the two drifted, as duplicates do: a fix making an unknown
-`--params` name a hard error (instead of silently rendering at the defaults, so every "swept"
-permutation comes out **identical** and the trainer learns the knob does nothing) landed in one
-copy and not the other. Two tools built from one schematic, disagreeing about what the device's
-knobs *are*. There is now exactly one.
+`livespice_cli` — **the oracle** — lives in
+[**`mrgeneko/livespice-cli`**](https://github.com/mrgeneko/livespice-cli), a small standalone
+public repo, not here. This repo used to carry its own near-copy, and the two drifted, as
+duplicates do: a fix making an unknown `--params` name a hard error (instead of silently
+rendering at the defaults, so every "swept" permutation comes out **identical** and the trainer
+learns the knob does nothing) landed in one copy and not the other. Two tools built from one
+schematic, disagreeing about what the device's knobs *are*. There is now exactly one. (It was
+originally extracted from `hotspice/oracle/` — same reasoning, promoted to its own repo since it
+has no other functional connection to this project or to hotspice's emitter.)
 
 ```bash
-git clone https://github.com/mrgeneko/hotspice   # as a SIBLING of this repo
-cd hotspice/oracle && ./build.sh
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of this repo
+cd livespice-cli && ./build.sh
 ```
-(.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS.)
+(.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS. `--recurse-submodules`
+matters — LiveSPICE has its own nested submodule; a plain clone leaves it empty and the build fails.)
 
 `batch_harness.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
-`../hotspice/oracle/publish/livespice_cli`. Set the env var if your checkout lives
+`../livespice-cli/publish/livespice_cli`. Set the env var if your checkout lives
 elsewhere.
 
-The oracle builds against **pristine upstream LiveSPICE**, never our fork — an oracle built from
-the thing under test is not an oracle — and `oracle/build.sh` refuses to build if it finds fork
-markers.
+The oracle builds against **pristine upstream LiveSPICE**, never a patched fork — an oracle built
+from the thing under test is not an oracle — and `build.sh` warns if it finds fork markers in the
+submodule (a sign the pin points somewhere other than pristine upstream).
 
 > **The micro-sign patch is gone, and deliberately.** LiveSPICE's `Quantity` parser knows
 > `U+03BC GREEK MU` (and ASCII `u`) but *not* `U+00B5 MICRO SIGN`, so upstream reads `4.7µF`
@@ -500,6 +506,7 @@ Not required for training or Python inference — only for C++ inference validat
 ## Related Repos
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
+- [`livespice-cli`](https://github.com/mrgeneko/livespice-cli) — the oracle (`livespice_cli`), public
 - `[redacted]` — target host for the trained `.param.nam` models
 
 ## Credits & Attribution
@@ -507,7 +514,8 @@ Not required for training or Python inference — only for C++ inference validat
 This toolchain builds on several open-source projects and published models:
 
 - **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
-  circuit simulator `livespice_cli` builds against (pristine, in `hotspice/extern/LiveSPICE-oracle`),
+  circuit simulator `livespice_cli` builds against (pristine, pinned in
+  [`livespice-cli`](https://github.com/mrgeneko/livespice-cli)'s `extern/LiveSPICE` submodule),
   and the reference for the tube-model equations. The ngspice backend's tube
   subcircuits are **ported from LiveSPICE's `Triode.cs` / `Pentode.cs`**.
 - **[ngspice](https://ngspice.sourceforge.io/)** (BSD) — the adaptive-timestep SPICE

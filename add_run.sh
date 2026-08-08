@@ -341,7 +341,7 @@ cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
 # renders the circuit through the LiveSPICE oracle and overlays each tier's knob effect
 # against that ground truth + reports the per-knob fidelity error. Best-effort: needs the
 # C++ binary (set RENDER_PARAMETRIC, or render_parametric on PATH / the fork's build/tools);
-# the schx overlay additionally needs the oracle ($LIVESPICE_CLI / the hotspice build). If
+# the schx overlay additionally needs the oracle ($LIVESPICE_CLI / the livespice-cli build). If
 # the render binary is unavailable the tool prints a warning and exits 0; if only the oracle
 # is missing it falls back to the model-only chart. Non-fatal on error too, so a broken
 # chart never blocks a publish.

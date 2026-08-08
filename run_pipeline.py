@@ -279,6 +279,7 @@ def portable(p) -> str:
         (HERE,                              "${PARAMETRIC_NAM:-$HOME/work/parametric-nam}"),
         (HERE.parent / "parametric-devices", "${PARAMETRIC_DEVICES:-$HOME/work/parametric-devices}"),
         (HERE.parent / "sweep-files",        "${SWEEP_FILES:-$HOME/work/sweep-files}"),
+        (HERE.parent / "livespice-cli",      "${LIVESPICE_CLI_REPO:-$HOME/work/livespice-cli}"),
         (HERE.parent / "hotspice",           "${HOTSPICE:-$HOME/work/hotspice}"),
         (Path.home(),                        "$HOME"),
     ):
