@@ -741,9 +741,6 @@ def main():
                    help="Lipschitz-bound every A2Layer's conv/mixin/l1x1 -- see "
                         "docs/film_runaway_investigation.md ('A2'). Default off. "
                         "Forwarded to param_train.py.")
-    g.add_argument("--film-gamma-bound", type=float, default=0.0,
-                   help="Bound FiLM's gamma to (1-R, 1+R), R = this value (0.0 = off) -- see "
-                        "docs/film_runaway_investigation.md ('A1'). Forwarded to param_train.py.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
     _pre = argparse.ArgumentParser(add_help=False)
@@ -1082,7 +1079,6 @@ def main():
             if args.per_tier_clip:       train_cmd.append("--per-tier-clip")
             if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
             if args.spectral_norm:       train_cmd.append("--spectral-norm")
-            if args.film_gamma_bound:    train_cmd += ["--film-gamma-bound", args.film_gamma_bound]
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------

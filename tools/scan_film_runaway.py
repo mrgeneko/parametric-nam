@@ -70,13 +70,7 @@ def load_all_submodels(nam_path: str):
         param_metas = parametric["parameters"]
         param_names = [p["name"] for p in param_metas]
         weights = sub["model"]["weights"]
-        # film_gamma_bound is a forward-pass formula parameter (docs/film_runaway_investigation.md,
-        # "A1"), not a weight -- must be read back from the export or this reconstruction would
-        # silently apply the wrong (unbounded) gamma to a model actually trained bounded, which
-        # would corrupt exactly the thing this scanner exists to check. 0.0 (off) for older exports.
-        film_gamma_bound = float(parametric.get("film_gamma_bound", 0.0))
-        model = ParametricA2(channels=channels, num_params=len(param_names),
-                             film_gamma_bound=film_gamma_bound)
+        model = ParametricA2(channels=channels, num_params=len(param_names))
         expected = model.weight_count()
         if len(weights) != expected:
             raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "

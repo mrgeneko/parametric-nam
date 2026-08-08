@@ -60,8 +60,7 @@ def detect_spectral_norm(state) -> bool:
     """Was this checkpoint trained with A2Layer(spectral_norm=True)? Detectable directly
     from the state dict: PyTorch's parametrize system renames conv/mixin/l1x1's plain
     `.weight` key to `.parametrizations.weight.original` (+ power-iteration `._u`/`._v`
-    buffers) -- their presence/absence is unambiguous, unlike film_gamma_bound (below),
-    which leaves no trace in the state dict at all."""
+    buffers) -- their presence/absence is unambiguous."""
     return any(".parametrizations.weight" in k for k in state)
 
 
@@ -79,13 +78,6 @@ def main():
     ap.add_argument("--state", default="model", choices=["model", "best_state"],
                     help="single-checkpoint mode: which weights to export (default: model)")
     ap.add_argument("--sample-rate", type=int, default=48000)
-    ap.add_argument("--film-gamma-bound", type=float, default=0.0,
-                    help="R used at training time (param_train.py's --film-gamma-bound, "
-                         "docs/film_runaway_investigation.md 'A1'). NOT auto-detectable from "
-                         "the checkpoint -- it only affects FiLM's forward formula, not its "
-                         "module structure, so the state dict carries no trace of it. Must match "
-                         "what the checkpoint was actually trained with, or the reconstructed "
-                         "model computes a different (wrong) gamma than what training produced.")
     args = ap.parse_args()
     if bool(args.checkpoint) == bool(args.compose):
         raise SystemExit("pass exactly one of --checkpoint or --compose")
@@ -110,14 +102,7 @@ def main():
                              f"(detected {sn_per_tier}) -- can't mix a spectral-norm-trained "
                              f"tier with a plain one in one container")
         spectral_norm = next(iter(sn_per_tier.values()))
-        if spectral_norm and args.film_gamma_bound == 0.0:
-            print("WARNING: spectral_norm detected but --film-gamma-bound not given (default "
-                  "0.0) -- if this checkpoint was ALSO trained with a nonzero gamma bound, "
-                  "this reconstruction will compute the wrong (unbounded) gamma. Pass the same "
-                  "--film-gamma-bound the training run used.")
-        model = SlimmableParametricA2(ds.num_params, widths=widths,
-                                      spectral_norm=spectral_norm,
-                                      film_gamma_bound=args.film_gamma_bound)
+        model = SlimmableParametricA2(ds.num_params, widths=widths, spectral_norm=spectral_norm)
         labels = model.tier_labels()
         missing = [l for l in labels if l not in specs]
         if missing:
@@ -137,20 +122,13 @@ def main():
             raise SystemExit(f"checkpoint has no '{args.state}' key; available: {list(ck.keys())}")
         state = ck[args.state]
         spectral_norm = detect_spectral_norm(state)
-        if spectral_norm and args.film_gamma_bound == 0.0:
-            print("WARNING: spectral_norm detected but --film-gamma-bound not given (default "
-                  "0.0) -- if this checkpoint was ALSO trained with a nonzero gamma bound, "
-                  "this reconstruction will compute the wrong (unbounded) gamma. Pass the same "
-                  "--film-gamma-bound the training run used.")
         if any(k.startswith("lite.") for k in state):
             model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
-                                          spectral_norm=spectral_norm,
-                                          film_gamma_bound=args.film_gamma_bound)
+                                          spectral_norm=spectral_norm)
         else:
             ch = next(v.shape[0] for k, v in state.items()
                      if k.endswith("conv.parametrizations.weight.original") or k.endswith("conv.weight"))
-            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm,
-                                 film_gamma_bound=args.film_gamma_bound)
+            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm)
         model.load_state_dict(state)
         provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
                       f"best_esr={ck.get('best_esr')}")

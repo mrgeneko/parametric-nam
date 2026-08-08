@@ -37,19 +37,17 @@ def load_model(checkpoint_path: str):
     num_params = len(param_names)
     args_dict["param_names"] = param_names
 
-    # A2/A1 (docs/film_runaway_investigation.md): args_dict already captures these from the
-    # training CLI (it's saved from vars(args)), so this recovers them for free -- no separate
+    # A2 (docs/film_runaway_investigation.md): args_dict already captures this from the
+    # training CLI (it's saved from vars(args)), so this recovers it for free -- no separate
     # detection needed the way export_checkpoint.py has to (it doesn't get an args_dict when
     # composing across checkpoints from possibly different runs).
     spectral_norm = args_dict.get("spectral_norm", False)
-    film_gamma_bound = args_dict.get("film_gamma_bound", 0.0)
     if slimmable:
         model = SlimmableParametricA2(num_params=num_params, widths=args_dict.get("widths"),
-                                      spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
+                                      spectral_norm=spectral_norm)
     else:
         channels = args_dict.get("channels", 8)
-        model = ParametricA2(num_params=num_params, channels=channels,
-                             spectral_norm=spectral_norm, film_gamma_bound=film_gamma_bound)
+        model = ParametricA2(num_params=num_params, channels=channels, spectral_norm=spectral_norm)
 
     state = ckpt.get("model") or ckpt.get("best_state")
     model.load_state_dict(state)

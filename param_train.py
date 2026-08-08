@@ -135,24 +135,14 @@ K_DILATIONS = [
 class FiLM(nn.Module):
     """Feature-wise Linear Modulation: gamma * x + beta.
 
-    gamma_bound: 0.0 (default) = today's raw, unbounded gamma -- exactly the old
-    behavior, bit-identical for existing checkpoints. A positive R bounds gamma to
-    (1-R, 1+R) via gamma = 1 + R*tanh(raw_gamma/R): see docs/film_runaway_investigation.md
-    ("A1"). This alone does NOT prevent the runaway (the investigation found gamma
-    smooth and unremarkable at the blow-up corner; the mechanism is in the conv/l1x1/
-    residual pathway -- see A2Layer's spectral_norm) but closes off one real
-    amplification vector cheaply, and A2's guarantee needs it: gamma sits structurally
-    between two of A2's bounded stages and can defeat the guarantee alone if unbounded.
-
     gamma_beta() is the ONE place this formula is computed -- forward() (training/live
     inference) and nam_standard.fold_film() (baking) both call it. fold_film() used to
     reimplement this affine step inline, independently of FiLM; that silent duplication
-    is exactly the kind of two-place divergence a bound added to only one of them would
-    reintroduce, so both now share this method instead.
+    is exactly the kind of two-place divergence worth avoiding, so both now share this
+    method instead.
     """
-    def __init__(self, channels: int, cond_dim: int, gamma_bound: float = 0.0):
+    def __init__(self, channels: int, cond_dim: int):
         super().__init__()
-        self.gamma_bound = gamma_bound
         self.net = nn.Linear(cond_dim, 2 * channels)
         # Small NON-zero weight so the knob modulates from step 0. A pure-zero init
         # leaves FiLM at identity for ALL cond, and it then under-learns subtle /
@@ -161,20 +151,11 @@ class FiLM(nn.Module):
         # near-identity: gamma≈1, beta≈0.
         nn.init.normal_(self.net.weight, std=0.1)
         nn.init.zeros_(self.net.bias)
-        if gamma_bound <= 0.0:
-            self.net.bias.data[:channels].fill_(1.0)
-        # else: leave the gamma half of bias at 0 -- gamma_beta()'s tanh(0/R)=0
-        # already gives gamma≈1 at init, so no extra bias offset is needed (a
-        # fill_(1.0) here would instead start gamma≈1+R*tanh(1/R), off-identity).
+        self.net.bias.data[:channels].fill_(1.0)
 
     def gamma_beta(self, cond: torch.Tensor):
         params = self.net(cond)
-        raw_gamma, beta = params.chunk(2, dim=-1)
-        if self.gamma_bound > 0.0:
-            R = self.gamma_bound
-            gamma = 1.0 + R * torch.tanh(raw_gamma / R)
-        else:
-            gamma = raw_gamma
+        gamma, beta = params.chunk(2, dim=-1)
         return gamma, beta
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
@@ -268,8 +249,7 @@ class A2Layer(nn.Module):
     to an unconstrained run with the same seed, isolating A2's actual training-time effect from
     an accidental initialization-lottery difference in side-by-side comparisons.
     """
-    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int,
-                film_gamma_bound: float = 0.0):
+    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int):
         super().__init__()
         # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
         # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
@@ -286,7 +266,7 @@ class A2Layer(nn.Module):
         self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
         self.mixin = nn.Conv1d(1, channels, 1, bias=False)
         self.l1x1 = nn.Conv1d(channels, channels, 1)
-        self.film = FiLM(channels, cond_dim, gamma_bound=film_gamma_bound) if cond_dim > 0 else None
+        self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
 
     def enable_spectral_norm(self):
         """Wrap conv/mixin/l1x1 with spectral_norm. Call ONLY after every raw module this
@@ -372,19 +352,16 @@ class ParametricA2(nn.Module):
     Architecture matches the C++ A2FastModel with additional FiLM layers
     for parametric knob control.
     """
-    def __init__(self, channels: int, num_params: int,
-                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
+    def __init__(self, channels: int, num_params: int, spectral_norm: bool = False):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
-        # anything to strip -- see docs/film_runaway_investigation.md ("A1"/"A2").
+        # anything to strip -- see docs/film_runaway_investigation.md ("A2").
         self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
-        self.film_gamma_bound = film_gamma_bound
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
-            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params,
-                    film_gamma_bound=film_gamma_bound)
+            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -521,8 +498,7 @@ class ParametricA2(nn.Module):
         """
         if not self.spectral_norm:
             return self
-        baked = ParametricA2(self.channels, self.num_params,
-                             spectral_norm=False, film_gamma_bound=self.film_gamma_bound)
+        baked = ParametricA2(self.channels, self.num_params, spectral_norm=False)
         with torch.no_grad():
             baked.rechannel.weight.copy_(self.rechannel.weight)
             baked.head.weight.copy_(self.head.weight)
@@ -610,14 +586,6 @@ class ParametricA2(nn.Module):
                 "head_mode": "skip",
                 "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
                 "parameters": param_defs,
-                # A1 (docs/film_runaway_investigation.md): 0.0 = off, today's raw unbounded
-                # gamma. NOT a weight -- gamma_beta()'s bound is a forward-pass formula, so
-                # this MUST travel with the export for any reconstruction (bake_nam.py,
-                # scan_film_runaway.py) to apply the same formula the model was trained
-                # with; a reconstruction that silently defaults to 0.0 here would replay an
-                # unbounded gamma over correctly-trained-bounded weights and diverge from
-                # what training actually produced.
-                "film_gamma_bound": self.film_gamma_bound,
             },
         }
         now = datetime.datetime.now()
@@ -685,16 +653,12 @@ class SlimmableParametricA2(nn.Module):
     index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
     2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
     """
-    def __init__(self, num_params: int, widths=None,
-                spectral_norm: bool = False, film_gamma_bound: float = 0.0):
+    def __init__(self, num_params: int, widths=None, spectral_norm: bool = False):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
-        # film_gamma_bound: see docs/film_runaway_investigation.md ("A1"). Passed through
-        # identically to every tier -- the runaway was found across widths (Tweed's 8ch full
-        # tier and DS-1's 8ch tier both), not one specific tier. spectral_norm is DELIBERATELY
-        # NOT passed here (always False per-tier) -- see below.
-        kw = dict(spectral_norm=False, film_gamma_bound=film_gamma_bound)
+        # spectral_norm is DELIBERATELY NOT passed here (always False per-tier) -- see below.
+        kw = dict(spectral_norm=False)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
         # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
@@ -1478,17 +1442,7 @@ def main():
                          "docs/film_runaway_investigation.md ('A2'). Default off: existing "
                          "training runs are unaffected until opted in and validated "
                          "(measure aggregate + per-perm ESR before/after on a per-model "
-                         "basis; this is a real capacity constraint, not free). Combine "
-                         "with --film-gamma-bound for the full guarantee -- A2 alone can "
-                         "still be defeated by an unbounded gamma sitting between two of "
-                         "its bounded stages.")
-    ap.add_argument("--film-gamma-bound", type=float, default=0.0,
-                    help="Bound FiLM's gamma to (1-R, 1+R) via gamma = 1 + R*tanh(raw/R), "
-                         "R = this value (e.g. 32.0; 0.0 = off, today's unbounded gamma). "
-                         "See docs/film_runaway_investigation.md ('A1'). Cheap and mostly "
-                         "harmless alone (near-identity for R chosen above the observed "
-                         "benign gamma range) but NOT sufficient by itself against the "
-                         "runaway -- combine with --spectral-norm.")
+                         "basis; this is a real capacity constraint, not free).")
     ap.add_argument("--per-tier-clip", action="store_true",
                     help="Slimmable only: clip_grad_norm_ EACH tier's own parameters "
                          "separately (each to --clip-norm) instead of one joint call over "
@@ -1634,8 +1588,7 @@ def main():
     # starting point -- not a fresh random init, so fine-tuning under the now-active constraint
     # only needs to ADAPT, not relearn the whole function.
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
-                                  spectral_norm=(args.spectral_norm and args.init_from is None),
-                                  film_gamma_bound=args.film_gamma_bound)
+                                  spectral_norm=(args.spectral_norm and args.init_from is None))
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
@@ -2064,12 +2017,7 @@ def main():
     for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
                                  model.tier_labels(), model.submodels):
         ch = sm_data["model"]["config"]["layers"]
-        # film_gamma_bound (docs/film_runaway_investigation.md, "A1") is a forward-pass formula
-        # parameter, not a weight -- reconstructing with the default (0.0/unbounded) here while
-        # `src` was trained bounded is a REAL divergence, not export corruption. Same bug class
-        # already fixed in export_checkpoint.py/param_infer.py; missed here originally.
-        film_gamma_bound = float(sm_data["model"]["config"]["parametric"].get("film_gamma_bound", 0.0))
-        m2 = ParametricA2(ch, num_params, film_gamma_bound=film_gamma_bound)
+        m2 = ParametricA2(ch, num_params)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():
