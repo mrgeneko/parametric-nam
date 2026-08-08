@@ -693,7 +693,11 @@ def main():
                    help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
                         "cell that fails puts a floor under the model that NO training can lift. "
-                        "Takes a couple of minutes. See internal engineering notes.")
+                        "Cheap relative to generation+training regardless (renders scale with knob-"
+                        "axis count, not permutation count -- ~15-200 across the real fleet), but "
+                        "not a fixed constant: cost per render follows --oversample (4-16 across "
+                        "real configs) and backend (ngspice is markedly slower than livespice). "
+                        "See internal engineering notes.")
     g.add_argument("--grid-target",    type=float, default=0.03,
                    help="the interpolation ESR the knob grid must support (default 0.03, the "
                         "audibility floor -- NOT the training-fidelity ESR; see tools/grid_adequacy.py)")
@@ -816,7 +820,9 @@ def main():
         # 20-100x. It was simultaneously too dense almost everywhere and too coarse in the one place
         # the pedal actually lives, and no training run could ever have told us.
         #
-        # So measure it BEFORE spending the renders and the epochs. It costs a couple of minutes.
+        # So measure it BEFORE spending the renders and the epochs. Cheap relative to that either
+        # way (render count scales with knob-axis count, not permutation count), but cost per
+        # render follows --oversample and backend, so "cheap" isn't a fixed number across devices.
         # See internal engineering notes.
         # ------------------------------------------------------------------
         if run_generate and args.config and not args.skip_grid_check:

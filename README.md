@@ -74,7 +74,7 @@ One command runs **four** steps:
 
 | step | what it does | why it exists |
 |---|---|---|
-| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Aborts in ~2 min instead of wasting hours. |
+| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full permutation count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). |
 | 1 — Generate | renders the dataset across the knob grid | |
 | 2 — Combine | per-permutation WAVs → `outputs.npy` | |
 | 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
