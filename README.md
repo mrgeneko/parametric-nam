@@ -458,20 +458,6 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
   stock-standard `.nam`. Works on **already-trained** parametric `.nam`s offline (no
   retrain) — pure weight transform.
 
-### ESR targets
-
-Validation ESR (error-to-signal ratio) as a rough quality guide:
-
-| ESR | Quality |
-|---|---|
-| < 0.01 | Good |
-| < 0.005 | Excellent |
-| < 0.003 | Exceptional (JCM800 single-param achieved 0.003) |
-
-Treat these as a sanity check, not a substitute for listening — a model's
-perceptual quality and its full-band ESR can diverge quite a bit,
-especially on high-gain amps (see the project's internal engineering notes).
-
 ---
 
 ## System Requirements
