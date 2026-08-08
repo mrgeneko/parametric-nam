@@ -16,8 +16,10 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 ### Try it now — no sibling repos needed
 
 `examples/big-muff-pi-v1-66-5/` bundles a real, complete recipe: the `.schx` circuit, the
-`sweepv5.wav` excitation (ours outright, freely licensed), and an annotated `config.toml`. The
-only external piece is the oracle, which is public:
+`sweepv5.wav` excitation (ours outright, freely licensed), and an annotated `config.toml`. Feel
+free to substitute your own favorite sweep or DI recording — just point `input` in the config at
+it. A good input covers the top of the band (real playing alone rarely does) and includes real
+transient attacks, not just steady tones. The only external piece is the oracle, which is public:
 
 ```bash
 git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli ../livespice-cli
