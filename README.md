@@ -343,7 +343,10 @@ runnable `reproduce.sh`.
 
 A standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already
 registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a
-custom architecture our host app's factory registers.
+custom architecture [our fork of NeuralAmpModelerCore](https://github.com/mrgeneko/NeuralAmpModelerCore)'s
+factory registers. [`NAMix`](https://github.com/mrgeneko/NAMix) and
+[`NeuralAmpModelerPlugin`](https://github.com/mrgeneko/NeuralAmpModelerPlugin) (see
+"Related Repos") are working sample hosts built against it.
 
 ```json
 {
@@ -421,8 +424,8 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
   `config_model_packed.json`. A **static** (no-FiLM) A2 is literally a standard NAM
   model → exports as `"WaveNet"` / `"SlimmableContainer"` and loads in the stock
   plugin.
-- **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and stays
-  internal to our own host app. **Standard NAM plugins cannot drive user knobs**: the core's
+- **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and needs our
+  fork of NeuralAmpModelerCore, which registers it. **Standard NAM plugins cannot drive user knobs**: the core's
   public API is `process(input, output, num_frames)` — audio in/out, *no* parameter
   argument, and no `SetParam`/`SetCondition` anywhere. NAM's own FiLM/`condition_dsp`
   is *input-derived* architecture, not a knob interface. So re-serializing parametric
@@ -580,7 +583,13 @@ host-app integration.
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - [`livespice-cli`](https://github.com/mrgeneko/livespice-cli) — the oracle (`livespice_cli`), public
-- a private real-time host app — target host for the trained `.param.nam` models; not part of this public repo set
+- [`NeuralAmpModelerCore`](https://github.com/mrgeneko/NeuralAmpModelerCore) — our fork,
+  public. Adds the `"ParametricWaveNet"` architecture + live knob support on top of Steven
+  Atkinson's original DSP core.
+- Sample host apps with working parametric-knob support, both public, both built against
+  that fork: [`NAMix`](https://github.com/mrgeneko/NAMix) (Linux VST3/standalone) and
+  [`NeuralAmpModelerPlugin`](https://github.com/mrgeneko/NeuralAmpModelerPlugin) — rebranded
+  "Anti-Static" — (macOS/Windows VST3/AU/standalone)
 
 ## Credits & Attribution
 
