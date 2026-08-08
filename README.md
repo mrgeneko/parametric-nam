@@ -99,7 +99,7 @@ python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
     (simulate: sweep × N permutations)           (run each capture against a shared sweep, 1/file)
                         ╲                        ╱
                          Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
-                             ↓  param_train.py  (train A2 Lite 3ch + Full 8ch jointly, FiLM knob conditioning)
+                             ↓  param_train.py  (train A2 Lite 4ch + Full 8ch jointly, FiLM knob conditioning)
                          .param.nam  (SlimmableContainer)
                              ↓  param_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
                              ↓  NeuralAmpModelerCore  (ParametricWaveNet factory, C++ inference)
@@ -246,9 +246,9 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
     --lr 3e-4 --epochs 200
 ```
 
-- Training is **always slimmable**: it jointly trains an A2 **Lite 3ch + Full 8ch**
+- Training is **always slimmable**: it jointly trains an A2 **Lite 4ch + Full 8ch**
   and exports both tiers in one SlimmableContainer. `--widths` overrides the tier
-  channel counts (default `3,8`).
+  channel counts (default `4,8`).
 - **Dual best-checkpointing**: the best-full and best-lite epochs (which differ) are
   each saved and exported live to `<output>.best_full.param.nam` /
   `<output>.best_lite.param.nam`, plus `best.pt` / `best_lite.pt` and per-epoch

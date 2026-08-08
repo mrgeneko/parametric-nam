@@ -617,16 +617,16 @@ class ParametricA2(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Slimmable model (A2 Lite 3ch + A2 Full 8ch, trained jointly)
+# Slimmable model (A2 Lite 4ch + A2 Full 8ch, trained jointly)
 # ---------------------------------------------------------------------------
 
-K_LITE_CHANNELS = 3
+K_LITE_CHANNELS = 4
 K_FULL_CHANNELS = 8
-K_DEFAULT_WIDTHS = [K_LITE_CHANNELS, K_FULL_CHANNELS]   # 2-tier default (back-compat)
+K_DEFAULT_WIDTHS = [K_LITE_CHANNELS, K_FULL_CHANNELS]   # 2-tier default
 
 
 def parse_widths(spec) -> list[int]:
-    """'3,4,8' -> [3,4,8]; None/'' -> the default [3,8]. Sorted, de-duplicated,
+    """'3,4,8' -> [3,4,8]; None/'' -> the default [4,8]. Sorted, de-duplicated,
     ascending (narrowest first = the 'lite' tier, widest last = the 'full' tier).
     A single width ('5' -> [5]) is allowed: it trains ONE tier, exported as a
     1-submodel container (see SlimmableParametricA2 for how the single tier maps
@@ -650,8 +650,8 @@ class SlimmableParametricA2(nn.Module):
     ascending `max_value` breakpoints.
 
     Tiers are ordered ascending by width: index 0 = narrowest (the 'lite' tier),
-    index -1 = widest (the 'full' tier). Default widths [3, 8] reproduce the prior
-    2-tier lite/full behavior exactly (max_value 0.5 / 1.0).
+    index -1 = widest (the 'full' tier). Default widths [4, 8] (max_value 0.5 / 1.0);
+    pass `--widths 3,8` to reproduce the original 2-tier convention exactly.
     """
     def __init__(self, num_params: int, widths=None, spectral_norm: bool = False):
         super().__init__()
@@ -660,9 +660,11 @@ class SlimmableParametricA2(nn.Module):
         # spectral_norm is DELIBERATELY NOT passed here (always False per-tier) -- see below.
         kw = dict(spectral_norm=False)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
-        # `lite.*` / `full.*` — a default [3, 8] model is byte-compatible with old
-        # 2-tier checkpoints (resume + export_checkpoint keep working). Any middle
-        # tiers live in `mid` (empty ModuleList when widths has just 2 entries).
+        # `lite.*` / `full.*` regardless of the actual widths chosen -- a 2-tier model
+        # stays structurally compatible with old 2-tier checkpoints for resume /
+        # export_checkpoint as long as `--widths` matches what that checkpoint was
+        # trained with (tensor shapes are width-dependent; the key names are not). Any
+        # middle tiers live in `mid` (empty ModuleList when widths has just 2 entries).
         if len(self.widths) == 1:
             # A single width is not really "slimmable": build ONE submodel under the
             # `full` role (widest == only tier) so it saves as best.pt / `full.` state
@@ -799,7 +801,7 @@ class ParamDataset(torch.utils.data.Dataset):
         #
         # It also silently broke on real-playing input. sweepv5/v6 (synthetic, sweep-tone-
         # dominated, crest factor ~11-12dB, peak-normalized to 0.9 by their own build process)
-        # happen to scale DOWN under -18dBFS RMS and stay safe. [redacted]-sweep-v3.wav (real playing,
+        # happen to scale DOWN under -18dBFS RMS and stay safe. sweep-v3.wav (real playing,
         # pick-transient crest factor ~21.8dB, native peak already 0.967) scales UP 1.65x under
         # the same formula, pushing its peak to 1.55 -- past 0dBFS in float terms, and (combined
         # with the linear-rescale error above) a plausible root cause of the "unexpected noise,
@@ -1433,7 +1435,7 @@ def main():
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--widths", type=str, default=None,
                     help="Comma-separated slimmable channel widths, e.g. '3,4,8' "
-                         "(default: 3,8). Narrowest = lite tier, widest = full tier; "
+                         "(default: 4,8). Narrowest = lite tier, widest = full tier; "
                          "middle tiers logged/checkpointed as w<N>.")
     ap.add_argument("--spectral-norm", action="store_true",
                     help="Constrain every A2Layer's conv/mixin/l1x1 to spectral norm <=1 "

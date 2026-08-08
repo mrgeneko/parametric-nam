@@ -50,7 +50,7 @@ converge). The correlation "peak" was reproducible (robust to envelope window
 size/parity) but not real -- almost certainly a swept-tone excitation's own
 self-similarity structure, reshaped by the circuit's frequency-dependent nonlinear
 compression, producing a stable but meaningless envelope-correlation lag. Turned out
-`sweepv5.wav` wasn't the right tool for this: `[redacted]-sweep-v3.wav` (this ecosystem's
+`sweepv5.wav` wasn't the right tool for this: the widely-used `sweep-v3.wav` (this ecosystem's
 usual real-playing excitation source) is, byte-for-byte (MD5 match), NAM's own
 official "Version 3.0.0" standard input file -- the exact file `nam.train.core`'s
 input-version detection and blip-based latency calibration are built around. Running
@@ -304,7 +304,7 @@ def calibrate_and_write_data_config(input_wav: Path, dry_wav: Path, wet_wav: Pat
               "using delay=0 (not a guess: matches param_train.py's own convention "
               "for LiveSpice renders, and this ecosystem's envelope-correlation "
               "delay-guessing has been shown to actively mislead). For a rigorously "
-              "calibrated capture, use [redacted]-sweep-v3.wav or another NAM standard file.")
+              "calibrated capture, use sweep-v3.wav or another NAM standard file.")
         delay = 0
         data_config = {
             "train": {"start_seconds": None, "stop_seconds": -val_seconds, "ny": 8192},
@@ -342,14 +342,14 @@ def _layer_config(channels: int) -> dict:
 
 
 def write_model_and_learning_configs(widths: list, max_epochs: int, configs_dir: Path):
-    """widths=[8] (a single value) trains one plain WaveNet, same as before. The
-    default, widths=[3, 8], trains a PackedWaveNet instead: every listed width
-    jointly, as one masked model in one nam-full run (net.name="PackedWaveNet",
+    """widths=[8] (a single value) trains one plain WaveNet, same as before. Two or
+    more widths (default widths=[4, 8]) trains a PackedWaveNet instead: every listed
+    width jointly, as one masked model in one nam-full run (net.name="PackedWaveNet",
     per nam_full_configs/models/wavenet_packed.json), exporting a single
-    SlimmableContainer .nam with one discrete submodel per width -- verified
-    against a real released model (Deluxe Reverb.nam: 2 submodels, channels 3 and
-    8, max_value 0.5/1.0) to be the same shape this produces. Matches the fleet's
-    own lite/full split without needing a separate capture per width.
+    SlimmableContainer .nam with one discrete submodel per width -- this export shape
+    was verified against a real released model (Deluxe Reverb.nam: 2 submodels,
+    channels 3 and 8, max_value 0.5/1.0). Matches the fleet's own lite/full split
+    without needing a separate capture per width.
 
     NOTE on --threshold-esr with 2+ widths: nam-full's own best-checkpoint monitor
     (whose filename used to be what this script's SIGINT-threshold polling read)
@@ -595,8 +595,8 @@ def main():
     ap.add_argument("--oversample", default="auto")
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
-    ap.add_argument("--widths", default="3,8",
-                     help="comma-separated channel widths to train (default '3,8', the "
+    ap.add_argument("--widths", default="4,8",
+                     help="comma-separated channel widths to train (default '4,8', the "
                           "fleet's lite/full split) -- 2+ widths trains one PackedWaveNet "
                           "jointly and exports a single SlimmableContainer .nam with one "
                           "submodel per width; a single width (e.g. '8') trains a plain "

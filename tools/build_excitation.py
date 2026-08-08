@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a device training excitation that actually covers the full input range.
 
-A high-crest real-playing clip (e.g. [redacted], ~22 dB crest) samples its own loud region
+A high-crest real-playing clip (e.g. sweep-v3.wav, ~22 dB crest) samples its own loud region
 essentially never (<0.1% of time within 6 dB of peak), so a model trained on it alone
 never learns the device's saturation/blocking behavior and goes out-of-distribution when a
 hot input (upstream boost) arrives. This concatenates:
@@ -75,7 +75,7 @@ def _log_sweep(f0, f1, dur, amp):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="real-playing clip (e.g. [redacted] sweep)")
+    ap.add_argument("--input", required=True, help="real-playing clip (e.g. sweep-v3.wav)")
     ap.add_argument("--output", required=True)
     ap.add_argument("--realistic-peak", type=float, default=1.0,
                     help="peak (V, at V0dBFS=1) to scale the real-playing clip to")
@@ -115,7 +115,7 @@ def main():
         print(f"  time >= {thr:.2f} V : {100*np.mean(a >= thr):6.3f}%")
 
     # Recipe sidecar: HOW this excitation was built, not just which bytes it is. Without this,
-    # a derived excitation's provenance chain stops at "some file named *_[redacted]95.wav" -- the exact
+    # a derived excitation's provenance chain stops at "some file named *_src95.wav" -- the exact
     # window/args used to cut it from the source are lost the moment the config-file comment that
     # (informally, inconsistently) recorded them is out of date or missing. gen_dataset_from_schx.py's
     # input_provenance() picks this up automatically (same directory, <stem>.recipe.json) and

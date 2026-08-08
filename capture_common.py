@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-# Default prefix -> knob-name map, matching the 5150 DST [REDACTED] captures this was built for.
+# Default prefix -> knob-name map, matching the 5150 DST community captures this was built for.
 # A token's ALPHA PREFIX (not just its first letter) is the dict key, so "Rvb"/"Rsn"/"Prsn" never
 # collide with "R" or with each other -- filename splitting isolates the whole prefix run before
 # lookup, see parse_filename_tokens.

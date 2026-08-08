@@ -475,7 +475,7 @@ Full per-epoch ESR history: `metrics.csv`.
 - Speaker: {args.speaker or '(none)'}
 
 ## Training
-- slimmable ({args.widths or '3,8'}ch), FiLM conditioning
+- slimmable ({args.widths or '4,8'}ch), FiLM conditioning
 - epochs {args.epochs}, repeats {args.repeats}, crop_len {args.crop_len}, batch {args.batch_size}, lr {args.lr}, seed {args.seed}
 - {best_line}
 
@@ -676,7 +676,7 @@ def main():
     g.add_argument("--repeats",        type=int,   default=1)
     g.add_argument("--mrstft-weight",  type=float, default=0.1)
     g.add_argument("--widths",         type=str,   default=None,
-                   help="Slimmable channel widths, e.g. '3,4,8' (default 3,8)")
+                   help="Slimmable channel widths, e.g. '3,4,8' (default 4,8)")
     g.add_argument("--mmap",           action="store_true", default=True,
                    help="Memory-map the training dataset (default on -- see param_train.py --help). "
                         "Use --no-mmap to force a full RAM load instead.")
