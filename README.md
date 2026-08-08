@@ -15,7 +15,7 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 
 ### Try it now — no sibling repos needed
 
-`examples/big-muff-pi-v1-66-5/` bundles a real, complete recipe: the `.schx` circuit, the
+`examples/muff/` bundles a real, complete recipe: the `.schx` circuit, the
 `sweepv5.wav` excitation (ours outright, freely licensed), and an annotated `config.toml`. Feel
 free to substitute your own favorite sweep or DI recording — just point `input` in the config at
 it. A good input covers the top of the band (real playing alone rarely does) and includes real
@@ -26,13 +26,13 @@ git clone https://github.com/mrgeneko/parametric-nam
 git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
 
-python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
-    --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
-    --checkpoint-dir /tmp/bigmuff_ckpt
+python run_pipeline.py --config examples/muff/config.toml \
+    --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
+    --checkpoint-dir /tmp/muff_ckpt
 ```
 
 This trains an actual Big Muff Pi V1 (66#5) model end to end. See
-`examples/big-muff-pi-v1-66-5/Big Muff Pi V1 (66#5).md` for the circuit notes.
+`examples/muff/Big Muff Pi V1 (66#5).md` for the circuit notes.
 
 ### Full setup — training your own devices
 
@@ -144,8 +144,8 @@ hyperparameters — lives in a declarative TOML, so the pipeline stays generic (
 
 ```bash
 python run_pipeline.py --config /path/to/device-config.toml \
-    --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
-    --checkpoint-dir /tmp/bigmuff_ckpt
+    --dataset-dir /tmp/ds --nam-output /tmp/model.param.nam \
+    --checkpoint-dir /tmp/ckpt
 ```
 
 Any CLI flag overrides the config (config is loaded as argparse defaults). The `[knobs]`
@@ -156,7 +156,7 @@ table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 `config.toml[.<variant>]` next to its trained models in
 [`parametric-nam-models`](https://github.com/mrgeneko/parametric-nam-models)
 (`<category>/<device-id>/config.toml`) — the *living* recipe, distinct from a specific
-archived run's *frozen* `reproduce.sh`. `examples/big-muff-pi-v1-66-5/config.toml` is a
+archived run's *frozen* `reproduce.sh`. `examples/muff/config.toml` is a
 fully worked, annotated example of the format.
 
 ## Scripts
@@ -311,9 +311,14 @@ where embedding the full master in every tone just multiplies size.
 
 ### `release_run.sh` — verify + stage a finished run
 
+Its defaults assume the private fleet layout (`parametric-devices`/`parametric-nam-models`);
+override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the bundled
+`examples/muff/` one — continuing straight from the "Try it now" run above:
+
 ```bash
-RUN=~/work/tmp/bigmuff_v4 DS=~/work/tmp/bigmuff_v4_ds \
-CONFIG=~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml \
+RUN=/tmp/muff DS=/tmp/muff_ds \
+SCHX=examples/muff/"Big Muff Pi V1 (66#5).schx" \
+CONFIG=examples/muff/config.toml \
     ./release_run.sh
 ```
 Packages a finished (or killed) `run_pipeline.py` run into a verified release bundle:

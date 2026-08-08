@@ -4,14 +4,14 @@
 # examples/ dir — no sibling parametric-devices or sweep-files checkout required. See
 # "Big Muff Pi V1 (66#5).md" next to this file for the circuit notes.
 #
-#   python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
-#       --dataset-dir /tmp/bigmuff_ds --nam-output /tmp/bigmuff.param.nam \
-#       --checkpoint-dir /tmp/bigmuff_ckpt
+#   python run_pipeline.py --config examples/muff/config.toml \
+#       --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
+#       --checkpoint-dir /tmp/muff_ckpt
 #
 # Output paths (--dataset-dir/--nam-output/--checkpoint-dir) stay on the CLI so one
 # recipe drives many runs; any value here is overridden by a CLI flag.
 
-schx       = "examples/big-muff-pi-v1-66-5/Big Muff Pi V1 (66#5).schx"
+schx       = "examples/muff/Big Muff Pi V1 (66#5).schx"
 
 # sweepv5.wav: ours outright -- original Logic Pro material plus a synthesised excitation
 # section (see tools/make_sweep.py) -- so it can be bundled and published directly, unlike the
@@ -79,7 +79,7 @@ target-steps = 25000
 
 # --- knob grid (12 x 5 = 60 perms) ---
 #
-# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/big-muff-pi-v1-66-5/config.toml --target 0.009
+# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/muff/config.toml --target 0.009
 # It renders the circuit's TRUE output at each cell's midpoint and compares it against interpolating
 # the two neighbours. The residual is the error the GRID imposes -- no model in it. Above the ESR you
 # are chasing, the grid is the limiting factor and no amount of training can fix it.
