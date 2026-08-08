@@ -25,7 +25,7 @@ a static-only file (for capture-pack members, where embedding the master in ever
 just multiplies size).
 
 SKIP-ONLY: a baked .nam is played with a skip-accumulating head everywhere it can run
-(stock NAM plugins, nam_wavenet.metal, [redacted]'s static a2_fast path), which is the only
+(stock NAM plugins, nam_wavenet.metal, the host app's static a2_fast path), which is the only
 head we support. A legacy residual/untagged source is REJECTED (its weights would sound wrong,
 corr ~0.31) — retrain it.
 """

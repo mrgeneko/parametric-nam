@@ -6,7 +6,7 @@ condition_size=1 / widths all match `nam/train/_resources/config_model_packed.js
 A **static** (no-FiLM) A2 is therefore literally a standard NAM WaveNet and exports as
 a stock-loadable ``"WaveNet"`` .nam.
 
-A **parametric** A2 (A2 + FiLM knob-conditioning) is [redacted]-internal — standard NAM
+A **parametric** A2 (A2 + FiLM knob-conditioning) is host-app-internal — standard NAM
 plugins have no runtime knob input. To deliver a specific tone to a standard plugin we
 **bake** the knob setting: FiLM is affine (``gamma*h + beta``) over the layer's linear
 ops, so freezing the knobs folds gamma/beta *exactly* into ``conv.weight/bias`` and
@@ -27,10 +27,10 @@ from param_train import (ParametricA2, SlimmableParametricA2,
 # separately via config.parametric.schema_version).
 #
 # Must be "0.7.0", not an older value:
-#   - [redacted] gates imports on it (NAMModelLibraryManager.isA2CompatibleVersion): anything
+#   - the host app gates imports on it (its own version-compatibility check): anything
 #     below 0.7.0 is classified A1 and REJECTED ("A1 NAM models are not supported"). A baked
 #     file stamped 0.5.4 was bounced before its embedded parametric payload was even read.
-#   - 0.7.0 is LATEST_FULLY_SUPPORTED_NAM_FILE_VERSION in every core we checked ([redacted]'s
+#   - 0.7.0 is LATEST_FULLY_SUPPORTED_NAM_FILE_VERSION in every core we checked (our own
 #     fork, upstream, and the one NeuralAmpModelerPlugin ships), whose supported range is
 #     0.5.0–0.7.0. So 0.7.0 is fully supported by stock plugins too — it is the one value that
 #     satisfies both ends.

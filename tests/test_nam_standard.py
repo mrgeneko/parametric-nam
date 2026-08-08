@@ -56,16 +56,16 @@ def test_export_schema_is_official_wavenet():
 def test_export_declares_a2_compatible_version():
     """The baked export MUST declare 0.7.0.
 
-    [redacted] gates imports on the top-level version (isA2CompatibleVersion): anything
+    The host app gates imports on the top-level version (its own version-compatibility check): anything
     below 0.7.0 is classified A1 and rejected outright — a file stamped 0.5.4 was bounced
     before its embedded parametric payload was even read. 0.7.0 is also
     LATEST_FULLY_SUPPORTED in every NAM core (range 0.5.0–0.7.0), so it is the one value
-    that satisfies stock plugins AND [redacted]."""
+    that satisfies stock plugins AND the host app."""
     m = _mk()
     d = nam_standard.export_nam_standard(m, params=[0.5, 0.5])
     assert d["version"] == "0.7.0"
     major, minor = (int(x) for x in d["version"].split(".")[:2])
-    assert (major, minor) >= (0, 7), "below 0.7.0 [redacted] rejects the file as A1"
+    assert (major, minor) >= (0, 7), "below 0.7.0 the host app rejects the file as A1"
 
 
 def test_parametric_requires_params():

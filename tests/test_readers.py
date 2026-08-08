@@ -126,7 +126,7 @@ def test_infer_can_drive_a_multi_knob_model(tmp_path):
 
 def test_export_checkpoint_infers_slimmable_widths():
     """Widths are recovered from the state dict, so a checkpoint round-trips to the right
-    container shape ([3,4,8] must not silently collapse to the default [3,8])."""
+    container shape ([3,4,8] must not silently collapse to the default 2-tier shape)."""
     from param_train import SlimmableParametricA2
     model = SlimmableParametricA2(2, widths=[3, 4, 8])
     assert export_checkpoint.infer_widths(model.state_dict()) == [3, 4, 8]

@@ -16,7 +16,7 @@ Usage:
 Below --threshold, samples pass through unchanged. Above it, a smooth tanh knee compresses
 toward an asymptote at --ceiling -- never a hard clip, so no new harmonic-distortion
 artifact is added; it only caps how far growth continues at the loudest few percent of
-samples (matching the [redacted] sweep's rare max-excitation segments, given its ~24:1 crest
+samples (matching sweep-v3.wav's rare max-excitation segments, given its ~24:1 crest
 factor -- most content sits far below the threshold and is untouched).
 """
 import argparse

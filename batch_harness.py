@@ -343,7 +343,7 @@ class Result:
 SPIKE_NEIGHBOR_RATIO = 3.0
 SPIKE_BULK_RATIO = 2.0
 # Absolute floor: below this, don't even consider a sample a candidate spike, regardless of the
-# ratio checks. Found on the Boss DS-1 ([redacted]-sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
+# ratio checks. Found on the Boss DS-1 (sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
 # smooth, cross-solver-agreeing circuit response to genuine near-Nyquist sweep content (~12kHz,
 # only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
 # and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
@@ -652,7 +652,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
                 out.append(r)
 
         # tmax: cheapest-first, tried BEFORE input_upsample. Found on the Boss DS-1 (Dist<=0.4,
-        # Tone>=0.6, [redacted]-sweep-v3-declicked.wav): a "ngspice killed by signal 11" crash at the
+        # Tone>=0.6, sweep-v3-declicked.wav): a "ngspice killed by signal 11" crash at the
         # default tmax (one audio period, 20.8333u) that input_upsample escalation never fixed
         # (measured up to 4x -- no effect, consistent with input_upsample's OWN retirement note
         # elsewhere: it densifies the filesource, it does not change the solver's internal step
@@ -964,7 +964,7 @@ def input_provenance(wav: Path) -> dict:
     # <stem>.recipe.json next to the WAV recording exactly how (source file + hash, tool git rev,
     # every CLI arg). Embed it here so it rides along automatically into every dataset's
     # config.json -> parametric-nam-models' dataset_config.json, with no per-device wiring.
-    # Absent for a raw/undevired source (e.g. [redacted]-sweep-v3.wav used directly) -- correctly, since
+    # Absent for a raw/undevired source (e.g. sweep-v3.wav used directly) -- correctly, since
     # there is no recipe for something that wasn't built.
     recipe_path = wav.with_suffix(".recipe.json")
     if recipe_path.exists():

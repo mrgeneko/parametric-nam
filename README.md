@@ -3,7 +3,7 @@
 Toolchain for converting SPICE circuit schematics (`.schx`) into **parametric**
 Neural Amp Modeler (NAM) files. The resulting `.param.nam` captures a circuit's
 behavior across its **full knob range** — enabling real-time parametric inference
-in [redacted] at a fraction of the CPU cost of live simulation.
+in a compatible real-time host at a fraction of the CPU cost of live simulation.
 
 Given a `.schx` (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`), it simulates
 the circuit across a sweep of knob settings, trains a FiLM-conditioned WaveNet on the
@@ -110,7 +110,7 @@ Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
 .param.nam  (SlimmableContainer)
     ↓  param_infer.py          (PyTorch inference at arbitrary knob positions — no C++)
     ↓  Phase 3                 (NeuralAmpModelerCore ParametricWaveNet factory)
-Real-time inference in [redacted]
+Real-time inference in a compatible host app
 ```
 
 `run_pipeline.py` orchestrates the first three steps in one command; you can also run
@@ -378,7 +378,7 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
   model → exports as `"WaveNet"` / `"SlimmableContainer"` and loads in the stock
   plugin. (See `docs/spice_static_plan.md`.)
 - **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and stays
-  internal to [redacted]. **Standard NAM plugins cannot drive user knobs**: the core's
+  internal to the host app. **Standard NAM plugins cannot drive user knobs**: the core's
   public API is `process(input, output, num_frames)` — audio in/out, *no* parameter
   argument, and no `SetParam`/`SetCondition` anywhere. NAM's own FiLM/`condition_dsp`
   is *input-derived* architecture, not a knob interface. So re-serializing parametric
@@ -386,7 +386,7 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 - **Delivering parametric tones to standard plugins = snapshot baking.** FiLM is
   affine over the layer's linear ops, so freezing a knob setting folds `γ,β` exactly
   into `conv.weight/bias` + `mixin.weight`, yielding an identical *static* A2 with no
-  FiLM. [redacted] keeps live knobs; "export this tone" bakes the setting into a
+  FiLM. The host app keeps live knobs; "export this tone" bakes the setting into a
   stock-standard `.nam`. Works on **already-trained** parametric `.nam`s offline (no
   retrain) — pure weight transform.
 
@@ -518,7 +518,7 @@ apt install ngspice        # Linux;  macOS: brew install ngspice
 
 ### NeuralAmpModelerCore (Phase 3 only)
 Not required for training or Python inference — only for C++ inference validation and
-[redacted] integration.
+host app integration.
 
 > **Input formats**: any WAV (16/24/32-bit) and any content read correctly — an earlier
 > O(N²) bug in `livespice_cli`'s WAV reader (fixed in `fa90d57`) once made non-24-bit
@@ -536,7 +536,7 @@ Not required for training or Python inference — only for C++ inference validat
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - [`livespice-cli`](https://github.com/mrgeneko/livespice-cli) — the oracle (`livespice_cli`), public
-- `[redacted]` — target host for the trained `.param.nam` models
+- the host app (private) — target host for the trained `.param.nam` models
 
 ## Credits & Attribution
 

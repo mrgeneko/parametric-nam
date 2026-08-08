@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build a parametric training dataset from a SET OF EXISTING .nam FILES, each a fixed/captured
-knob-setting of a real device (e.g. [REDACTED] exports), instead of rendering from a .schx circuit.
+knob-setting of a real device (e.g. community-shared NAM captures), instead of rendering from a .schx circuit.
 
     python gen_dataset_from_nam.py \\
         --nam "~/Downloads/5150 DST *.nam" \\
@@ -52,7 +52,7 @@ from nam.models import init_from_nam
 
 def load_nam_model(path: Path, tier: str = "full"):
     """Load a .nam file for inference, transparently unwrapping SlimmableContainer exports
-    ([REDACTED] and this repo's own export_checkpoint.py --compose both use this wrapper: multiple
+    (community capture tools and this repo's own export_checkpoint.py --compose both use this wrapper: multiple
     width-tier submodels gated by `max_value`). Picks the highest max_value ("full", best-quality)
     submodel by default -- these captures have condition_size=1 per submodel (no FiLM knob
     conditioning inside the file itself; each file IS one fixed setting), so tier selection only
@@ -97,10 +97,10 @@ def main():
                      help="reject a capture whose crest factor exceeds this (see batch_harness._finalize_wav)")
     ap.add_argument("--restricted-input", action="store_true",
                      help="mark --input as licensed for local training only, not redistribution "
-                          "(e.g. a [redacted]-derived sweep) -- a trained/shipped model is fine, the raw "
+                          "(e.g. a third-party-derived sweep) -- a trained/shipped model is fine, the raw "
                           "sweep audio itself is not. Writes a NOTICE file and an "
                           "input_restricted flag in config.json so the dataset directory is "
-                          "self-documenting, matching sweep-files/README.md's [redacted]-DERIVED convention. "
+                          "self-documenting, matching sweep-files/README.md's third-party-derived convention. "
                           "Does not skip writing sweep.wav -- ParamDataset needs it for training -- "
                           "it only makes the restriction explicit and hard to miss.")
     args = ap.parse_args()
@@ -222,12 +222,12 @@ def main():
     }
     if args.restricted_input:
         # Local training/a shipped trained model is fine; the raw sweep audio itself is not
-        # redistributable (matches sweep-files/README.md's [redacted]-DERIVED convention). sweep.wav is
+        # redistributable (matches sweep-files/README.md's third-party-derived convention). sweep.wav is
         # still written below -- ParamDataset needs it on disk to train -- this just makes the
         # restriction impossible to miss later, the same way that repo's file-list table does.
         cfg["input_restricted"] = True
         cfg["input_restricted_note"] = (
-            "input_wav is NOT licensed for redistribution (e.g. a [redacted]-derived sweep). "
+            "input_wav is NOT licensed for redistribution (e.g. a third-party-derived sweep). "
             "Training on it / shipping the resulting .nam is fine; committing, publishing, or "
             "bundling this dataset directory or its sweep.wav is NOT. See sweep-files/README.md."
         )
@@ -237,7 +237,7 @@ def main():
         (out_dir / "NOTICE_RESTRICTED_INPUT.md").write_text(
             f"# Restricted input -- do not redistribute\n\n"
             f"This dataset's `sweep.wav` is a copy of `{in_wav}`, which is NOT licensed for "
-            f"redistribution (see sweep-files/README.md's [redacted]-DERIVED table).\n\n"
+            f"redistribution (see sweep-files/README.md's third-party-derived table).\n\n"
             f"- OK: training locally on this dataset, shipping/publishing a model trained from it.\n"
             f"- NOT OK: committing this directory, publishing it, or bundling `sweep.wav` itself "
             f"into any released dataset or model package.\n"
