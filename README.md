@@ -32,28 +32,14 @@ python run_pipeline.py --config examples/big-muff-pi-v1-66-5/config.toml \
 This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 `examples/big-muff-pi-v1-66-5/Big Muff Pi V1 (66#5).md` for the circuit notes.
 
-### Full setup — training your own devices
+### Bring your own circuit
 
-Beyond the bundled example, **this repo is not self-contained.** It needs sibling checkouts.
-Clone them side by side:
-
-```bash
-mkdir -p ~/work && cd ~/work
-
-gh repo clone mrgeneko/parametric-nam        # this repo — the toolchain
-gh repo clone mrgeneko/parametric-devices      # the .schx library + devices.toml registry — PRIVATE
-gh repo clone mrgeneko/sweep-files         # the training sweeps (licence-restricted — see its README) — PRIVATE
-gh repo clone mrgeneko/parametric-nam-models    # where trained runs are archived — PRIVATE
-
-# THE ORACLE (livespice_cli) — public, no PRIVATE-repo auth needed. Recursive: it has its own
-# nested submodule.
-git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
-
-cd parametric-nam && ./setup.sh && . .venv/bin/activate
-```
+Beyond the bundled example, all you need is your own `.schx` (e.g. from
+`LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it —
+see **Per-circuit configs** below for the format. No other repos required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
-skip) and creates the venv. If your checkouts are not siblings, point at them explicitly:
+skip). If your checkout isn't a sibling of this repo, point at it explicitly:
 
 ```bash
 export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
@@ -62,10 +48,10 @@ export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ### Train a device
 
 ```bash
-python run_pipeline.py --config ~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml \
-    --dataset-dir    ~/work/tmp/bigmuff_ds \
-    --nam-output     ~/work/tmp/bigmuff.param.nam \
-    --checkpoint-dir ~/work/tmp/bigmuff_ckpt
+python run_pipeline.py --config path/to/your-device/config.toml \
+    --dataset-dir    /tmp/ds \
+    --nam-output     /tmp/model.param.nam \
+    --checkpoint-dir /tmp/ckpt
 ```
 
 One command runs **four** steps:
@@ -83,7 +69,7 @@ whole recipe, and every step in it exists because skipping it produced a quietly
 ### Listen
 
 ```bash
-python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
+python param_infer.py --checkpoint /tmp/ckpt/best.pt \
     --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
 ```
 
@@ -158,11 +144,9 @@ Any CLI flag overrides the config (config is loaded as argparse defaults). The `
 table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 `--fixed-params`, and `widths = [3,4,8]` to `--widths`.
 
-**This repo carries no per-device configs of its own.** Each device's recipe lives as
-`config.toml[.<variant>]` next to its trained models in
-[`parametric-nam-models`](https://github.com/mrgeneko/parametric-nam-models)
-(`<category>/<device-id>/config.toml`) — the *living* recipe, distinct from a specific
-archived run's *frozen* `reproduce.sh`. See
+**This repo carries no per-device configs of its own.** Each device's recipe lives as a
+`config.toml[.<variant>]` you maintain alongside your own circuits — the *living* recipe,
+distinct from a specific archived run's *frozen* `reproduce.sh`. See
 [`docs/adding-a-device.md`](docs/adding-a-device.md) for a fully worked example of the
 format when writing a new one.
 
