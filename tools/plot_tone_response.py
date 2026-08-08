@@ -59,11 +59,6 @@ def find_render_bin(explicit):
     which = shutil.which("render_parametric")
     if which:
         return which
-    for base in (Path.home() / "work/[redacted]/NeuralAmpModelerCore/build/tools",
-                 Path.home() / "work/[redacted]/NeuralAmpModelerCore/build"):
-        hit = base / "render_parametric"
-        if hit.is_file():
-            return str(hit)
     return None
 
 

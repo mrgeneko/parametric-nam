@@ -4,7 +4,7 @@ Build a parametric training dataset from a SET OF EXISTING .nam FILES, each a fi
 knob-setting of a real device (e.g. [REDACTED] exports), instead of rendering from a .schx circuit.
 
     python gen_dataset_from_nam.py \\
-        --nam "/Users/USER/Downloads/5150 DST *.nam" \\
+        --nam "~/Downloads/5150 DST *.nam" \\
         --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
 
 Each input filename encodes its knob settings as comma-separated tokens, e.g.

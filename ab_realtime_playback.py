@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ab_[redacted].py — A/B our Python forward against [redacted]'s C++ playback.
+"""ab_realtime_playback.py — A/B our Python forward against [redacted]'s C++ playback.
 
 This is the FiLM-on parity check (docs/rearchitecture_skip_accumulation.md §4.2/4.3): the
 last unverified link between how we TRAIN a parametric model and how the product PLAYS it.
@@ -10,7 +10,7 @@ cover conditioning; this does.
   ./build/tools/render_parametric model.param.nam in.wav cpp.wav --knobs 0.75,0.30
 
   # 2. compare against our Python forward at the same knobs
-  python ab_[redacted].py --model model.param.nam --input in.wav --cpp cpp.wav \
+  python ab_realtime_playback.py --model model.param.nam --input in.wav --cpp cpp.wav \
       --params "Sustain=0.75,Tone=0.30"
 
 Three things MUST be reconciled or the comparison falsely mismatches:

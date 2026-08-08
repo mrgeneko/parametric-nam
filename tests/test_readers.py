@@ -31,7 +31,7 @@ def _skip_model_file(path: Path, num_params: int = 2) -> Path:
 
     NOTE num_params=1 for the infer.py tests: infer.py's CLI can only drive a SINGLE knob
     (--gain2). It cannot run a multi-knob model at all — a pre-existing limitation, not a
-    regression (it is why ab_[redacted].py exists). Tracked below."""
+    regression (it is why ab_realtime_playback.py exists). Tracked below."""
     names = ["SUSTAIN", "TONE"][:num_params]
     m = ParametricA2(3, num_params)
     d = m.export_nam(
@@ -114,7 +114,7 @@ def test_infer_rejects_a_legacy_model(tmp_path, mode):
 # ------------------------------------------------------------------- export_checkpoint.py
 
 @pytest.mark.xfail(reason="KNOWN GAP: infer.py's CLI exposes only --gain2, so it cannot "
-                          "drive a multi-knob model. Not a regression — ab_[redacted].py "
+                          "drive a multi-knob model. Not a regression — ab_realtime_playback.py "
                           "exists because of it. Fix: give infer.py a --params flag like "
                           "bake_nam's.", strict=True)
 def test_infer_can_drive_a_multi_knob_model(tmp_path):
