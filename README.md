@@ -287,6 +287,27 @@ python export_checkpoint.py --checkpoint <ckpt>/latest.pt --dataset <ds> \
 ```
 Re-exports a NAM from any `.pt` (e.g. the final `latest.pt` weights) without retraining.
 
+### `bake_nam.py` — freeze a knob setting for stock/upstream NAM plugins
+
+```bash
+python bake_nam.py --in model.param.nam --params "Gain=0.7,Tone=0.5" -o tone.nam
+```
+
+Standard NAM plugins have no runtime knob input, so a raw `.param.nam` handed to one just
+throws (`"No config parser registered for architecture: ParametricWaveNet"`). This bakes
+one specific knob setting into an ordinary static `.nam` instead — FiLM is affine over the
+layer's linear ops, so freezing a setting folds exactly into `conv`/`mixin` weights, no
+retraining, pure offline weight transform. Omitted knobs fall back to their own declared
+default, not a blanket 0.5 (wrong for circuits like the Timmy, whose controls don't center
+at noon).
+
+By default the output is **dual-payload**: the baked tone at the top level (so any stock
+plugin plays it) plus the full original parametric model under an `embedded_parametric`
+key that stock loaders ignore but a parametric-aware host (`NAMix`,
+`NeuralAmpModelerPlugin`/"Anti-Static") reads for live knobs — one file, safe to hand
+anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
+where embedding the full master in every tone just multiplies size.
+
 ### `release_run.sh` — verify + stage a finished run
 
 ```bash
