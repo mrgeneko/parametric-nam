@@ -3,7 +3,7 @@
 knob/switch setting, training through the OFFICIAL upstream `neural-amp-modeler`
 trainer (`nam-full`) instead of this repo's own FiLM-conditioned `param_train.py`.
 
-WHY A SEPARATE PATH, NOT "BAKE A PARAMETRIC MODEL". See docs/spice_static_plan.md:
+WHY A SEPARATE PATH, NOT "BAKE A PARAMETRIC MODEL". See internal engineering notes:
 this repo's own ParametricA2 architecture is residual-only (the head reads only the
 final layer's output); official NAM's WaveNet is skip-accumulating (the head reads the
 SUM of every layer's output). Same weights, different forward pass -- a baked/

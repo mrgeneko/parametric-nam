@@ -4,7 +4,7 @@
 Standard NAM plugins have no runtime knob input, so to deliver a specific tone we
 freeze the FiLM at a chosen setting → an identical static A2 → an official "WaveNet"
 .nam that loads in any NAM plugin. Runs offline on an already-trained parametric file
-(pure weight transform; no retrain). See docs/spice_static_plan.md.
+(pure weight transform; no retrain). See internal engineering notes.
 
   python bake_nam.py --in model.param.nam --params "Gain=0.7,Tone=0.5" -o tone.nam
   python bake_nam.py --in model.param.nam --params "..." --width 8       -o tone.nam

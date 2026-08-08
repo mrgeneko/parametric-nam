@@ -201,8 +201,8 @@ Open:
   methods) as a potential way to use exact tubes + light damping instead. Verdict:
   **negative, structurally** — the 5150's failure is a *transient* integration
   instability, and Xyce's continuation methods only apply to *DC operating point*
-  solving (confirmed in Xyce's own source). Full test + build notes:
-  [`../docs/xyce_build_notes.md`](../docs/xyce_build_notes.md).
+  solving (confirmed in Xyce's own source). Full test + build notes are in the
+  project's internal engineering notes.
   Also evaluated **LTspice** (its "modified trap" integration) — not pursued
   to a final convergence test (reasoned unlikely to help, since it removes
   numerical damping rather than adding it; and hit an unrelated Wine

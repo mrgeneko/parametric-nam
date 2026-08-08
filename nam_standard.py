@@ -11,7 +11,7 @@ plugins have no runtime knob input. To deliver a specific tone to a standard plu
 **bake** the knob setting: FiLM is affine (``gamma*h + beta``) over the layer's linear
 ops, so freezing the knobs folds gamma/beta *exactly* into ``conv.weight/bias`` and
 ``mixin.weight`` — yielding an identical static A2. No retrain; works offline on an
-already-trained model. See docs/spice_static_plan.md.
+already-trained model. See internal engineering notes.
 """
 from __future__ import annotations
 import copy

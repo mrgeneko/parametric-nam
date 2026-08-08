@@ -4,7 +4,7 @@ Every test here corresponds to a bug that was actually shipped. They are written
 of the loss rather than golden numbers, because the bugs were not "wrong value" bugs — they were
 "optimising the wrong thing" bugs, and a golden number would have happily locked them in.
 
-See docs/loss-energy-bias.md.
+See internal engineering notes.
 """
 import numpy as np
 import pytest
@@ -268,7 +268,7 @@ class TestValidateReportsPerExampleESR:
 class TestParamLossWiring:
     def test_default_is_esr(self):
         """--loss esr must stay the default. Reverting it restores the DS-1 fade-out AND the
-        quiet-setting under-fit, while making the headline ESR look better. See docs/RETRAINING.md."""
+        quiet-setting under-fit, while making the headline ESR look better. See internal engineering notes."""
         import inspect
         sig = inspect.signature(ParamLoss.__init__)
         assert sig.parameters["kind"].default == "esr"

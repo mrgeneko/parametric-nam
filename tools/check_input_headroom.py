@@ -24,7 +24,7 @@ have a MUCH lower onset at the grid's own maximum setting than at the default --
 false-positive (warn on a device that's actually fine at its loud knob settings) exactly the way it
 did on TAD, where the amp turned out to have real, dense nonlinear behavior concentrated at LOW
 Volume rather than at high input level. Treat a WARN here as "go investigate at the grid's hot
-corner directly" (see docs/adding-a-device.md), not as an automatic verdict either way.
+corner directly" (see internal engineering notes), not as an automatic verdict either way.
 
 Usage:
     ./tools/check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml

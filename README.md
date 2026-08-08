@@ -77,8 +77,10 @@ One command runs **four** steps:
 | 2 — Combine | per-permutation WAVs → `outputs.npy` | |
 | 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
 
-**Adding a *new* device? Read [`docs/adding-a-device.md`](docs/adding-a-device.md)** — it walks the
-whole recipe, and every step in it exists because skipping it produced a quietly wrong model.
+**Adding a *new* device to the private fleet?** That workflow (and the toolchain's other
+methodology docs — grid adequacy, convergence, training budget, retraining, architecture,
+lessons learned) lives in a private internal notes repo, since it's specific to maintaining
+that fleet rather than to using this toolchain standalone.
 
 ### Listen
 
@@ -86,19 +88,6 @@ whole recipe, and every step in it exists because skipping it produced a quietly
 python param_infer.py --checkpoint ~/work/tmp/bigmuff_ckpt/best.pt \
     --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
 ```
-
-## Documentation
-
-| doc | read it when |
-|---|---|
-| **[`docs/adding-a-device.md`](docs/adding-a-device.md)** | **training a new device — start here** |
-| [`docs/LESSONS.md`](docs/LESSONS.md) | the failure modes this toolchain is built to prevent. Every one shipped or nearly did, and every one was **silent**. |
-| [`docs/grid-adequacy.md`](docs/grid-adequacy.md) | choosing the knob grid (measure it; don't tune by ear) |
-| [`docs/convergence.md`](docs/convergence.md) | choosing `oversample` and Newton iterations |
-| [`docs/training-budget.md`](docs/training-budget.md) | `target-steps`, and why `repeats`/`epochs` are derived |
-| [`docs/loss-energy-bias.md`](docs/loss-energy-bias.md) | why the loss is ESR, not MSE |
-| [`docs/RETRAINING.md`](docs/RETRAINING.md) | why every parametric model needs regenerating + retraining |
-| [`docs/architecture.md`](docs/architecture.md) | how the repos fit together |
 
 ## How it works
 
@@ -162,9 +151,8 @@ table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 `config.toml[.<variant>]` next to its trained models in
 [`parametric-nam-models`](https://github.com/mrgeneko/parametric-nam-models)
 (`<category>/<device-id>/config.toml`) — the *living* recipe, distinct from a specific
-archived run's *frozen* `reproduce.sh`. See
-[`docs/adding-a-device.md`](docs/adding-a-device.md) for a fully worked example of the
-format when writing a new one.
+archived run's *frozen* `reproduce.sh`. `examples/big-muff-pi-v1-66-5/config.toml` is a
+fully worked, annotated example of the format.
 
 ## Scripts
 
@@ -392,7 +380,7 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
   LeakyReLU/non-gated, `condition_size=1`, widths `[3,8]` all match NAM's
   `config_model_packed.json`. A **static** (no-FiLM) A2 is literally a standard NAM
   model → exports as `"WaveNet"` / `"SlimmableContainer"` and loads in the stock
-  plugin. (See `docs/spice_static_plan.md`.)
+  plugin.
 - **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and stays
   internal to our own host app. **Standard NAM plugins cannot drive user knobs**: the core's
   public API is `process(input, output, num_frames)` — audio in/out, *no* parameter

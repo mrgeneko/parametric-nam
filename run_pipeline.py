@@ -693,7 +693,7 @@ def main():
                    help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
                         "cell that fails puts a floor under the model that NO training can lift. "
-                        "Takes a couple of minutes. See docs/grid-adequacy.md.")
+                        "Takes a couple of minutes. See internal engineering notes.")
     g.add_argument("--grid-target",    type=float, default=0.03,
                    help="the interpolation ESR the knob grid must support (default 0.03, the "
                         "audibility floor -- NOT the training-fidelity ESR; see tools/grid_adequacy.py)")
@@ -817,7 +817,7 @@ def main():
         # the pedal actually lives, and no training run could ever have told us.
         #
         # So measure it BEFORE spending the renders and the epochs. It costs a couple of minutes.
-        # See docs/grid-adequacy.md.
+        # See internal engineering notes.
         # ------------------------------------------------------------------
         if run_generate and args.config and not args.skip_grid_check:
             section("STEP 0 / 3 — Grid Adequacy", fh)

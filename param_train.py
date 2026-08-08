@@ -937,7 +937,7 @@ def _mrstft_combine(p_mags: list, t_mags: list) -> torch.Tensor:
     L1 is invariant to a uniform gain k on both signals because log(k*x) - log(k*y) =
     log(x) - log(y) (the log(k) terms cancel). That matters here specifically because
     ParamDataset no longer forces every dataset to a shared reference RMS (see
-    docs/LESSONS.md #18) -- each device now trains at its own native level, and a
+    internal engineering notes #18) -- each device now trains at its own native level, and a
     scale-DEPENDENT loss term would silently carry a different effective weight per
     device depending on how loud that device's own data happens to be. ESR (the other
     term in ParamLoss) was already scale-invariant by construction; this closes the gap
@@ -993,7 +993,7 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> t
     energy bias that motivates this simply does not exist for it, and MSE is a perfectly good
     objective there. Our problem is parametric: 126 permutations spanning a 70x ENERGY range. That
     is a different optimisation problem and it needs a different objective. The justification is
-    our own measurement (docs/loss-energy-bias.md), NOT an appeal to NAM.
+    our own measurement (internal engineering notes), NOT an appeal to NAM.
 
     This is the whole point. Plain MSE is an ABSOLUTE error, so a crop's influence on the
     gradient is proportional to its ENERGY — which has two consequences we measured on the
@@ -1339,7 +1339,7 @@ def main():
     ap.add_argument("--stale-cycles", type=int, default=3,
                     help="Open-ended mode: stop automatically after this many consecutive "
                          "SGDR cycles in which NO tier minted a new best val ESR — the "
-                         "stopping rule docs/training-budget.md specifies, which until now "
+                         "stopping rule internal engineering notes specifies, which until now "
                          "was executed by a human watching the log (the 5150 run burned "
                          "~2.5h past its plateau waiting for one). Compared at CYCLE "
                          "granularity, i.e. at matched LR phase, so the cosine-tail "
@@ -1378,7 +1378,7 @@ def main():
     ap.add_argument("--val-split", type=float, default=0.05,
                     help="Fraction of samples for validation (default: %(default)s). Was 0.1; "
                          "val here does not measure interpolation anyway (the same knob settings "
-                         "land in train and val -- docs/architecture.md), so a big split buys "
+                         "land in train and val -- internal engineering notes), so a big split buys "
                          "only noise-reduction on the checkpoint-selection signal, which "
                          "--val-passes already provides: 0.05 x 4 passes scores twice the crops "
                          "of the old 0.1 x 1. The Dumble production runs used 0.02 without "
@@ -1426,7 +1426,7 @@ def main():
                          "training measured COMPUTE-bound on MPS, KoT: ~1.7 s/step of conv "
                          "work, TS-9 w4+w8 measured ~2.9x s/step faster than fp32) -- the "
                          "per-device quality A/B (judge on level_band_esr.py bands and "
-                         "per_perm_esr.py spread per docs/RETRAINING.md, never the headline "
+                         "per_perm_esr.py spread per internal engineering notes, never the headline "
                          "val ESR) is still worth running per-device, but no longer gates "
                          "opt-in. Pass --amp off to disable.")
     ap.add_argument("--seed", type=int, default=42,
@@ -1480,7 +1480,7 @@ def main():
                          "oversample=8 fleet re-render): the old solution is a close starting "
                          "point, plausibly cutting steps-to-plateau severalfold. Widths and "
                          "knob count must match the checkpoint. Mutually exclusive with "
-                         "--resume. CAVEAT (docs/RETRAINING.md): checkpoints trained under "
+                         "--resume. CAVEAT (internal engineering notes): checkpoints trained under "
                          "the old MSE loss carry the loud-perm bias the ESR loss removed -- "
                          "gate acceptance on level_band_esr.py bands, not headline ESR.")
     ap.add_argument("--log-csv", type=Path, default=None,
@@ -1874,7 +1874,7 @@ def main():
 
         completed += 1
 
-        # SGDR cycle-aware auto-stop: the documented budget rule (docs/training-budget.md:
+        # SGDR cycle-aware auto-stop: the documented budget rule (internal engineering notes:
         # "two consecutive cycles with no new best = the budget"), executed by the loop
         # instead of a human watching the log. CosineAnnealingWarmRestarts wraps T_cur to
         # 0 on the scheduler.step() that completes a cycle, so this fires exactly at each

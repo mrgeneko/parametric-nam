@@ -2,7 +2,7 @@
 """Measure BDF2 truncation error for one device.
 
 WHY THIS FILE EXISTS AS A FILE.
-The first fleet-wide truncation table (docs/convergence.md, commit 9d986c5) was produced by an
+The first fleet-wide truncation table (internal engineering notes, commit 9d986c5) was produced by an
 ad-hoc script that was never committed. When its Big Muff number (2.25e-02) later failed to
 reproduce -- a careful re-measurement on the same input, same circuit, same worst corner gives
 9.33e-03 -- there was nothing to audit and no way to find out which of the two was wrong. A
@@ -30,7 +30,7 @@ Muff, worst corner, whole file:
      8       1.63e-04         3.70e-04            2.3x
 
 All renders at 256 Newton iterations, so under-convergence is not a confound (that is a different
-failure and docs/convergence.md covers it).
+failure and internal engineering notes cover it).
 
 KNOB SETTINGS. Both ends of every knob, plus both corners, plus the mid point -- and we report
 WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the Boss DS-1's Dist pot
@@ -44,7 +44,7 @@ Usage:
 from it, like every other analysis tool here) -- no registry, no `parametric-devices` dependency.
 One device per invocation, on purpose: a fleet-wide table is rare (it matters only when
 re-deriving the shared oversample floor, or auditing every device after a measurement-methodology
-change; see docs/convergence.md) and is just as easy from the outside:
+change; see internal engineering notes) and is just as easy from the outside:
 
     for f in ../parametric-nam-models/*/*/config.toml*; do
         ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --config "$f"

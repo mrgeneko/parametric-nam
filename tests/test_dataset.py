@@ -1,7 +1,7 @@
 """Dataset integrity, and what the train/val split ACTUALLY measures.
 
 The second test class here is not a "does it work" test. It PINS A KNOWN LIMITATION so that
-nobody reads a val-ESR number as something it is not. See docs/architecture.md.
+nobody reads a val-ESR number as something it is not. See internal engineering notes.
 """
 import csv
 import json
@@ -101,5 +101,5 @@ class TestValSplitIsNotInterpolation:
 
         assert val_perms & train_perms, (
             "If this ever passes cleanly, someone has made the split knob-disjoint — good! "
-            "Update docs/architecture.md and delete this test."
+            "Update internal engineering notes and delete this test."
         )

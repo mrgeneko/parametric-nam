@@ -577,7 +577,7 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
 # these keywords, so a spike failure was never escalated -- it failed once at the base rung and
 # gave up immediately, even though the retry ladder's whole design intent ("failures a stiffer
 # solve can actually fix") explicitly covers this exact failure mode, and the JCM800-sag precedent
-# (docs/LESSONS.md #12) confirms oversample *can* clear these. Found on the Fender Twin (sag): the
+# (internal engineering notes #12) confirms oversample *can* clear these. Found on the Fender Twin (sag): the
 # real dataset generation run hard-failed ~87% of its first 107 permutations, nearly all on spike
 # errors that had never been given a single retry.
 _CONVERGENCE_FAILURE = re.compile(
@@ -1542,7 +1542,7 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
         print(f"    equations 4x harder MOVES the answer, so Newton stopped short and this dataset")
         print(f"    is WRONG at that setting -- and nothing else would have told you: the RMS is")
         print(f"    normal, the crest is normal, there is no NaN.")
-        print(f"    Raise the iteration count and regenerate. See docs/convergence.md.")
+        print(f"    Raise the iteration count and regenerate. See internal engineering notes.")
     else:
         print(f"    OK — worst ESR {worst:.2e} at [{at}] (solving harder does not move it)")
     if worst_disc_at is not None:
@@ -1765,7 +1765,7 @@ def main():
                          "Big Muff 1.0x, Timmy 1.0x) -- the target is wronger than the model, and "
                          "capacity is being spent fitting it. 'auto' climbs 2/4/8/16 until the "
                          "truncation measured against a converged reference is under --trunc-target, "
-                         "probing both ends of every knob. See docs/convergence.md and "
+                         "probing both ends of every knob. See internal engineering notes and "
                          "measure_truncation.py.")
     ap.add_argument("--trunc-target", type=float, default=1e-3,
                     help="With --oversample auto: the truncation ESR to get under (default 1e-3). "
@@ -1936,7 +1936,7 @@ def main():
     sr = wav_info.samplerate
     # --oversample auto: MEASURE it, before anything downstream depends on the number.
     # A guessed oversample is a guessed target, and the model can only ever be as right as
-    # the target it is fitted to. See choose_oversample() and docs/convergence.md.
+    # the target it is fitted to. See choose_oversample() and internal engineering notes.
     _auto_os = str(args.oversample).strip().lower() == "auto"
     if _auto_os:
         if args.backend == "cpp":
