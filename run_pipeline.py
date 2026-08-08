@@ -563,7 +563,8 @@ def main():
     g = ap.add_argument_group("pipeline")
     g.add_argument("--config",         type=Path, default=None,
                    help="TOML per-circuit config (knobs/ranges/fixed/schx/input/widths/"
-                        "hyperparams). CLI flags override it. See configs/.")
+                        "hyperparams). CLI flags override it. See "
+                        "parametric-nam-models/<category>/<device-id>/config.toml.")
     # These three may come from --config OR the CLI; validated after parsing.
     g.add_argument("--dataset-dir",    type=Path, default=None,
                    help="Dataset directory (generation output / training input)")
