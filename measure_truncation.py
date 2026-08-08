@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure BDF2 truncation error across the device fleet.
+"""Measure BDF2 truncation error for one device.
 
 WHY THIS FILE EXISTS AS A FILE.
 The first fleet-wide truncation table (docs/convergence.md, commit 9d986c5) was produced by an
@@ -37,8 +37,15 @@ WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the B
 is ReverseLinear, so all-max is MINIMUM drive.
 
 Usage:
-    ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav          # whole fleet
-    ./measure_truncation.py --input ... --device big-muff-pi-v1-66-5              # one device
+    ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --device big-muff-pi-v1-66-5
+
+One device per invocation, on purpose -- a fleet-wide table is rare (it matters only when
+re-deriving the shared oversample floor, or auditing every device after a measurement-methodology
+change; see docs/convergence.md) and is just as easy from the outside:
+
+    for d in $(python3 -c "import tomllib,sys; print(*tomllib.load(open('../parametric-devices/devices.toml','rb')))"); do
+        ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --device "$d"
+    done
 """
 from __future__ import annotations
 
@@ -128,19 +135,17 @@ def probe_settings(knobs: list[str]) -> list[dict]:
     return uniq
 
 
-def load_fleet(only: str | None) -> list[tuple[str, Path, list[str]]]:
+def load_device(device_id: str) -> tuple[str, Path, list[str]] | None:
     reg = tomllib.loads(REGISTRY.read_text())
     root = REGISTRY.parent
-    out = []
-    for dev_id, d in reg.items():
-        if only and dev_id != only:
-            continue
-        # Only real knobs. A switch changes the TOPOLOGY, so it is not a point on a knob sweep.
-        knobs = [k["name"] for k in d.get("knobs", []) if k.get("kind") != "switch"]
-        if not knobs:
-            continue
-        out.append((d["name"], root / d["schx"], knobs))
-    return out
+    d = reg.get(device_id)
+    if not isinstance(d, dict):
+        return None
+    # Only real knobs. A switch changes the TOPOLOGY, so it is not a point on a knob sweep.
+    knobs = [k["name"] for k in d.get("knobs", []) if k.get("kind") != "switch"]
+    if not knobs:
+        return None
+    return (d["name"], root / d["schx"], knobs)
 
 
 def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: int,
@@ -228,7 +233,7 @@ def main() -> None:
                     help="the sweep to measure on. Truncation ESR is INPUT-DEPENDENT (a quiet tail "
                          "shrinks the denominator), so the table is only meaningful with the input "
                          "named. Use the sweep the datasets were actually rendered with.")
-    ap.add_argument("--device", help="one device id from devices.toml (default: the whole fleet)")
+    ap.add_argument("--device", required=True, help="one device id from devices.toml")
     ap.add_argument("--ref-os", type=int, default=32, help="reference oversample (default 32)")
     ap.add_argument("--candidates", default="2,4,8",
                     help="oversamples to score against the reference (default 2,4,8)")
@@ -255,13 +260,16 @@ def main() -> None:
         ap.error(f"--candidates must all be below --ref-os ({args.ref_os}): you cannot measure the "
                  f"reference against itself")
 
-    fleet = load_fleet(args.device)
-    if not fleet:
-        ap.error(f"no devices matched (registry: {REGISTRY})")
+    dev = load_device(args.device)
+    if not dev:
+        ap.error(f"device {args.device!r} not found, or has no real knobs (registry: {REGISTRY})")
+    name, schx, knobs = dev
+    if not schx.exists():
+        ap.error(f"{name}: MISSING {schx}")
 
     print(f"input:      {args.input.name}")
     print(f"reference:  oversample={args.ref_os}, {args.iterations} Newton iterations")
-    print(f"devices:    {len(fleet)}\n")
+    print(f"device:     {name} ({len(knobs)} knobs)\n")
 
     rows = []
     with tempfile.TemporaryDirectory() as tds:
@@ -270,14 +278,10 @@ def main() -> None:
         if len(clips) > 1 or clips[0] != args.input:
             print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
                   f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")
-        for name, schx, knobs in fleet:
-            if not schx.exists():
-                print(f"  {name}: MISSING {schx}", file=sys.stderr)
-                continue
-            print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
-            r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
-                        args.iterations, args.speaker, td, args.workers)
-            rows.append((name, r))
+        print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
+        r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
+                    args.iterations, args.speaker, td, args.workers)
+        rows.append((name, r))
 
     hdr = " | ".join(f"@ os={c}" for c in cands)
     print(f"\n| device | {hdr} | worst setting @ os={cands[0]} | ref err | verdict |")
