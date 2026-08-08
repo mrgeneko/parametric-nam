@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
-# Package a finished (or killed) training run into a release bundle, VALIDATE the
-# .nam payloads, and hand off to parametric-nam-models/add-run.sh.
+# Package a finished (or killed) training run into a verified release bundle: VALIDATE
+# the .nam payloads, compose the "optimal" container, measure what it buys. Publishing
+# that bundle into some archive is a separate, later, entirely optional step -- this
+# script has no git/network dependency and works the same whether or not you have one.
+# (If you do use a parametric-nam-models-style archive, its own add-run.sh takes the
+# staged bundle this script produces -- see the suggested command it prints at the end.)
 #
 # Nothing about the model shape is hardcoded. Tiers, widths, and the whole training
 # config are DERIVED from the run itself:
@@ -11,12 +15,12 @@
 #   * circuit + knobs      <- the dataset's config.json
 # So [3,5,8], [3,4,8], [3,8] and [2,4,6,8] all work without edits.
 #
-# Two things it refuses to publish, because both have already bitten us:
+# Two things it refuses to pass as valid, because both have already bitten us:
 #   * NAM version != 0.7.0   -> [redacted] rejects the file as "A1"
 #   * head_mode != "skip"    -> legacy residual head; renders the wrong function
 #
 # Usage:
-#   ./publish_run.sh [--commit] [--push] [--dry-run] [--skip-verify] [--blurb FILE]
+#   ./release_run.sh [--skip-verify] [--blurb FILE]
 #
 # Override via env: RUN, CKPT, DS, SCHX, CATEGORY, CIRCUIT, PREFIX, MODELS, PY_BIN
 #
@@ -40,12 +44,9 @@ STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
 # the bare CURRENT, and PRIOR_STATE needs to run before this var existed to find it.
 VARIANT="${VARIANT:-}"
 
-do_commit=0 do_push=0 dry=0 verify=1 BLURB=""
+verify=1 BLURB=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --commit)      do_commit=1; shift;;
-    --push)        do_push=1; do_commit=1; shift;;
-    --dry-run)     dry=1; shift;;
     --skip-verify) verify=0; shift;;
     --blurb)       BLURB="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -54,16 +55,6 @@ done
 [ -f "$CONFIG" ] || { echo "no training config at $CONFIG (set CONFIG=)" >&2; exit 1; }
 [ -f "$CKPT/metrics.csv" ] || { echo "no metrics.csv in $CKPT" >&2; exit 1; }
 [ -f "$CKPT/best.pt" ]     || { echo "no best.pt in $CKPT" >&2; exit 1; }
-# Fail NOW, not after staging/verifying/composing the release: this script's whole job is
-# to publish into a parametric-nam-models-style archive (MODELS), which is optional -- you
-# don't need one to train with run_pipeline.py, only to use this specific publish step.
-[ -f "$MODELS/add-run.sh" ] || {
-  echo "no $MODELS/add-run.sh -- this hands off to a parametric-nam-models-style archive repo," >&2
-  echo "which is separate from parametric-nam and not required to train a model. Set MODELS= to" >&2
-  echo "point at your own archive (see parametric-nam-models' add-run.sh for the expected shape)," >&2
-  echo "or don't use this script if you don't want one." >&2
-  exit 1
-}
 
 # ---------------------------------------------------------------------------
 # 1. DERIVE the facts. Nothing below is hand-typed.
@@ -638,38 +629,25 @@ python run_pipeline.py --config "$CONFIG" \\
 EOF
 chmod +x "$STAGE/reproduce.sh"
 
-echo "==> bundle ready:"
+echo "==> bundle ready at $STAGE:"
 ls -1 "$STAGE" | sed 's/^/      /'
 
 # ---------------------------------------------------------------------------
-# 9. Hand off to the models repo.
+# That's the whole job -- this script never touches git or any other repo.
+# Publishing $STAGE into some archive (parametric-nam-models-style or your own) is a
+# separate, optional step. If you have a parametric-nam-models-style archive's own
+# add-run.sh (--release/--category/--circuit/--schx-repo/--variant/--commit/--push),
+# here's the command it would need, for reference -- not run automatically:
 # ---------------------------------------------------------------------------
-ADD="$MODELS/add-run.sh"
 if [ "$IS_CAPTURE" -eq 0 ]; then
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --schx-repo "$SCHX_REPO")
 else
-  # No schematic to validate the run dir against -- add-run.sh skips the devices.toml registry
-  # check entirely for --capture-source runs (see its own comments for the tradeoff: no automated
-  # directory-name-drift protection for this class of device).
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --capture-source)
 fi
-# VARIANT: required by the models repo's own add-run.sh whenever the circuit has switches -- a
-# switch changes the TOPOLOGY, so its position is part of WHICH MODEL this is, not a training
-# detail (see that script's own comment). Also the right place for a switchless device's
-# pinned-knob/swept-range/speaker variants, same doc. (Declared up near RUN/CKPT/etc -- PRIOR_STATE
-# detection above needs it too.) Left empty by default so switchless single-release circuits
-# (e.g. Big Muff) are unaffected.
 [ -n "$VARIANT" ] && args+=(--variant "$VARIANT")
-if [ "$do_push" -eq 1 ]; then args+=(--push); elif [ "$do_commit" -eq 1 ]; then args+=(--commit); fi
-
-if [ "$dry" -eq 1 ]; then
-  echo
-  echo "==> DRY RUN — would invoke:"
-  echo "    $ADD ${args[*]}"
-  echo
-  echo "    NOTE: HISTORY.md's table has only 'ESR full' and 'ESR lite' columns, so any"
-  echo "    middle tiers (${TIERS[*]}) are recorded in ESR_RECORD.md / MANIFEST.md only."
-  exit 0
-fi
-
-"$ADD" "${args[@]}"
+echo
+echo "==> to publish into a parametric-nam-models-style archive:"
+echo "    <path-to-your-archive>/add-run.sh ${args[*]} [--commit] [--push]"
+echo
+echo "    NOTE: HISTORY.md's table has only 'ESR full' and 'ESR lite' columns, so any"
+echo "    middle tiers (${TIERS[*]}) are recorded in ESR_RECORD.md / MANIFEST.md only."
