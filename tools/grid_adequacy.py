@@ -171,6 +171,12 @@ class Renderer:
         # render in parallel.
         self._cache_lock = threading.Lock()
         self._key_locks: dict = {}
+        # Grouped by message, not printed per-render: a config-level failure (bad knob
+        # name, wrong circuit) fails EVERY render with the identical text, and this probe
+        # can fire hundreds of them -- printing the same line hundreds of times just
+        # buries the one thing worth reading. See gen_dataset_from_schx.py's identical fix.
+        self.fail_counts: dict = {}
+        self._fail_lock = threading.Lock()
 
         if backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
@@ -217,6 +223,14 @@ class Renderer:
             self.clips.append(c)
         self.win_s = win / sr
 
+    def _note_fail(self, msg: str):
+        with self._fail_lock:
+            self.fail_counts[msg] = self.fail_counts.get(msg, 0) + 1
+
+    def print_fail_summary(self):
+        for msg, n in sorted(self.fail_counts.items(), key=lambda kv: -kv[1]):
+            print(f"    {n} render(s) failed: {msg}", file=sys.stderr)
+
     def __call__(self, params: dict):
         """-> list of rendered windows (one array per probe window)."""
         key = tuple(sorted(params.items()))
@@ -254,8 +268,7 @@ class Renderer:
                     d, _ = sf.read(str(w))
                     out.append(np.asarray(d, dtype=np.float64))
                 else:
-                    print(f"      render failed at {allp}: {getattr(fail, 'error', 'no output')}",
-                         file=sys.stderr)
+                    self._note_fail(str(getattr(fail, 'error', 'no output')))
                     out.append(None)
                 continue
             r = subprocess.run(
@@ -268,7 +281,7 @@ class Renderer:
                 out.append(np.asarray(d, dtype=np.float64))
             else:
                 tail = (r.stderr.strip().splitlines() or ["(no stderr)"])[-1]
-                print(f"      render failed at {allp}: {tail}", file=sys.stderr)
+                self._note_fail(tail)
                 out.append(None)
         with self._cache_lock:
             self.cache[key] = out
@@ -336,6 +349,19 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
             j = futures[fut]
             res.append((j[0], j[1], j[2], fut.result()))
             print(f"    {i}/{len(jobs)} probes done", flush=True)
+
+    render.print_fail_summary()
+
+    # EVERY probe failed. Do NOT fall through to the per-cell table below: every cell would
+    # print "?" with no explanation of why, one row at a time, across every axis -- exactly
+    # the buried-cryptic-failure pattern this guard exists to stop. See the analogous fix in
+    # measure_truncation.py / gen_dataset_from_schx.py.
+    if jobs and all(not np.isfinite(r[3]) for r in res):
+        raise RuntimeError(
+            f"EVERY probe render failed ({len(jobs)}/{len(jobs)}). Nothing was measured, so "
+            "there is no grid-adequacy table to print. See the failure(s) above -- this "
+            "usually means a config problem (wrong knob/fixed-param name, wrong --circuit, "
+            "wrong --backend), not a per-cell convergence issue; fix that and re-run.")
 
     worst_by_axis: dict = {}
     n_coarse = n_over = 0
@@ -472,8 +498,11 @@ def main() -> None:
                 print(f"  --- iteration {iteration}/{args.max_iterations}: "
                       f"{' x '.join(str(len(v)) for v in knobs_cur.values())} = {tot} "
                       f"permutations ---\n")
-            worst_by_axis, n_coarse, n_over = measure_grid(render, knobs_cur, args.target,
-                                                            args.workers)
+            try:
+                worst_by_axis, n_coarse, n_over = measure_grid(render, knobs_cur, args.target,
+                                                                args.workers)
+            except RuntimeError as e:
+                sys.exit(f"\nERROR: {e}")
 
             if not args.apply:
                 break

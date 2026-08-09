@@ -2276,8 +2276,21 @@ def main():
         print(f"Rung memory: {len(_remembered)} permutations start at their previously-winning rung")
     print()
 
+    # FAIL-FAST on a SYSTEMIC error. A real convergence failure varies with the knob
+    # setting (different permutations stress the solver differently) -- the retry ladder
+    # in process_one already chews through it per-permutation. If the first several
+    # completions ALL fail with the IDENTICAL error text, that is not per-permutation
+    # noise; it is a config problem (bad --fixed-params/--knobs name, wrong --circuit,
+    # wrong --backend...) that will fail every remaining permutation the same way. Found
+    # the hard way: a wrong-case fixed-param name ran an entire batch to its cryptic
+    # per-permutation error, one line at a time, before anyone noticed it was the same
+    # line every time.
+    FAIL_FAST_N = min(10, len(to_run))
     t0 = time.time()
     done = 0
+    fail_errors = []
+    ok_seen = False
+    aborted = False
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futs = {
             pool.submit(process_one, i, p, out_dir, in_wav,
@@ -2307,7 +2320,31 @@ def main():
                   f"perm_{idx:06d}  {status}  "
                   f"DSP={r.dsp_load:.1f}%  elapsed={elapsed:.0f}s  ETA ~{finish}{extra}")
 
+            if r.ok:
+                ok_seen = True
+            else:
+                fail_errors.append(r.error)
+            if (not ok_seen and len(fail_errors) >= FAIL_FAST_N
+                    and len(set(fail_errors)) == 1):
+                aborted = True
+                for fut in futs:
+                    fut.cancel()
+                print(
+                    "\n" + "#" * 72 + "\n"
+                    f"# ABORTING: the first {len(fail_errors)} permutations all failed with the\n"
+                    "# IDENTICAL error below. A real convergence problem varies with the knob\n"
+                    "# setting; this looks SYSTEMIC instead -- a bad knob/fixed-param name, the\n"
+                    "# wrong --circuit/--schx, or the wrong --backend -- and would fail the\n"
+                    f"# remaining {len(to_run) - done} permutation(s) the exact same way. Fix the\n"
+                    "# config and re-run rather than grinding through the rest for this.\n"
+                    "#\n"
+                    f"# error: {fail_errors[0]}\n"
+                    + "#" * 72, file=sys.stderr)
+                break
+
     csv_fh.close()
+    if aborted:
+        sys.exit(1)
     total = time.time() - t0
     ok = len(list((out_dir / "sig").rglob("*.npy"))) if (out_dir / "sig").exists() else 0
     print(f"\nDone: {ok}/{len(perms)} files in {total:.0f}s "

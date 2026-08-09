@@ -98,9 +98,15 @@ target-steps = 25000
 # Tone stays at 5 rather than the 3 the measurement permits: its points are nearly free, and 3
 # conditioning points is thin for a shipped model. Its linearity is not luck -- the tone control is a
 # passive blend of two filter paths, so its output really is close to a linear interpolation.
+#
+# Keys here must match the schx's own pot Names EXACTLY (case included) -- gen_dataset_from_schx.py's
+# --knobs CLI flag resolves case/spacing-insensitively against the schx (see resolve_knobs()), but
+# --fixed-params, measure_truncation.py, and grid_adequacy.py all pass these keys straight through to
+# the oracle unchanged. A mismatched case here fails every render identically, one per permutation
+# (see the render-failure fail-fast/dedup this config exists to be a worked example of NOT hitting).
 [knobs]
-Sustain = [0.001, 0.008, 0.03, 0.12, 0.4, 0.55, 0.7, 0.8, 0.88, 0.94, 0.97, 1.0]
-Tone    = [0.0, 0.25, 0.5, 0.75, 1.0]
+SUSTAIN = [0.001, 0.008, 0.03, 0.12, 0.4, 0.55, 0.7, 0.8, 0.88, 0.94, 0.97, 1.0]
+TONE    = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 # Volume is a passive output divider (level only, no tone) — fixed, not trained.
 #
@@ -109,4 +115,4 @@ Tone    = [0.0, 0.25, 0.5, 0.75, 1.0]
 # stage does not), but it is a property of the product and it should be stated rather than
 # discovered.
 [fixed]
-Volume = 1.0
+VOLUME = 1.0
