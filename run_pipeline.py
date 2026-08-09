@@ -37,6 +37,8 @@ PYTHON  = sys.executable
 BATCH   = HERE / "gen_dataset_from_schx.py"
 TRAIN   = HERE / "param_train.py"
 
+from gen_dataset_from_schx import check_oracle
+
 # argparse dests whose config values are filesystem paths (argparse's type=Path is
 # only applied to CLI strings, not to set_defaults values, so we convert here).
 _CONFIG_PATH_DESTS = {"dataset_dir", "nam_output", "checkpoint_dir", "release_dir",
@@ -813,6 +815,13 @@ def main():
                 log("SKIP generate: outputs.npy exists and no sig/ dir found. "
                     "Use --force-generate to redo.", fh)
                 run_generate = False
+
+        # Oracle preflight: Step 0 (grid adequacy) and Step 1 (generate) both need it,
+        # and both are about to start if run_generate is still true here. Check before
+        # either, not after the first render fails deep into one of them -- confirmed
+        # that's a raw subprocess FileNotFoundError with no useful message otherwise.
+        if run_generate:
+            check_oracle(args.backend)
 
         # ------------------------------------------------------------------
         # Step 0: is the knob grid dense enough to be worth rendering?

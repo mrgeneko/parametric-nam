@@ -80,7 +80,8 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from gen_dataset_from_schx import LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice, write_probe_clip
+from gen_dataset_from_schx import (LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice,
+                                    check_oracle, write_probe_clip)
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -429,6 +430,7 @@ def main() -> None:
     else:
         oversample = int(oversample)
     backend = cfg.get("backend", "livespice")
+    check_oracle(backend)
 
     n_perms = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")

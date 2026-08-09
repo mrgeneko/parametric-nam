@@ -82,6 +82,39 @@ def _find_livespice_cli() -> Path:
 
 LIVESPICE_CLI = _find_livespice_cli()
 
+
+def check_oracle(backend: str) -> None:
+    """Preflight: does this backend's oracle/harness actually exist? Exits with a
+    clear, actionable message (built vs. not built vs. wrong path) if not -- instead
+    of letting the first real render fail deep into a run with a raw subprocess
+    FileNotFoundError, which is what happens with no check at all (confirmed: this is
+    exactly what tools/grid_adequacy.py and run_pipeline.py's own STEP 0 used to hit,
+    since neither called this check before this was factored out to be shared).
+
+    Callers: gen_dataset_from_schx.py's own generation path, run_pipeline.py (once, up
+    front, covering every step that will need the oracle), tools/grid_adequacy.py."""
+    if backend == "cpp" and not HARNESS.exists():
+        print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
+        sys.exit(1)
+    if backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
+        env = os.environ.get("LIVESPICE_CLI")
+        print(f"ERROR: livespice_cli not found at {LIVESPICE_CLI}", file=sys.stderr)
+        if env:
+            print("       ($LIVESPICE_CLI is set to this path -- check it's correct and built)",
+                  file=sys.stderr)
+        else:
+            print("       Clone it (recursively -- it has its own nested submodule) as a "
+                  "SIBLING of this repo:", file=sys.stderr)
+            print("         git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli",
+                  file=sys.stderr)
+            print("         cd ../livespice-cli && ./build.sh", file=sys.stderr)
+            print("       ...or point $LIVESPICE_CLI at an existing build.", file=sys.stderr)
+        sys.exit(1)
+    if backend == "ngspice" and not shutil.which("ngspice"):
+        print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
+        sys.exit(1)
+
+
 # Per-circuit ngspice defaults, keyed by a substring of the .schx filename. Applied
 # automatically when the matching CLI flag is unset, so a circuit's known-good
 # convergence/damping config isn't re-typed each run (CLI flags win). Analogous to
@@ -2042,26 +2075,7 @@ def main():
                   "to override). See the per-corner report above.", file=sys.stderr)
             sys.exit(1)
 
-    if args.backend == "cpp" and not HARNESS.exists():
-        print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
-        sys.exit(1)
-    if args.backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
-        env = os.environ.get("LIVESPICE_CLI")
-        print(f"ERROR: livespice_cli not found at {LIVESPICE_CLI}", file=sys.stderr)
-        if env:
-            print("       ($LIVESPICE_CLI is set to this path -- check it's correct and built)",
-                  file=sys.stderr)
-        else:
-            print("       Clone it (recursively -- it has its own nested submodule) as a "
-                  "SIBLING of this repo:", file=sys.stderr)
-            print("         git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli",
-                  file=sys.stderr)
-            print("         cd ../livespice-cli && ./build.sh", file=sys.stderr)
-            print("       ...or point $LIVESPICE_CLI at an existing build.", file=sys.stderr)
-        sys.exit(1)
-    if args.backend == "ngspice" and not shutil.which("ngspice"):
-        print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
-        sys.exit(1)
+    check_oracle(args.backend)
 
     # ------------------------------------------------------------------
     # Run
