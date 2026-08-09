@@ -407,7 +407,6 @@ for i in $(seq 0 $LAST_I); do esr_inline="${esr_inline:+$esr_inline · }${TIERS[
 CIRCDIR="$MODELS/$CATEGORY/$CIRCUIT"
 PRIOR_STATE=none
 if [ -d "$CIRCDIR" ] && [ -n "$(ls -A "$CIRCDIR" 2>/dev/null)" ]; then
-  PRIOR_STATE=unknown
   # A variant-keyed circuit's CURRENT pointer is CURRENT.<variant> (models-repo add-run.sh's own
   # convention -- see its "A device with SWITCHES needs a --variant" comment), not the bare
   # CURRENT -- that file doesn't even exist for such a circuit (confirmed: dumble-ots-183-full has
@@ -430,7 +429,14 @@ print("skip" if modes == {"skip"} else "residual" if "residual" in modes else "u
 PYX
 )" || PRIOR_STATE=unknown
     [ -n "$PRIOR_STATE" ] || PRIOR_STATE=unknown
+  elif [ -n "$_cur" ]; then
+    # A CURRENT pointer exists for this variant but its .nam couldn't be located -- a genuinely
+    # broken/unreadable state, not "no prior release". Flag it rather than silently calling this
+    # a first release.
+    PRIOR_STATE=unknown
   fi
+  # else: no CURRENT/CURRENT.<variant> pointer found at all -- correctly "none" (first release of
+  # THIS variant), even though the circuit directory has content from a SIBLING variant's release.
 fi
 echo "==> prior published bundle for $CIRCUIT: $PRIOR_STATE"
 
