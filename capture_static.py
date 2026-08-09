@@ -79,7 +79,7 @@ import soundfile as sf
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
-from param_train import _schx_input_v0dbfs  # noqa: E402
+from param_train import _input_level_dbu, _schx_input_v0dbfs  # noqa: E402
 from tools.preflight import find_saturation_point  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
@@ -587,6 +587,40 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
     return result
 
 
+def patch_input_level_dbu(nam_path: Path, schx: str) -> "float | None":
+    """Set input_level_dbu on every metadata block in an already-exported .nam (top-level
+    AND per-submodel, if it's a container -- param_train.py's export_composite_nam writes
+    the identical value into both, since it's a property of the schx's input stage, not
+    of any one tier). nam-full's own export path (nam/train/full.py's main(), calling
+    model.net.export()/.export_container() with no metadata argument at all) has no
+    mechanism to set this -- it has to be patched in after the fact.
+
+    Same derivation as param_train.py's _input_level_dbu/_schx_input_v0dbfs: read the
+    schx's Circuit.Input V0dBFS and convert to dBu. Returns None (and leaves every
+    metadata block's input_level_dbu as null, matching the parametric side's own
+    "omitted" behavior) if the schx has no readable V0dBFS."""
+    v0dbfs = _schx_input_v0dbfs(schx)
+    input_level_dbu = _input_level_dbu(v0dbfs) if v0dbfs else None
+    if input_level_dbu is None:
+        print("[capture_static] WARNING: schx has no V0dBFS -- input_level_dbu will be "
+              "omitted from the .nam (same as the parametric side's behavior).")
+
+    def patch(obj):
+        if isinstance(obj, dict):
+            if "metadata" in obj and isinstance(obj["metadata"], dict):
+                obj["metadata"]["input_level_dbu"] = input_level_dbu
+            for v in obj.values():
+                patch(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                patch(v)
+
+    d = json.loads(nam_path.read_text())
+    patch(d)
+    nam_path.write_text(json.dumps(d, separators=(",", ":")))
+    return input_level_dbu
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--schx", required=True)
@@ -660,6 +694,11 @@ def main():
     result["nam_path"].rename(named_path)
     result["nam_path"] = named_path
 
+    # nam-full's own export has no metadata hook for this (see patch_input_level_dbu's
+    # docstring) -- same derivation param_train.py uses for the parametric side, patched
+    # in after the fact since it isn't one.
+    input_level_dbu = patch_input_level_dbu(result["nam_path"], args.schx)
+
     manifest = {
         "schx": args.schx,
         "setting": setting,
@@ -678,6 +717,7 @@ def main():
         "best_val_esr": result["best_esr"],
         "wall_clock_s": result["wall_s"],
         "gear_make": args.gear_make, "gear_model": args.gear_model, "gear_type": args.gear_type,
+        "input_level_dbu": input_level_dbu,
         "nam_path": str(result["nam_path"]),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
