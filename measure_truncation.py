@@ -183,17 +183,36 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
             keymap[str(w)] = key
         errs = _livespice_batch(str(schx), jobs, workers, speaker)
         out: dict[tuple, np.ndarray | None] = {}
+        fails: dict[str, list[int]] = {}
         for wpath, key in keymap.items():
             if errs.get(wpath) is None and Path(wpath).exists():
                 d, _ = sf.read(wpath)
                 out[key] = np.asarray(d, dtype=np.float64)
             else:
-                print(f"      render failed (os={key[1]}): {errs.get(wpath)}", file=sys.stderr)
                 out[key] = None
+                fails.setdefault(errs.get(wpath) or "no output", []).append(key[1])
+        # GROUPED, not one line per render: a config-level failure (bad knob name, wrong
+        # circuit) fails EVERY render with the identical message, and printing that message
+        # 20+ times just buries the one thing worth reading. Group by message instead.
+        for msg, oss in fails.items():
+            oss_str = ",".join(str(o) for o in sorted(set(oss)))
+            print(f"      {len(oss)} render(s) failed (os={oss_str}): {msg}", file=sys.stderr)
         return out
 
     cache = run_batch([(p, os_, wi) for p in settings for os_ in (*candidates, ref_os)
                        for wi in range(len(clips))])
+
+    # EVERY render failed. Do NOT fall through to the table below: worst/at stay at their
+    # initial (0.0, None), which prints as a confident-looking "0.00e+00 ... falls nanx" --
+    # a precise-looking number produced by measuring NOTHING. That is exactly how this got
+    # missed the first time: a wrong-case fixed-param name failed all 21 renders identically
+    # and the tool still printed a verdict, just a garbled one, instead of stopping.
+    if cache and all(v is None for v in cache.values()):
+        raise RuntimeError(
+            f"{schx}: EVERY render failed ({len(cache)}/{len(cache)}). Nothing was measured, "
+            "so there is no table to print. See the failure(s) above -- this usually means a "
+            "config problem (wrong knob/fixed-param name, wrong --speaker, wrong backend), "
+            "not a convergence issue; fix that and re-run.")
 
     def pooled_esr(k: tuple, os_a: int, os_b: int) -> float:
         num = den = 0.0
@@ -286,8 +305,11 @@ def main() -> None:
             print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
                   f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")
         print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
-        r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
-                    args.iterations, args.speaker, td, args.workers)
+        try:
+            r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
+                        args.iterations, args.speaker, td, args.workers)
+        except RuntimeError as e:
+            sys.exit(f"\nERROR: {e}")
         rows.append((name, r))
 
     hdr = " | ".join(f"@ os={c}" for c in cands)
