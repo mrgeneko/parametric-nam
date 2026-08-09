@@ -3,11 +3,17 @@ calibration and alignment logic, which is the one thing a raw .wav capture needs
 capture (pure digital inference, phase-aligned by construction) doesn't. See that module's
 detect_delay()/_align_wet() docstrings for the full reasoning.
 
-detect_delay() is tested entirely through monkeypatched _import_nam_core() -- never against a
-real neural-amp-modeler install -- so these pass whether or not that optional package (or its
-sibling-checkout venv) is present in the environment running the tests.
+detect_delay() shells out to tools/nam_delay_helper.py under a sibling neural-amp-modeler
+venv's own interpreter (see detect_delay's docstring for why: a numba/numpy version conflict
+when importing nam.train.core in-process, confirmed hitting it directly). These tests fake
+that subprocess boundary -- monkeypatching _find_nam_site_packages (a fake venv layout under
+tmp_path) and subprocess.run (canned JSON, matching the helper's actual output contract) --
+so they pass whether or not a real neural-amp-modeler install exists in the environment
+running the tests, and without spawning a real subprocess.
 """
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import soundfile as sf
@@ -46,93 +52,121 @@ def test_align_wet_truncates_when_shift_leaves_it_longer_than_target():
 
 # --------------------------------------------------------------------------- detect_delay
 
-def test_detect_delay_when_nam_core_unimportable(monkeypatch):
-    monkeypatch.setattr(gdc, "_import_nam_core", lambda: None)
-    delay, source = gdc.detect_delay(dry_wav=Path("dry.wav"), wet_wav=Path("wet.wav"))
+def _fake_sibling_venv(tmp_path, with_python=True):
+    """Build a fake sibling-checkout layout matching what _find_nam_site_packages looks for
+    and detect_delay derives its interpreter path from, WITHOUT a real neural-amp-modeler
+    install -- these tests fake the subprocess boundary itself (see module docstring)."""
+    site_packages = tmp_path / "neural-amp-modeler" / "venv" / "lib" / "python3.11" / "site-packages"
+    site_packages.mkdir(parents=True)
+    if with_python:
+        bin_dir = site_packages.parent.parent.parent / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "python3").touch()
+    return site_packages
+
+
+def test_detect_delay_when_no_sibling_checkout(monkeypatch):
+    monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: None)
+    delay, source = gdc.detect_delay(Path("dry.wav"), Path("wet.wav"))
     assert (delay, source) == (0, "nam_unavailable")
 
 
-def test_detect_delay_falls_back_when_input_is_not_a_nam_standard_file(monkeypatch):
-    def fake_detect_input_version(path):
-        return None, False  # NAM's own "no match" return shape
+def test_detect_delay_when_sibling_venv_has_no_python_binary(monkeypatch, tmp_path):
+    site_packages = _fake_sibling_venv(tmp_path, with_python=False)
+    monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: site_packages)
+    delay, source = gdc.detect_delay(Path("dry.wav"), Path("wet.wav"))
+    assert (delay, source) == (0, "nam_unavailable")
 
-    monkeypatch.setattr(gdc, "_import_nam_core",
-                         lambda: (fake_detect_input_version, ValueError, None))
-    delay, source = gdc.detect_delay(dry_wav=Path("sweepv5.wav"), wet_wav=Path("wet.wav"))
+
+def _run_detect_delay_with_helper_output(monkeypatch, tmp_path, payload, returncode=0, stderr=""):
+    """Wire detect_delay's subprocess call to a canned response matching
+    tools/nam_delay_helper.py's real JSON-on-stdout contract, without spawning it."""
+    site_packages = _fake_sibling_venv(tmp_path)
+    monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: site_packages)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        assert cmd[0] == str(site_packages.parent.parent.parent / "bin" / "python3")
+        assert cmd[1] == str(gdc._NAM_DELAY_HELPER)
+        return SimpleNamespace(stdout=json.dumps(payload) + "\n", stderr=stderr,
+                               returncode=returncode)
+
+    monkeypatch.setattr(gdc.subprocess, "run", fake_run)
+    return gdc.detect_delay(Path("dry.wav"), Path("wet.wav"))
+
+
+def test_detect_delay_when_helper_reports_nam_unavailable(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path, {"delay": None, "source": "nam_unavailable", "detail": "no nam"})
+    assert (delay, source) == (0, "nam_unavailable")
+
+
+def test_detect_delay_when_input_is_not_a_nam_standard_file(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path, {"delay": None, "source": "delay_zero_fallback"})
     assert (delay, source) == (0, "delay_zero_fallback")
 
 
-def test_detect_delay_falls_back_when_detection_raises_input_validation_error(monkeypatch):
-    class _FakeInputValidationError(Exception):
-        pass
-
-    def fake_detect_input_version(path):
-        raise _FakeInputValidationError("no strong or weak match")
-
-    monkeypatch.setattr(gdc, "_import_nam_core",
-                         lambda: (fake_detect_input_version, _FakeInputValidationError, None))
-    delay, source = gdc.detect_delay(dry_wav=Path("sweepv5.wav"), wet_wav=Path("wet.wav"))
-    assert (delay, source) == (0, "delay_zero_fallback")
-
-
-def test_detect_delay_falls_back_on_any_other_detection_error_without_crashing(monkeypatch):
-    """A FLOAT-subtype WAV can crash NAM's own reader outright (see capture_static.py's
-    identical trap) -- detect_delay must degrade, not propagate."""
-    def fake_detect_input_version(path):
-        raise RuntimeError("unknown format: 3")
-
-    monkeypatch.setattr(gdc, "_import_nam_core",
-                         lambda: (fake_detect_input_version, ValueError, None))
-    delay, source = gdc.detect_delay(dry_wav=Path("scaled.wav"), wet_wav=Path("wet.wav"))
-    assert (delay, source) == (0, "delay_zero_fallback")
-
-
-def test_detect_delay_uses_nam_calibration_when_input_matches_a_standard_file(monkeypatch):
-    class _Calibration:
-        recommended = 137
-
-    class _LatencyResult:
-        calibration = _Calibration()
-
-    def fake_detect_input_version(path):
-        return "v3", True
-
-    def fake_analyze_latency(user_latency, input_version, input_path, output_path, silent):
-        assert user_latency is None
-        assert input_version == "v3"
-        assert silent is True
-        return _LatencyResult()
-
-    monkeypatch.setattr(gdc, "_import_nam_core",
-                         lambda: (fake_detect_input_version, ValueError, fake_analyze_latency))
-    delay, source = gdc.detect_delay(dry_wav=Path("sweep-v3.wav"), wet_wav=Path("wet.wav"))
+def test_detect_delay_uses_real_calibration_when_helper_succeeds(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path, {"delay": 137, "source": "nam_standard_calibration"})
     assert (delay, source) == (137, "nam_standard_calibration")
 
 
-def test_detect_delay_falls_back_when_calibration_finds_no_impulse_response(monkeypatch):
-    class _Calibration:
-        recommended = None  # NAM's own "couldn't calibrate" signal
+def test_detect_delay_when_subprocess_times_out(monkeypatch, tmp_path):
+    site_packages = _fake_sibling_venv(tmp_path)
+    monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: site_packages)
 
-    class _LatencyResult:
-        calibration = _Calibration()
+    import subprocess as _subprocess
+    def fake_run(cmd, capture_output, text, timeout):
+        raise _subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(gdc.subprocess, "run", fake_run)
 
-    monkeypatch.setattr(
-        gdc, "_import_nam_core",
-        lambda: (lambda p: ("v3", True), ValueError,
-                 lambda **kw: _LatencyResult()))
-    delay, source = gdc.detect_delay(dry_wav=Path("sweep-v3.wav"), wet_wav=Path("silent.wav"))
+    delay, source = gdc.detect_delay(Path("dry.wav"), Path("wet.wav"))
     assert (delay, source) == (0, "delay_zero_fallback")
 
 
-def test_detect_delay_falls_back_when_analyze_latency_itself_raises(monkeypatch):
-    def fake_analyze_latency(**kw):
-        raise RuntimeError("boom")
+def test_detect_delay_when_subprocess_output_is_not_json(monkeypatch, tmp_path):
+    site_packages = _fake_sibling_venv(tmp_path)
+    monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: site_packages)
+    monkeypatch.setattr(gdc.subprocess, "run",
+                         lambda *a, **kw: SimpleNamespace(stdout="", stderr="traceback...",
+                                                          returncode=1))
+    delay, source = gdc.detect_delay(Path("dry.wav"), Path("wet.wav"))
+    assert (delay, source) == (0, "nam_unavailable")
 
-    monkeypatch.setattr(
-        gdc, "_import_nam_core",
-        lambda: (lambda p: ("v3", True), ValueError, fake_analyze_latency))
-    delay, source = gdc.detect_delay(dry_wav=Path("sweep-v3.wav"), wet_wav=Path("wet.wav"))
+
+# ---- sanity bound: a "successful" result outside NAM's own search window is untrusted ----
+
+def test_detect_delay_trusts_a_result_at_the_edge_of_the_lookback_window(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path,
+        {"delay": gdc._NAM_LOOKBACK_SAMPLES, "source": "nam_standard_calibration"})
+    assert (delay, source) == (gdc._NAM_LOOKBACK_SAMPLES, "nam_standard_calibration")
+
+
+def test_detect_delay_rejects_a_result_beyond_the_lookback_window(monkeypatch, tmp_path):
+    """Confirmed hitting this for real: an injected ~1s delay, far outside NAM's own
+    lookback=10_000-sample search window, still came back as a plausible-looking "0" instead
+    of failing loudly. detect_delay must not trust a match outside the window it's honest
+    about searching."""
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path,
+        {"delay": gdc._NAM_LOOKBACK_SAMPLES + 1, "source": "nam_standard_calibration"})
     assert (delay, source) == (0, "delay_zero_fallback")
+
+
+def test_detect_delay_rejects_a_result_beyond_the_lookahead_window(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path,
+        {"delay": -(gdc._NAM_LOOKAHEAD_SAMPLES + 1), "source": "nam_standard_calibration"})
+    assert (delay, source) == (0, "delay_zero_fallback")
+
+
+def test_detect_delay_trusts_a_result_at_the_edge_of_the_lookahead_window(monkeypatch, tmp_path):
+    delay, source = _run_detect_delay_with_helper_output(
+        monkeypatch, tmp_path,
+        {"delay": -gdc._NAM_LOOKAHEAD_SAMPLES, "source": "nam_standard_calibration"})
+    assert (delay, source) == (-gdc._NAM_LOOKAHEAD_SAMPLES, "nam_standard_calibration")
 
 
 # --------------------------------------------------------------------------- _find_nam_site_packages
@@ -142,8 +176,7 @@ def test_find_nam_site_packages_returns_none_when_no_sibling_checkout(tmp_path):
 
 
 def test_find_nam_site_packages_finds_a_real_sibling_venv(tmp_path):
-    site_packages = tmp_path / "neural-amp-modeler" / "venv" / "lib" / "python3.11" / "site-packages"
-    site_packages.mkdir(parents=True)
+    site_packages = _fake_sibling_venv(tmp_path, with_python=False)
     assert gdc._find_nam_site_packages(work_dir=tmp_path) == site_packages
 
 

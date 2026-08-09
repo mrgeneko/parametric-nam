@@ -50,6 +50,7 @@ import argparse
 import csv
 import glob
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -92,19 +93,6 @@ def _import_nam_models():
         return None
 
 
-def _import_nam_core():
-    """Lazy, best-effort import of nam.train.core's blip-calibration functions -- same
-    reasoning as _import_nam_models, needed only for .wav delay detection."""
-    site_packages = _find_nam_site_packages()
-    if site_packages and str(site_packages) not in sys.path:
-        sys.path.insert(0, str(site_packages))
-    try:
-        from nam.train.core import _detect_input_version, _InputValidationError, _analyze_latency
-        return _detect_input_version, _InputValidationError, _analyze_latency
-    except ImportError:
-        return None
-
-
 def load_nam_model(path: Path, tier: str = "full"):
     """Load a .nam file for inference, transparently unwrapping SlimmableContainer exports
     (community capture tools and this repo's own export_checkpoint.py --compose both use this wrapper: multiple
@@ -135,6 +123,27 @@ def _run_model(model, x: np.ndarray) -> np.ndarray:
     return np.asarray(y).reshape(-1).astype(np.float32)
 
 
+# nam.train.core._calibrate_latency_v_all's own search window around the expected blip
+# location (lookahead=1_000, lookback=10_000 -- not exported as constants, so mirrored here).
+# A delay outside [-lookahead, +lookback] can still come back as a "successful" calibration
+# -- confirmed directly: an injected ~1s delay, far outside the window, returned a plausible-
+# looking but WRONG ~0. detect_delay() below treats anything outside this range as untrusted.
+#
+# THIS BOUND IS NOT A COMPLETE GUARANTEE. It only catches results that violate NAM's own
+# documented search range -- a spurious match that happens to land INSIDE that range (e.g.
+# the algorithm triggering on some incidental transient in the actual rendered content,
+# rather than the real calibration blip) isn't caught by it, and isn't caught by NAM's own
+# exposed warnings either (checked directly: `matches_lookahead`/`disagreement_too_high` were
+# both False on exactly such a spurious match -- V3 has only one blip location, so there's
+# nothing for `disagreement_too_high` to cross-check against). A latency this far outside
+# realistic audio-interface territory (tested: ~1s) is an extreme case, not a scenario this
+# tool can fully defend against from NAM's calibration output alone.
+_NAM_LOOKAHEAD_SAMPLES = 1_000
+_NAM_LOOKBACK_SAMPLES = 10_000
+
+_NAM_DELAY_HELPER = Path(__file__).resolve().parent / "tools" / "nam_delay_helper.py"
+
+
 def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
     """Best-effort NAM blip-based latency calibration between a wet capture and the shared dry
     reference sweep. Returns (delay_samples, source):
@@ -142,50 +151,63 @@ def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
       "nam_standard_calibration"  real calibration -- dry_wav matched a NAM-recognized standard
                                    sweep (e.g. sweep-v3.wav)
       "delay_zero_fallback"       dry_wav isn't a recognized standard file (e.g. this repo's own
-                                   sweepv5.wav), or calibration found no usable impulse response
-      "nam_unavailable"           the optional neural-amp-modeler package isn't importable
+                                   sweepv5.wav), calibration found no usable impulse response, or
+                                   a "successful" result fell outside NAM's own trusted search
+                                   window (see _NAM_LOOKAHEAD_SAMPLES/_NAM_LOOKBACK_SAMPLES)
+      "nam_unavailable"           the optional neural-amp-modeler package isn't importable, or
+                                   its subprocess (see below) couldn't be run at all
 
     A REAL capture's latency (analog signal chain: ADC/DAC, cable, buffering) has no digital-
     inference equivalent -- gen_dataset_from_schx.py's SPICE renders and this file's own
     .nam-inference path are both exactly phase-aligned to the input by construction, so this
     problem is unique to the .wav path. Never a correlation-based guess (see capture_static.py's
     module docstring for why that actively misleads) -- only NAM's own impulse-based calibration,
-    or a disclosed delay=0."""
-    nam_core = _import_nam_core()
-    if nam_core is None:
+    or a disclosed delay=0.
+
+    RUNS IN A SUBPROCESS (tools/nam_delay_helper.py), under the sibling neural-amp-modeler
+    venv's OWN interpreter -- not a lazy in-process import like load_nam_model's. nam.train.core
+    depends on numba, which checks numpy's version at import time; importing it in-process (even
+    after adding the sibling venv's site-packages to sys.path) hands numba whatever numpy module
+    THIS process already loaded (parametric-nam's own), not the sibling venv's compatible one --
+    confirmed hitting exactly this ("Numba needs NumPy 2.4 or less. Got NumPy 2.5.") in normal
+    use. A fresh subprocess under that venv's own python has no such contamination."""
+    site_packages = _find_nam_site_packages()
+    if site_packages is None:
         return 0, "nam_unavailable"
-    _detect_input_version, _InputValidationError, _analyze_latency = nam_core
+    python = site_packages.parent.parent.parent / "bin" / "python3"  # venv/lib/pyX/site-packages -> venv/bin/python3
+    if not python.exists():
+        return 0, "nam_unavailable"
 
     try:
-        version, _strong_match = _detect_input_version(str(dry_wav))
-    except _InputValidationError:
-        version = None
-    except Exception as e:
-        # Despite the (version, strong_match) signature implying a graceful None for "no
-        # match", it can also RAISE (confirmed on sweepv5.wav) or hit an unrelated read
-        # failure (e.g. a FLOAT-subtype WAV NAM's own reader doesn't support -- see
-        # capture_static.py's detect_standard_input for the same trap). Either way: not a
-        # standard file, fall back, don't crash the whole batch over one file.
-        print(f"  WARNING: standard-input detection failed on {dry_wav.name} "
-              f"({type(e).__name__}: {e}) -- treating as not-a-standard-file, delay=0.")
-        version = None
-    if version is None:
+        r = subprocess.run([str(python), str(_NAM_DELAY_HELPER), str(dry_wav), str(wet_wav)],
+                           capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f"  WARNING: NAM latency calibration timed out on {wet_wav.name} -- "
+              f"falling back to delay=0.")
         return 0, "delay_zero_fallback"
 
     try:
-        latency_result = _analyze_latency(user_latency=None, input_version=version,
-                                          input_path=str(dry_wav), output_path=str(wet_wav),
-                                          silent=True)
-        delay = latency_result.calibration.recommended
-    except Exception as e:
-        print(f"  WARNING: NAM latency calibration failed on {wet_wav.name} "
-              f"({type(e).__name__}: {e}) -- falling back to delay=0.")
-        return 0, "delay_zero_fallback"
+        result = json.loads(r.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        print(f"  WARNING: NAM latency calibration subprocess produced no usable output on "
+              f"{wet_wav.name} (exit {r.returncode}): {r.stderr[-300:] or '(no stderr)'} -- "
+              f"falling back to delay=0.")
+        return 0, "nam_unavailable"
+
+    if "detail" in result:
+        print(f"  WARNING: {result['detail']} -- falling back to delay=0.")
+    delay, source = result.get("delay"), result.get("source")
     if delay is None:
-        print(f"  WARNING: NAM's blip calibration found no impulse response in "
-              f"{wet_wav.name} -- falling back to delay=0.")
+        return 0, source or "delay_zero_fallback"
+
+    if delay < -_NAM_LOOKAHEAD_SAMPLES or delay > _NAM_LOOKBACK_SAMPLES:
+        print(f"  WARNING: NAM calibration on {wet_wav.name} returned delay={delay}, outside "
+              f"its own [-{_NAM_LOOKAHEAD_SAMPLES}, +{_NAM_LOOKBACK_SAMPLES}]-sample search "
+              f"window -- treating as an unreliable match rather than a real detection, "
+              f"falling back to delay=0.")
         return 0, "delay_zero_fallback"
-    return int(delay), "nam_standard_calibration"
+
+    return int(delay), source
 
 
 def _align_wet(y: np.ndarray, delay: int, target_len: int) -> np.ndarray:
