@@ -50,6 +50,7 @@ import argparse
 import csv
 import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -70,10 +71,14 @@ def _find_nam_site_packages(work_dir: Path = None):
     module's own import or for a .wav-only run without calibration -- can find them. Returns
     None if no such checkout exists; callers degrade gracefully rather than crash.
 
-    `work_dir` (default ~/work) is a parameter rather than hardcoded so tests can point it at
-    an empty directory instead of monkeypatching Path.home() -- stdlib global state pytest's
-    own internals rely on too."""
-    venv = (work_dir or Path.home() / "work") / "neural-amp-modeler" / "venv"
+    `$NEURAL_AMP_MODELER_HOME` overrides the checkout location if it isn't a sibling of this
+    repo (same override-precedence pattern as $LIVESPICE_CLI elsewhere in this toolchain).
+    `work_dir` (default ~/work, ignored when the env var is set) is a parameter rather than
+    hardcoded so tests can point it at an empty directory instead of monkeypatching
+    Path.home() -- stdlib global state pytest's own internals rely on too."""
+    env = os.environ.get("NEURAL_AMP_MODELER_HOME")
+    venv = (Path(env).expanduser() if env else
+           (work_dir or Path.home() / "work") / "neural-amp-modeler") / "venv"
     site_packages = next((venv / "lib").glob("python*/site-packages"), None)
     return site_packages if site_packages and site_packages.exists() else None
 
