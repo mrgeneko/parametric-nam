@@ -324,11 +324,32 @@ key that stock loaders ignore but a parametric-aware host (`NAMix`,
 anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
 where embedding the full master in every tone just multiplies size.
 
+### `tools/plot_tone_response.py` — frequency-response chart for an exported `.nam`
+
+```bash
+python tools/plot_tone_response.py \
+    --model bundle.optimal.param.nam --config dataset/config.json \
+    --out tone_response.svg --summary tone_response.md \
+    --schx circuit.schx
+```
+
+Renders a low-level sweep through every tier of a `SlimmableContainer` `.param.nam`, at each
+tone knob's min/max (the drive knob held low, so the curves reflect frequency shaping, not
+distortion — `--include-drive` charts it anyway), via the real C++ render path
+(`render_parametric`). Draws a grid of magnitude-response curves: rows = tiers, columns =
+swept knobs — self-consistency across tiers by default. Pass `--schx` to also render the
+schematic through the LiveSPICE oracle and overlay it as ground truth, turning the chart
+into a per-knob accuracy check (does the model's Bass/Mid/Treble response actually match the
+circuit?) instead of just tier agreement. Best-effort throughout: falls back to a
+model-only chart if the oracle is unavailable, and exits 0 with a warning (never blocks a
+release) if `render_parametric` itself isn't built.
+
 ### `release_run.sh` — verify + stage a finished run
 
-Its defaults assume a private archive layout you don't have; override `RUN`/`DS`/`SCHX`/
-`CONFIG` to point at any recipe instead, including the bundled `examples/muff/` one —
-continuing straight from the "Try it now" run above:
+Calls `plot_tone_response.py` above automatically to produce the release bundle's
+`tone_response.svg`/`.md`. Its own defaults assume a private archive layout you don't
+have; override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the
+bundled `examples/muff/` one — continuing straight from the "Try it now" run above:
 
 ```bash
 RUN=/tmp/muff DS=/tmp/muff_ds \
