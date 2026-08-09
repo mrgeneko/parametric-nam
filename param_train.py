@@ -1379,6 +1379,33 @@ def export_composite_nam(model, best_state: dict, dataset, path: Path, device):
     model.to(device)
 
 
+def resolve_device(requested: str) -> str:
+    """"auto" -> cuda, else mps, else cpu; anything else passes through unchanged.
+
+    Loud, not silent, on the auto-detected-cpu case specifically: it's easy to miss in
+    scrollback, and a real device grid runs into hundreds/thousands of permutations and
+    tens of thousands of gradient steps -- CPU-only training realistically never
+    finishes one (see README: System Requirements). An EXPLICIT --device cpu is a
+    deliberate choice (e.g. debugging on a laptop) and doesn't get the alarm. Not a
+    hard block either way -- some environments legitimately have no better option and
+    still want the run queued."""
+    if requested != "auto":
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    print("\n" + "#" * 64, file=sys.stderr)
+    print("# WARNING: no GPU detected (torch.cuda/mps both unavailable) --", file=sys.stderr)
+    print("# falling back to CPU. A real training run has tens of thousands", file=sys.stderr)
+    print("# of gradient steps; CPU-only training is realistically too slow", file=sys.stderr)
+    print("# to ever finish one (see README: System Requirements). If a GPU", file=sys.stderr)
+    print("# IS present, check your torch install matches it (CUDA/ROCm/MPS", file=sys.stderr)
+    print("# wheel, not the CPU-only default) before letting this run.", file=sys.stderr)
+    print("#" * 64 + "\n", file=sys.stderr)
+    return "cpu"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1581,15 +1608,7 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.device == "auto":
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-    else:
-        device = args.device
+    device = resolve_device(args.device)
     print(f"Device: {device}", file=sys.stderr)
 
     # --spectral-norm's power-iteration (nn.utils.parametrizations.spectral_norm's
