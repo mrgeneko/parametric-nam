@@ -222,3 +222,29 @@ def test_load_config_maps_knobs_fixed_and_defaults(tmp_path):
     assert out["defaults"] == "SUSTAIN=0.3"     # the Timmy case: a real default, not midpoint
     assert out["widths"] == "3,4,8"             # list -> the string --widths expects
     assert out["epochs"] == 400
+
+
+# --------------------------------------------------------------------------- resolve_device
+
+def test_resolve_device_passes_through_an_explicit_choice_unchanged(capsys):
+    assert param_train.resolve_device("cpu") == "cpu"
+    assert "WARNING" not in capsys.readouterr().err   # explicit cpu is deliberate, no alarm
+
+
+def test_resolve_device_auto_prefers_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert param_train.resolve_device("auto") == "cuda"
+
+
+def test_resolve_device_auto_prefers_mps_over_cpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    assert param_train.resolve_device("auto") == "mps"
+
+
+def test_resolve_device_auto_falls_back_to_cpu_with_a_loud_warning(monkeypatch, capsys):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    assert param_train.resolve_device("auto") == "cpu"
+    assert "WARNING" in capsys.readouterr().err
