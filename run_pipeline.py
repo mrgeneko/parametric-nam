@@ -723,10 +723,13 @@ def main():
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.05,
                    help="Val fraction (was 0.1 -- see param_train.py --help for why 0.05)")
-    g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="bf16",
-                   help="Mixed-precision training forward (default: bf16, ~2x throughput on "
-                        "MPS vs fp32, no fp16-overflow risk -- see param_train.py --help). "
-                        "Forwarded to param_train.py; pass --amp off to disable.")
+    g.add_argument("--amp",            choices=["off", "fp16", "bf16"], default="off",
+                   help="Mixed-precision training forward (default: off, i.e. fp32 -- bf16/"
+                        "fp16 give ~2x throughput on MPS but bf16's reduced mantissa was found "
+                        "to mask further ESR improvement once a run nears convergence, "
+                        "separate from the fp16-overflow/nan issue it was chosen to fix -- see "
+                        "param_train.py --help). Forwarded to param_train.py; pass --amp bf16 "
+                        "or fp16 to opt into mixed precision.")
     g.add_argument("--per-tier-clip",  action="store_true",
                    help="Slimmable only: clip_grad_norm_ each tier's own parameters "
                         "separately instead of one joint call over every tier combined "

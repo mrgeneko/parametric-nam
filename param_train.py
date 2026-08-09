@@ -1489,15 +1489,16 @@ def main():
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
-    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="bf16",
-                    help="Mixed-precision TRAINING forward (default: bf16). The model forward "
-                         "runs under autocast in half precision; the LOSS is always computed "
-                         "in fp32 (the MRSTFT magnitudes of near-silent fading tails are "
-                         "exactly what the ESR loss exists to protect), and validate() always "
-                         "runs fp32 so val ESR stays comparable across runs and matches the "
-                         "exported (fp32) model. fp16 uses GradScaler loss scaling; bf16 "
-                         "needs none (fp32 exponent range) but has fewer mantissa bits. "
-                         "Made default 2026-07-28 for the throughput win over fp32 "
+    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="off",
+                    help="Mixed-precision TRAINING forward (default: off, i.e. fp32). The "
+                         "model forward runs under autocast in half precision when fp16/bf16 "
+                         "is selected; the LOSS is always computed in fp32 (the MRSTFT "
+                         "magnitudes of near-silent fading tails are exactly what the ESR loss "
+                         "exists to protect), and validate() always runs fp32 so val ESR stays "
+                         "comparable across runs and matches the exported (fp32) model. fp16 "
+                         "uses GradScaler loss scaling; bf16 needs none (fp32 exponent range) "
+                         "but has fewer mantissa bits. "
+                         "Made fp16 default 2026-07-28 for the throughput win over fp32 "
                          "(production-shape training measured COMPUTE-bound on MPS, KoT: "
                          "~1.7 s/step of conv work, TS-9 w4+w8 measured ~2.9x s/step faster "
                          "than fp32) -- the choice of fp16 specifically (vs bf16) was never "
@@ -1508,17 +1509,26 @@ def main():
                          "loud-transient crops pushing activations past its ~65504 ceiling), "
                          "producing nan losses -- GradScaler verified to correctly skip the "
                          "optimizer step on those (weights not corrupted), but still wasted "
-                         "steps. bf16 has no such ceiling and needs no loss scaling, so the "
-                         "whole failure class is structurally gone, not just less likely. "
-                         "Confirmed both a synthetic MPS benchmark and real production "
-                         "per-epoch timing (metrics.csv) show bf16 at parity or marginally "
-                         "faster than fp16 -- no throughput tradeoff for the switch -- and "
-                         "confirmed zero nan across a 3h21m / ~90-epoch run that crossed a "
-                         "full SGDR restart (the specific window fp16 was clustering nans "
-                         "in). The per-device quality A/B (judge on level_band_esr.py bands "
-                         "and per_perm_esr.py spread per internal engineering notes, never "
-                         "the headline val ESR) is still worth running per-device, but no "
-                         "longer gates opt-in. Pass --amp off to disable.")
+                         "steps. bf16 has no such ceiling and needs no loss scaling, so that "
+                         "failure class was structurally gone, not just less likely. "
+                         "Switched default bf16 -> off (fp32) 2026-08-09, same day, after the "
+                         "bf16 fix turned out to only address the nan/instability issue, NOT "
+                         "the separate ESR plateau bf16 was stuck at -- resuming that same "
+                         "Guv'nor run at fp32 broke through it (4 new best-ESR epochs within "
+                         "45 minutes of resuming, after bf16 had been flat since epoch 2998), "
+                         "and a tweed5f6a run on a different machine, also switched to fp32, "
+                         "saw 11 ESR improvements in the following 48 epochs. Both are "
+                         "consistent with bf16's reduced mantissa (7 bits) introducing enough "
+                         "per-step arithmetic error (previously measured 8e-4-6.5e-3, rivaling "
+                         "model ESR at typical operating points) to mask further optimization "
+                         "progress once a run gets close to convergence, even though it never "
+                         "produced nans the way fp16 did. fp32 pays the ~2.9x/step throughput "
+                         "cost domain-wide now, in exchange for that ESR ceiling not existing. "
+                         "The per-device quality A/B (judge on level_band_esr.py bands and "
+                         "per_perm_esr.py spread per internal engineering notes, never the "
+                         "headline val ESR) is still worth running per-device if fp16/bf16 are "
+                         "used for a quick throughput-bound run. Pass --amp bf16 or --amp fp16 "
+                         "explicitly to opt back into mixed precision.")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--widths", type=str, default=None,
