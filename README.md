@@ -257,12 +257,19 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
     --lr 3e-4 --epochs 200
 ```
 
-- **`--slimmable`** (always use it) trains an A2 **Lite 3ch + Full 8ch** jointly and
-  exports both tiers in one SlimmableContainer.
-- **Dual best-checkpointing**: the best-full and best-lite epochs (which differ) are
-  each saved and exported live to `<output>.best_full.param.nam` /
-  `<output>.best_lite.param.nam`, plus `best.pt` / `best_lite.pt` and per-epoch
-  `latest.pt` + `metrics.csv`.
+- Training is **always slimmable**: it jointly trains an A2 **Lite 4ch + Full 8ch**
+  and exports both tiers in one SlimmableContainer. `--widths` overrides the tier
+  channel counts (default `4,8`).
+- **Per-tier best-checkpointing**: each tier's own best epoch (they differ) is saved
+  and exported live to `<output>.best_full.param.nam` / `<output>.best_lite.param.nam`
+  (and `.best_w<N>.param.nam` for any middle tier), plus `best.pt` / `best_<tier>.pt`
+  and per-epoch `latest.pt` + `metrics.csv`.
+- **Composite export**: whenever *any* tier improves, its current per-tier bests are
+  also spliced into one combined container and exported live to
+  `<output>.optimal.param.nam` — the same multi-tier artifact `release_run.sh`
+  otherwise builds from checkpoints after the fact, kept up to date automatically so
+  you can spot-test it mid-run without a separate manual export step. Cheap: reuses
+  the per-tier weights already held in memory, no extra disk read and no forward pass.
 - **`--epochs 0`** = open-ended: trains with an SGDR (cosine-warm-restart) schedule
   until you `touch <ckpt>/STOP` (or SIGINT/SIGTERM). Best models export continuously,
   so you can stop whenever ESR is good enough. `--restart-period` sets the cycle length.
@@ -359,10 +366,10 @@ outputs.npy   # [N_perms, N_samples] float32
 params.csv    # idx, knob1, ..., rms, peak, ok, error
 ```
 
-A **release folder** (`<nam-output>_release/`, built by `run_pipeline`): the shipped
-`.best_full.param.nam` + `.best_lite.param.nam`, the `.schx`, `metrics.csv`,
-`MANIFEST.md` (provenance: params, per-step timing, hardware, git revisions), and a
-runnable `reproduce.sh`.
+A **release folder** (`<nam-output>_release/`, built by `run_pipeline`): every
+per-tier `.best_<tier>.param.nam` plus the composite `.optimal.param.nam`, the
+`.schx`, `metrics.csv`, `MANIFEST.md` (provenance: params, per-step timing, hardware,
+git revisions), and a runnable `reproduce.sh`.
 
 ---
 

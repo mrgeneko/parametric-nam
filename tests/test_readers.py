@@ -138,6 +138,59 @@ def test_export_checkpoint_model_state_accepts_either_key():
     assert export_checkpoint.model_state({"c": 3}) == {"c": 3}   # raw state dict
 
 
+def test_export_composite_nam_splices_each_tiers_own_weights_and_restores_after(
+        tmp_path, monkeypatch):
+    """export_composite_nam is called automatically now whenever any tier improves
+    (param_train.py's epoch loop) -- it MUST pull each tier's slice from that tier's
+    OWN best_state (not another tier's, and not the model's current in-training
+    weights), and MUST leave the model's live weights untouched afterward so training
+    continues normally. Spies on SlimmableParametricA2.export_nam to inspect the
+    state_dict that was actually loaded at export time, rather than parsing the real
+    .nam JSON format -- decouples this test from that format entirely."""
+    from types import SimpleNamespace
+    from param_train import SlimmableParametricA2, export_composite_nam
+
+    model = SlimmableParametricA2(2, widths=[3, 4, 8])
+    labels = model.tier_labels()
+    assert labels == ["lite", "w4", "full"]
+    original = {k: v.clone() for k, v in model.state_dict().items()}
+
+    # Distinct, checkable best_state per tier: only THAT tier's own slice is scaled by
+    # a distinctive factor. If the splice cross-contaminates tiers, the wrong scale
+    # shows up on the wrong slice.
+    scale = {"lite": 2.0, "w4": 3.0, "full": 5.0}
+    best_state = {}
+    for i, lbl in enumerate(labels):
+        pref = model.tier_state_prefix(i)
+        st = {k: v.clone() for k, v in original.items()}
+        for k in st:
+            if k.startswith(pref):
+                st[k] = st[k] * scale[lbl]
+        best_state[lbl] = st
+
+    captured = {}
+    def fake_export_nam(self, config, metadata, sample_rate, input_audio=None):
+        captured["state"] = {k: v.clone() for k, v in self.state_dict().items()}
+        return {"fake": True}
+    monkeypatch.setattr(SlimmableParametricA2, "export_nam", fake_export_nam)
+
+    out_path = tmp_path / "optimal.param.nam"
+    export_composite_nam(model, best_state, SimpleNamespace(config={}, inp=None),
+                         out_path, device="cpu")
+
+    for i, lbl in enumerate(labels):
+        pref = model.tier_state_prefix(i)
+        for k, v in captured["state"].items():
+            if k.startswith(pref):
+                assert torch.equal(v, best_state[lbl][k]), f"{k} wasn't spliced from {lbl}"
+
+    after = model.state_dict()
+    for k, v in original.items():
+        assert torch.equal(after[k], v), f"{k} wasn't restored after the composite export"
+
+    assert json.loads(out_path.read_text()) == {"fake": True}
+
+
 def test_exported_model_is_tagged_skip(tmp_path):
     """Whatever path produced it, an exported model self-describes as skip — that tag is what
     lets every reader reject the legacy ones."""
