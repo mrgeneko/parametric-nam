@@ -295,6 +295,19 @@ coverage**, 1-D histograms, pairwise 2-D occupancy, and nearest-neighbour **gap
 analysis** (largest empty regions, optionally emitted as fill points). Pairs with the
 seed-extensible sampler to grow a dataset toward its gaps.
 
+### `sweep_report.py` — visualize a set of WAVs at different knob settings
+
+```bash
+python sweep_report.py /tmp/ds/*_gain_*.wav --param-name gain -o report.html
+```
+
+Self-contained HTML report from any set of WAVs, one per parameter setting (sorted by
+name): overlaid waveforms, frequency spectra, and per-file stats (peak, RMS, RMS
+monotonicity across the sweep, spectral centroid trend). Doesn't care where the WAVs came
+from — point it at a generated dataset's per-permutation renders to eyeball the sweep
+before training (`coverage_report.py` checks the *sampling*, this checks the *audio*), or
+at a batch of `param_infer.py` outputs to eyeball a trained model's knob response.
+
 ### `export_checkpoint.py` — checkpoint → `.param.nam`
 
 ```bash
