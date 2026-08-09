@@ -180,6 +180,28 @@ def test_find_nam_site_packages_finds_a_real_sibling_venv(tmp_path):
     assert gdc._find_nam_site_packages(work_dir=tmp_path) == site_packages
 
 
+def test_find_nam_site_packages_env_override_takes_precedence(monkeypatch, tmp_path):
+    # work_dir points at a real, discoverable checkout ...
+    work_site_packages = _fake_sibling_venv(tmp_path / "work", with_python=False)
+    # ... but $NEURAL_AMP_MODELER_HOME points somewhere else entirely, and must win.
+    override_root = tmp_path / "elsewhere"
+    override_site_packages = override_root / "venv" / "lib" / "python3.12" / "site-packages"
+    override_site_packages.mkdir(parents=True)
+    monkeypatch.setenv("NEURAL_AMP_MODELER_HOME", str(override_root))
+
+    found = gdc._find_nam_site_packages(work_dir=tmp_path / "work")
+    assert found == override_site_packages
+    assert found != work_site_packages
+
+
+def test_find_nam_site_packages_env_override_expands_user(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    site_packages = tmp_path / "nam" / "venv" / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+    monkeypatch.setenv("NEURAL_AMP_MODELER_HOME", "~/nam")
+    assert gdc._find_nam_site_packages() == site_packages
+
+
 # --------------------------------------------------------------------------- _wet_from_wav
 
 def test_wet_from_wav_aligns_and_resamples_to_the_dry_reference_rate(monkeypatch, tmp_path):
