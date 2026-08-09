@@ -120,6 +120,11 @@ python run_pipeline.py \
 
 - `--epochs 0` = **open-ended training** (see param_train) — runs until you
   `touch <ckpt>/STOP`, exporting the best model continuously.
+- **Monitor progress**: every step's output streams, timestamped, to both the terminal
+  and `<dataset-dir>/pipeline.log` (`--log` to put it elsewhere) — `tail -f
+  <dataset-dir>/pipeline.log` from another terminal to follow a long run, including
+  live training epochs once it reaches that step. `<checkpoint-dir>/metrics.csv` has
+  the same training progress in structured, per-epoch form (val ESR per tier).
 - On completion it builds `<nam-output>_release/`: the best-full & best-lite
   `.param.nam`, the `.schx`, `metrics.csv`, a provenance `MANIFEST.md` (params +
   timing + hardware + git revs), and a runnable `reproduce.sh`. `--no-release` skips it.
