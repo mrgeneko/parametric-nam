@@ -1344,30 +1344,33 @@ def export_composite_nam(model, best_state: dict, dataset, path: Path, device):
 
 
 def resolve_device(requested: str) -> str:
-    """"auto" -> cuda, else mps, else cpu; anything else passes through unchanged.
+    """"auto" -> cuda, else mps, else HARD FAIL; anything else (including an explicit
+    "cpu") passes through unchanged.
 
-    Loud, not silent, on the auto-detected-cpu case specifically: it's easy to miss in
-    scrollback, and a real device grid runs into hundreds/thousands of permutations and
-    tens of thousands of gradient steps -- CPU-only training realistically never
-    finishes one (see README: System Requirements). An EXPLICIT --device cpu is a
-    deliberate choice (e.g. debugging on a laptop) and doesn't get the alarm. Not a
-    hard block either way -- some environments legitimately have no better option and
-    still want the run queued."""
+    CPU training isn't "slow", it's realistically infeasible: a real device grid runs
+    into hundreds/thousands of permutations and tens of thousands of gradient steps
+    (see README: System Requirements), and letting --device auto silently land on cpu
+    just queues a run that will never finish -- a warning that's easy to miss in
+    scrollback isn't enough of a guard against that. So auto refuses outright when no
+    GPU is available. An EXPLICIT --device cpu is a deliberate choice (e.g. debugging
+    a few steps on a laptop, not a real run) and is honored as asked, no refusal --
+    that's the escape hatch for anyone who genuinely wants it anyway."""
     if requested != "auto":
         return requested
     if torch.cuda.is_available():
         return "cuda"
     if torch.backends.mps.is_available():
         return "mps"
-    print("\n" + "#" * 64, file=sys.stderr)
-    print("# WARNING: no GPU detected (torch.cuda/mps both unavailable) --", file=sys.stderr)
-    print("# falling back to CPU. A real training run has tens of thousands", file=sys.stderr)
-    print("# of gradient steps; CPU-only training is realistically too slow", file=sys.stderr)
-    print("# to ever finish one (see README: System Requirements). If a GPU", file=sys.stderr)
-    print("# IS present, check your torch install matches it (CUDA/ROCm/MPS", file=sys.stderr)
-    print("# wheel, not the CPU-only default) before letting this run.", file=sys.stderr)
-    print("#" * 64 + "\n", file=sys.stderr)
-    return "cpu"
+    sys.exit(
+        "\n" + "#" * 64 + "\n"
+        "# ERROR: no GPU detected (torch.cuda/mps both unavailable) -- refusing to\n"
+        "# start. A real training run has tens of thousands of gradient steps; CPU-\n"
+        "# only training is not realistically feasible for one (see README: System\n"
+        "# Requirements), not just slow. If a GPU IS present, check your torch\n"
+        "# install matches it (CUDA/ROCm/MPS wheel, not the CPU-only default).\n"
+        "# To proceed on CPU anyway (e.g. a short debugging run, not a real one),\n"
+        "# pass --device cpu explicitly instead of --device auto.\n"
+        + "#" * 64)
 
 
 # ---------------------------------------------------------------------------

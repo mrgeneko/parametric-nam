@@ -574,8 +574,10 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 Training parametric NAM models is GPU- and memory-intensive; a GPU is required in
 practice. Real device grids run into hundreds or thousands of permutations (e.g. the
 JCM800 hot-rod's 1944), and real training budgets run into the tens of thousands of
-gradient steps (see `--target-steps` above) — CPU-only training is too slow to
-realistically finish a real run.
+gradient steps (see `--target-steps` above) — CPU-only training isn't realistically
+feasible for a real run, not just slow. `--device auto` (the default) refuses to start
+if no GPU is detected, rather than silently queuing a run that will never finish —
+pass `--device cpu` explicitly if you genuinely want to (e.g. a short debugging run).
 
 - **GPU VRAM**: 16 GB+ — needed for comfortable training of slimmable models
   with 4 widths at batch-size 16+.
