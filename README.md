@@ -36,7 +36,8 @@ This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 
 Beyond the bundled example, all you need is your own `.schx` (e.g. from
 `LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it —
-see **Per-circuit configs** below for the format. No other repos required.
+copy `examples/template.config.toml` to start (see **Per-circuit configs** below for the
+format). No other repos required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip). If your checkout isn't a sibling of this repo, point at it explicitly:
@@ -146,9 +147,10 @@ table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 
 **This repo carries no per-device configs of its own.** Each device's recipe lives as a
 `config.toml[.<variant>]` you maintain alongside your own circuits — the *living* recipe,
-distinct from a specific archived run's *frozen* `reproduce.sh`. See
+distinct from a specific archived run's *frozen* `reproduce.sh`. `examples/template.config.toml`
+is a minimal blank one to copy for a new device; see
 [`docs/adding-a-device.md`](docs/adding-a-device.md) for a fully worked example of the
-format when writing a new one.
+format.
 
 ## Scripts
 
