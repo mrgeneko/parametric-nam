@@ -38,10 +38,12 @@ This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 
 The bundled example above needs nothing beyond what it already cloned. To train your own
 circuit, all you need on top of that is your own `.schx` (e.g. from
-`LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it —
-copy `examples/template.config.toml` to start (see **Per-circuit configs** below for the
-format), and use `grid_adequacy.py`/`measure_truncation.py` (Scripts, below) to measure
-good values instead of guessing them. No other repos are required.
+`LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it.
+`tools/scaffold_config.py --schx yours.schx` discovers its real controls and measures a
+starting `oversample` for you (Scripts, below) — or copy `examples/template.config.toml`
+by hand (see **Per-circuit configs** below for the format). Either way, finish with
+`tools/grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
+measured one. No other repos are required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip). If your checkout isn't a sibling of this repo, point at it explicitly:
@@ -149,11 +151,31 @@ blank one to copy for a new device.
 
 ## Scripts
 
+### `tools/scaffold_config.py` — generate a starting `config.toml` for a new circuit
+
+```bash
+python tools/scaffold_config.py --schx path/to/circuit.schx
+```
+
+Discovers the circuit's real controls (ganged pots collapsed to one, same logic
+`gen_dataset_from_schx.py --schx X` with no `--knobs` uses to list them) and writes a
+`config.toml` with a `[knobs]` entry per control, copying the rest of
+`examples/template.config.toml` verbatim. For the `livespice` backend (default) it also
+*measures* a starting `oversample` — runs `measure_truncation.py`'s own candidate sweep
+and prints the same kind of table, but doesn't pick a value out of it automatically: a
+"stalled" candidate in that table can mean a render problem, not convergence, and the
+docs treat it as something to investigate by hand, not a green light. So it writes the
+largest tested candidate as a starting point and leaves the judgment call to you. The
+`[knobs]` grid it writes is a **placeholder** (`--grid-points` evenly-spaced values per
+knob, default 3) — run `tools/grid_adequacy.py --config <output> --apply` next to turn it
+into a measured one.
+
 ### `tools/grid_adequacy.py` — measure whether a knob grid is dense enough
 
 ```bash
 ./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
-./tools/grid_adequacy.py --config ... --suggest       # propose a regrid
+./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
+./tools/grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
 ```
 
 Renders the circuit's true output at each grid cell's midpoint and compares it against
@@ -161,7 +183,12 @@ interpolating the two neighboring points — the residual is the interpolation e
 grid imposes**, independent of any model. Run this before training, not after: a cell
 whose residual exceeds `--target` is a floor that no training capacity or time can lift,
 since the information was never sampled. `--suggest` proposes a denser/sparser grid and
-prints it as TOML, ready to paste into `[knobs]`.
+prints it as TOML for you to paste into `[knobs]` yourself. `--apply` goes further: it
+bisects the failing cells, re-probes the new grid, and repeats (reusing the same render
+cache across rounds) until every cell clears `--target` or `--max-iterations` runs out,
+writing the converged grid straight into `--config`'s `[knobs]` table — one command
+instead of suggest → hand-copy → rerun → repeat. It doesn't touch anything else in the
+file, comments included.
 
 ### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 

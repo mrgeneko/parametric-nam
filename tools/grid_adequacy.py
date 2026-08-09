@@ -59,13 +59,15 @@ nothing else corrects for it (loss weighting, tier width, or -- the blunt instru
 the starved knob more grid points so it has more to learn from per epoch). Grid density and training
 balance are separate problems; this tool only measures the first one.
 
-    ./tools/grid_adequacy.py --config ~/work/parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml --target 0.009
-    ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid
+    ./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
+    ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
+    ./tools/grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
 """
 from __future__ import annotations
 
 import argparse
 import os as _os
+import re
 import subprocess
 import sys
 import tempfile
@@ -90,6 +92,36 @@ def esr(a: np.ndarray, b: np.ndarray) -> float:
 def load_config(p: Path) -> dict:
     with open(p, "rb") as f:
         return tomllib.load(f)
+
+
+def write_knobs(config_path: Path, knobs: dict) -> None:
+    """In-place text splice for --apply: replace only the [knobs] table's VALUE lines,
+    leaving every comment (including ones explaining the PREVIOUS grid, which read fine
+    as history) and every other section byte-for-byte untouched. Requires the standard
+    `[knobs]` header + one `NAME = [...]` line per knob layout every config in this repo
+    uses -- a full TOML round-trip (parse -> dict -> re-serialize) would blow away
+    exactly the hand-written commentary these configs are full of.
+
+    Only consumes the CONSECUTIVE `NAME = [...]` lines right after the header, stopping at
+    the first blank line, comment, or new section -- some configs put an explanatory
+    comment between [knobs]'s last line and the next section (e.g. muff's "Volume is a
+    passive output divider..." paragraph ahead of [fixed]); stopping there instead of at
+    the next `[section]` keeps that from being silently deleted as if it were still part
+    of the knobs table."""
+    text = config_path.read_text()
+    m = re.search(r"^\[knobs\][ \t]*(?:#.*)?\n", text, re.MULTILINE)
+    if not m:
+        sys.exit(f"--apply: no [knobs] table found in {config_path} -- write it by hand.")
+    body_start = m.end()
+    assign_re = re.compile(r"^[A-Za-z0-9_.-]+[ \t]*=.*\n", re.MULTILINE)
+    body_end = body_start
+    while (am := assign_re.match(text, body_end)):
+        body_end = am.end()
+
+    width = max(len(k) for k in knobs)
+    lines = [f"{name:<{width}} = [{', '.join(repr(float(v)) for v in vals)}]\n"
+             for name, vals in knobs.items()]
+    config_path.write_text(text[:body_start] + "".join(lines) + text[body_end:])
 
 
 class Renderer:
@@ -267,6 +299,64 @@ def cell_error(render, knobs: dict, axis: str, lo: float, hi: float, others: dic
     return num / den if den > 0 else float("nan")
 
 
+def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict, int, int]:
+    """Probe every cell in `knobs` with `render`, print the per-axis report, and return
+    (worst_by_axis, n_coarse, n_over) -- used standalone and by --apply's iteration loop."""
+    # Probe each cell at several positions of the OTHER knobs -- the knobs interact, and a cell
+    # that interpolates cleanly at one Tone can fail at another. (On the Big Muff the Sustain
+    # 0.85-1.0 cell is 0.0044 at Tone=0 and 0.0813 at Tone=1: an 18x spread. Probing one slice
+    # would have missed it.)
+    jobs = []
+    for axis, vals in knobs.items():
+        other_axes = {k: v for k, v in knobs.items() if k != axis}
+        # Three reference slices: the other knobs at their low / mid / high value. Index each
+        # axis at ITS OWN position -- axes have different lengths (e.g. Gain 9, Middle 3), so the
+        # old code's single shared index (the first axis's midpoint) ran off the end of shorter
+        # axes with an IndexError.
+        def _slice(pos):
+            return {k: (v[0] if pos == "lo" else v[-1] if pos == "hi" else v[len(v) // 2])
+                    for k, v in other_axes.items()}
+        slices = [{}] if not other_axes else [_slice(p) for p in ("lo", "mid", "hi")]
+        for lo, hi in zip(vals, vals[1:]):
+            for oth in slices:
+                jobs.append((axis, lo, hi, oth))
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        res = list(ex.map(lambda j: (j[0], j[1], j[2], cell_error(render, knobs, j[0], j[1], j[2], j[3])),
+                          jobs))
+
+    worst_by_axis: dict = {}
+    n_coarse = n_over = 0
+    for axis, vals in knobs.items():
+        rows = [r for r in res if r[0] == axis]
+        worst = {}
+        for lo, hi in zip(vals, vals[1:]):
+            es = [r[3] for r in rows if r[1] == lo and r[2] == hi and np.isfinite(r[3])]
+            worst[(lo, hi)] = max(es) if es else float("nan")
+        worst_by_axis[axis] = worst
+
+        print(f"  {axis}:")
+        for (lo, hi), e in worst.items():
+            if not np.isfinite(e):
+                verdict = "?"
+            elif e > target:
+                verdict = f"**TOO COARSE** ({e/target:.1f}x over) — the grid is the limit here"
+                n_coarse += 1
+            elif e <= target / 10:
+                verdict = "oversampled — these points teach the model nothing"
+                n_over += 1
+            else:
+                verdict = "ok"
+            print(f"    {lo:>7.4g} - {hi:<7.4g}  {e:>8.4f}   {verdict}")
+        print()
+
+    print(f"  {n_coarse} cell(s) too coarse, {n_over} oversampled.")
+    if n_coarse:
+        print("  A cell over target cannot be fixed by training: the information is not in the data.")
+
+    return worst_by_axis, n_coarse, n_over
+
+
 def suggest_axis(values: list, worst: dict, target: float) -> list:
     """Refine the cells that fail, drop points that are not earning their place.
 
@@ -312,6 +402,13 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=256)
     ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2))
     ap.add_argument("--suggest", action="store_true", help="propose a regrid and print it as TOML")
+    ap.add_argument("--apply", action="store_true",
+                    help="iterate suggest+reverify (implies --suggest's logic) until the grid "
+                         "clears --target or --max-iterations runs out, writing the result back "
+                         "into --config's [knobs] table -- one command instead of suggest, "
+                         "hand-copy, rerun, repeat.")
+    ap.add_argument("--max-iterations", type=int, default=5,
+                    help="cap on --apply's suggest/reverify loop (default 5)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -342,68 +439,43 @@ def main() -> None:
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
 
-    # FUTURE ENHANCEMENT: probes render into this ephemeral TemporaryDirectory with an in-memory cache,
-    # so a re-run (e.g. iterating the grid one axis at a time) re-renders every probe from scratch --
-    # no cross-run reuse. A persistent on-disk cache keyed by (schx-rev, params, oversample, iterations)
-    # would let successive runs reuse the unchanged probes, which is most of them during a regrid.
+    # --apply's suggest/reverify loop reuses this SAME Renderer (and its render cache) across
+    # iterations -- a cell whose (axis, other-knobs-slice) params dict didn't change between
+    # rounds (most of them; a bisection only touches the cells that failed) is a cache hit, not
+    # a re-render. Cross-INVOCATION reuse (e.g. tuning one axis at a time across separate runs)
+    # still re-renders from scratch -- that would need an on-disk cache keyed by (schx-rev,
+    # params, oversample, iterations).
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
                           backend=backend)
 
-        # Probe each cell at several positions of the OTHER knobs -- the knobs interact, and a cell
-        # that interpolates cleanly at one Tone can fail at another. (On the Big Muff the Sustain
-        # 0.85-1.0 cell is 0.0044 at Tone=0 and 0.0813 at Tone=1: an 18x spread. Probing one slice
-        # would have missed it.)
-        jobs = []
-        for axis, vals in knobs.items():
-            other_axes = {k: v for k, v in knobs.items() if k != axis}
-            # Three reference slices: the other knobs at their low / mid / high value. Index each
-            # axis at ITS OWN position -- axes have different lengths (e.g. Gain 9, Middle 3), so the
-            # old code's single shared index (the first axis's midpoint) ran off the end of shorter
-            # axes with an IndexError.
-            def _slice(pos):
-                return {k: (v[0] if pos == "lo" else v[-1] if pos == "hi" else v[len(v) // 2])
-                        for k, v in other_axes.items()}
-            slices = [{}] if not other_axes else [_slice(p) for p in ("lo", "mid", "hi")]
-            for lo, hi in zip(vals, vals[1:]):
-                for oth in slices:
-                    jobs.append((axis, lo, hi, oth))
+        knobs_cur = {k: list(v) for k, v in knobs.items()}
+        iteration = 0
+        while True:
+            iteration += 1
+            if args.apply and iteration > 1:
+                tot = int(np.prod([len(v) for v in knobs_cur.values()]))
+                print(f"  --- iteration {iteration}/{args.max_iterations}: "
+                      f"{' x '.join(str(len(v)) for v in knobs_cur.values())} = {tot} "
+                      f"permutations ---\n")
+            worst_by_axis, n_coarse, n_over = measure_grid(render, knobs_cur, args.target,
+                                                            args.workers)
 
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            res = list(ex.map(lambda j: (j[0], j[1], j[2], cell_error(render, knobs, j[0], j[1], j[2], j[3])),
-                              jobs))
+            if not args.apply:
+                break
+            if n_coarse == 0:
+                print(f"  grid adequate after {iteration} iteration(s).")
+                break
+            if iteration >= args.max_iterations:
+                print(f"  WARNING: still {n_coarse} cell(s) too coarse after "
+                      f"{args.max_iterations} iteration(s) -- writing anyway; rerun --apply "
+                      f"to keep refining.")
+                break
+            knobs_cur = {axis: suggest_axis(vals, worst_by_axis[axis], args.target)
+                        for axis, vals in knobs_cur.items()}
 
-    worst_by_axis: dict = {}
-    n_coarse = n_over = 0
-    for axis, vals in knobs.items():
-        rows = [r for r in res if r[0] == axis]
-        worst = {}
-        for lo, hi in zip(vals, vals[1:]):
-            es = [r[3] for r in rows if r[1] == lo and r[2] == hi and np.isfinite(r[3])]
-            worst[(lo, hi)] = max(es) if es else float("nan")
-        worst_by_axis[axis] = worst
-
-        print(f"  {axis}:")
-        for (lo, hi), e in worst.items():
-            if not np.isfinite(e):
-                verdict = "?"
-            elif e > args.target:
-                verdict = f"**TOO COARSE** ({e/args.target:.1f}x over) — the grid is the limit here"
-                n_coarse += 1
-            elif e <= args.target / 10:
-                verdict = "oversampled — these points teach the model nothing"
-                n_over += 1
-            else:
-                verdict = "ok"
-            print(f"    {lo:>7.4g} - {hi:<7.4g}  {e:>8.4f}   {verdict}")
-        print()
-
-    print(f"  {n_coarse} cell(s) too coarse, {n_over} oversampled.")
-    if n_coarse:
-        print("  A cell over target cannot be fixed by training: the information is not in the data.")
-
-    if args.suggest:
+    if args.suggest and not args.apply:
         print("\n  suggested regrid:\n\n  [knobs]")
         tot = 1
         for axis, vals in knobs.items():
@@ -411,6 +483,11 @@ def main() -> None:
             tot *= len(new)
             print(f"  {axis:<8} = {new}")
         print(f"\n  -> {tot} permutations (was {n_perms})")
+
+    if args.apply:
+        write_knobs(args.config, knobs_cur)
+        tot = int(np.prod([len(v) for v in knobs_cur.values()]))
+        print(f"\n  wrote [knobs] ({tot} permutations, was {n_perms}) -> {args.config}")
 
     sys.exit(1 if n_coarse else 0)
 
