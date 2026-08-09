@@ -126,8 +126,6 @@ def main():
         print(f"  Running {param_str} ...", flush=True)
         out_audio = run_inference(model, audio_norm, vec, args.device)
 
-        # Scale back (undo normalization)
-        out_audio = out_audio / scale
         sf.write(str(out_path), out_audio.astype(np.float32), sr, subtype="FLOAT")
         print(f"  → {out_path}", flush=True)
 
