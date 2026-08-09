@@ -1091,8 +1091,20 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
         finally:
             os.unlink(jl)
 
+    # Heartbeat, not silence: each chunk is ONE opaque, possibly long-running oracle
+    # subprocess call (batching many jobs internally) -- ex.map blocks until every chunk
+    # finishes with nothing printed in between, easy to mistake for a hang on a real
+    # probe/render batch (confirmed directly, more than once, checking `ps`/a profiler
+    # to tell the difference). Chunk-level is the finest granularity available here: the
+    # oracle's own --jobs stdout isn't streamed, only captured after the process exits,
+    # so per-JOB progress isn't visible from this side at all.
+    print(f"  rendering {len(jobs)} job(s) across {len(chunks)} worker(s) ...", flush=True)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        chunk_results = list(ex.map(run_chunk, chunks))
+        futures = {ex.submit(run_chunk, c): c for c in chunks}
+        chunk_results = []
+        for i, fut in enumerate(as_completed(futures), 1):
+            chunk_results.append(fut.result())
+            print(f"    {i}/{len(chunks)} render batches done", flush=True)
 
     if any(cr is None for cr in chunk_results):
         # Old oracle. One process per job, the pre-batch behavior.
@@ -1104,8 +1116,15 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
                 a += ["--speaker", speaker]
             r = subprocess.run(a, capture_output=True, text=True)
             return j["output"], None if r.returncode == 0 else (r.stderr[-200:] or "failed")
+        print(f"  oracle predates --jobs batch mode -- falling back to {len(jobs)} "
+             f"individual process(es)", flush=True)
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            return dict(ex.map(single, jobs))
+            out = {}
+            for i, fut in enumerate(as_completed({ex.submit(single, j): j for j in jobs}), 1):
+                k, v = fut.result()
+                out[k] = v
+                print(f"    {i}/{len(jobs)} renders done", flush=True)
+            return out
 
     res = {}
     for cr in chunk_results:

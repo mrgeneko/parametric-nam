@@ -71,7 +71,7 @@ import sys
 import tempfile
 import threading
 import tomllib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -372,9 +372,20 @@ def main() -> None:
                 for oth in slices:
                     jobs.append((axis, lo, hi, oth))
 
+        # ex.map blocks silently until EVERY job finishes, with no per-completion feedback --
+        # a real probe batch can run for minutes with nothing printed, easy to mistake for a
+        # hang (confirmed directly: had to check `ps`/a profiler to tell the difference).
+        # submit + as_completed gives a heartbeat as results actually land, in completion
+        # order rather than submission order -- res doesn't need to preserve job order below,
+        # only the (axis, lo, hi) values each row already carries.
+        print(f"  probing {len(jobs)} cell x reference-slice combination(s) ...", flush=True)
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            res = list(ex.map(lambda j: (j[0], j[1], j[2], cell_error(render, knobs, j[0], j[1], j[2], j[3])),
-                              jobs))
+            futures = {ex.submit(cell_error, render, knobs, j[0], j[1], j[2], j[3]): j for j in jobs}
+            res = []
+            for i, fut in enumerate(as_completed(futures), 1):
+                j = futures[fut]
+                res.append((j[0], j[1], j[2], fut.result()))
+                print(f"    {i}/{len(jobs)} probes done", flush=True)
 
     worst_by_axis: dict = {}
     n_coarse = n_over = 0
