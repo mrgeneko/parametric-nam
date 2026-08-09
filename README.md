@@ -488,19 +488,13 @@ especially on high-gain amps (see [`docs/evh5150_training_notes.md`](docs/evh515
 
 ## System Requirements
 
-Training parametric NAM models is GPU- and memory-intensive. Below are guidelines
-based on real-world testing.
-
-### Minimum (CPU training, works but slow)
-
-- **RAM**: 18 GB — sufficient for dataset generation (48 permutations, 60s sweep)
-  and CPU training.
-- **GPU**: none — CPU-only training works reliably.
-- **Training speed**: ~80 s/epoch for a 4-width slimmable model (3,4,5,8ch) at
-  batch-size 16, crop-len 24000, 60s sweep.
-- **200 epochs**: ~4–5 hours on CPU.
-
-### Recommended (GPU training)
+Training parametric NAM models is GPU- and memory-intensive; a GPU is required in
+practice. Real device grids run into hundreds or thousands of permutations (e.g. the
+JCM800 hot-rod's 1944), and real training budgets run into the tens of thousands of
+gradient steps (see `--target-steps` above) — CPU-only training isn't realistically
+feasible for a real run, not just slow. `--device auto` (the default) refuses to start
+if no GPU is detected, rather than silently queuing a run that will never finish —
+pass `--device cpu` explicitly if you genuinely want to (e.g. a short debugging run).
 
 - **GPU VRAM**: 16 GB+ — needed for comfortable training of slimmable models
   with 4 widths at batch-size 16+.

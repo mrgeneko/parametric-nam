@@ -226,9 +226,10 @@ def test_load_config_maps_knobs_fixed_and_defaults(tmp_path):
 
 # --------------------------------------------------------------------------- resolve_device
 
-def test_resolve_device_passes_through_an_explicit_choice_unchanged(capsys):
+def test_resolve_device_passes_through_an_explicit_choice_unchanged():
+    # Explicit "cpu" is the escape hatch -- honored as asked, never refused, even
+    # though --device auto refuses in the exact same (no GPU) situation below.
     assert param_train.resolve_device("cpu") == "cpu"
-    assert "WARNING" not in capsys.readouterr().err   # explicit cpu is deliberate, no alarm
 
 
 def test_resolve_device_auto_prefers_cuda(monkeypatch):
@@ -243,8 +244,11 @@ def test_resolve_device_auto_prefers_mps_over_cpu(monkeypatch):
     assert param_train.resolve_device("auto") == "mps"
 
 
-def test_resolve_device_auto_falls_back_to_cpu_with_a_loud_warning(monkeypatch, capsys):
+def test_resolve_device_auto_hard_fails_when_no_gpu_is_available(monkeypatch):
+    # Not a warn-and-proceed: CPU training is realistically infeasible for a real
+    # run, not just slow, so the auto-detected case refuses outright rather than
+    # silently queuing a run that will never finish.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-    assert param_train.resolve_device("auto") == "cpu"
-    assert "WARNING" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="--device cpu"):
+        param_train.resolve_device("auto")
