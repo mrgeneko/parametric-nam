@@ -259,14 +259,16 @@ Two source kinds, auto-detected per file by extension and freely mixable in one 
 - **`.nam`** — an already-trained/exported fixed-setting model (real hardware or amp-modeler
   export). Run once against the shared sweep to produce its wet render (digital inference,
   exactly phase-aligned to the input by construction).
-- **`.wav`** — an already-recorded wet capture: the shared sweep played through the real
-  device and captured directly (e.g. via an audio interface). A real analog signal chain has
-  its own latency the `.nam` path's pure inference doesn't, so each `.wav` is time-aligned via
-  best-effort NAM blip-based calibration before use — real calibration only for a
-  NAM-recognized standard sweep (e.g. `sweep-v3.wav`); capturing against this repo's own
+- **`.wav` / `.aif` / `.aiff`** — an already-recorded wet capture: the shared sweep played
+  through the real device and captured directly (e.g. via an audio interface). Any bit depth,
+  sample rate, or channel count libsndfile can read works (stereo is downmixed to mono; a
+  sample-rate mismatch against the shared sweep is resampled automatically). A real analog
+  signal chain has its own latency the `.nam` path's pure inference doesn't, so each capture is
+  time-aligned via best-effort NAM blip-based calibration before use — real calibration only
+  for a NAM-recognized standard sweep (e.g. `sweep-v3.wav`); capturing against this repo's own
   bundled `sweepv5.wav` always falls back to a disclosed `delay=0`, same as
   `capture_static.py`'s identical fallback for a non-standard excitation. `neural-amp-modeler`
-  is optional — without it every `.wav` just uses `delay=0` too.
+  is optional — without it every raw capture just uses `delay=0` too.
 
 ```bash
 python gen_dataset_from_captures.py \

@@ -1,7 +1,7 @@
-"""Tests for gen_dataset_from_captures.py's .wav capture path -- specifically the delay/latency
-calibration and alignment logic, which is the one thing a raw .wav capture needs that a .nam
-capture (pure digital inference, phase-aligned by construction) doesn't. See that module's
-detect_delay()/_align_wet() docstrings for the full reasoning.
+"""Tests for gen_dataset_from_captures.py's raw-capture (.wav/.aif/.aiff) path -- specifically
+the delay/latency calibration and alignment logic, which is the one thing a raw capture needs
+that a .nam capture (pure digital inference, phase-aligned by construction) doesn't. See that
+module's detect_delay()/_align_wet() docstrings for the full reasoning.
 
 detect_delay() shells out to tools/nam_delay_helper.py under a sibling neural-amp-modeler
 venv's own interpreter (see detect_delay's docstring for why: a numba/numpy version conflict
@@ -248,3 +248,34 @@ def test_wet_from_wav_passes_through_unchanged_when_rates_already_match(monkeypa
     assert delay_used == 0
     assert source == "delay_zero_fallback"
     np.testing.assert_array_equal(sig, wet[:target_len])
+
+
+def test_wet_from_wav_reads_aiff_captures_too(monkeypatch, tmp_path):
+    """_wet_from_wav's sf.read is format-agnostic (libsndfile) -- an AIFF capture must read
+    identically to the same content saved as WAV. This is what unblocks .aif/.aiff as a
+    --captures source kind (see WET_CAPTURE_EXTS): the read path already worked, only the
+    CLI's extension whitelist was turning them away."""
+    sr_in = 4000
+    target_len = 10
+    wet = np.arange(1, 21).astype(np.float32)
+    wet_path = tmp_path / "capture.aiff"
+    sf.write(str(wet_path), wet, sr_in, format="AIFF", subtype="FLOAT")
+    dry_path = tmp_path / "dry.wav"
+    sf.write(str(dry_path), np.zeros(target_len, dtype=np.float32), sr_in, subtype="FLOAT")
+
+    monkeypatch.setattr(gdc, "detect_delay", lambda dry, wetp: (0, "delay_zero_fallback"))
+
+    sig, delay_used, source = gdc._wet_from_wav(wet_path, dry_path, sr_in, target_len)
+    assert delay_used == 0
+    np.testing.assert_allclose(sig, wet[:target_len], atol=1e-3)
+
+
+# --------------------------------------------------------------------------- extension whitelist
+
+def test_wet_capture_exts_accepts_wav_and_aiff_rejects_everything_else():
+    assert gdc.WET_CAPTURE_EXTS == (".wav", ".aif", ".aiff")
+    accepted = {".nam", *gdc.WET_CAPTURE_EXTS}
+    assert Path("Klon G5.aiff").suffix.lower() in accepted
+    assert Path("Klon G5.AIF").suffix.lower() in accepted
+    assert Path("Klon G5.wav").suffix.lower() in accepted
+    assert Path("Klon G5.mp3").suffix.lower() not in accepted

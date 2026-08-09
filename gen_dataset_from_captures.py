@@ -7,13 +7,13 @@ source kinds, auto-detected per file by extension, freely mixable in one run:
   .nam   an already-trained/exported fixed-setting model (real hardware or amp-modeler export).
          Loaded and run once against the shared sweep input to produce its wet render --
          digital inference, exactly phase-aligned to the input by construction.
-  .wav   an already-recorded wet capture: the shared sweep played through the real device at
-         this setting and captured directly (e.g. via an audio interface). Unlike .nam
-         inference, a REAL analog signal chain (ADC/DAC, cable, buffering) has its own latency
-         relative to the reference sweep -- so each .wav is time-aligned via best-effort NAM
-         blip-based calibration before use (see detect_delay). Only NAM's OWN recognized
-         standard sweeps (e.g. sweep-v3.wav) get real calibration; capturing against this
-         repo's bundled sweepv5.wav always falls back to a disclosed delay=0, same as
+  .wav/.aif/.aiff   an already-recorded wet capture: the shared sweep played through the real
+         device at this setting and captured directly (e.g. via an audio interface). Unlike
+         .nam inference, a REAL analog signal chain (ADC/DAC, cable, buffering) has its own
+         latency relative to the reference sweep -- so each capture is time-aligned via
+         best-effort NAM blip-based calibration before use (see detect_delay). Only NAM's OWN
+         recognized standard sweeps (e.g. sweep-v3.wav) get real calibration; capturing against
+         this repo's bundled sweepv5.wav always falls back to a disclosed delay=0, same as
          capture_static.py's identical fallback for a non-standard excitation.
 
     python gen_dataset_from_captures.py \\
@@ -67,8 +67,8 @@ from capture_common import add_knob_parsing_args, check_scale_collisions, parse_
 def _find_nam_site_packages(work_dir: Path = None):
     """Best-effort: locate a sibling neural-amp-modeler checkout's venv site-packages (same
     layout capture_static.py assumes), so the OPTIONAL nam.models/nam.train.core imports below
-    -- needed only for .nam inference and .wav delay calibration respectively, not for this
-    module's own import or for a .wav-only run without calibration -- can find them. Returns
+    -- needed only for .nam inference and raw-capture delay calibration respectively, not for
+    this module's own import or for a calibration-free raw-capture-only run -- can find them. Returns
     None if no such checkout exists; callers degrade gracefully rather than crash.
 
     `$NEURAL_AMP_MODELER_HOME` overrides the checkout location if it isn't a sibling of this
@@ -110,7 +110,7 @@ def load_nam_model(path: Path, tier: str = "full"):
         sys.exit(f"can't load {path}: the 'nam' package (neural-amp-modeler) isn't importable. "
                  f"Point $PYTHONPATH at its venv's site-packages, or install it "
                  f"(pip install neural-amp-modeler) -- only needed for .nam-sourced captures; "
-                 f".wav-sourced ones don't need it.")
+                 f"raw-audio-sourced ones don't need it.")
     d = json.loads(path.read_text())
     if d.get("architecture") == "SlimmableContainer":
         submodels = d["config"]["submodels"]
@@ -146,6 +146,10 @@ def _run_model(model, x: np.ndarray) -> np.ndarray:
 _NAM_LOOKAHEAD_SAMPLES = 1_000
 _NAM_LOOKBACK_SAMPLES = 10_000
 
+# Any raw-audio wet capture, not just .wav -- sf.read (libsndfile) reads AIFF/AIFF-C natively,
+# so the only thing gating .aif/.aiff out was this list, not a real format limitation.
+WET_CAPTURE_EXTS = (".wav", ".aif", ".aiff")
+
 _NAM_DELAY_HELPER = Path(__file__).resolve().parent / "tools" / "nam_delay_helper.py"
 
 
@@ -165,7 +169,7 @@ def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
     A REAL capture's latency (analog signal chain: ADC/DAC, cable, buffering) has no digital-
     inference equivalent -- gen_dataset_from_schx.py's SPICE renders and this file's own
     .nam-inference path are both exactly phase-aligned to the input by construction, so this
-    problem is unique to the .wav path. Never a correlation-based guess (see capture_static.py's
+    problem is unique to the raw-capture path. Never a correlation-based guess (see capture_static.py's
     module docstring for why that actively misleads) -- only NAM's own impulse-based calibration,
     or a disclosed delay=0.
 
@@ -234,7 +238,7 @@ def _align_wet(y: np.ndarray, delay: int, target_len: int) -> np.ndarray:
 
 
 def _wet_from_wav(wet_path: Path, dry_path: Path, sr_in: int, target_len: int) -> tuple:
-    """Load a raw capture WAV as this permutation's wet signal: delay-detected against the
+    """Load a raw audio capture (WAV or AIFF) as this permutation's wet signal: delay-detected against the
     shared dry reference (native sample rate), then resampled to sr_in if needed -- the
     detected delay is scaled proportionally so it still lines up after resampling -- and
     finally time-aligned via _align_wet. Returns (aligned_signal, delay_used_at_sr_in,
@@ -260,10 +264,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--combine", type=Path, help="combine sharded .npy files (delegates to gen_dataset_from_schx.combine)")
     ap.add_argument("--captures", nargs="+",
-                     help="glob pattern(s) or explicit .nam/.wav file paths -- freely mixable")
+                     help="glob pattern(s) or explicit .nam/.wav/.aif/.aiff file paths -- freely mixable")
     ap.add_argument("--output", type=Path, help="output dataset directory")
     ap.add_argument("--input", default="examples/sweepv5.wav",
-                     help="shared dry sweep, same convention as the .schx pipeline. For .wav "
+                     help="shared dry sweep, same convention as the .schx pipeline. For raw "
                           "captures this is also the delay-calibration reference -- see "
                           "detect_delay's docstring for why only a NAM-recognized standard "
                           "sweep (not this default) gets real calibration")
@@ -274,7 +278,7 @@ def main():
     ap.add_argument("--gear-model", default=None)
     ap.add_argument("--gear-type", default=None,
                      help="default: a .nam file's own metadata gear_type (e.g. 'pedal', "
-                          "'amp_cab'), falling back to 'amp_cab' if there's none (.wav "
+                          "'amp_cab'), falling back to 'amp_cab' if there's none (raw "
                           "captures carry no metadata at all)")
     ap.add_argument("--device-name", default=None,
                      help="circuit/device label; default: first .nam file's metadata "
@@ -309,9 +313,9 @@ def main():
         ap.error(f"not found: {missing}")
     if not files:
         ap.error(f"no files matched {args.captures}")
-    unknown_ext = [f for f in files if f.suffix.lower() not in (".nam", ".wav")]
+    unknown_ext = [f for f in files if f.suffix.lower() not in (".nam", *WET_CAPTURE_EXTS)]
     if unknown_ext:
-        ap.error(f"not a .nam or .wav file: {unknown_ext}")
+        ap.error(f"not a .nam or {'/'.join(WET_CAPTURE_EXTS)} file: {unknown_ext}")
 
     prefix_map, scale_overrides, mapping = resolve_knob_maps(args)
 
@@ -346,15 +350,15 @@ def main():
     (out_dir / "sig").mkdir(parents=True, exist_ok=True)
 
     # 3. Get each permutation's wet render: run a .nam through the shared sweep (inference,
-    # exactly phase-aligned by construction), or time-align a .wav capture against it
+    # exactly phase-aligned by construction), or time-align a raw capture against it
     # (detect_delay -- a real analog signal chain has latency inference doesn't).
     perms, rows, meta0 = [], [], {}
     for idx, f in enumerate(sorted(per_file)):
         params = per_file[f]
         t0 = time.time()
-        if f.suffix.lower() == ".wav":
+        if f.suffix.lower() in WET_CAPTURE_EXTS:
             sig, delay, source = _wet_from_wav(f, in_wav, sr_in, target_len=len(inp))
-            sig_sr, tag, rung = sr_in, f"wav-capture:{source}", delay
+            sig_sr, tag, rung = sr_in, f"capture:{source}", delay
         else:
             model, sr_model = load_nam_model(f, tier=args.tier)
             x = inp
