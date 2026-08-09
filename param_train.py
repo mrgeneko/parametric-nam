@@ -1116,6 +1116,15 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
         (scaler.scale(loss) if scaler is not None else loss).backward()
 
     total_loss = torch.zeros((), device=device)
+    # Windowed separately from total_loss: total_loss is the epoch-cumulative sum
+    # returned below (and written to metrics.csv) and must stay untouched. Without
+    # this, a single nan/inf step anywhere in the epoch poisons total_loss for
+    # every remaining log line of that epoch (nan + anything = nan), making one
+    # isolated, correctly-skipped overflow look like a sustained breakdown. This
+    # window resets every log_interval steps so a bad step only contaminates the
+    # one print it actually happened in.
+    window_loss = torch.zeros((), device=device)
+    window_start = 0
     for step, (inp, out, params) in enumerate(loader):
         _watchdog_arm(f"epoch {epoch} step {step}")
         inp, out, params = inp.to(device), out.to(device), params.to(device)
@@ -1146,9 +1155,14 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
         else:
             optimizer.step()
         total_loss += step_loss
+        window_loss += step_loss
         if log_interval > 0 and (step + 1) % log_interval == 0:
+            window_n = step + 1 - window_start
+            scale_str = f"  scale={scaler.get_scale():.0f}" if scaler is not None else ""
             print(f"  [{epoch:3d}/{total_epochs}] step {step+1}/{len(loader)}  "
-                  f"loss={total_loss.item()/(step+1):.6f}", file=sys.stderr, flush=True)
+                  f"loss={window_loss.item()/window_n:.6f}{scale_str}", file=sys.stderr, flush=True)
+            window_loss = torch.zeros((), device=device)
+            window_start = step + 1
         _watchdog_disarm()
     return total_loss.item() / len(loader)
 
@@ -1475,21 +1489,36 @@ def main():
                     help="MRSTFT loss weight (default: %(default)s)")
     ap.add_argument("--device", default="auto",
                     help="Device: auto, cpu, cuda, mps (default: %(default)s)")
-    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="fp16",
-                    help="Mixed-precision TRAINING forward (default: fp16). The model forward "
+    ap.add_argument("--amp", choices=["off", "fp16", "bf16"], default="bf16",
+                    help="Mixed-precision TRAINING forward (default: bf16). The model forward "
                          "runs under autocast in half precision; the LOSS is always computed "
                          "in fp32 (the MRSTFT magnitudes of near-silent fading tails are "
                          "exactly what the ESR loss exists to protect), and validate() always "
                          "runs fp32 so val ESR stays comparable across runs and matches the "
                          "exported (fp32) model. fp16 uses GradScaler loss scaling; bf16 "
                          "needs none (fp32 exponent range) but has fewer mantissa bits. "
-                         "Made default 2026-07-28 for the throughput win (production-shape "
-                         "training measured COMPUTE-bound on MPS, KoT: ~1.7 s/step of conv "
-                         "work, TS-9 w4+w8 measured ~2.9x s/step faster than fp32) -- the "
-                         "per-device quality A/B (judge on level_band_esr.py bands and "
-                         "per_perm_esr.py spread per internal engineering notes, never the headline "
-                         "val ESR) is still worth running per-device, but no longer gates "
-                         "opt-in. Pass --amp off to disable.")
+                         "Made default 2026-07-28 for the throughput win over fp32 "
+                         "(production-shape training measured COMPUTE-bound on MPS, KoT: "
+                         "~1.7 s/step of conv work, TS-9 w4+w8 measured ~2.9x s/step faster "
+                         "than fp32) -- the choice of fp16 specifically (vs bf16) was never "
+                         "re-examined at the time, just the more commonly-reached-for half "
+                         "type. Switched default fp16 -> bf16 2026-08-09 after a Guv'nor "
+                         "training run (see internal engineering notes): fp16 was "
+                         "intermittently overflowing under autocast (hot-gain-knob + "
+                         "loud-transient crops pushing activations past its ~65504 ceiling), "
+                         "producing nan losses -- GradScaler verified to correctly skip the "
+                         "optimizer step on those (weights not corrupted), but still wasted "
+                         "steps. bf16 has no such ceiling and needs no loss scaling, so the "
+                         "whole failure class is structurally gone, not just less likely. "
+                         "Confirmed both a synthetic MPS benchmark and real production "
+                         "per-epoch timing (metrics.csv) show bf16 at parity or marginally "
+                         "faster than fp16 -- no throughput tradeoff for the switch -- and "
+                         "confirmed zero nan across a 3h21m / ~90-epoch run that crossed a "
+                         "full SGDR restart (the specific window fp16 was clustering nans "
+                         "in). The per-device quality A/B (judge on level_band_esr.py bands "
+                         "and per_perm_esr.py spread per internal engineering notes, never "
+                         "the headline val ESR) is still worth running per-device, but no "
+                         "longer gates opt-in. Pass --amp off to disable.")
     ap.add_argument("--seed", type=int, default=42,
                     help="Random seed (default: %(default)s)")
     ap.add_argument("--widths", type=str, default=None,
