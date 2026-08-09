@@ -1,12 +1,12 @@
 """Shared helpers for building a parametric dataset from real captures (not a .schx render) --
 a SET OF EXISTING FILES, each a fixed/captured knob-setting of a real device, where every
 permutation's filename encodes its knob settings as comma-separated tokens (see
-parse_filename_tokens). Used today by gen_dataset_from_nam.py (.nam captures); a future
-.wav-pair capture tool shares the same filename convention and the same collision hazard, so
-this module holds ONLY what's genuinely source-agnostic -- filename parsing, the digit-scale
-collision check, and the argparse wiring for --knob-map/--knob-scale/--mapping-csv. It does NOT
-assemble config.json (per-source fields differ too much to fake a shared schema prematurely --
-see docs, "sketch it out properly").
+parse_filename_tokens). Used by gen_dataset_from_captures.py for both its source kinds (.nam
+exports and raw .wav captures) -- they share the same filename convention and the same collision
+hazard, so this module holds ONLY what's genuinely source-agnostic -- filename parsing, the
+digit-scale collision check, and the argparse wiring for --knob-map/--knob-scale/--mapping-csv.
+It does NOT assemble config.json (per-source fields differ too much to fake a shared schema
+prematurely -- see docs, "sketch it out properly").
 """
 import argparse
 import csv
