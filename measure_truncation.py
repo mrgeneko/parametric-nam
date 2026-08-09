@@ -62,7 +62,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from batch_harness import _livespice_batch, write_probe_clip
+from batch_harness import _livespice_batch, check_oracle, write_probe_clip
 
 
 def esr_terms(a: np.ndarray, b: np.ndarray, lead_n: int, sr: int) -> tuple[float, float]:
@@ -272,6 +272,7 @@ def main() -> None:
         ap.error(str(e))
     if not schx.exists():
         ap.error(f"{name}: MISSING {schx}")
+    check_oracle("livespice")
 
     print(f"input:      {args.input.name}")
     print(f"reference:  oversample={args.ref_os}, {args.iterations} Newton iterations")
