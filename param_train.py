@@ -1314,6 +1314,35 @@ def export_nam_state(model, state, dataset, path: Path, device):
     model.to(device)
 
 
+def export_composite_nam(model, best_state: dict, dataset, path: Path, device):
+    """Splice each tier's OWN best-epoch weights (already in best_state, no disk I/O)
+    into one composite SlimmableContainer and export it -- the same "optimal" artifact
+    release_run.sh's compose step / export_checkpoint.py --compose build from checkpoint
+    FILES after the fact, done here directly from what's already in memory during
+    training. Same cost class as export_nam_state (called once per improving tier
+    already, every epoch): tensor copies and one state_dict load, no forward pass, no
+    disk read -- the splice below is the only new work, and it's just dict assignment.
+    Restores the model's current weights afterward so training continues untouched.
+
+    Caller's job, not this function's: skip calling this when any tier is still
+    missing a best_state entry (composing needs all of them) -- see the call site."""
+    current = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    labels = model.tier_labels()
+    composite = {k: v.clone() for k, v in current.items()}
+    for i, lbl in enumerate(labels):
+        pref = model.tier_state_prefix(i)
+        for k, v in best_state[lbl].items():
+            if k.startswith(pref):
+                composite[k] = v.clone() if hasattr(v, "clone") else v
+    model.load_state_dict(composite)
+    model.to(device)
+    nam = model.export_nam(dataset.config, {"version": "0.7.0"}, sample_rate=48000,
+                           input_audio=dataset.inp)
+    path.write_text(json.dumps(nam, separators=(",", ":")))
+    model.load_state_dict(current)
+    model.to(device)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1830,6 +1859,19 @@ def main():
                 _watchdog_disarm()
         if new_best:
             cycle_improved = True
+            # Composite "optimal" export: whenever ANY tier improves, splice every
+            # tier's own best-epoch weights into one container and export it too --
+            # the artifact release_run.sh's compose step / export_checkpoint.py
+            # --compose otherwise require a separate manual invocation to produce, for
+            # spot-testing before a run finishes. Cheap (see export_composite_nam) and
+            # gated the same way per-tier exports already are (ckpt_dir set); skipped
+            # for a single-tier model (nothing to compose) or until every tier has
+            # recorded at least one best epoch (composing needs all of them).
+            if ckpt_dir is not None and len(labels) > 1 and all(lbl in best_state for lbl in labels):
+                _watchdog_arm(f"epoch {epoch} composite export", timeout=60.0)
+                export_composite_nam(model, best_state, dataset,
+                                     nam_variant(args.output, "optimal"), device)
+                _watchdog_disarm()
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]

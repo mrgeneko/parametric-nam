@@ -346,16 +346,20 @@ def build_release(args, fh, timings=None):
     section("RELEASE — assembling durable folder", fh)
     log(f"Release folder: {release_dir}", fh)
 
-    # --- copy model files (every per-tier export, primary) ---
+    # --- copy model files (every per-tier export, plus the composite, primary) ---
     # Glob rather than a hardcoded ("best_full", "best_lite") tuple -- that
     # silently dropped any middle tier (e.g. "best_w5") for 3+-width slimmable
     # models, even though param_train.py exports one .param.nam per tier
     # regardless of tier count. nam_out.stem strips only the LAST suffix
     # (".nam"), so match by prefix instead of relying on Path.stem twice.
+    # ".optimal" (param_train.py's live composite export, updated whenever any
+    # tier improves) is a separate pattern, not "best_*" -- included here too so
+    # the release folder doesn't miss an artifact already sitting in checkpoint_dir.
     prefix = nam_out.name[:-len(".param.nam")] if nam_out.name.endswith(".param.nam") else nam_out.stem
-    for src in sorted(nam_out.parent.glob(f"{prefix}.best_*.param.nam")):
-        shutil.copy2(src, release_dir / src.name)
-        log(f"  + {src.name}", fh)
+    for pat in (f"{prefix}.best_*.param.nam", f"{prefix}.optimal.param.nam"):
+        for src in sorted(nam_out.parent.glob(pat)):
+            shutil.copy2(src, release_dir / src.name)
+            log(f"  + {src.name}", fh)
     if nam_out.exists():
         shutil.copy2(nam_out, release_dir / nam_out.name)
 
