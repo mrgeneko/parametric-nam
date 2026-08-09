@@ -111,7 +111,7 @@ last = max(int(r["epoch"]) for r in rows)
 
 cfg = json.loads((ds / "config.json").read_text())
 knobs = cfg.get("knobs", [])
-# A capture-sourced dataset (gen_dataset_from_nam.py, future wav-pair tool) has no .schx --
+# A capture-sourced dataset (gen_dataset_from_captures.py, .nam or .wav) has no .schx --
 # config.json records that as schx=null. Everything schx-specific below (bundling the schematic,
 # deriving its git revision, the tone-response ground-truth overlay, the registry handoff) is
 # gated on this.
@@ -151,7 +151,7 @@ emit("IS_CAPTURE", "1" if is_capture else "0")
 emit("GEAR_MAKE", cfg.get("gear_make", "?"))
 emit("GEAR_MODEL", cfg.get("gear_model", "?"))
 emit("GEAR_TYPE", cfg.get("gear_type", "?"))
-emit("N_SOURCE_FILES", len(cfg.get("source_nam_files") or []))
+emit("N_SOURCE_FILES", len(cfg.get("source_files") or []))
 # film_gamma_bound (docs/film_runaway_investigation.md "A1") is a forward-pass formula
 # parameter, not detectable from weight shapes the way spectral_norm is (export_checkpoint.py's
 # own detect_spectral_norm() comment) -- must be read back from args_dict and threaded through
