@@ -1820,6 +1820,15 @@ def main():
                          "By default a failed render is retried with a stiffer solve (more Newton "
                          "iterations, finer timestep, ngspice damping) and the rung that won is "
                          "recorded per row in params.csv. Use this only to see the raw failure.")
+    ap.add_argument("--start-rung", type=int, default=0,
+                    help="Skip straight to this rung for every permutation instead of always "
+                         "starting at rung 0. Per-permutation rung MEMORY (winning rung read back "
+                         "from a previous run's params.csv) already skips ahead automatically; "
+                         "this is a GLOBAL floor for permutations with no memory yet -- e.g. a "
+                         "high-drive excitation where rung 0/1 almost never converge, so paying for "
+                         "them first on every permutation is close to pure waste (checked directly "
+                         "for the Tweed v5 excitation: 3.6%% converge at rung 0, 76%% need rung 2 -- "
+                         "starting at rung 2 measured ~27%% faster overall than escalating from 0).")
     # ngspice backend (offline adaptive-timestep SPICE for stiff/high-gain amps)
     ap.add_argument("--koren", action="store_true",
                     help="ngspice: Koren triode model (softer, for stiff amps) vs exact DempwolfZolzer")
@@ -2402,7 +2411,7 @@ def main():
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
                         args.oversample, args.max_crest, ng,
                         warmup_s=args.skip_warmup_s, no_retry=args.no_retry,
-                        start_rung=prev_rungs.get(i, 0)): i
+                        start_rung=max(args.start_rung, prev_rungs.get(i, 0))): i
             for i, p in to_run
         }
         for f in as_completed(futs):

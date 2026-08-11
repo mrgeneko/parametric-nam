@@ -648,6 +648,10 @@ def main():
     g.add_argument("--max-crest",    type=float, default=50.0,
                    help="Fail perms whose output crest factor exceeds this "
                         "(catches numerical divergence; 0 disables)")
+    g.add_argument("--start-rung",   type=int, default=0,
+                   help="Skip straight to this solver-retry rung for every permutation with no "
+                        "rung memory yet, instead of always starting at rung 0. See "
+                        "gen_dataset_from_schx.py --start-rung's help for when this is worth it.")
     g.add_argument("--allow-missing-perms", action="store_true",
                    help="Proceed to combine/train even if some permutations failed to "
                         "generate. Default is to stop -- a convergence failure can "
@@ -945,6 +949,7 @@ def main():
             if args.random:        gen_cmd += ["--random",       args.random]
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
             if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
+            if args.start_rung:    gen_cmd += ["--start-rung",   args.start_rung]
             for r in (args.ranges or []):
                 gen_cmd += ["--range", r]
             for b in (args.bounds or []):
