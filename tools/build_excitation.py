@@ -90,6 +90,28 @@ def main():
     ap.add_argument("--sweep-f0", type=float, default=40.0)
     ap.add_argument("--sweep-f1", type=float, default=12000.0)
     ap.add_argument("--sweep-dur", type=float, default=3.0, help="seconds per amplitude step")
+    ap.add_argument("--noise-burst-src", default=None,
+                    help="source WAV to pull a broadband white-noise burst staircase from -- "
+                         "default: same file as --input. A sine sweep only tests ONE frequency "
+                         "at a time at each level; a broadband noise ATTACK (0 -> level, sharp "
+                         "rise) stress-tests saturation onset the way a real pick attack does, "
+                         "across the whole spectrum at once, at a level the sweep-tail alone "
+                         "doesn't guarantee (see check_transient_coverage.py's docstring -- this "
+                         "is the same gap that under-covered Tweed 5F6-A originally). T3K-sweep-v3 "
+                         "has exactly this built in already (a 3-step discrete noise staircase "
+                         "plus a continuous swell, found by scanning for high spectral-flatness "
+                         "windows) -- reusing it beats synthesizing a new one from scratch.")
+    ap.add_argument("--noise-burst-window", default=None, metavar="START,END",
+                    help="seconds into --noise-burst-src to extract (e.g. '12.0,17.0' for "
+                         "T3K-sweep-v3's own noise staircase). Required if --noise-burst-src "
+                         "or a --noise-burst-peak is given.")
+    ap.add_argument("--noise-burst-peak", type=float, default=None,
+                    help="peak (V) to rescale the extracted noise-burst window to -- scales the "
+                         "WHOLE window by one factor, preserving its internal staircase shape "
+                         "(so the low steps land at the same fraction of this peak the source "
+                         "window has). Typically the same as --sweep-peaks' last value. Omit to "
+                         "skip the noise-burst segment entirely (default: off, matches prior "
+                         "behavior).")
     ap.add_argument("--fade-out-ms", type=float, default=150.0)
     args = ap.parse_args()
 
@@ -104,6 +126,26 @@ def main():
     pad = np.zeros(int(SR * 0.1), dtype=np.float32)
     parts = [real, pad] + [_fade(_log_sweep(args.sweep_f0, args.sweep_f1, args.sweep_dur, a), 8, 8)
                            for a in peaks]
+
+    noise_burst = None
+    if args.noise_burst_peak is not None:
+        if not args.noise_burst_window:
+            raise SystemExit("--noise-burst-peak needs --noise-burst-window START,END")
+        burst_src = args.noise_burst_src or args.input
+        # Read fresh, UNTRUNCATED -- the burst window can fall past --realistic-dur's prefix
+        # cutoff (e.g. T3K's own noise staircase runs to ~17s, past a 15s realistic-dur).
+        bx, bsr = sf.read(burst_src, dtype="float32")
+        if bx.ndim > 1: bx = bx[:, 0]
+        if bsr != SR: raise SystemExit(f"--noise-burst-src sr {bsr} != {SR}")
+        w0, w1 = (float(v) for v in args.noise_burst_window.split(","))
+        window = bx[int(SR * w0):int(SR * w1)]
+        if len(window) == 0:
+            raise SystemExit(f"--noise-burst-window {args.noise_burst_window} is empty against "
+                             f"{burst_src} ({len(bx)/SR:.1f}s)")
+        noise_burst = _fade((window / max(np.abs(window).max(), 1e-9)
+                             * args.noise_burst_peak).astype(np.float32), 10, 10)
+        parts += [pad, noise_burst]
+
     comp = np.concatenate(parts)
     nf = int(SR * args.fade_out_ms / 1000)
     if nf > 0: comp[-nf:] *= np.sin(np.linspace(np.pi / 2, 0, nf)) ** 2
@@ -113,6 +155,9 @@ def main():
     print(f"wrote {args.output}  dur {len(comp)/SR:.1f}s  peak {a.max():.3f}  rms {np.sqrt((comp**2).mean()):.4f}")
     for thr in sorted(set([0.5] + peaks)):
         print(f"  time >= {thr:.2f} V : {100*np.mean(a >= thr):6.3f}%")
+    if noise_burst is not None:
+        print(f"  noise burst: {len(noise_burst)/SR:.2f}s from {args.noise_burst_src or args.input} "
+              f"[{args.noise_burst_window}]  rescaled peak {np.abs(noise_burst).max():.3f}")
 
     # Recipe sidecar: HOW this excitation was built, not just which bytes it is. Without this,
     # a derived excitation's provenance chain stops at "some file named *_src95.wav" -- the exact
@@ -131,6 +176,9 @@ def main():
             "sweep_f0": args.sweep_f0,
             "sweep_f1": args.sweep_f1,
             "sweep_dur": args.sweep_dur,
+            "noise_burst_src": args.noise_burst_src or (args.input if noise_burst is not None else None),
+            "noise_burst_window": args.noise_burst_window if noise_burst is not None else None,
+            "noise_burst_peak": args.noise_burst_peak,
             "fade_out_ms": args.fade_out_ms,
         },
         "source": _audio_provenance(args.input),
