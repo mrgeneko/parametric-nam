@@ -33,6 +33,7 @@ Usage:
   file's realistic/sweep boundary would be worse than refusing to run).
 """
 import argparse
+import itertools
 import json
 import sys
 import tempfile
@@ -53,12 +54,22 @@ from tools.preflight import find_saturation_point, _findpeak_cache_path  # noqa:
 SR = 48000
 
 
-def _corners(knob_ranges: dict) -> list:
-    """Reduced hypercube corner set: all-min, all-max, center, each knob solo-
-    extreme (rest at their own center). Same convention as
-    scan_film_runaway.py's hypercube_corners() and this fleet's existing
-    knob-grid-design practice (internal engineering notes) -- NOT the full
-    grid, which would be 972 renders x 20 amplitude points for Tweed alone.
+def _corners(knob_ranges: dict, full_hypercube: bool = True, max_full_corners: int = 512) -> list:
+    """Corner set: all-min, all-max, center, each knob solo-extreme (rest at their own
+    center), PLUS (if full_hypercube) the full binary hypercube -- every knob independently
+    at its own min or max, 2**n corners total (all-min/all-max are 2 of them; deduped below).
+
+    The binary hypercube was added after a real miss: Tweed 5F6-A Full's shipped blowup
+    corner was NormalVol/BrightVol held at their grid-min SIMULTANEOUSLY with
+    Treble/Bass/Middle at their grid-max. The solo set can't represent that -- solo holds
+    every OTHER knob at center, never at another extreme -- so a MIXED
+    some-knobs-low-others-high corner went completely untested, and the excitation was
+    never checked (or built) to saturate there. 2**n is still exponential, just far cheaper
+    than the full trained grid this was originally reduced from (972 renders x 20 amplitude
+    points for Tweed alone) -- capped at max_full_corners (default 512, i.e. up to 9 knobs);
+    pass full_hypercube=False for a config with more knobs than that rather than let this
+    silently balloon.
+
     Uses each knob's OWN grid min/max/center (not a blanket 0/1/0.5), since
     swept ranges are frequently narrowed (e.g. Tweed's tone stack is 0.2..0.8).
     """
@@ -73,6 +84,22 @@ def _corners(knob_ranges: dict) -> list:
         solo_hi = dict(mid); solo_hi[n] = hi[n]
         corners.append((f"{n}=lo-solo", solo_lo))
         corners.append((f"{n}=hi-solo", solo_hi))
+
+    if full_hypercube and names:
+        n_full = 2 ** len(names)
+        if n_full > max_full_corners:
+            raise ValueError(f"full hypercube would be {n_full} corners (> max_full_corners="
+                             f"{max_full_corners}) for {len(names)} knobs -- pass "
+                             f"full_hypercube=False, or raise max_full_corners, explicitly")
+        seen = {tuple(sorted(v.items())) for _, v in corners}
+        for bits in itertools.product((0, 1), repeat=len(names)):
+            vals = {n: (hi[n] if b else lo[n]) for n, b in zip(names, bits)}
+            key = tuple(sorted(vals.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            corners.append((",".join(f"{n}={'hi' if b else 'lo'}" for n, b in zip(names, bits)),
+                            vals))
     return corners
 
 
@@ -89,7 +116,8 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
 
 def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
-                   peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False) -> dict:
+                   peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
+                   full_hypercube: bool = True) -> dict:
     """Core check, importable directly (gen_dataset_from_schx.py's hard gate uses this in-process --
     no subprocess, no re-parsing a config, and it can't be silently skipped by someone calling
     gen_dataset_from_schx.py without going through run_pipeline.py / this tool's own CLI first).
@@ -97,11 +125,12 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
     Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
     couldn't be determined (a render failure is not a pass -- see main()'s same convention).
     """
-    corners = _corners(knob_ranges)
+    corners = _corners(knob_ranges, full_hypercube=full_hypercube)
     if not quiet:
         print(f"Transient saturation coverage: {Path(schx).name}")
-        print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners (reduced "
-              f"hypercube set)  margin={margin}x\n")
+        print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners "
+              f"({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)  "
+              f"margin={margin}x\n")
 
     rows = []
     with tempfile.TemporaryDirectory() as scratch:
@@ -158,6 +187,10 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--no-full-hypercube", action="store_true",
+                    help="skip the full 2**n min/max hypercube (only the solo + all-min/"
+                         "all-max/center corners) -- use for a config with many knobs where "
+                         "2**n would be impractically large")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -187,7 +220,8 @@ def main():
     print(f"  excitation: {input_wav.name}")
     result = check_coverage(schx, knob_ranges, fixed, oversample, transient_peak,
                             margin=args.margin, iterations=args.iterations,
-                            peak_max_v=args.peak_max_v, no_cache=args.no_cache)
+                            peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                            full_hypercube=not args.no_full_hypercube)
 
     if args.json:
         Path(args.json).write_text(json.dumps({

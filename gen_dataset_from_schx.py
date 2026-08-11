@@ -1811,9 +1811,11 @@ def main():
                          "backend only). See internal engineering notes: this refuses to "
                          "start generation if the excitation's transient-bearing content never "
                          "reaches saturation at some knob-grid corner (checked via "
-                         "tools/check_transient_coverage.py against a reduced hypercube corner "
-                         "set) -- exactly the gap that under-covered Tweed 5F6-A's high-gain "
-                         "corners and produced a 80-260x FiLM/LeakyReLU runaway there.")
+                         "tools/check_transient_coverage.py against the full min/max hypercube "
+                         "corner set) -- exactly the gap that under-covered Tweed 5F6-A's "
+                         "mixed low-volume/high-tone corner and produced a real ~100x blowup "
+                         "there (the solo-only corner set this check used to run missed it "
+                         "entirely -- see check_transient_coverage.py's _corners() docstring).")
     ap.add_argument("--transient-peak", type=float, default=None,
                     help="excitation's transient/real-playing segment peak, in volts at "
                          "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "

@@ -38,6 +38,7 @@ Usage:
       --config ~/work/parametric-nam-models/amps/tweed-5f6-a-full-sag/config.toml
 """
 import argparse
+import itertools
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -81,10 +82,17 @@ def load_all_submodels(nam_path: str):
     return out
 
 
-def hypercube_corners(param_names):
-    """All-min, all-max, each knob solo-extreme (rest at 0.5), and the center --
-    the same reduced corner set already used for knob-grid design in this fleet
-    (per internal engineering notes), not the full 2^n hypercube."""
+def hypercube_corners(param_names, max_full_corners: int = 512):
+    """All-min, all-max, each knob solo-extreme (rest at 0.5), center, PLUS the full
+    binary hypercube (every knob independently at 0.0 or 1.0, 2**n corners; all-min/
+    all-max are 2 of them, deduped below).
+
+    Used to be solo-only. That missed a real corner: Tweed 5F6-A Full's shipped blowup
+    was two volume knobs at min held SIMULTANEOUSLY with three tone knobs at max -- solo
+    holds every OTHER knob at 0.5 (center), never at another extreme, so a mixed
+    some-low-some-high corner was never scanned. 2**n is exponential; capped at
+    max_full_corners (default 512, up to 9 params) so a many-knob device doesn't silently
+    balloon this -- pass a smaller cap (it'll raise) if that's ever hit intentionally."""
     n = len(param_names)
     corners = [("all-min", [0.0] * n), ("all-max", [1.0] * n), ("center", [0.5] * n)]
     for i, name in enumerate(param_names):
@@ -92,6 +100,21 @@ def hypercube_corners(param_names):
         hi = [0.5] * n; hi[i] = 1.0
         corners.append((f"{name}=0-solo", lo))
         corners.append((f"{name}=1-solo", hi))
+
+    if n:
+        n_full = 2 ** n
+        if n_full > max_full_corners:
+            raise ValueError(f"full hypercube would be {n_full} corners (> max_full_corners="
+                             f"{max_full_corners}) for {n} params")
+        seen = {tuple(v) for _, v in corners}
+        for bits in itertools.product((0.0, 1.0), repeat=n):
+            vals = list(bits)
+            key = tuple(vals)
+            if key in seen:
+                continue
+            seen.add(key)
+            corners.append((",".join(f"{nm}={'1' if b else '0'}"
+                                     for nm, b in zip(param_names, bits)), vals))
     return corners
 
 
