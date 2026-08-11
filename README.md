@@ -451,6 +451,66 @@ Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
 See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
 and the important fidelity caveats.
 
+## Known issue: rare knob-corner blowup (FiLM/LeakyReLU runaway)
+
+Trained `.schx` models can develop a **narrow, catastrophic instability** at a specific
+knob-grid corner — the model's prediction spikes to tens or hundreds of times its normal
+peak level on real transient content, while every aggregate metric (val ESR, per-tier
+loss curves) looks fine, because the corner is a single cell out of hundreds-to-thousands
+and contributes almost nothing to the training loss. It has recurred independently on at
+least two shipped models (the pre-fix Boss DS-1, and Tweed 5F6-A Full sag) at different
+knob combinations, so treat it as a real, recurring failure mode of this pipeline, not a
+one-off.
+
+What it looks like, concretely (Tweed 5F6-A Full sag, lite tier): at
+`NormalVol=BrightVol=0.025` (the swept grid's own minimum) combined with `Treble=Bass=
+Middle=0.8`, the model predicted a peak of **100.2 V** against a ground-truth peak of
+**0.64 V** (156×) — RMS stayed normal, so it's a brief spike, not sustained distortion,
+and it's invisible to ESR unless you check per-permutation, not just aggregate. A second,
+nearby corner (`Bass=0.5` instead of `0.8`) showed the same signature at 41×. Both
+cleared the same distinctive test: moving `NormalVol`/`BrightVol` off the exact trained
+minimum by as little as **0.025** (to 0.05) — not even to the next grid point — dropped
+the peak straight back to ~0.7 V. That knife-edge sensitivity (fires exactly *at* a
+trained grid value, not in a neighborhood around it) is the fingerprint of this failure:
+it isn't a smooth under-generalization gradient, it's closer to a discontinuity the
+network found room to plant right on a specific training point.
+
+**Why `.schx` training is exposed to this in particular**: the swept knob grid is a
+finite set of discrete points, and *mixed* corners — several knobs simultaneously at
+their own min/max, not just one knob varied in isolation — are combinatorially numerous
+(2ⁿ for n swept knobs) and easy to under-sample relative to how densely the "safe" middle
+of the grid gets covered. A corner like this can go completely unnoticed by grid
+adequacy (which checks interpolation error, not model behavior) and by aggregate
+validation ESR (which averages over everything else).
+
+**Mitigations, both already in this repo**:
+- **`tools/check_transient_coverage.py`** (pre-training gate, run automatically by
+  `gen_dataset_from_schx.py` unless `--skip-transient-check`) — checks that the
+  excitation's transient content actually reaches each corner's own saturation onset,
+  across the **full min/max hypercube** (every swept knob independently at its own grid
+  min or max, not just one knob varied from center) plus the traditional solo-knob
+  corners. A corner whose real-playing content never crosses into saturation during
+  training is a corner the network has to extrapolate at inference time.
+- **`tools/scan_film_runaway.py`** (post-training, run by hand against a finished
+  `.param.nam`) — replays a real reference clip through every tier at every corner
+  (`--config` for the exact trained grid, not just the reduced set) and flags any window
+  whose peak is anomalous relative to that model's own typical output. Scanning the
+  Tweed fp32 model with a **generic** guitar reference came back clean even including
+  this exact corner — the spike only showed up against the **actual training excitation**
+  at that permutation, so when investigating a suspected corner, prefer `--reference
+  <the training sweep.wav>` over an arbitrary clip; a scan that doesn't reproduce the
+  triggering content can give a false sense of safety.
+
+If either tool flags a corner, don't just retrain longer at the same grid — the blowup
+in the Tweed case was a spike lasting well under a second inside a single permutation's
+~27 s clip, so it barely moves that permutation's own loss, let alone the average across
+hundreds of permutations; more of the same data is unlikely to fix it. Narrowing the
+grid's swept range, adding an explicit loss weight on transient/peak error, or excluding
+that exact corner combination and documenting it as an unsupported setting are the
+levers that actually address it.
+
+---
+
 ## What a run produces
 
 A **dataset** directory (`gen_dataset_from_schx --combine` format):
