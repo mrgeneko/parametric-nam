@@ -56,14 +56,28 @@ def load_model(checkpoint_path: str):
 
 
 def run_inference(model, audio: np.ndarray, param_vec: list[float],
-                  device: str, chunk_size: int = 48000 * 10) -> np.ndarray:
+                  device: str, tier: str = None, chunk_size: int = 48000 * 10) -> np.ndarray:
+    """`tier`: which submodel's output to return for a SlimmableParametricA2 model
+    (must match model.tier_labels(), e.g. 'lite'/'full'/'w4'/'w8'). REQUIRED for a
+    slimmable model -- there is no safe default. Silently always returning the
+    widest tier regardless of which checkpoint was actually loaded (the previous
+    behavior here) meant inspecting a best_lite.pt checkpoint via this function
+    quietly evaluated the full/w8 submodel instead -- caught this comparing
+    against per_perm_esr.py's own (tier-correct) result for the same checkpoint
+    and permutation: 0.037 here vs. the real 1.30 for that lite-tier corner."""
     model.to(device)
     audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0).to(device)  # [1,1,T]
     params_t = torch.tensor([param_vec], dtype=torch.float32).to(device)            # [1,N]
 
     with torch.no_grad():
         if isinstance(model, SlimmableParametricA2):
-            out = model(audio_t, params_t)[-1]   # use full (widest) tier output
+            if tier is None:
+                raise ValueError("run_inference: --tier is required for a slimmable "
+                                 "model (no safe default -- see this function's docstring)")
+            labels = model.tier_labels()
+            if tier not in labels:
+                raise ValueError(f"tier {tier!r} not in {labels}")
+            out = model(audio_t, params_t)[labels.index(tier)]
         else:
             out = model(audio_t, params_t)
 
@@ -86,6 +100,11 @@ def main():
         "cuda" if torch.cuda.is_available()          # NVIDIA or AMD/ROCm
         else "mps" if torch.backends.mps.is_available()
         else "cpu"))
+    ap.add_argument("--tier", default=None,
+                    help="which submodel to run, for a slimmable checkpoint (e.g. "
+                         "'lite'/'full'). Default: inferred from the checkpoint's own "
+                         "filename (best.pt -> full, best_<label>.pt -> <label>), matching "
+                         "how param_train.py names them -- pass explicitly to override.")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -95,6 +114,16 @@ def main():
     model, args_dict = load_model(args.checkpoint)
     param_names = args_dict["param_names"]
     print(f"  Params: {param_names}", flush=True)
+
+    tier = args.tier
+    if isinstance(model, SlimmableParametricA2) and tier is None:
+        stem = Path(args.checkpoint).stem
+        tier = "full" if stem == "best" else stem.removeprefix("best_")
+        labels = model.tier_labels()
+        if tier not in labels:
+            sys.exit(f"Couldn't infer --tier from checkpoint filename {stem!r} "
+                     f"(guessed {tier!r}, not in {labels}) -- pass --tier explicitly.")
+        print(f"  Tier (inferred from filename): {tier}", flush=True)
 
     print(f"Loading input {args.input} ...", flush=True)
     audio, sr = sf.read(args.input)
@@ -124,7 +153,7 @@ def main():
         out_path = out_dir / f"out_{label}.wav"
 
         print(f"  Running {param_str} ...", flush=True)
-        out_audio = run_inference(model, audio_norm, vec, args.device)
+        out_audio = run_inference(model, audio_norm, vec, args.device, tier)
 
         sf.write(str(out_path), out_audio.astype(np.float32), sr, subtype="FLOAT")
         print(f"  → {out_path}", flush=True)
