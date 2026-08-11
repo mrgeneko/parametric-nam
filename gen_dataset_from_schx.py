@@ -1622,8 +1622,24 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
               f"Raise it if you want a tighter model of the circuit.")
 
 
+# Standard bands for the tone-knob spectral check below -- generic guitar-amp-signal ranges
+# (bass/low-mid/mid/high), not circuit-specific. Same bands used for a manual investigation
+# (2026-08-11, TAD BF85) that confirmed Bass/Middle were real, just RMS-invisible once the
+# signal is saturated -- see the "tone" branch's own comment for why RMS is the wrong metric.
+_TONE_BANDS = ((80, 300), (300, 1000), (1000, 3000), (3000, 8000))
+_TONE_BAND_LABELS = ["80-300Hz", "300-1000Hz", "1000-3000Hz", "3000-8000Hz"]
+
+
+def _band_powers(y: np.ndarray, sr: int = 48000, bands=_TONE_BANDS) -> list:
+    Y = np.abs(np.fft.rfft(y.astype(np.float64)))
+    freqs = np.fft.rfftfreq(len(y), 1 / sr)
+    return [float(np.sum(Y[(freqs >= lo) & (freqs < hi)] ** 2)) for lo, hi in bands]
+
+
 def run_post_generation_checks(out_dir: Path, knobs: List[str],
-                                perms: List[dict], values_per_knob: dict):
+                                perms: List[dict], values_per_knob: dict,
+                                knob_kind: dict = None):
+    knob_kind = knob_kind or {}
     csv_path = out_dir / "params.csv"
     if not csv_path.exists():
         return
@@ -1663,25 +1679,87 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
             else:
                 print(f"    {k}={v} ({label}): median RMS={median_rms:.4f}  OK")
 
-    # 2. Knob sensitivity check: varying each knob should change the output RMS.
-    print("  Knob sensitivity (RMS spread across knob range):")
+    # 2. Knob sensitivity check: varying each knob should change the output in some measurable
+    # way. Two different metrics depending on --knob-kind (config's own [knob-kind] table):
+    #   "level" (default, unspecified) -- overall RMS spread. Right for Volume/Gain/Drive-type
+    #     knobs, which are SUPPOSED to change loudness.
+    #   "tone" -- per-frequency-band power spread instead. RMS is the WRONG metric for EQ-type
+    #     knobs (Treble/Bass/Middle): once the excitation drives the circuit into sustained
+    #     saturation (common -- see build_excitation.py), output RMS gets capped by the
+    #     clipping ceiling regardless of the PRE-clip tonal balance, so a tone knob that
+    #     clearly reshapes the spectrum can still barely move total RMS. Confirmed on TAD BF85
+    #     (2026-08-11): Bass/Middle both flagged "no effect" by the RMS check (0.5-0.6% spread)
+    #     while a direct per-band spectral comparison showed a real, physically-correct effect
+    #     (Bass: +1.4dB in 80-300Hz; Middle: +2.5 to +4.1dB in 300Hz-8kHz) -- a false alarm from
+    #     the metric, not a broken knob. Declare a knob "tone" in the config to get the right
+    #     check for it; anything left unspecified keeps the old RMS-only behavior.
+    print("  Knob sensitivity:")
+    tone_knobs = [k for k in knobs if knob_kind.get(k) == "tone"]
+    band_power_cache: dict = {}
+    if tone_knobs:
+        for r in rows:
+            try:
+                idx = int(r["idx"])
+            except (KeyError, ValueError):
+                continue
+            p = sig_path(out_dir, idx)
+            if not p.exists():
+                continue
+            try:
+                band_power_cache[idx] = _band_powers(np.load(p))
+            except Exception:
+                pass
+
     for k in knobs:
         if k not in values_per_knob or len(values_per_knob[k]) < 2:
             continue
-        by_val: dict = {}
-        for r in rows:
-            v = round(float(r[k]), 4)
-            by_val.setdefault(v, []).append(r["_rms"])
-        mean_by_val = {v: sum(rms_list) / len(rms_list) for v, rms_list in by_val.items()}
-        overall_mean = sum(mean_by_val.values()) / len(mean_by_val)
-        rms_range = max(mean_by_val.values()) - min(mean_by_val.values())
-        rel_range = rms_range / overall_mean if overall_mean > 1e-9 else 0.0
-        if rel_range < 0.01:
-            print(f"    WARNING {k}: RMS varies only {rel_range*100:.2f}% — knob may have no effect "
-                  f"(check param_map name)")
-            any_warn = True
+        if knob_kind.get(k) == "tone":
+            by_val_band: dict = {}
+            for r in rows:
+                try:
+                    idx = int(r["idx"])
+                except (KeyError, ValueError):
+                    continue
+                if idx not in band_power_cache:
+                    continue
+                v = round(float(r[k]), 4)
+                by_val_band.setdefault(v, []).append(band_power_cache[idx])
+            if len(by_val_band) < 2:
+                print(f"    {k} (tone): SKIPPED — no per-permutation audio found "
+                      f"(sig/ already cleaned up?)")
+                continue
+            n_bands = len(next(iter(by_val_band.values()))[0])
+            best_spread, best_band = 0.0, 0
+            for bi in range(n_bands):
+                mean_by_val = {v: sum(p[bi] for p in plist) / len(plist)
+                               for v, plist in by_val_band.items()}
+                overall_mean = sum(mean_by_val.values()) / len(mean_by_val)
+                spread = ((max(mean_by_val.values()) - min(mean_by_val.values())) / overall_mean
+                          if overall_mean > 1e-12 else 0.0)
+                if spread > best_spread:
+                    best_spread, best_band = spread, bi
+            label = _TONE_BAND_LABELS[best_band] if best_band < len(_TONE_BAND_LABELS) else f"band{best_band}"
+            if best_spread < 0.01:
+                print(f"    WARNING {k} (tone): no band shows >1% power spread (best: {label} "
+                      f"{best_spread*100:.2f}%) — knob may have no effect (check param_map name)")
+                any_warn = True
+            else:
+                print(f"    {k} (tone): {label} power spread {best_spread*100:.1f}%  OK")
         else:
-            print(f"    {k}: RMS spread {rel_range*100:.1f}%  OK")
+            by_val: dict = {}
+            for r in rows:
+                v = round(float(r[k]), 4)
+                by_val.setdefault(v, []).append(r["_rms"])
+            mean_by_val = {v: sum(rms_list) / len(rms_list) for v, rms_list in by_val.items()}
+            overall_mean = sum(mean_by_val.values()) / len(mean_by_val)
+            rms_range = max(mean_by_val.values()) - min(mean_by_val.values())
+            rel_range = rms_range / overall_mean if overall_mean > 1e-9 else 0.0
+            if rel_range < 0.01:
+                print(f"    WARNING {k}: RMS varies only {rel_range*100:.2f}% — knob may have no effect "
+                      f"(check param_map name)")
+                any_warn = True
+            else:
+                print(f"    {k}: RMS spread {rel_range*100:.1f}%  OK")
 
     if not any_warn:
         print("  All checks passed.")
@@ -1806,6 +1884,13 @@ def main():
                          "the host renders a stepped control and quantizes to N positions. Set "
                          "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
+    ap.add_argument("--knob-kind", default=None,
+                    help="NAME=kind,... (kind: 'tone' or 'level') for the post-generation knob "
+                         "sensitivity check. 'level' (default for any knob not listed) checks "
+                         "RMS spread -- right for Volume/Gain/Drive. 'tone' checks per-band "
+                         "spectral power spread instead -- RMS is the wrong metric for EQ knobs "
+                         "(Treble/Bass/Middle) once the signal is saturated, see the check's own "
+                         "comment. From a config's [knob-kind] table.")
     ap.add_argument("--skip-transient-check", action="store_true",
                     help="skip the pre-generation transient/saturation coverage gate (livespice "
                          "backend only). See internal engineering notes: this refuses to "
@@ -2369,7 +2454,14 @@ def main():
     print(f"\nDone: {ok}/{len(perms)} files in {total:.0f}s "
           f"({total / max(len(perms), 1) * 1000:.0f} ms/perm)")
 
-    run_post_generation_checks(out_dir, knobs, perms, values_per_knob if not args.random else {})
+    knob_kind = {}
+    if args.knob_kind:
+        for kv in args.knob_kind.split(","):
+            if "=" in kv:
+                name, kind = kv.split("=", 1)
+                knob_kind[name.strip()] = kind.strip()
+    run_post_generation_checks(out_dir, knobs, perms, values_per_knob if not args.random else {},
+                                knob_kind=knob_kind)
 
     # Is the DATASET converged? Every other check detects DIVERGENCE (the solver blew up and said
     # so). This is the only one that can see UNDER-convergence -- the solver stopping short and

@@ -61,6 +61,15 @@ def load_config(path: Path) -> dict:
                                            boost for a knob whose audible effect is
                                            small relative to others -- generic over
                                            any knob name, not circuit-specific)
+      [knob-kind]  NAME = "tone"|"level" -> --knob-kind NAME=kind,... (which metric
+                                           gen_dataset_from_schx.py's post-generation
+                                           sensitivity check uses for this knob --
+                                           "level", the default for anything unlisted,
+                                           checks RMS spread; "tone" checks per-band
+                                           spectral power spread instead, since RMS is
+                                           the wrong metric for an EQ knob once the
+                                           signal is saturated -- see that check's own
+                                           comment)
     `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
     """
     with open(path, "rb") as f:
@@ -69,6 +78,7 @@ def load_config(path: Path) -> dict:
     fixed = raw.pop("fixed", None)
     defaults = raw.pop("defaults", None)
     knob_boost = raw.pop("knob-boost", None)
+    knob_kind = raw.pop("knob-kind", None)
     out: dict = {}
     for k, v in raw.items():
         dest = k.replace("-", "_")
@@ -87,6 +97,8 @@ def load_config(path: Path) -> dict:
         out["defaults"] = ",".join(f"{name}={val}" for name, val in defaults.items())
     if knob_boost:
         out["knob_boost"] = ",".join(f"{name}={mult}" for name, mult in knob_boost.items())
+    if knob_kind:
+        out["knob_kind"] = ",".join(f"{name}={kind}" for name, kind in knob_kind.items())
     return out
 
 
@@ -643,6 +655,10 @@ def main():
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
     g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
+    g.add_argument("--knob-kind", default=None,
+                   help="NAME=kind,... (kind: 'tone' or 'level') -- which metric the "
+                        "post-generation knob-sensitivity check uses. From [knob-kind] in "
+                        "--config; see load_config()'s own docstring.")
     g.add_argument("--timeout-mult", type=float, default=1.0,
                    help="Scale gen_dataset_from_schx.py's auto-computed per-permutation timeout "
                         "(default: %(default)s). Some circuits have a genuine, reproducible "
@@ -912,6 +928,7 @@ def main():
             if args.input:         gen_cmd += ["--input",        args.input]
             if args.values:        gen_cmd += ["--values",       args.values]
             if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
+            if args.knob_kind:     gen_cmd += ["--knob-kind",    args.knob_kind]
             if args.skip_transient_check: gen_cmd += ["--skip-transient-check"]
             if args.transient_peak is not None: gen_cmd += ["--transient-peak", args.transient_peak]
             if args.transient_margin != 1.0: gen_cmd += ["--transient-margin", args.transient_margin]
