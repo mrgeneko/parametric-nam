@@ -72,6 +72,45 @@ def fold_film(model: ParametricA2, params) -> ParametricA2:
     return m
 
 
+def fold_lora(model: ParametricA2, params) -> ParametricA2:
+    """Deep-copy `model`, fold its LoRA delta at `params` into l1x1, and remove it — a
+    static A2 whose l1x1 output equals the parametric model's l1x1+lora sum at that knob
+    setting.
+
+    Simpler than fold_film() above: LoRA's delta = A(cond) @ (B(cond) @ x) is already
+    linear in the SAME x that l1x1(x) is linear in (both act on post_act, and LoRA
+    contributes no bias-like term independent of x) — so at a FIXED cond, A(cond)/B(cond)
+    collapse to plain fixed (channels x rank)/(rank x channels) matrices, and folding is
+    just `l1x1.weight += A_cond @ B_cond`. No bias adjustment needed, unlike fold_film's
+    gamma*bias+beta. Independent of fold_film/FiLM: LoRA acts strictly after FiLM in the
+    layer (on post_act, i.e. after the LeakyReLU FiLM's own output feeds into), so the two
+    folds don't interact and can run in either order (or independently) on the same model.
+
+    `params` is an ordered vector/list of length model.num_params. A model with no LoRA
+    (lora_rank==0, including FiLM-only models) is returned as-is.
+    """
+    m = copy.deepcopy(model).eval()
+    if m.lora_rank == 0:
+        return m
+    cond = torch.as_tensor(params, dtype=torch.float32).view(1, -1)
+    if cond.shape[1] != m.num_params:
+        raise ValueError(f"expected {m.num_params} params, got {cond.shape[1]}")
+    with torch.no_grad():
+        for layer in m.layers:
+            if layer.lora is None:
+                continue
+            lora = layer.lora
+            # Same batched reshape LoRA.delta() itself uses, squeezed to drop the
+            # batch=1 dim -- one shared reshape convention, not a second one invented here.
+            A = lora.net_A(cond).view(1, lora.channels, lora.rank).squeeze(0)  # (C, R)
+            B = lora.net_B(cond).view(1, lora.rank, lora.channels).squeeze(0)  # (R, C)
+            delta_w = A @ B                                                    # (C, C)
+            layer.l1x1.weight.add_(delta_w.view_as(layer.l1x1.weight))
+            layer.lora = None
+    m.lora_rank = 0
+    return m
+
+
 def _wavenet_config(channels: int, head_scale: float) -> dict:
     """Official NAM WaveNet `config` for our A2 at a given width — mirrors exactly
     what NAM's `WaveNet.export_config()` emits for the A2 config (verified in-venv)."""

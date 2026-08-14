@@ -64,6 +64,38 @@ def detect_spectral_norm(state) -> bool:
     return any(".parametrizations.weight" in k for k in state)
 
 
+def detect_lora_rank(state) -> int:
+    """Model-wide LoRA rank (uniform across all tiers/layers by construction -- see
+    SlimmableParametricA2.__init__'s `kw` dict), or 0 if this checkpoint has no LoRA
+    layers. Purely structural, like detect_spectral_norm above: finds any
+    "...layers.<i>.lora.net_A.weight" key, reads that SAME tier's own rechannel.weight
+    (or, for a non-slimmable single ParametricA2 state with no tier prefix, the
+    top-level rechannel.weight) to recover channels, and divides -- net_A.weight is
+    nn.Linear(cond_dim, channels*rank), shape (channels*rank, cond_dim), so rank is
+    only recoverable once channels is known. No separate CLI re-entry needed, avoiding
+    the mistake `--film-gamma-bound` made (a scalar hyperparameter with no state-dict
+    trace, requiring the caller to re-specify it by hand and get it right)."""
+    for k, v in state.items():
+        if not k.endswith("lora.net_A.weight"):
+            continue
+        # "" (non-slimmable, key starts with "layers.") or "lite"/"full"/"mid.0" etc.
+        # (slimmable, key is "<prefix>.layers...."). k.split(".layers.") only works for the
+        # latter -- the non-slimmable key has no leading dot before "layers." to split on.
+        idx = k.find("layers.")
+        prefix = k[:idx].rstrip(".")
+        rechannel_key = f"{prefix}.rechannel.weight" if prefix else "rechannel.weight"
+        if rechannel_key not in state:
+            raise SystemExit(f"found {k} but no matching {rechannel_key} to recover "
+                             f"channels from -- corrupt or hand-edited checkpoint?")
+        channels = state[rechannel_key].shape[0]
+        out_features = v.shape[0]
+        if out_features % channels != 0:
+            raise SystemExit(f"can't infer LoRA rank from {k}: {out_features} output "
+                             f"features not a multiple of channels={channels}")
+        return out_features // channels
+    return 0
+
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -102,7 +134,15 @@ def main():
                              f"(detected {sn_per_tier}) -- can't mix a spectral-norm-trained "
                              f"tier with a plain one in one container")
         spectral_norm = next(iter(sn_per_tier.values()))
-        model = SlimmableParametricA2(ds.num_params, widths=widths, spectral_norm=spectral_norm)
+        lora_per_tier = {t: detect_lora_rank(s) for t, s in loaded.items()}
+        if len(set(lora_per_tier.values())) > 1:
+            raise SystemExit(f"--compose checkpoints disagree on LoRA rank "
+                             f"(detected {lora_per_tier}) -- can't mix a tier trained with "
+                             f"one LoRA rank (or no LoRA at all) into a container with "
+                             f"tiers trained at a different rank")
+        lora_rank = next(iter(lora_per_tier.values()))
+        model = SlimmableParametricA2(ds.num_params, widths=widths, spectral_norm=spectral_norm,
+                                      lora_rank=lora_rank)
         labels = model.tier_labels()
         missing = [l for l in labels if l not in specs]
         if missing:
@@ -122,13 +162,14 @@ def main():
             raise SystemExit(f"checkpoint has no '{args.state}' key; available: {list(ck.keys())}")
         state = ck[args.state]
         spectral_norm = detect_spectral_norm(state)
+        lora_rank = detect_lora_rank(state)
         if any(k.startswith("lite.") for k in state):
             model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
-                                          spectral_norm=spectral_norm)
+                                          spectral_norm=spectral_norm, lora_rank=lora_rank)
         else:
             ch = next(v.shape[0] for k, v in state.items()
                      if k.endswith("conv.parametrizations.weight.original") or k.endswith("conv.weight"))
-            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm)
+            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm, lora_rank=lora_rank)
         model.load_state_dict(state)
         provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
                       f"best_esr={ck.get('best_esr')}")

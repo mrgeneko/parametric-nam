@@ -11,10 +11,10 @@ from param_train import ParametricA2, K_NUM_LAYERS
 import nam_standard
 
 
-def _mk(channels=3, num_params=2, seed=0):
+def _mk(channels=3, num_params=2, lora_rank=0, seed=0):
     torch.manual_seed(seed)
-    m = ParametricA2(channels=channels, num_params=num_params).eval()
-    # randomize so FiLM actually does something (init is near-identity)
+    m = ParametricA2(channels=channels, num_params=num_params, lora_rank=lora_rank).eval()
+    # randomize so FiLM/LoRA actually do something (init is near-identity/exactly-zero)
     for p in m.parameters():
         p.data = p.data + 0.05 * torch.randn_like(p)
     return m
@@ -31,6 +31,25 @@ def test_fold_film_matches_parametric():
         y_static = static(x, torch.zeros(1, 0))
     assert static.num_params == 0
     assert all(layer.film is None for layer in static.layers)
+    torch.testing.assert_close(y_param, y_static, atol=2e-5, rtol=1e-4)
+
+
+def test_fold_lora_matches_parametric():
+    """A folded (l1x1-only) static model must reproduce the parametric model's LoRA
+    contribution at that knob setting. FiLM, if present, is untouched by fold_lora --
+    the two folds are independent (see fold_lora's own docstring)."""
+    m = _mk(lora_rank=4)
+    x = torch.randn(1, 1, 8192)
+    params = torch.tensor([0.3, 0.7])
+    with torch.no_grad():
+        y_param = m(x, params.view(1, -1))
+        static = nam_standard.fold_lora(m, params)
+        # FiLM is still active on `static` -- only lora was folded -- so it still needs a
+        # real cond, unlike fold_film's num_params=0 result.
+        y_static = static(x, params.view(1, -1))
+    assert static.lora_rank == 0
+    assert all(layer.lora is None for layer in static.layers)
+    assert all(layer.film is not None for layer in static.layers)
     torch.testing.assert_close(y_param, y_static, atol=2e-5, rtol=1e-4)
 
 

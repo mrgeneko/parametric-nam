@@ -86,9 +86,24 @@ K_LEAKY_SLOPE = 0.01
 #   0 = pre-versioning (implicit): no schema_version, no head_mode => legacy residual model,
 #       which is REJECTED (the residual head no longer exists).
 #   1 = declares "head_mode": "skip".
+#   2 = adds an optional per-layer LoRA weight block (see the LoRA class) -- ONLY exported
+#       when lora_rank>0 (export_nam() picks this per-model, see K_PARAM_SCHEMA_VERSION_LORA
+#       below); a non-LoRA export still declares 1, unchanged, so every existing reader stays
+#       fully compatible with the common case.
 # Readers MUST fail loudly on a version they don't know rather than guess — guessing
 # a conditioning/head change produces wrong audio with no error.
 K_PARAM_SCHEMA_VERSION = 1
+# The version a LoRA-enabled export declares. Deliberately NOT folded into
+# K_PARAM_SCHEMA_VERSION (check_parametric_schema's own max-accepted value, checked by
+# infer.py/bake_nam.py/ab_realtime_playback.py) until those readers are updated to actually
+# reconstruct lora_rank from a checkpoint/config before calling load_weights() -- bumping the
+# accepted max without also fixing reconstruction would let a LoRA export past the schema
+# check into a model built with lora_rank=0, and _load_weight_block's flat-iterator consumption
+# would desync for every layer from there on: exactly the "silently misread the model" failure
+# schema_version exists to prevent, just relocated to Python instead of caught here. Until then,
+# an unmodified reader correctly (loudly) rejects a schema_version=2 file as newer than it
+# understands -- see check_parametric_schema.
+K_PARAM_SCHEMA_VERSION_LORA = 2
 
 
 def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
@@ -474,6 +489,11 @@ class ParametricA2(nn.Module):
             if layer.film is not None:
                 total += layer.film.net.weight.numel()
                 total += layer.film.net.bias.numel()
+            if layer.lora is not None:
+                total += layer.lora.net_A.weight.numel()
+                total += layer.lora.net_A.bias.numel()
+                total += layer.lora.net_B.weight.numel()
+                total += layer.lora.net_B.bias.numel()
         total += self.head.weight.numel()
         total += self.head.bias.numel()
         total += 1  # head_scale
@@ -492,6 +512,11 @@ class ParametricA2(nn.Module):
             if layer.film is not None:
                 w.extend(layer.film.net.weight.detach().flatten().tolist())
                 w.extend(layer.film.net.bias.detach().flatten().tolist())
+            if layer.lora is not None:
+                w.extend(layer.lora.net_A.weight.detach().flatten().tolist())
+                w.extend(layer.lora.net_A.bias.detach().flatten().tolist())
+                w.extend(layer.lora.net_B.weight.detach().flatten().tolist())
+                w.extend(layer.lora.net_B.bias.detach().flatten().tolist())
         w.extend(self.head.weight.detach().flatten().tolist())
         w.extend(self.head.bias.detach().flatten().tolist())
         w.append(self.head_scale.detach().item())
@@ -520,6 +545,17 @@ class ParametricA2(nn.Module):
                     torch.tensor([next(it) for _ in range(2 * C * np_)]).view_as(layer.film.net.weight))
                 layer.film.net.bias.data.copy_(
                     torch.tensor([next(it) for _ in range(2 * C)]).view_as(layer.film.net.bias))
+            if layer.lora is not None:
+                np_ = self.num_params
+                R = layer.lora.rank
+                layer.lora.net_A.weight.data.copy_(
+                    torch.tensor([next(it) for _ in range(C * R * np_)]).view_as(layer.lora.net_A.weight))
+                layer.lora.net_A.bias.data.copy_(
+                    torch.tensor([next(it) for _ in range(C * R)]).view_as(layer.lora.net_A.bias))
+                layer.lora.net_B.weight.data.copy_(
+                    torch.tensor([next(it) for _ in range(R * C * np_)]).view_as(layer.lora.net_B.weight))
+                layer.lora.net_B.bias.data.copy_(
+                    torch.tensor([next(it) for _ in range(R * C)]).view_as(layer.lora.net_B.bias))
         self.head.weight.data.copy_(
             torch.tensor([next(it) for _ in range(K_HEAD_KERNEL * self.channels)]).view_as(self.head.weight))
         self.head.bias.data.copy_(
@@ -628,19 +664,31 @@ class ParametricA2(nn.Module):
             if steps >= 2:
                 entry["steps"] = steps
             param_defs.append(entry)
+        has_lora = self.lora_rank > 0
+        parametric_config = {
+            # "type" used to be write-only (exported, read by nothing) -- NeuralAmpModelerCore's
+            # fast-path dispatch (a2_fast.cpp's is_parametric_a2_shape()) now reads it to decide
+            # whether a model is safe for the hand-optimized fast path ("film" only) or must fall
+            # through to the slower but LoRA-aware generic path ("film+lora"). Absent/"film"
+            # defaults to fast-path-eligible, so every pre-existing export is unaffected.
+            "type": "film+lora" if has_lora else "film",
+            "schema_version": K_PARAM_SCHEMA_VERSION_LORA if has_lora else K_PARAM_SCHEMA_VERSION,
+            "condition_size": self.num_params,
+            # Always "skip" — the one head we support. Declared so readers can REJECT
+            # legacy residual/untagged models instead of silently playing garbage.
+            "head_mode": "skip",
+            "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
+            "parameters": param_defs,
+        }
+        if has_lora:
+            # Model-wide rank (l1x1-only scope, one rank for every layer -- see the LoRA
+            # class docstring). Per-layer ranks aren't supported yet; if that changes, this
+            # becomes a list, not a scalar, and needs another schema_version bump.
+            parametric_config["lora"] = {"rank": self.lora_rank}
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),
-            "parametric": {
-                "type": "film",
-                "schema_version": K_PARAM_SCHEMA_VERSION,
-                "condition_size": self.num_params,
-                # Always "skip" — the one head we support. Declared so readers can REJECT
-                # legacy residual/untagged models instead of silently playing garbage.
-                "head_mode": "skip",
-                "film_layers": [f"layer_{i}" for i in range(K_NUM_LAYERS)],
-                "parameters": param_defs,
-            },
+            "parametric": parametric_config,
         }
         now = datetime.datetime.now()
         nam_metadata = {

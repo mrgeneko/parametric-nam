@@ -132,6 +132,53 @@ def test_export_checkpoint_infers_slimmable_widths():
     assert export_checkpoint.infer_widths(model.state_dict()) == [3, 4, 8]
 
 
+def test_export_checkpoint_detects_lora_rank():
+    """LoRA rank is recovered from the state dict alone (net_A.weight's shape, divided by
+    that tier's own channels from rechannel.weight) -- no args_dict needed, the same
+    state-dict-only recovery detect_spectral_norm already relies on for --compose mode."""
+    from param_train import SlimmableParametricA2, ParametricA2
+    assert export_checkpoint.detect_lora_rank(SlimmableParametricA2(2, widths=[3, 8]).state_dict()) == 0
+    assert export_checkpoint.detect_lora_rank(
+        SlimmableParametricA2(2, widths=[3, 8], lora_rank=5).state_dict()) == 5
+    assert export_checkpoint.detect_lora_rank(
+        SlimmableParametricA2(2, widths=[3, 4, 8], lora_rank=2).state_dict()) == 2
+    assert export_checkpoint.detect_lora_rank(ParametricA2(3, 2).state_dict()) == 0
+    assert export_checkpoint.detect_lora_rank(ParametricA2(3, 2, lora_rank=4).state_dict()) == 4
+
+
+def test_lora_checkpoint_round_trips_through_state_dict_reconstruction(tmp_path):
+    """The actual thing Phase 2 validates: build a small LoRA-enabled slimmable model
+    (simulating a saved checkpoint's 'model' state), detect its widths/lora_rank purely
+    from the state dict (as export_checkpoint.py's single-checkpoint path does), rebuild a
+    FRESH model from those detected values, load the state, and confirm the reconstruction's
+    forward pass is bit-identical to the original -- proves detect_lora_rank's output is
+    actually sufficient to reconstruct a working model, not just a plausible-looking number.
+    """
+    from param_train import SlimmableParametricA2
+
+    torch.manual_seed(0)
+    original = SlimmableParametricA2(num_params=2, widths=[3, 8], lora_rank=4).eval()
+    for p in original.parameters():
+        p.data = p.data + 0.05 * torch.randn_like(p)
+    state = original.state_dict()
+
+    widths = export_checkpoint.infer_widths(state)
+    lora_rank = export_checkpoint.detect_lora_rank(state)
+    assert widths == [3, 8]
+    assert lora_rank == 4
+
+    rebuilt = SlimmableParametricA2(num_params=2, widths=widths, lora_rank=lora_rank).eval()
+    rebuilt.load_state_dict(state)
+
+    x = torch.randn(1, 1, 4096)
+    cond = torch.tensor([[0.2, 0.9]])
+    with torch.no_grad():
+        y_original = original(x, cond)
+        y_rebuilt = rebuilt(x, cond)
+    for a, b in zip(y_original, y_rebuilt):
+        torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+
 def test_export_checkpoint_model_state_accepts_either_key():
     assert export_checkpoint.model_state({"model": {"a": 1}}) == {"a": 1}
     assert export_checkpoint.model_state({"best_state": {"b": 2}}) == {"b": 2}

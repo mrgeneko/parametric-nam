@@ -42,12 +42,16 @@ def load_model(checkpoint_path: str):
     # detection needed the way export_checkpoint.py has to (it doesn't get an args_dict when
     # composing across checkpoints from possibly different runs).
     spectral_norm = args_dict.get("spectral_norm", False)
+    # Same free recovery as spectral_norm above: --lora-rank is captured in args_dict
+    # automatically (the whole argparse namespace is saved verbatim), no extra plumbing.
+    lora_rank = args_dict.get("lora_rank", 0)
     if slimmable:
         model = SlimmableParametricA2(num_params=num_params, widths=args_dict.get("widths"),
-                                      spectral_norm=spectral_norm)
+                                      spectral_norm=spectral_norm, lora_rank=lora_rank)
     else:
         channels = args_dict.get("channels", 8)
-        model = ParametricA2(num_params=num_params, channels=channels, spectral_norm=spectral_norm)
+        model = ParametricA2(num_params=num_params, channels=channels,
+                             spectral_norm=spectral_norm, lora_rank=lora_rank)
 
     state = ckpt.get("model") or ckpt.get("best_state")
     model.load_state_dict(state)
