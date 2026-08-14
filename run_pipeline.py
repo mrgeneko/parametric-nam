@@ -775,6 +775,10 @@ def main():
                    help="Lipschitz-bound every A2Layer's conv/mixin/l1x1 -- see "
                         "internal engineering notes ('A2'). Default off. "
                         "Forwarded to param_train.py.")
+    g.add_argument("--lora-rank",      type=int,   default=0,
+                   help="Low-rank ('LoRA-style') additive weight update on every A2Layer's "
+                        "l1x1, alongside FiLM -- see internal engineering notes ('LoRA-style "
+                        "knob conditioning'). Default 0 (off). Forwarded to param_train.py.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
     _pre = argparse.ArgumentParser(add_help=False)
@@ -1124,6 +1128,7 @@ def main():
             if args.per_tier_clip:       train_cmd.append("--per-tier-clip")
             if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
             if args.spectral_norm:       train_cmd.append("--spectral-norm")
+            if args.lora_rank:           train_cmd += ["--lora-rank", str(args.lora_rank)]
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------
