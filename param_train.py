@@ -2240,7 +2240,13 @@ def main():
     for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
                                  model.tier_labels(), model.submodels):
         ch = sm_data["model"]["config"]["layers"]
-        m2 = ParametricA2(ch, num_params)
+        # lora_rank from the SOURCE submodel (src.lora_rank) -- without this, a LoRA-trained
+        # model reconstructs m2 as lora_rank=0, so load_weights() consumes each layer's extra
+        # lora.net_A/net_B weights as if they belonged to the NEXT layer's conv/mixin/l1x1,
+        # corrupting every downstream layer. Not caught by a hard error (load_weights doesn't
+        # validate weight count) -- silently produces a real but wrong forward pass, which is
+        # exactly what surfaced as a large-but-finite round-trip WARN instead of a crash.
+        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():

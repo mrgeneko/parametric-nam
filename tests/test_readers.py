@@ -179,6 +179,41 @@ def test_lora_checkpoint_round_trips_through_state_dict_reconstruction(tmp_path)
         torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
 
 
+def test_export_nam_lora_round_trip_matches_live_model():
+    """Regression test for a real bug found in param_train.py's own export-time round-trip
+    check (main()'s `m2 = ParametricA2(ch, num_params)` -- missing lora_rank): reconstructing
+    a LoRA-trained submodel from its exported `weights` list without threading lora_rank
+    through doesn't crash (load_weights doesn't validate weight count) -- it silently
+    consumes each layer's lora.net_A/net_B weights as if they belonged to the NEXT layer's
+    conv/mixin/l1x1, corrupting every downstream layer. Caught as a large-but-finite
+    max_diff, not an error. This exercises the same `export_nam()` -> per-submodel
+    `weights` list -> `ParametricA2(ch, num_params, lora_rank=...)` -> `load_weights()` path
+    param_train.py's own round-trip check uses, for a multi-tier slimmable model (the
+    scenario that actually surfaced the bug -- two different channel counts sharing one
+    lora_rank)."""
+    from param_train import SlimmableParametricA2
+
+    torch.manual_seed(0)
+    model = SlimmableParametricA2(num_params=2, widths=[4, 8], lora_rank=3).eval()
+    for p in model.parameters():
+        p.data = p.data + 0.05 * torch.randn_like(p)
+
+    nam = model.export_nam({"param_names": ["a", "b"]}, {"version": "0.7.0"},
+                           sample_rate=48000, input_audio=None)
+
+    x = torch.randn(1, 1, 4096)
+    cond = torch.tensor([[0.2, 0.9]])
+    for sm_data, src in zip(nam["config"]["submodels"], model.submodels):
+        ch = sm_data["model"]["config"]["layers"]
+        weights = sm_data["model"]["weights"]
+        rebuilt = ParametricA2(ch, 2, lora_rank=src.lora_rank).eval()
+        rebuilt.load_weights(weights)
+        with torch.no_grad():
+            y_src = src(x, cond)
+            y_rebuilt = rebuilt(x, cond)
+        torch.testing.assert_close(y_src, y_rebuilt, atol=0.0, rtol=0.0)
+
+
 def test_export_checkpoint_model_state_accepts_either_key():
     assert export_checkpoint.model_state({"model": {"a": 1}}) == {"a": 1}
     assert export_checkpoint.model_state({"best_state": {"b": 2}}) == {"b": 2}
