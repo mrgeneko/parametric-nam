@@ -71,7 +71,12 @@ def load_all_submodels(nam_path: str):
         param_metas = parametric["parameters"]
         param_names = [p["name"] for p in param_metas]
         weights = sub["model"]["weights"]
-        model = ParametricA2(channels=channels, num_params=len(param_names))
+        # LoRA-enabled export (schema_version 2, "type":"film+lora") declares its rank
+        # directly in the config -- no state-dict detection needed the way
+        # export_checkpoint.py's detect_lora_rank() has to do for a training checkpoint.
+        # Every pre-LoRA export has no "lora" key at all -> rank 0, unchanged behavior.
+        lora_rank = parametric.get("lora", {}).get("rank", 0)
+        model = ParametricA2(channels=channels, num_params=len(param_names), lora_rank=lora_rank)
         expected = model.weight_count()
         if len(weights) != expected:
             raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "
