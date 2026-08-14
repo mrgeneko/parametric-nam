@@ -165,6 +165,51 @@ class FiLM(nn.Module):
         return gamma * x + beta
 
 
+class LoRA(nn.Module):
+    """Low-rank knob-conditioned weight update: delta_x = A(cond) @ (B(cond) @ x).
+
+    An alternative/addition to FiLM for a layer's l1x1: FiLM only ever rescales/shifts
+    l1x1's FIXED output via a diagonal per-channel affine transform -- it can never change
+    what l1x1 actually computes. LoRA lets the knob genuinely change that computation, via
+    a low-rank (rank << channels) additive update to l1x1's effective weight -- conceptually
+    W_eff = W_l1x1 + A@B -- applied here as two small matmuls on the SAME input l1x1
+    consumes, never materializing the full (channels x channels) delta. See internal
+    engineering notes ("LoRA-style knob conditioning") for the motivation (the >3-knob ESR
+    ceiling, and a chainsmith zippering report both traced to FiLM's rescale-only ceiling)
+    and the exact formula this must match bit-for-bit against the C++ inference side.
+
+    delta() is the ONE place this formula is computed -- forward() and (once it exists)
+    nam_standard.fold_lora() both must call it, mirroring FiLM.gamma_beta()'s own
+    single-source-of-truth discipline (see FiLM's docstring for the bug class that
+    discipline avoids).
+    """
+    def __init__(self, channels: int, cond_dim: int, rank: int):
+        super().__init__()
+        self.channels = channels
+        self.rank = rank
+        self.net_A = nn.Linear(cond_dim, channels * rank)
+        self.net_B = nn.Linear(cond_dim, rank * channels)
+        # Zero-init net_A (weight AND bias): delta() == 0 for ANY cond, ANY net_B, at step 0,
+        # so enabling LoRA never perturbs a model that would otherwise train identically to
+        # LoRA-off. net_B gets FiLM's own small-nonzero init so gradients reach net_A via the
+        # chain rule through B from the first step -- net_A's own gradient is nonzero even
+        # though its zero-init OUTPUT contributes nothing to delta() at step 0.
+        nn.init.zeros_(self.net_A.weight)
+        nn.init.zeros_(self.net_A.bias)
+        nn.init.normal_(self.net_B.weight, std=0.1)
+        nn.init.zeros_(self.net_B.bias)
+
+    def delta(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        b = x.shape[0]
+        A = self.net_A(cond).view(b, self.channels, self.rank)
+        B = self.net_B(cond).view(b, self.rank, self.channels)
+        Bx = torch.bmm(B, x)      # (b, rank, T)
+        return torch.bmm(A, Bx)   # (b, channels, T)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        return self.delta(x, cond)
+
+
 def parse_knob_boost(spec: str) -> dict[str, float]:
     """Parse '--knob-boost' syntax: 'NAME=mult,NAME2=mult2,...' -> {NAME: mult}."""
     boosts: dict[str, float] = {}
@@ -249,7 +294,8 @@ class A2Layer(nn.Module):
     to an unconstrained run with the same seed, isolating A2's actual training-time effect from
     an accidental initialization-lottery difference in side-by-side comparisons.
     """
-    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int):
+    def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int,
+                lora_rank: int = 0):
         super().__init__()
         # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
         # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
@@ -267,6 +313,10 @@ class A2Layer(nn.Module):
         self.mixin = nn.Conv1d(1, channels, 1, bias=False)
         self.l1x1 = nn.Conv1d(channels, channels, 1)
         self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
+        # Independently toggleable from film -- a layer can have neither, either, or
+        # both active. See LoRA's own docstring for why this is additive to l1x1
+        # specifically, not a replacement for FiLM's own (earlier, pre-activation) role.
+        self.lora = LoRA(channels, cond_dim, lora_rank) if (cond_dim > 0 and lora_rank > 0) else None
 
     def enable_spectral_norm(self):
         """Wrap conv/mixin/l1x1 with spectral_norm. Call ONLY after every raw module this
@@ -284,6 +334,8 @@ class A2Layer(nn.Module):
             h = self.film(h, cond)
         post_act = F.leaky_relu(h, K_LEAKY_SLOPE)
         residual_out = x + self.l1x1(post_act)
+        if self.lora is not None:
+            residual_out = residual_out + self.lora(post_act, cond)
         return residual_out, post_act
 
 
@@ -352,16 +404,18 @@ class ParametricA2(nn.Module):
     Architecture matches the C++ A2FastModel with additional FiLM layers
     for parametric knob control.
     """
-    def __init__(self, channels: int, num_params: int, spectral_norm: bool = False):
+    def __init__(self, channels: int, num_params: int, spectral_norm: bool = False,
+                lora_rank: int = 0):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
+        self.lora_rank = lora_rank
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
         # anything to strip -- see internal engineering notes ("A2").
         self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
-            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params)
+            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params, lora_rank=lora_rank)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -653,12 +707,17 @@ class SlimmableParametricA2(nn.Module):
     index -1 = widest (the 'full' tier). Default widths [4, 8] (max_value 0.5 / 1.0);
     pass `--widths 3,8` to reproduce the original 2-tier convention exactly.
     """
-    def __init__(self, num_params: int, widths=None, spectral_norm: bool = False):
+    def __init__(self, num_params: int, widths=None, spectral_norm: bool = False,
+                lora_rank: int = 0):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
         # spectral_norm is DELIBERATELY NOT passed here (always False per-tier) -- see below.
-        kw = dict(spectral_norm=False)
+        # lora_rank, unlike spectral_norm, IS passed straight through per-tier at construction
+        # time: LoRA's net_A/net_B are freshly constructed modules (like conv/mixin/film),
+        # not a later wrap of an already-existing module, so they carry none of spectral_norm's
+        # RNG-draw-order sensitivity -- no deferred enable_lora() call needed.
+        kw = dict(spectral_norm=False, lora_rank=lora_rank)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` regardless of the actual widths chosen -- a 2-tier model
         # stays structurally compatible with old 2-tier checkpoints for resume /
@@ -1543,6 +1602,16 @@ def main():
                          "training runs are unaffected until opted in and validated "
                          "(measure aggregate + per-perm ESR before/after on a per-model "
                          "basis; this is a real capacity constraint, not free).")
+    ap.add_argument("--lora-rank", type=int, default=0,
+                    help="Add a low-rank ('LoRA-style') knob-conditioned weight update to "
+                         "every layer's l1x1, alongside (not instead of) FiLM -- see internal "
+                         "engineering notes ('LoRA-style knob conditioning'). Rank is the "
+                         "bottleneck dimension of the additive update (0 = disabled, the "
+                         "default: existing training runs are unaffected until opted in). "
+                         "Unlike FiLM's diagonal affine rescale of one fixed l1x1 weight, "
+                         "this lets the knob genuinely change what l1x1 computes -- aimed at "
+                         "the >3-knob ESR ceiling FiLM alone can't lift regardless of "
+                         "training time.")
     ap.add_argument("--per-tier-clip", action="store_true",
                     help="Slimmable only: clip_grad_norm_ EACH tier's own parameters "
                          "separately (each to --clip-norm) instead of one joint call over "
@@ -1680,7 +1749,8 @@ def main():
     # starting point -- not a fresh random init, so fine-tuning under the now-active constraint
     # only needs to ADAPT, not relearn the whole function.
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
-                                  spectral_norm=(args.spectral_norm and args.init_from is None))
+                                  spectral_norm=(args.spectral_norm and args.init_from is None),
+                                  lora_rank=args.lora_rank)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
