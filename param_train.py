@@ -1494,6 +1494,45 @@ def resolve_device(requested: str) -> str:
         + "#" * 64)
 
 
+def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
+                             test_inp=None, test_params=None) -> list[tuple[str, float]]:
+    """Reconstruct each exported submodel from its OWN weights list (the same
+    ParametricA2(...).load_weights() path any real reader uses) and diff its forward pass
+    against the live in-memory submodel it was exported from. Returns [(tier_label,
+    max_diff), ...]; a real export/reload bug shows up as a large, non-tiny max_diff for the
+    affected tier(s), not necessarily an exception.
+
+    Pulled out of main() so this exact check -- including the lora_rank threading fix -- is
+    directly testable, not just exercised as a side effect of running a real training pipeline."""
+    if test_inp is None:
+        test_inp = torch.randn(1, 1, 8192, device=device)
+    if test_params is None:
+        test_params = torch.rand(1, num_params, device=device)
+    results = []
+    # Pair each exported submodel with its SOURCE tier by ascending width. (Both
+    # nam_data["config"]["submodels"] and model.submodels are width-ascending, and
+    # tier_labels() matches that order.) Earlier this hardcoded ["lite","full"],
+    # which for 3+ tiers mislabeled and compared the wrong pair (e.g. the 4ch export
+    # vs the 8ch model) — a false WARN that also never tested the widest tier.
+    for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
+                                 model.tier_labels(), model.submodels):
+        ch = sm_data["model"]["config"]["layers"]
+        # lora_rank from the SOURCE submodel (src.lora_rank) -- without this, a LoRA-trained
+        # model reconstructs m2 as lora_rank=0, so load_weights() consumes each layer's extra
+        # lora.net_A/net_B weights as if they belonged to the NEXT layer's conv/mixin/l1x1,
+        # corrupting every downstream layer. Not caught by a hard error (load_weights doesn't
+        # validate weight count) -- silently produces a real but wrong forward pass, which is
+        # exactly what surfaced as a large-but-finite round-trip WARN instead of a crash.
+        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank)
+        m2.load_weights(sm_data["model"]["weights"])
+        m2.to(device)
+        with torch.no_grad():
+            o1 = src(test_inp, test_params)
+            o2 = m2(test_inp, test_params)
+        results.append((lbl, (o1 - o2).abs().max().item()))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2230,29 +2269,7 @@ def main():
 
     # Verify round-trip
     print(f"  Verifying round-trip ...", file=sys.stderr)
-    test_inp = torch.randn(1, 1, 8192, device=device)
-    test_params = torch.rand(1, num_params, device=device)
-    # Pair each exported submodel with its SOURCE tier by ascending width. (Both
-    # nam_data["config"]["submodels"] and model.submodels are width-ascending, and
-    # tier_labels() matches that order.) Earlier this hardcoded ["lite","full"],
-    # which for 3+ tiers mislabeled and compared the wrong pair (e.g. the 4ch export
-    # vs the 8ch model) — a false WARN that also never tested the widest tier.
-    for sm_data, lbl, src in zip(nam_data["config"]["submodels"],
-                                 model.tier_labels(), model.submodels):
-        ch = sm_data["model"]["config"]["layers"]
-        # lora_rank from the SOURCE submodel (src.lora_rank) -- without this, a LoRA-trained
-        # model reconstructs m2 as lora_rank=0, so load_weights() consumes each layer's extra
-        # lora.net_A/net_B weights as if they belonged to the NEXT layer's conv/mixin/l1x1,
-        # corrupting every downstream layer. Not caught by a hard error (load_weights doesn't
-        # validate weight count) -- silently produces a real but wrong forward pass, which is
-        # exactly what surfaced as a large-but-finite round-trip WARN instead of a crash.
-        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank)
-        m2.load_weights(sm_data["model"]["weights"])
-        m2.to(device)
-        with torch.no_grad():
-            o1 = src(test_inp, test_params)
-            o2 = m2(test_inp, test_params)
-        md = (o1 - o2).abs().max().item()
+    for lbl, md in verify_export_round_trip(nam_data, model, num_params, device):
         status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
         print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
 

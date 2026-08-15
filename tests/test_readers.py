@@ -19,6 +19,7 @@ import soundfile as sf
 import torch
 
 import export_checkpoint
+import param_infer
 import param_train
 import run_pipeline
 from param_train import ParametricA2, check_parametric_schema
@@ -146,6 +147,91 @@ def test_export_checkpoint_detects_lora_rank():
     assert export_checkpoint.detect_lora_rank(ParametricA2(3, 2, lora_rank=4).state_dict()) == 4
 
 
+def test_require_tier_agreement_passes_when_unanimous():
+    assert export_checkpoint.require_tier_agreement({"lite": 4, "full": 4}, "LoRA rank") == 4
+    assert export_checkpoint.require_tier_agreement({"lite": False, "full": False},
+                                                     "spectral_norm") is False
+
+
+def test_require_tier_agreement_rejects_lora_rank_mismatch():
+    """--compose must refuse to splice a rank-4 tier with a rank-0 (no LoRA) or
+    differently-ranked tier into one container -- this is the actual check
+    export_checkpoint.py's --compose mode relies on to reject that combination."""
+    with pytest.raises(SystemExit, match="LoRA rank"):
+        export_checkpoint.require_tier_agreement({"lite": 0, "full": 4}, "LoRA rank")
+    with pytest.raises(SystemExit, match="LoRA rank"):
+        export_checkpoint.require_tier_agreement({"lite": 2, "full": 4}, "LoRA rank")
+
+
+def test_param_infer_load_model_reads_back_lora_rank(tmp_path):
+    """param_infer.py's load_model() threads lora_rank out of a checkpoint's args_dict the
+    same way spectral_norm already was ('free recovery' -- the whole argparse namespace is
+    saved verbatim at training time, see param_infer.py's own comment on this). Without this,
+    a LoRA checkpoint would silently reconstruct as lora_rank=0 -- load_state_dict would then
+    fail loudly (missing lora.* keys) rather than misload, but the model would simply be
+    unloadable, defeating the point of inspecting a LoRA checkpoint with this tool at all."""
+    from param_train import SlimmableParametricA2
+
+    dataset_dir = tmp_path / "ds"
+    dataset_dir.mkdir()
+    (dataset_dir / "config.json").write_text(json.dumps({"knobs": ["a", "b"]}))
+
+    torch.manual_seed(0)
+    original = SlimmableParametricA2(num_params=2, widths=[3, 8], lora_rank=4).eval()
+
+    ckpt_path = tmp_path / "best.pt"
+    torch.save({
+        "model": original.state_dict(),
+        "args_dict": {"dataset": str(dataset_dir), "widths": [3, 8], "lora_rank": 4},
+    }, str(ckpt_path))
+
+    model, args_dict = param_infer.load_model(str(ckpt_path))
+    assert args_dict["lora_rank"] == 4
+    for sub in model.submodels:
+        assert sub.lora_rank == 4
+        assert all(layer.lora is not None for layer in sub.layers)
+
+    x = torch.randn(1, 1, 4096)
+    cond = torch.tensor([[0.3, 0.7]])
+    with torch.no_grad():
+        y_original = original(x, cond)
+        y_loaded = model(x, cond)
+    for a, b in zip(y_original, y_loaded):
+        torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+
+def _minimal_train_cmd_args(**overrides):
+    """A Namespace covering every attribute build_train_cmd() reads, with the same
+    defaults argparse would assign (see run_pipeline.py's own --xxx default= values).
+    overrides lets a test vary just the flag(s) it cares about."""
+    import argparse
+    defaults = dict(
+        nam_output="out.param.nam", checkpoint_dir="ckpt", restart_period=50, restart_mult=1,
+        stale_cycles=3, batch_size=16, lr=3e-4, crop_len=48000, mrstft_weight=0.0,
+        val_split=0.05, val_passes=1, device="cpu", seed=42, widths=None, mmap=True,
+        resume=None, amp="off", init_from=None, param_sensitivity=False, knob_boost=None,
+        per_tier_clip=False, clip_norm=1.0, spectral_norm=False, lora_rank=0,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_build_train_cmd_omits_lora_rank_when_zero():
+    args = _minimal_train_cmd_args(lora_rank=0)
+    cmd = run_pipeline.build_train_cmd(args, "ds", 100, 4)
+    assert "--lora-rank" not in cmd
+
+
+def test_build_train_cmd_forwards_lora_rank():
+    """The actual gap this test closes: --lora-rank was added to run_pipeline.py's CLI and
+    threaded into train_cmd (mirroring the existing --spectral-norm pattern) with no test
+    confirming the flag actually reaches param_train.py's command line."""
+    args = _minimal_train_cmd_args(lora_rank=4)
+    cmd = run_pipeline.build_train_cmd(args, "ds", 100, 4)
+    assert "--lora-rank" in cmd
+    assert cmd[cmd.index("--lora-rank") + 1] == "4"
+
+
 def test_lora_checkpoint_round_trips_through_state_dict_reconstruction(tmp_path):
     """The actual thing Phase 2 validates: build a small LoRA-enabled slimmable model
     (simulating a saved checkpoint's 'model' state), detect its widths/lora_rank purely
@@ -186,12 +272,14 @@ def test_export_nam_lora_round_trip_matches_live_model():
     through doesn't crash (load_weights doesn't validate weight count) -- it silently
     consumes each layer's lora.net_A/net_B weights as if they belonged to the NEXT layer's
     conv/mixin/l1x1, corrupting every downstream layer. Caught as a large-but-finite
-    max_diff, not an error. This exercises the same `export_nam()` -> per-submodel
-    `weights` list -> `ParametricA2(ch, num_params, lora_rank=...)` -> `load_weights()` path
-    param_train.py's own round-trip check uses, for a multi-tier slimmable model (the
-    scenario that actually surfaced the bug -- two different channel counts sharing one
-    lora_rank)."""
-    from param_train import SlimmableParametricA2
+    max_diff, not an error.
+
+    Calls param_train.verify_export_round_trip() directly -- the ACTUAL function main() now
+    calls for this check (extracted specifically so this test exercises real production code,
+    not an independent reimplementation of the same pattern that could silently drift from
+    it) -- for a multi-tier slimmable model (the scenario that actually surfaced the bug --
+    two different channel counts sharing one lora_rank)."""
+    from param_train import SlimmableParametricA2, verify_export_round_trip
 
     torch.manual_seed(0)
     model = SlimmableParametricA2(num_params=2, widths=[4, 8], lora_rank=3).eval()
@@ -203,15 +291,11 @@ def test_export_nam_lora_round_trip_matches_live_model():
 
     x = torch.randn(1, 1, 4096)
     cond = torch.tensor([[0.2, 0.9]])
-    for sm_data, src in zip(nam["config"]["submodels"], model.submodels):
-        ch = sm_data["model"]["config"]["layers"]
-        weights = sm_data["model"]["weights"]
-        rebuilt = ParametricA2(ch, 2, lora_rank=src.lora_rank).eval()
-        rebuilt.load_weights(weights)
-        with torch.no_grad():
-            y_src = src(x, cond)
-            y_rebuilt = rebuilt(x, cond)
-        torch.testing.assert_close(y_src, y_rebuilt, atol=0.0, rtol=0.0)
+    results = verify_export_round_trip(nam, model, num_params=2, device="cpu",
+                                       test_inp=x, test_params=cond)
+    assert [lbl for lbl, _ in results] == model.tier_labels()
+    for lbl, max_diff in results:
+        assert max_diff <= 1e-6, f"tier {lbl!r}: round-trip max_diff={max_diff:.3e} (expected ~0)"
 
 
 def test_export_checkpoint_model_state_accepts_either_key():

@@ -566,6 +566,50 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
         sys.exit(1)
 
 
+def build_train_cmd(args, dataset_dir, epochs, repeats):
+    """The param_train.py invocation for the training step. Pulled out of main() so the
+    flag-forwarding logic (easy to silently break when adding a new pipeline flag -- see the
+    --amp comment below for a real incident) is directly testable without running an actual
+    dataset-gen + train pipeline."""
+    train_cmd = [
+        PYTHON, TRAIN,
+        "--dataset",         dataset_dir,
+        "--output",          args.nam_output,
+        "--checkpoint-dir",  args.checkpoint_dir,
+        "--epochs",          epochs,    # derived from target-steps unless explicit
+        "--restart-period",  args.restart_period,
+        "--restart-mult",    args.restart_mult,
+        "--stale-cycles",    args.stale_cycles,
+        "--batch-size",      args.batch_size,
+        "--lr",              args.lr,
+        "--crop-len",        args.crop_len,
+        "--repeats",         repeats,   # derived above — may differ from args.repeats
+        "--mrstft-weight",   args.mrstft_weight,
+        "--val-split",       args.val_split,
+        "--val-passes",      args.val_passes,
+        "--device",          args.device,
+        "--seed",            args.seed,
+    ]
+    if args.widths:              train_cmd += ["--widths", args.widths]
+    if not args.mmap:             train_cmd.append("--no-mmap")
+    if args.resume:              train_cmd += ["--resume", args.resume]
+    # ALWAYS forward --amp explicitly. The old `if args.amp != "off"` guard assumed
+    # param_train.py's own default matches "off" when the flag is omitted -- it doesn't
+    # (param_train.py --amp also defaults to "fp16"), so a caller's explicit --amp off
+    # request silently fell through to fp16 instead, with nothing reporting the mismatch.
+    # See the 2026-07-31 dumble-rock incident: this crashed training with an MPS/GradScaler
+    # TypeError that --amp off was specifically meant to avoid.
+    train_cmd += ["--amp", args.amp]
+    if args.init_from:           train_cmd += ["--init-from", args.init_from]
+    if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
+    if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
+    if args.per_tier_clip:       train_cmd.append("--per-tier-clip")
+    if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
+    if args.spectral_norm:       train_cmd.append("--spectral-norm")
+    if args.lora_rank:           train_cmd += ["--lora-rank", str(args.lora_rank)]
+    return train_cmd
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -1093,42 +1137,7 @@ def main():
                     log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_perms). Change the knob "
                         f"grid and this number moves silently. Prefer target-steps.", fh)
 
-            train_cmd = [
-                PYTHON, TRAIN,
-                "--dataset",         dataset_dir,
-                "--output",          args.nam_output,
-                "--checkpoint-dir",  args.checkpoint_dir,
-                "--epochs",          epochs,    # derived from target-steps unless explicit
-                "--restart-period",  args.restart_period,
-                "--restart-mult",    args.restart_mult,
-                "--stale-cycles",    args.stale_cycles,
-                "--batch-size",      args.batch_size,
-                "--lr",              args.lr,
-                "--crop-len",        args.crop_len,
-                "--repeats",         repeats,   # derived above — may differ from args.repeats
-                "--mrstft-weight",   args.mrstft_weight,
-                "--val-split",       args.val_split,
-                "--val-passes",      args.val_passes,
-                "--device",          args.device,
-                "--seed",            args.seed,
-            ]
-            if args.widths:              train_cmd += ["--widths", args.widths]
-            if not args.mmap:             train_cmd.append("--no-mmap")
-            if args.resume:              train_cmd += ["--resume", args.resume]
-            # ALWAYS forward --amp explicitly. The old `if args.amp != "off"` guard assumed
-            # param_train.py's own default matches "off" when the flag is omitted -- it doesn't
-            # (param_train.py --amp also defaults to "fp16"), so a caller's explicit --amp off
-            # request silently fell through to fp16 instead, with nothing reporting the mismatch.
-            # See the 2026-07-31 dumble-rock incident: this crashed training with an MPS/GradScaler
-            # TypeError that --amp off was specifically meant to avoid.
-            train_cmd += ["--amp", args.amp]
-            if args.init_from:           train_cmd += ["--init-from", args.init_from]
-            if args.param_sensitivity:   train_cmd.append("--param-sensitivity")
-            if args.knob_boost:          train_cmd += ["--knob-boost", args.knob_boost]
-            if args.per_tier_clip:       train_cmd.append("--per-tier-clip")
-            if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
-            if args.spectral_norm:       train_cmd.append("--spectral-norm")
-            if args.lora_rank:           train_cmd += ["--lora-rank", str(args.lora_rank)]
+            train_cmd = build_train_cmd(args, dataset_dir, epochs, repeats)
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------

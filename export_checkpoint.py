@@ -96,6 +96,16 @@ def detect_lora_rank(state) -> int:
     return 0
 
 
+def require_tier_agreement(per_tier: dict, what: str):
+    """--compose's tiers must all agree on a model-wide setting (spectral_norm presence,
+    LoRA rank, ...) -- these aren't per-tier knobs, so a mismatch means the checkpoints
+    can't actually be spliced into one consistent container. Returns the single agreed
+    value, or raises SystemExit citing exactly which tiers disagreed."""
+    if len(set(per_tier.values())) > 1:
+        raise SystemExit(f"--compose checkpoints disagree on {what} "
+                         f"(detected {per_tier}) -- can't mix tiers with different {what}")
+    return next(iter(per_tier.values()))
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -129,18 +139,9 @@ def main():
         loaded = {t: model_state(ck) for t, ck in raw.items()}
         widths = infer_widths(next(iter(loaded.values())))
         sn_per_tier = {t: detect_spectral_norm(s) for t, s in loaded.items()}
-        if len(set(sn_per_tier.values())) > 1:
-            raise SystemExit(f"--compose checkpoints disagree on spectral_norm "
-                             f"(detected {sn_per_tier}) -- can't mix a spectral-norm-trained "
-                             f"tier with a plain one in one container")
-        spectral_norm = next(iter(sn_per_tier.values()))
+        spectral_norm = require_tier_agreement(sn_per_tier, "spectral_norm")
         lora_per_tier = {t: detect_lora_rank(s) for t, s in loaded.items()}
-        if len(set(lora_per_tier.values())) > 1:
-            raise SystemExit(f"--compose checkpoints disagree on LoRA rank "
-                             f"(detected {lora_per_tier}) -- can't mix a tier trained with "
-                             f"one LoRA rank (or no LoRA at all) into a container with "
-                             f"tiers trained at a different rank")
-        lora_rank = next(iter(lora_per_tier.values()))
+        lora_rank = require_tier_agreement(lora_per_tier, "LoRA rank")
         model = SlimmableParametricA2(ds.num_params, widths=widths, spectral_norm=spectral_norm,
                                       lora_rank=lora_rank)
         labels = model.tier_labels()
