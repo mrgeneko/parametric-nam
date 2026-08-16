@@ -73,6 +73,39 @@ def _log_sweep(f0, f1, dur, amp):
     return (amp * np.sin(K * (np.exp(t * L) - 1))).astype(np.float32)
 
 
+def _transient_burst(sec, amp, decay_tau):
+    """Broadband (20 Hz - 16 kHz, Schroeder-phase -- same deterministic construction
+    make_sweep.py's flat_burst() uses) burst with an INSTANT attack (no fade-in) and an
+    exponential decay, mimicking a real hard pick-attack's amplitude envelope (high crest
+    factor: sharp onset, fast decay to near-silence) rather than a sustained tone. No RNG --
+    same input always writes the same bytes.
+
+    Exists as a deterministic, license-free alternative to extracting a real-playing noise
+    burst (--noise-burst-*): a real hard attack's rise time is close to the 1-sample physical
+    limit already, so a synthesized instant attack loses nothing there, while avoiding any
+    dependency on restricted third-party source audio. decay_tau=0.03s (the default) gives
+    crest factor ~8.5, matching a real hard-attack transient -- see internal engineering
+    notes on the corner-instability investigation this was built to fix.
+    """
+    n = int(SR * sec)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    mag = ((f >= 20) & (f <= 16000)).astype(float)
+    k = np.arange(len(f))
+    spec = mag * np.exp(1j * (np.pi * k ** 2 / max(mag.sum(), 1)))
+    x = np.fft.irfft(spec, n)
+    t = np.arange(n) / SR
+    env = np.exp(-t / decay_tau)
+    y = x * env
+    # Two-stage normalize: x's own peak (from the Schroeder-phase construction) doesn't
+    # necessarily land at t=0, where the decay envelope is strongest -- normalizing x alone
+    # (as flat_burst does) then multiplying by env systematically undershoots `amp` by
+    # however much the envelope has already decayed by the time x reaches ITS peak.
+    # Renormalizing the final enveloped signal instead makes "peak level == amp" exact,
+    # matching --sweep-peaks/--realistic-peak's own contract elsewhere in this file.
+    y /= (np.abs(y).max() + 1e-12)
+    return (amp * y).astype(np.float32)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="real-playing clip (e.g. sweep-v3.wav)")
@@ -112,6 +145,21 @@ def main():
                          "window has). Typically the same as --sweep-peaks' last value. Omit to "
                          "skip the noise-burst segment entirely (default: off, matches prior "
                          "behavior).")
+    ap.add_argument("--synth-burst-peaks", default=None,
+                    help="comma list of synthesized transient-burst peak amplitudes (V) -- a "
+                         "deterministic, license-free alternative to --noise-burst-* (which "
+                         "depends on a restricted real-playing source and only ever tests ONE "
+                         "level). Inserts one burst per level: broadband (20Hz-16kHz), instant "
+                         "attack, exponential decay -- crest factor ~8.5 (see "
+                         "--synth-burst-decay-tau), matching a real hard pick-attack -- so "
+                         "saturation-onset behavior under a sharp transient gets tested at "
+                         "EVERY level, not just the loudest. Typically the same list as "
+                         "--sweep-peaks.")
+    ap.add_argument("--synth-burst-decay-tau", type=float, default=0.03,
+                    help="exponential decay time constant (s) for --synth-burst-peaks. "
+                         "Default 0.03s gives crest factor ~8.5.")
+    ap.add_argument("--synth-burst-dur", type=float, default=0.5,
+                    help="duration (s) of each synthesized transient burst")
     ap.add_argument("--fade-out-ms", type=float, default=150.0)
     args = ap.parse_args()
 
@@ -146,6 +194,15 @@ def main():
                              * args.noise_burst_peak).astype(np.float32), 10, 10)
         parts += [pad, noise_burst]
 
+    synth_bursts = []
+    synth_peaks = []
+    if args.synth_burst_peaks:
+        synth_peaks = [float(p) for p in args.synth_burst_peaks.split(",") if p.strip()]
+        for a in synth_peaks:
+            burst = _transient_burst(args.synth_burst_dur, a, args.synth_burst_decay_tau)
+            synth_bursts.append(burst)
+            parts += [pad, burst]
+
     comp = np.concatenate(parts)
     nf = int(SR * args.fade_out_ms / 1000)
     if nf > 0: comp[-nf:] *= np.sin(np.linspace(np.pi / 2, 0, nf)) ** 2
@@ -158,6 +215,11 @@ def main():
     if noise_burst is not None:
         print(f"  noise burst: {len(noise_burst)/SR:.2f}s from {args.noise_burst_src or args.input} "
               f"[{args.noise_burst_window}]  rescaled peak {np.abs(noise_burst).max():.3f}")
+    for peak, burst in zip(synth_peaks, synth_bursts):
+        b_peak = np.abs(burst).max()
+        b_rms = np.sqrt(np.mean(burst**2))
+        print(f"  synth burst: {len(burst)/SR:.2f}s  peak={b_peak:.3f}  "
+              f"crest={b_peak/(b_rms+1e-12):.2f}  (target level {peak:.3f})")
 
     # Recipe sidecar: HOW this excitation was built, not just which bytes it is. Without this,
     # a derived excitation's provenance chain stops at "some file named *_src95.wav" -- the exact
@@ -179,6 +241,9 @@ def main():
             "noise_burst_src": args.noise_burst_src or (args.input if noise_burst is not None else None),
             "noise_burst_window": args.noise_burst_window if noise_burst is not None else None,
             "noise_burst_peak": args.noise_burst_peak,
+            "synth_burst_peaks": synth_peaks or None,
+            "synth_burst_decay_tau": args.synth_burst_decay_tau if synth_peaks else None,
+            "synth_burst_dur": args.synth_burst_dur if synth_peaks else None,
             "fade_out_ms": args.fade_out_ms,
         },
         "source": _audio_provenance(args.input),
