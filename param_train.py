@@ -1722,6 +1722,16 @@ def main():
                          "slow for large grids (e.g. a 1,944-permutation config).")
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
                     help="Directory to save epoch checkpoints and metrics CSV")
+    ap.add_argument("--cycle-checkpoints", action="store_true", default=True,
+                    help="Save a full resumable checkpoint (cycle_<epoch>.pt) at the end of "
+                         "every SGDR cycle, in addition to latest.pt/best*.pt (which get "
+                         "overwritten in place and so cannot answer 'what did this tier look "
+                         "like N cycles ago'). Default on -- one file per restart-period "
+                         "epochs (e.g. every 50 epochs at the default --restart-period), same "
+                         "size as latest.pt, so cost is bounded and modest even for a long "
+                         "open-ended run. Use --no-cycle-checkpoints to disable.")
+    ap.add_argument("--no-cycle-checkpoints", action="store_false", dest="cycle_checkpoints",
+                    help="Don't save a periodic checkpoint at each SGDR cycle boundary")
     ap.add_argument("--resume", type=Path, default=None,
                     help="Checkpoint .pt to resume from")
     ap.add_argument("--init-from", type=Path, default=None,
@@ -2136,13 +2146,40 @@ def main():
 
         completed += 1
 
+        # Cycle-boundary detection, shared by periodic checkpoint retention (below) and the
+        # SGDR-aware auto-stop rule (further below) -- CosineAnnealingWarmRestarts wraps T_cur
+        # to 0 on the scheduler.step() that completes a cycle, so this fires exactly at each
+        # trough.
+        cycle_ended = getattr(scheduler, "T_cur", None) == 0
+
+        # Periodic checkpoint retention: latest.pt/best*.pt are overwritten in place every
+        # epoch/new-best, so neither can answer "what did this tier look like N cycles ago" --
+        # e.g. investigating a corner instability that appeared partway through a long run,
+        # with no saved intermediate state to pin down when. One extra full (resumable)
+        # checkpoint per cycle -- same content/size as latest.pt -- is a bounded, modest cost
+        # for that (a --restart-period=50 run of a few thousand epochs is a few dozen files).
+        # Independent of open_ended/--stale-cycles: this is about retention, not stopping.
+        if cycle_ended and ckpt_dir is not None and args.cycle_checkpoints:
+            _watchdog_arm(f"epoch {epoch} cycle checkpoint save", timeout=60.0)
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler_last_epoch": scheduler.last_epoch,
+                "best_esr_by_tier": dict(best_esr),
+                "best_state_by_tier": dict(best_state),
+                "best_esr": best_esr["full"],
+                "best_state": best_state["full"],
+                "args_dict": dict(vars(args)),
+            }, ckpt_dir / f"cycle_{epoch}.pt")
+            _watchdog_disarm()
+
         # SGDR cycle-aware auto-stop: the documented budget rule (internal engineering notes:
         # "two consecutive cycles with no new best = the budget"), executed by the loop
-        # instead of a human watching the log. CosineAnnealingWarmRestarts wraps T_cur to
-        # 0 on the scheduler.step() that completes a cycle, so this fires exactly at each
-        # trough — cycle-to-cycle comparisons happen at matched LR phase, which is what
-        # makes this rule immune to the cosine-tail artifact that broke per-epoch patience.
-        if open_ended and args.stale_cycles > 0 and getattr(scheduler, "T_cur", None) == 0:
+        # instead of a human watching the log. Cycle-to-cycle comparisons happen at matched
+        # LR phase, which is what makes this rule immune to the cosine-tail artifact that
+        # broke per-epoch patience.
+        if open_ended and args.stale_cycles > 0 and cycle_ended:
             if cycle_improved:
                 stale_cycles = 0
             else:
