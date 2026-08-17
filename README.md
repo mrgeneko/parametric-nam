@@ -329,6 +329,20 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
 - **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
   `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
   model's receptive field and ~2× faster than 48000.
+- **`--lora-rank N`** (default 0 = off) adds a low-rank ("LoRA-style") knob-conditioned
+  weight update to every layer's `l1x1`, alongside FiLM rather than instead of it — see
+  **[LoRA-style knob conditioning](#lora-style-knob-conditioning)** below for the design
+  rationale, config format, and cross-repo requirement. Rank is recoverable from the
+  checkpoint's own state-dict shape, so `export_checkpoint.py`/`param_infer.py` never
+  need it re-specified.
+- **`--cycle-checkpoints`** (default on; `--no-cycle-checkpoints` to disable) saves a
+  full resumable snapshot (`<ckpt-dir>/cycle_<epoch>.pt`) at every SGDR cycle boundary
+  during open-ended (`--epochs 0`) training, alongside the usual `best*.pt`/`latest.pt`
+  (which are overwritten in place and don't preserve history). Lets you go back and
+  compare a model's behavior at an earlier point in training — e.g. to narrow down when
+  an instability (see [Known issue](#known-issue-rare-knob-corner-blowup-filmleakyrelu-runaway)
+  below) first appeared, which `best.pt` alone can't answer since it only ever holds the
+  single best-so-far snapshot.
 
 ### `param_infer.py` — inference (Python, no C++)
 
@@ -458,9 +472,15 @@ knob-grid corner — the model's prediction spikes to tens or hundreds of times 
 peak level on real transient content, while every aggregate metric (val ESR, per-tier
 loss curves) looks fine, because the corner is a single cell out of hundreds-to-thousands
 and contributes almost nothing to the training loss. It has recurred independently on at
-least two shipped models (the pre-fix Boss DS-1, and Tweed 5F6-A Full sag) at different
-knob combinations, so treat it as a real, recurring failure mode of this pipeline, not a
-one-off.
+least three shipped/prototype models (the pre-fix Boss DS-1, Tweed 5F6-A Full sag's
+FiLM-only 5-knob release, and Tweed 5F6-A Full sag's FiLM+LoRA 2-knob prototype) at
+different knob combinations, so treat it as a real, recurring failure mode of this
+pipeline, not a one-off — and not specific to either conditioning mechanism. Whether
+LoRA's extra per-layer capacity makes the failure *worse* once it occurs (more room for
+an unconstrained input region to produce an extreme wrong answer) versus FiLM alone is a
+real, plausible hypothesis, not yet confirmed: a same-corner probe against a FiLM-only
+model found only ~1.1× elevation where the FiLM+LoRA case showed ~7×, but on a different
+grid/config, so it's suggestive rather than a controlled comparison.
 
 What it looks like, concretely (Tweed 5F6-A Full sag, lite tier): at
 `NormalVol=BrightVol=0.025` (the swept grid's own minimum) combined with `Treble=Bass=
@@ -483,7 +503,7 @@ of the grid gets covered. A corner like this can go completely unnoticed by grid
 adequacy (which checks interpolation error, not model behavior) and by aggregate
 validation ESR (which averages over everything else).
 
-**Mitigations, both already in this repo**:
+**Mitigations, all already in this repo**:
 - **`tools/check_transient_coverage.py`** (pre-training gate, run automatically by
   `gen_dataset_from_schx.py` unless `--skip-transient-check`) — checks that the
   excitation's transient content actually reaches each corner's own saturation onset,
@@ -500,14 +520,32 @@ validation ESR (which averages over everything else).
   at that permutation, so when investigating a suspected corner, prefer `--reference
   <the training sweep.wav>` over an arbitrary clip; a scan that doesn't reproduce the
   triggering content can give a false sense of safety.
+- **`tools/build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
+  diagnosing the Tweed FiLM+LoRA case) — `check_transient_coverage.py` only checks that
+  the excitation's peak *level* reaches saturation onset per corner; it says nothing
+  about *shape*. The Tweed FiLM+LoRA blowup happened at a trained grid point (not a gap
+  needing extrapolation) whose excitation had moderate-level content and separately had
+  high-crest-factor (sharp-transient) content, but never both together at the same
+  time — that exact (level, shape) combination was simply never in the loss, so nothing
+  constrained the model's behavior there. `--synth-burst-peaks` inserts one synthesized,
+  deterministic, license-free broadband transient burst (`_transient_burst()`, crest≈8.5,
+  instant attack + exponential decay) at every `--sweep-peaks` level, closing that gap
+  directly. Verified end-to-end on the Tweed 2-knob retrain: `scan_film_runaway.py` came
+  back clean across the full grid **at full training convergence** (not just an early
+  checkpoint — the original instability itself only emerged well into training, so a
+  clean early scan alone doesn't prove a fix held).
 
-If either tool flags a corner, don't just retrain longer at the same grid — the blowup
-in the Tweed case was a spike lasting well under a second inside a single permutation's
-~27 s clip, so it barely moves that permutation's own loss, let alone the average across
-hundreds of permutations; more of the same data is unlikely to fix it. Narrowing the
-grid's swept range, adding an explicit loss weight on transient/peak error, or excluding
-that exact corner combination and documenting it as an unsupported setting are the
-levers that actually address it.
+If a corner gets flagged, first check whether it's a *level* problem
+(`check_transient_coverage.py`, fixed by raising `--realistic-peak`/`--sweep-peaks`) or a
+*shape* problem (a real reference clip flags it but the excitation's own peak clears
+onset fine — fixed by `--synth-burst-peaks`, not by more level). Don't just retrain
+longer at the same excitation — the blowup in the Tweed case was a spike lasting well
+under a second inside a single permutation's clip, so it barely moves that permutation's
+own loss, let alone the average across hundreds of permutations; more of the same data
+without closing the actual coverage gap is unlikely to fix it. If neither excitation fix
+applies, narrowing the grid's swept range, adding an explicit loss weight on
+transient/peak error, or excluding that exact corner combination and documenting it as an
+unsupported setting remain the fallback levers.
 
 ---
 
@@ -605,6 +643,62 @@ Weight layout per layer (for C++ `set_weights_` compatibility):
 conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → film.weight → film.bias
 ```
 Then after all 23 layers: `head.weight → head.bias → head_scale`.
+
+### LoRA-style knob conditioning
+
+**Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
+per-channel affine rescale of one fixed backbone computation. As swept knob count grows
+past ~3, the space of tonal behaviors the backbone must represent as "one shared
+computation, rescaled per knob setting" outgrows what fixed weights can encode — measured
+concretely on the Tweed 5F6-A Full (sag) 5-knob run, where the lite (4ch) tier plateaued
+at median ESR 0.126 on the full grid (not shippable) while the architecturally-identical
+full (8ch) tier reached 0.025. `--lora-rank` adds a genuine per-knob weight *delta* —
+`W_effective = W_l1x1 + A(cond)@B(cond)` — computed as two small matmuls
+(`A @ (B @ x)`, never materializing the full `channels × channels` delta) rather than a
+scale on a fixed computation. `A`/`B` are produced by a linear map of `cond`, mirroring
+FiLM's own `nn.Linear`, so the result is smooth in the knob value by construction — more
+expressive than FiLM, without the unconstrained-arbitrary-weights problem a full
+hypernetwork would have. Zero-init on `net_A` means LoRA starts as a true no-op (delta ≡
+0), so enabling it never perturbs an otherwise-converged FiLM baseline at step 0.
+
+**Additive, not a replacement.** FiLM and LoRA are independently toggleable
+(`--lora-rank 0` = FiLM only, unchanged from before LoRA existed) and, when both are on,
+compose — LoRA is not a mode that turns FiLM off. Measured on the Tweed 5F6-A Full (sag)
+2-knob testbed (81→121-perm grid across two runs): FiLM+LoRA cut lite-tier ESR from
+FiLM-only's ~0.146 to ~0.040 (-72%) and full-tier from ~0.034 to ~0.012 (-65%), matching
+what the capacity-ceiling diagnosis predicted.
+
+**Config format** — `config.parametric` gains an optional `lora` object, and
+`schema_version` bumps from 1 to 2 (only for LoRA-enabled exports; a non-LoRA export
+still declares 1, byte-for-byte unchanged from before LoRA existed):
+```json
+"parametric": {
+  "type": "film+lora",
+  "schema_version": 2,
+  "condition_size": 2,
+  "lora": {"rank": 4},
+  "film_layers": ["layer_0", "layer_1", ...],
+  "parameters": [...]
+}
+```
+`"type"` is `"film"` (or absent, for every export before this field existed) when
+`--lora-rank 0`, `"film+lora"` otherwise. Weight layout per layer gains an optional LoRA
+block immediately after `film.bias` when active, in lockstep with `weight_count()`/
+`_export_weight_block()`/`_load_weight_block()` (`param_train.py`) — all three of which
+must stay in sync exactly like the existing `film` branch does.
+
+**Requires the LoRA-aware NeuralAmpModelerCore fork** — same requirement `"ParametricWaveNet"`
+itself already has. A LoRA-tagged model is safe to hand to an *older* build of this fork
+that predates LoRA: `require_supported_parametric_model()` rejects `schema_version 2`
+loudly (`"...is newer than this build supports..."`) rather than silently misreading it,
+the same fail-loud contract every schema bump in this project follows. **`ParametricA2FastModel`
+(the hand-optimized C++ fast path) has no LoRA support and never will** — it's a fully
+separate reimplementation with zero shared code with the generic `Layer`/`FiLM`/`LoRA`
+classes. `is_parametric_a2_shape()` gates on `"type"`: `"film"` (or absent) still takes
+the fast path, unaffected by any of this; `"film+lora"` falls through to the slower but
+topology-agnostic generic path. A FiLM-only model built today runs identically, on the
+same fast path, at the same performance, whether or not the LoRA code exists in the
+binary at all.
 
 ### NAM ecosystem compatibility
 
