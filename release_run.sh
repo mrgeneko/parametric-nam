@@ -189,8 +189,13 @@ for t in names:
         par = m.get("config", {}).get("parametric", {})
         if par.get("head_mode") != "skip":
             errs.append(f"tier{i} head_mode={par.get('head_mode')!r} (must be 'skip')")
-        if par.get("schema_version") != 1:
-            errs.append(f"tier{i} schema_version={par.get('schema_version')!r} (must be 1)")
+        # schema_version 1 = FiLM-only, 2 = FiLM+LoRA (config.parametric.lora present) --
+        # both are known-good; only an UNKNOWN (future) version is a real problem, same
+        # fail-loud-on-newer-not-guess contract param_train.py's own check_parametric_schema
+        # and NeuralAmpModelerCore's require_supported_parametric_model use.
+        sv = par.get("schema_version")
+        if sv not in (1, 2):
+            errs.append(f"tier{i} schema_version={sv!r} (must be 1 or 2)")
         if not m.get("weights"):
             errs.append(f"tier{i} has no weights")
     if errs:
@@ -201,7 +206,8 @@ for t in names:
     else:
         l = [s["model"]["config"]["layers"] for s in subs]
         w = [len(s["model"]["weights"]) for s in subs]
-        print(f"  ok   {t:<8} v0.7.0  skip  schema=1  widths={l}  weights={w}")
+        svs = sorted({s["model"]["config"]["parametric"].get("schema_version") for s in subs})
+        print(f"  ok   {t:<8} v0.7.0  skip  schema={','.join(map(str, svs))}  widths={l}  weights={w}")
 if bad:
     print("\nREFUSING TO PUBLISH: payload validation failed.")
     sys.exit(1)
@@ -264,9 +270,13 @@ loader = torch.utils.data.DataLoader(val_ds, batch_size=args["batch_size"],
 # "*.weight" directly instead, a hard mismatch, not a numerical difference. Confirmed via a real
 # run of this script against a spectral_norm=True checkpoint (2026-08-04): the old unconditional
 # `SlimmableParametricA2(..., widths=widths)` here crashed load_state_dict with every conv/
-# mixin/l1x1 key mismatched.
+# mixin/l1x1 key mismatched. Same class of bug for lora_rank (missed until a real LoRA
+# checkpoint hit this script, 2026-08-21): an unrolled construction with lora_rank=0 has no
+# "*.lora.net_A/net_B" keys at all, so a LoRA checkpoint's state dict fails to load entirely,
+# not just numerically differs.
 m = SlimmableParametricA2(len(ds.param_names), widths=widths,
-                          spectral_norm=args.get("spectral_norm", False)).to(dev)
+                          spectral_norm=args.get("spectral_norm", False),
+                          lora_rank=args.get("lora_rank", 0)).to(dev)
 labels = m.tier_labels()
 
 def state(p):
