@@ -14,8 +14,9 @@ tone, no attack shape) crossed into saturation there. The network never saw a
 transient AND saturation together at that corner, and ran open-loop when a real
 one eventually arrived. This tool automates the cross-check that was missing:
 for every corner (reduced hypercube set, matching scan_film_runaway.py's
-convention), find that corner's OWN saturation onset (reusing preflight.py's
-find_saturation_point) and compare it against the excitation's transient peak.
+convention), find that corner's OWN saturation onset (reusing
+find_saturation_point.py's shared, backend-agnostic algorithm) and compare it
+against the excitation's transient peak.
 
 Exit status is nonzero if any corner fails, so a generation script can gate on it
 (same convention as preflight.py):
@@ -45,11 +46,13 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from run_pipeline import load_config  # noqa: E402
-# Package-qualified (not `from preflight import ...`): direct script execution auto-adds HERE
-# (tools/) to sys.path so either form works, but importing this module as tools.check_transient_
-# coverage (e.g. from gen_dataset_from_schx.py) does NOT add tools/ itself -- only `from run_pipeline
-# import ...` above (repo root) would resolve; `preflight` bare would 404. This form works both ways.
-from tools.preflight import find_saturation_point, _findpeak_cache_path  # noqa: E402
+# Package-qualified (not `from find_saturation_point import ...`): direct script execution
+# auto-adds HERE (tools/) to sys.path so either form works, but importing this module as
+# tools.check_transient_coverage (e.g. from gen_dataset_from_schx.py) does NOT add tools/
+# itself -- only `from run_pipeline import ...` above (repo root) would resolve; a bare
+# `find_saturation_point` import would 404. This form works both ways.
+from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
+from tools.render_backends import LiveSpiceBackend  # noqa: E402
 
 SR = 48000
 
@@ -132,16 +135,18 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
               f"({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)  "
               f"margin={margin}x\n")
 
+    backend = LiveSpiceBackend(schx, oversample=oversample, iterations=iterations)
+    identity = Path(schx).read_bytes()
+    cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}"
     rows = []
     with tempfile.TemporaryDirectory() as scratch:
         for label, vals in corners:
             params = dict(vals); params.update(fixed)
-            cpath = _findpeak_cache_path(schx, params, oversample, iterations, peak_max_v)
+            cpath = findpeak_cache_key(identity, params, cache_extra)
             if cpath.exists() and not no_cache:
                 sat = json.loads(cpath.read_text())
             else:
-                sat = find_saturation_point(schx, params, oversample, iterations,
-                                            scratch, max_v=peak_max_v)
+                sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v)
                 if sat is not None:
                     cpath.write_text(json.dumps(sat))
             onset = sat.get("onset_99pct_input_v") if sat else None

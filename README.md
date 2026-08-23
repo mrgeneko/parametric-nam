@@ -465,6 +465,17 @@ Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
 See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
 and the important fidelity caveats.
 
+**Don't confuse this with `preflight.py`/`prepare_excitation.py --backend ngspice-deck`** — a
+different flag on different tools, for a different situation. The `--backend ngspice` above
+still describes the circuit as a `.schx` file, just solves it with ngspice instead of
+LiveSPICE. `ngspice-deck` is for a device that has **no `.schx` at all** — a hand-written
+ngspice netlist (`gen_ocd_ngspice.py` and siblings, kept in a private devices repo), typically
+because the circuit needs something `.schx` has no component for (a real MOSFET) or a feedback
+loop LiveSPICE's fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s
+translation. `render_backends.py` is the adapter layer both `preflight.py` and
+`prepare_excitation.py` share across this split (and where a third backend, e.g. LTspice, would
+plug in) — see its module docstring for the two-method contract a backend implements.
+
 ## Known issue: rare knob-corner blowup (FiLM/LeakyReLU runaway)
 
 Trained `.schx` models can develop a **narrow, catastrophic instability** at a specific
@@ -546,6 +557,93 @@ without closing the actual coverage gap is unlikely to fix it. If neither excita
 applies, narrowing the grid's swept range, adding an explicit loss weight on
 transient/peak error, or excluding that exact corner combination and documenting it as an
 unsupported setting remain the fallback levers.
+
+---
+
+## Known issue: excitation needs a silent lead-in (cold-start settling transient)
+
+Every render starts a `.tran` from a cold, all-capacitors-at-0V initial condition, not the
+already-biased-up state a real, already-powered-on device is always in. For a circuit with a
+slow-charging DC-blocking network — a large output-coupling capacitor into a high-value pot,
+for instance — real content starting at t=0 captures a genuine but non-representative
+multi-second "circuit powering on" transient instead of the device's true steady behavior.
+
+**Concrete evidence (Fulltone OCD, ngspice backend — `gen_ocd_ngspice.py`/`render_ocd.py` in
+parametric-devices)**: `C10` (10µF) into the Volume pot's low leg (`RVOL2`, up to 500kΩ) gives
+an RC time constant of roughly **5 seconds**. A sustained 200Hz test tone with no lead-in,
+rendered from t=0, showed output RMS *slowly drifting* for about 15 seconds and then making an
+**abrupt jump to a different, higher steady value at ~16 seconds** — neither of which a real
+pedal, always already running, would ever do. This wasn't a settling-window artifact of a short
+probe: a direct 20-second render showed the same two-phase drift-then-jump behavior end to end.
+Prepending 3 seconds of silence before any real content resolved it completely: every corner
+tested (across both `Gain` and `Tone` extremes) showed the tone snapping to a single stable,
+unchanging RMS/peak within about a second of starting, with zero drift for the remainder of a
+20+ second render. A quick way to rule this out on a new circuit: render a sustained tone with
+no lead-in for at least 20-30 seconds (not just 1-2) and check whether RMS/peak in 1-second
+windows is still changing well after the excitation's actual attack transient should have
+settled — a circuit without a slow DC-blocking network won't show this, but there's no way to
+know that in advance without checking, since the RC time constant is set by both output-stage
+values, not something knob positions expose directly.
+
+**Fix, applied by default**: `tools/build_excitation.py --lead-silence-s` (default `3.0`)
+prepends that many seconds of true silence before the `--input`-derived real-playing segment.
+The silent segment is written into the excitation file itself (not stripped after generation),
+so it also gives the DC-blocking network real settling time before the file's `real` segment
+dynamics are what training actually samples. Set to `0` to disable for a circuit already
+verified not to need it. This is a cheap, non-device-specific fix — prefer it over adding
+explicit `.ic` initial-condition statements to a specific device's deck, which would need to be
+hand-derived and re-verified per circuit.
+
+The same fix is also needed in `tools/preflight.py --backend ngspice-deck` and
+`tools/find_saturation_point.py`'s own amplitude sweep (both take `--lead-silence-s`, default
+`3.0`) — a short knob-direction probe with no lead-in hits the identical cold-start transient,
+and it isn't just noisy, it can flip the answer: OCD's Tone knob probed REVERSED at a 5-second
+probe with no lead-in and correctly OK once probed with a lead-in (or a long-enough probe to
+outlast the transient on its own). See the next "Known issue" entry for the other, independent
+fix this same investigation needed.
+
+**Caveat**: 3 seconds was sufficient for the one circuit (OCD) this was diagnosed and verified
+against, not derived from the RC time constant analytically for every possible circuit. A
+circuit with a slower network (larger coupling cap and/or higher-value downstream resistance)
+could need longer — when in doubt, run the sustained-tone check above with the circuit's own
+component values before trusting the default.
+
+---
+
+## Known issue: preflight's EQ-knob checks can be swamped by the circuit's own gain control
+
+`tools/preflight.py`'s dead/reversed-knob check holds every non-tested knob at a flat `0.5`
+center. For a low-to-moderate-gain circuit that's fine, but for a genuinely high-gain device
+(Fulltone OCD's stages run up to ~50dB combined), `0.5` on the Gain/Drive knob can already be
+deep into saturation — and hard clipping SWAMPS a passive tone stack's real effect, since the
+extra content an EQ knob lets through just becomes more clipping mush, not more clean signal at
+that band. This reads as a **false REVERSED (or DEAD) direction on a knob that's actually
+correct**, and it isn't just about probe input level — it's the circuit's OWN gain control
+self-saturating regardless of how quiet the input is.
+
+**Concrete evidence (Fulltone OCD, `--backend ngspice-deck`)**: with Gain held at the default
+`0.5` center, Tone probed REVERSED (`-11.6%`) at a 10-second native-level probe — this is the
+SAME Tone pot already verified correct on the LiveSPICE side (`+627%` rising) and independently
+re-verified correct here once the fix below was applied. Confirmed the mechanism directly: a
+manual amplitude sweep at fixed Gain=0.5 showed Tone's measured direction flipping between
+REVERSED, DEAD, and OK depending purely on probe input level (`1.0V` → reversed, `0.3V` → OK
+`+875%`, `0.1V` → dead, `0.05V` → OK `+80%`) — a clean signature of clipping-swamp, not a real
+circuit fault.
+
+**Fix, applied by default**: `--eq-check-drive-level` (default `0.1`). While checking an
+EQ/tone knob's direction, every OTHER knob `classify()` tags as `"drive"` (Gain, Distortion,
+Overdrive, etc. — the same name-based classification the direction check already used) is held
+at this LOW value instead of the usual `0.5`, so the circuit isn't self-saturating from its own
+gain control while the tone stack's real effect is being measured. This alone fixed OCD's Tone
+reading at every probe duration tested, with no need for a reduced input level at all.
+Volume/level-classified knobs are untouched — they're normally a post-clipping-stage
+attenuator, so they don't change whether the nonlinear stage itself saturates.
+
+**Complementary, not a replacement**: `--find-peak`/`--clean-probe-peak` (input-level scaling,
+probing an EQ knob at both a driven and a linear-region level, pass-if-either) stays on by
+default too — it catches the same failure mode via a different knob than the one under test,
+and via a knob `classify()` can't identify as `"drive"` by name. Both mitigations were verified
+independently on OCD; neither alone was assumed sufficient going forward.
 
 ---
 

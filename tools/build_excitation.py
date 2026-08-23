@@ -15,7 +15,22 @@ is genuinely learned. Under the V0dBFS=1V convention a sample value == drive vol
 --sweep-peaks in volts and set the max to the device's saturation/max-output point + headroom.
 Written float32 so values >1.0 survive (they represent >1 V drive, which is legitimate).
 
-See internal engineering notes.
+LEADING SILENCE (--lead-silence-s, default 3.0): every render starts a `.tran` from a cold,
+all-capacitors-at-0V initial condition, not the already-biased-up state a real (already
+powered-on) device is always in. For a circuit with a slow-charging DC-blocking network (e.g.
+a large output-coupling cap into a high-value pot -- Fulltone OCD's C10/Volume-pot leg has a
+~5s RC time constant), starting real content at t=0 captures a genuine but non-representative
+multi-second "circuit powering on" transient: measured directly on the OCD (ngspice backend,
+see gen_ocd_ngspice.py/render_ocd.py in parametric-devices), a sustained tone with no lead-in
+showed RMS slowly drifting for ~15s and then an ABRUPT jump to a different steady value at
+~16s -- neither of which a real, already-running pedal ever does. Prepending 3s of silence
+before any real content let the circuit reach its true, cold-start-independent operating bias
+first; every render taken after that showed the tone snapping to a single stable, unchanging
+level within about a second of starting. Cheap fix, not device-specific -- applied by default
+to every excitation this tool builds, silent segment included in the file (not stripped after
+generation), so it also gives the DC bias network real settling time before the `real`
+segment's own dynamics are what's being sampled. See internal engineering notes and the OCD
+investigation for the concrete before/after traces this was based on.
 """
 import argparse
 import hashlib
@@ -161,6 +176,11 @@ def main():
     ap.add_argument("--synth-burst-dur", type=float, default=0.5,
                     help="duration (s) of each synthesized transient burst")
     ap.add_argument("--fade-out-ms", type=float, default=150.0)
+    ap.add_argument("--lead-silence-s", type=float, default=3.0,
+                    help="silence prepended before any real content, so a slow DC-blocking "
+                         "network (e.g. a large output-coupling cap into a high-value pot) "
+                         "reaches its true bias before the excitation's own dynamics start -- "
+                         "see module docstring's LEADING SILENCE note. 0 to disable.")
     args = ap.parse_args()
 
     x, sr = sf.read(args.input, dtype="float32")
@@ -172,8 +192,10 @@ def main():
     real = _fade((x / max(np.abs(x).max(), 1e-9) * args.realistic_peak).astype(np.float32), 10, 10)
     peaks = [float(p) for p in args.sweep_peaks.split(",") if p.strip()]
     pad = np.zeros(int(SR * 0.1), dtype=np.float32)
-    parts = [real, pad] + [_fade(_log_sweep(args.sweep_f0, args.sweep_f1, args.sweep_dur, a), 8, 8)
-                           for a in peaks]
+    lead_silence = np.zeros(int(SR * args.lead_silence_s), dtype=np.float32)
+    parts = ([lead_silence] if args.lead_silence_s > 0 else []) + [real, pad] + \
+            [_fade(_log_sweep(args.sweep_f0, args.sweep_f1, args.sweep_dur, a), 8, 8)
+             for a in peaks]
 
     noise_burst = None
     if args.noise_burst_peak is not None:
@@ -232,6 +254,7 @@ def main():
         "tool_git_rev": _tool_git_rev(),
         "built_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "args": {
+            "lead_silence_s": args.lead_silence_s,
             "realistic_peak": args.realistic_peak,
             "realistic_dur": args.realistic_dur,
             "sweep_peaks": peaks,
