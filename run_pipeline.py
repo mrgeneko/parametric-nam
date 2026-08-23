@@ -61,15 +61,25 @@ def load_config(path: Path) -> dict:
                                            boost for a knob whose audible effect is
                                            small relative to others -- generic over
                                            any knob name, not circuit-specific)
-      [knob-kind]  NAME = "tone"|"level" -> --knob-kind NAME=kind,... (which metric
+      [knob-kind]  NAME = kind          -> --knob-kind NAME=kind,... (which metric
                                            gen_dataset_from_schx.py's post-generation
-                                           sensitivity check uses for this knob --
-                                           "level", the default for anything unlisted,
-                                           checks RMS spread; "tone" checks per-band
-                                           spectral power spread instead, since RMS is
-                                           the wrong metric for an EQ knob once the
-                                           signal is saturated -- see that check's own
-                                           comment)
+                                           sensitivity check uses for this knob, AND
+                                           (passed the same way to tools/preflight.py)
+                                           which knobs it holds low while checking an
+                                           EQ knob's direction -- see tools/knob_classify.py.
+                                           kind is "hi"/"lo"/"mid" (an EQ/tone knob --
+                                           checked by per-band spectral power spread,
+                                           since RMS is the wrong metric for an EQ knob
+                                           once the signal is saturated), "drive" (gain/
+                                           distortion), or "rms" (volume/level, also the
+                                           default for anything unlisted). The legacy
+                                           "tone" value still works as an alias for the
+                                           tone-detection path here, but doesn't carry
+                                           enough information for preflight.py's
+                                           drive-knob detection -- prefer hi/lo/mid/
+                                           drive/rms going forward. tools/scaffold_config.py
+                                           auto-guesses this table from each knob's name;
+                                           always review its guesses by hand)
     `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
     """
     with open(path, "rb") as f:

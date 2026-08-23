@@ -67,19 +67,10 @@ from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
 from find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
 from render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
+from knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference, matches param_train.py
-
-# (name keywords, metric, human label). First match wins; order specific->general.
-# metric returns a scalar that should RISE as the knob rises.
-DIRECTION_RULES = [
-    (("treble", "tone", "bright", "presence", "high", "top", "tref"), "hi",  "treble/high-freq"),
-    (("bass", "low", "depth", "body", "bottom", "sub"),               "lo",  "bass/low-freq"),
-    (("mid", "middle"),                                               "mid", "midrange"),
-    (("gain", "drive", "dist", "overdrive", "fuzz", "sustain", "sat", "od", "pre"), "drive", "gain/distortion"),
-    (("volume", "level", "master", "output", "vol", "loud", "post"),  "rms", "output level"),
-]
 
 
 def _band(y, f_lo, f_hi):
@@ -99,14 +90,6 @@ def metric(y, kind):
     if kind == "mid":
         return _band(y, 300, 1500) / (_band(y, 40, 200) + _band(y, 3000, 8000) + 1e-12)
     raise ValueError(kind)
-
-
-def classify(knob):
-    n = knob.lower()
-    for keys, kind, label in DIRECTION_RULES:
-        if any(k in n for k in keys):
-            return kind, label
-    return None, "unknown"
 
 
 def esr(a, b):
@@ -196,10 +179,27 @@ def main():
     ap.add_argument("--clean-probe-peak", type=float, default=None,
                      help="probe EQ/tone knobs with the input scaled to this peak voltage "
                           "instead of deriving one from --find-peak")
+    ap.add_argument("--knob-kind", default=None,
+                     help="NAME=kind,... override for classify()'s name-based guess (kind: "
+                          "hi/lo/mid/drive/rms -- same as a config's [knob-kind] table, see "
+                          "run_pipeline.py). Use this for a knob whose real-world name doesn't "
+                          "match the keyword heuristic (an unrecognized name gets NEITHER a "
+                          "direction check NOR --eq-check-drive-level's EQ-swamp protection, "
+                          "silently -- the least scrutiny, not the most).")
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true",
                      help="ignore (and overwrite) any cached --find-peak saturation sweep")
     args = ap.parse_args()
+
+    knob_kind_override = {}
+    for kv in filter(None, (s.strip() for s in (args.knob_kind or "").split(","))):
+        k, v = kv.split("="); knob_kind_override[k.strip()] = v.strip()
+
+    def classify(knob):
+        if knob in knob_kind_override:
+            kind = knob_kind_override[knob]
+            return kind, f"{kind} (explicit --knob-kind)"
+        return _classify_by_name(knob)
 
     backend, knobs, identity, cache_extra = _build_backend(args)
     fixed = {}

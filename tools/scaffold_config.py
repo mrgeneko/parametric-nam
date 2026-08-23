@@ -2,7 +2,7 @@
 """
 scaffold_config.py -- generate a starting config.toml for a new circuit.
 
-Cuts the two most mechanical steps out of writing a new device's config.toml by hand:
+Cuts the three most mechanical steps out of writing a new device's config.toml by hand:
 
   1. DISCOVER CONTROLS. Every real control (pot/switch, ganged pots collapsed to one) is
      read straight from the .schx via parse_schx_controls() -- the same discovery
@@ -12,11 +12,22 @@ Cuts the two most mechanical steps out of writing a new device's config.toml by 
      of candidate oversamples and prints the same kind of table it does, so you start
      from a real number instead of a guess -- but it does NOT pick one for you; see WHY
      NOT below.
+  3. GUESS KNOB ROLES. Each discovered name is run through knob_classify.classify() --
+     the same hi/lo/mid/drive/rms heuristic tools/preflight.py uses for its own direction
+     and EQ-swamp checks -- and written into a [knob-kind] table. This is explicitly a
+     GUESS, not a determination: a name that matches no known keyword is written
+     commented-out as UNCONFIRMED rather than silently defaulted, and every guessed line
+     carries the matched label as a trailing comment so a wrong guess is easy to spot on
+     read-through. Always review this table by hand -- an unclassified or misclassified
+     knob doesn't just get the wrong sensitivity metric in gen_dataset_from_schx.py, it
+     also silently skips preflight.py's role-aware EQ-check protection for every OTHER
+     knob's direction check.
 
 WHAT IT DOES NOT DO.
-The knob GRID stays a placeholder (--grid-points evenly-spaced values per knob, default
-3) -- a good grid needs render probes at values the circuit's actual response curve
-implies, which is exactly tools/grid_adequacy.py --apply's job. Run that next.
+The knob GRID stays a placeholder -- role-aware (see GUESS KNOB ROLES / _grid_for_kind
+below), not a naive linspace(0,1) for every knob regardless of role, but still a starting
+point, not a measured one. A good grid needs render probes at values the circuit's actual
+response curve implies, which is exactly tools/grid_adequacy.py --apply's job. Run that next.
 
 WHY IT DOESN'T PICK AN OVERSAMPLE FOR YOU.
 measure_truncation.py's own docs describe a "stall" -- a candidate's error falling much
@@ -50,6 +61,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gen_dataset_from_schx import parse_schx_controls
 from measure_truncation import measure, probe_clips
+from knob_classify import classify  # noqa: E402 (sibling file, same tools/ dir; dependency-free)
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "examples" / "template.config.toml"
 
@@ -79,10 +91,66 @@ def _replace_table(text: str, header: str, body_lines: list) -> str:
     return text[:start] + "".join(l + "\n" for l in body_lines) + text[end:]
 
 
+def _grid_for_kind(kind: "str | None", n_points: int) -> list:
+    """Default knob-grid VALUES for a classify() kind -- still a placeholder meant to be
+    refined by grid_adequacy.py --apply, but an informed one instead of a naive linspace(0,1)
+    for every knob regardless of role. Empirical basis (this fleet's own hand-tuned grids,
+    e.g. Timmy/OCD's Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]):
+
+      hi/lo/mid (tone/EQ knob): STILL evenly spaced (no observed need for endpoint density
+        here), but narrowed to [0.2, 0.8] -- the fully-CCW/CW extremes rarely hold a tone
+        stack's interesting behavior, so a naive [0,1] grid wastes render budget there.
+
+      drive/rms (gain/volume knob): NOT evenly spaced. A gain-type knob's audible character
+        changes fastest near the bottom of its range, so 0.1 (not 0.0 -- a knob truly at
+        zero is often a degenerate/dead corner anyway) gets two extra points just above it
+        (+0.05, +0.15); the top gets one extra point just below max (-0.05) to "stabilize"
+        the max grid point, a pattern already used by hand on several devices. --grid-points
+        still spreads that many points evenly across the full range as a baseline (so a
+        larger --grid-points adds real middle-of-range coverage, not just these 5 anchors),
+        deduped/sorted together with the anchors.
+
+      unclassified (no keyword match): legacy behavior, evenly spaced [0, 1] -- see
+      knob_classify.classify()'s own docstring for why an unclassified knob gets the LEAST
+      special treatment everywhere, not the most; this is no exception.
+    """
+    if kind in ("hi", "lo", "mid"):
+        lo, hi = 0.2, 0.8
+        return [round(float(v), 4) for v in np.linspace(lo, hi, max(2, n_points))]
+    if kind in ("drive", "rms"):
+        lo, hi = 0.1, 1.0
+        baseline = list(np.linspace(lo, hi, max(2, n_points)))
+        anchors = [lo, lo + 0.05, lo + 0.15, hi - 0.05, hi]
+        return sorted(set(round(float(v), 4) for v in baseline + anchors))
+    return [round(float(v), 4) for v in np.linspace(0.0, 1.0, max(2, n_points))]
+
+
 def _format_knobs(names: list, n_points: int) -> list:
     width = max(len(n_) for n_ in names)
-    pts = [round(float(v), 4) for v in np.linspace(0.0, 1.0, max(2, n_points))]
-    return [f"{name:<{width}} = {pts}" for name in names]
+    lines = []
+    for name in names:
+        kind, _ = classify(name)
+        pts = _grid_for_kind(kind, n_points)
+        lines.append(f"{name:<{width}} = {pts}")
+    return lines
+
+
+def _format_knob_kind(names: list) -> list:
+    """Auto-guess each knob's role from its NAME via knob_classify.classify() -- the same
+    heuristic tools/preflight.py uses for its own direction/EQ-swamp checks. A guess is
+    ALWAYS a guess: an unconventional or non-English name can silently match nothing, so
+    every line gets a trailing comment naming the label that drove the guess (or flagging
+    UNCONFIRMED for a no-match) precisely so this doesn't read as more certain than it is --
+    review it by hand before trusting it."""
+    width = max(len(n_) for n_ in names)
+    lines = []
+    for name in names:
+        kind, label = classify(name)
+        if kind is None:
+            lines.append(f'# {name:<{width}} = "UNCONFIRMED"   # name matched no known keyword -- classify by hand')
+        else:
+            lines.append(f'{name:<{width}} = "{kind}"   # guessed from name ({label}) -- verify')
+    return lines
 
 
 def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tuple,
@@ -143,8 +211,11 @@ def main() -> None:
                          "adaptive timestepping isn't tuned the same way (see "
                          "ngspice/README.md)")
     ap.add_argument("--grid-points", type=int, default=3,
-                    help="placeholder points per knob, evenly spaced 0..1 (default 3) -- "
-                         "refine with grid_adequacy.py --apply afterward")
+                    help="placeholder points per knob (default 3), spread evenly across "
+                         "that knob's role-aware range as a BASELINE (see _grid_for_kind) -- "
+                         "a drive/rms knob adds fixed low/high-density anchor points on top, "
+                         "so its actual point count is usually higher than this. Refine with "
+                         "grid_adequacy.py --apply afterward")
     ap.add_argument("--candidates", default="2,4,8",
                     help="oversamples to measure (default 2,4,8, same as measure_truncation.py)")
     ap.add_argument("--ref-os", type=int, default=32)
@@ -181,10 +252,21 @@ def main() -> None:
 
     text = _replace_table(text, "knobs", _format_knobs(names, args.grid_points))
 
+    knob_kind_lines = _format_knob_kind(names)
+    text = _replace_table(text, "knob-kind", knob_kind_lines)
+    unconfirmed = [n for n, l in zip(names, knob_kind_lines) if l.lstrip().startswith("#")]
+    if unconfirmed:
+        print(f"  [knob-kind]: {len(unconfirmed)}/{len(names)} name(s) matched no known "
+              f"keyword, left UNCONFIRMED (commented out): {', '.join(unconfirmed)} -- "
+              f"classify by hand (hi/lo/mid/drive/rms, see tools/knob_classify.py)")
+
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text)
-    tot = max(2, args.grid_points) ** len(names)
-    print(f"\n  wrote {output}  ([knobs] is a {args.grid_points}-point-per-axis placeholder, "
+    counts = {name: len(_grid_for_kind(classify(name)[0], args.grid_points)) for name in names}
+    tot = 1
+    for c in counts.values(): tot *= c
+    axes = ", ".join(f"{name}={n}" for name, n in counts.items())
+    print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} permutations)")
     print(f"  next: python tools/grid_adequacy.py --config {output} --apply   "
           f"# refine the placeholder grid")

@@ -37,6 +37,18 @@ crop-len   = 48000    # must EXCEED the receptive field (2483 samples / 52 ms @ 
 Knob1 = [0.0, 0.5, 1.0]
 Knob2 = [0.0, 0.5, 1.0]
 
+# Auto-guessed by scaffold_config.py from each knob's NAME (same classify() heuristic
+# tools/preflight.py uses for its own direction/EQ-swamp checks) -- review any entry
+# flagged UNCONFIRMED below; a misclassified knob silently gets the wrong knob-sensitivity
+# metric here AND skips preflight's role-aware EQ-check safeguard. Values: hi/lo/mid (an
+# EQ/tone-shaping knob -- checked by per-band spectral spread here, held LOW during another
+# knob's EQ check in preflight.py), drive (a gain/distortion knob -- the one preflight.py
+# holds low while checking an EQ knob), rms (a volume/level knob). Omit a knob to leave it
+# unclassified (defaults to a plain RMS-spread check here; no special preflight treatment).
+[knob-kind]
+Knob1 = "drive"
+Knob2 = "hi"
+
 # Any control NOT listed in [knobs] is left at its schx default. To pin one explicitly --
 # which makes this config a VARIANT of the device, not "the device"; state that if you do:
 # [fixed]

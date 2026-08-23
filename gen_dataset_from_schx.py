@@ -1691,10 +1691,13 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
     #     (2026-08-11): Bass/Middle both flagged "no effect" by the RMS check (0.5-0.6% spread)
     #     while a direct per-band spectral comparison showed a real, physically-correct effect
     #     (Bass: +1.4dB in 80-300Hz; Middle: +2.5 to +4.1dB in 300Hz-8kHz) -- a false alarm from
-    #     the metric, not a broken knob. Declare a knob "tone" in the config to get the right
-    #     check for it; anything left unspecified keeps the old RMS-only behavior.
+    #     the metric, not a broken knob. Declare a knob "tone" (or the more specific hi/lo/mid --
+    #     same vocabulary tools/preflight.py's classify() and scaffold_config.py's auto-tagging
+    #     use, see tools/knob_classify.py) in the config to get the right check for it; anything
+    #     left unspecified keeps the old RMS-only behavior.
+    from tools.knob_classify import TONE_LIKE_KINDS
     print("  Knob sensitivity:")
-    tone_knobs = [k for k in knobs if knob_kind.get(k) == "tone"]
+    tone_knobs = [k for k in knobs if knob_kind.get(k) in TONE_LIKE_KINDS or knob_kind.get(k) == "tone"]
     band_power_cache: dict = {}
     if tone_knobs:
         for r in rows:
@@ -1713,7 +1716,7 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
     for k in knobs:
         if k not in values_per_knob or len(values_per_knob[k]) < 2:
             continue
-        if knob_kind.get(k) == "tone":
+        if knob_kind.get(k) in TONE_LIKE_KINDS or knob_kind.get(k) == "tone":
             by_val_band: dict = {}
             for r in rows:
                 try:
