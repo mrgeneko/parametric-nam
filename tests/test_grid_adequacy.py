@@ -8,8 +8,9 @@ See tools/grid_adequacy.py.
 """
 import numpy as np
 import pytest
+import soundfile as sf
 
-from tools.grid_adequacy import cell_error, esr, measure_grid, suggest_axis, write_knobs
+from tools.grid_adequacy import Renderer, cell_error, esr, measure_grid, suggest_axis, write_knobs
 
 
 class FakeRender:
@@ -168,3 +169,105 @@ class TestWriteKnobs:
         cfg.write_text('schx = "device.schx"\n[fixed]\nVolume = 1.0\n')
         with pytest.raises(SystemExit):
             write_knobs(cfg, {"Gain": [0.1, 0.9]})
+
+
+class TestRendererNgspiceDeck:
+    """The Renderer's hand-deck twin of its schx-translated "ngspice" mode -- same stratified-
+    window/lead-in machinery, but rendered through render_backends.NgspiceBackend against a
+    gen_*_ngspice.py module directly, since there's no .schx to netlist-dump for a device whose
+    clipping needs a real component (a MOSFET, a real BJT) .schx has no model for."""
+
+    def _write_pedal_module(self, tmp_path, name="gen_fake_ngspice", knob_names=("Gain",)):
+        pedal_dir = tmp_path / "pedals"
+        pedal_dir.mkdir(exist_ok=True)
+        (pedal_dir / f"{name}.py").write_text(
+            f"KNOB_NAMES = {list(knob_names)!r}\ndef build_deck(**kw): return ''\n")
+        return pedal_dir
+
+    def _write_input(self, tmp_path, sr=1000, dur_s=20):
+        inp = tmp_path / "input.wav"
+        sf.write(str(inp), np.zeros(sr * dur_s, dtype=np.float32), sr)
+        return inp
+
+    class FakeNgspiceBackend:
+        """render_many returns a constant array (one per window) equal to the Gain knob's
+        value -- lets a test assert on the exact params a Renderer call forwards."""
+
+        def __init__(self, build_deck, probe_node="OUT"):
+            self.probe_node = probe_node
+
+        def render_many(self, jobs, handle, scratch):
+            tag = jobs[0]["tag"]
+            val = jobs[0]["params"].get("Gain", 0.0)
+            _sr, t_, _input_src = handle
+            return {tag: np.full(len(t_), val, dtype=np.float64)}
+
+    def test_uses_two_windows_and_the_ngspice_backends_output(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                    probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ngspice", probe_node="OUT")
+        out = r({"Gain": 0.7})
+        assert len(out) == 2  # n_windows bumped to 2, same segfault-avoidance as "ngspice"
+        assert all(np.allclose(w, 0.7) for w in out)
+
+    def test_fixed_params_are_merged_into_the_rendered_knobs(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path, knob_names=("Gain", "Tone"))
+        inp = self._write_input(tmp_path)
+        seen = []
+
+        class RecordingBackend(self.FakeNgspiceBackend):
+            def render_many(self, jobs, handle, scratch):
+                seen.append(dict(jobs[0]["params"]))
+                return super().render_many(jobs, handle, scratch)
+
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", RecordingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="Tone=0.3",
+                    td=td, probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ngspice", probe_node="OUT")
+        r({"Gain": 0.5})
+        assert all(p == {"Tone": 0.3, "Gain": 0.5} for p in seen)
+
+    def test_non_convergence_is_recorded_as_none_not_a_crash(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+
+        class FailingBackend:
+            def __init__(self, build_deck, probe_node="OUT"):
+                pass
+
+            def render_many(self, jobs, handle, scratch):
+                return {jobs[0]["tag"]: None}
+
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", FailingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                    probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ngspice", probe_node="OUT")
+        out = r({"Gain": 0.5})
+        assert out == [None, None]
+
+    def test_results_are_cached_by_params(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        calls = []
+
+        class CountingBackend(self.FakeNgspiceBackend):
+            def render_many(self, jobs, handle, scratch):
+                calls.append(1)
+                return super().render_many(jobs, handle, scratch)
+
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", CountingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                    probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ngspice", probe_node="OUT")
+        r({"Gain": 0.5})
+        n_first = len(calls)
+        r({"Gain": 0.5})
+        assert len(calls) == n_first, "identical params must be a cache hit, not a re-render"

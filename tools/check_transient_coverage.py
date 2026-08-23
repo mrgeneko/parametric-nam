@@ -23,9 +23,14 @@ Exit status is nonzero if any corner fails, so a generation script can gate on i
   python tools/check_transient_coverage.py ... && python gen_dataset_from_schx.py ...
 
 Usage:
-  python tools/check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
+  livespice:   python tools/check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
       [--transient-peak 0.2] [--margin 1.0] [--oversample 8] [--iterations 256] \
       [--json report.json] [--no-cache]
+
+  ngspice-deck: same --config, with [knobs]/[fixed]/backend="ngspice-deck"/pedal-dir/module/
+      probe-node in the TOML (same convention as preflight.py/prepare_excitation.py --backend
+      ngspice-deck) -- for a device whose clipping needs a real component .schx has no model
+      for (a MOSFET, a real BJT), so there's no .schx at all to check against.
 
 --transient-peak: the excitation's transient/real-playing segment peak, in volts
   at V0dBFS=1. Auto-read from the excitation's <stem>.recipe.json sidecar
@@ -34,8 +39,10 @@ Usage:
   file's realistic/sweep boundary would be worse than refusing to run).
 """
 import argparse
+import importlib
 import itertools
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -52,7 +59,7 @@ from run_pipeline import load_config  # noqa: E402
 # itself -- only `from run_pipeline import ...` above (repo root) would resolve; a bare
 # `find_saturation_point` import would 404. This form works both ways.
 from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend  # noqa: E402
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
 
 SR = 48000
 
@@ -117,36 +124,35 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
         return None
 
 
-def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
-                   transient_peak: float, margin: float = 1.0, iterations: int = 256,
-                   peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
-                   full_hypercube: bool = True) -> dict:
-    """Core check, importable directly (gen_dataset_from_schx.py's hard gate uses this in-process --
-    no subprocess, no re-parsing a config, and it can't be silently skipped by someone calling
-    gen_dataset_from_schx.py without going through run_pipeline.py / this tool's own CLI first).
+def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict, fixed: dict,
+                    transient_peak: float, label: str, margin: float = 1.0,
+                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
+                    full_hypercube: bool = True, lead_silence_s: float = 0.0) -> dict:
+    """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
+    vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
+    check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
+    ONLY thing that differs between them is how `backend`/`identity`/`cache_extra` get built.
 
     Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
     couldn't be determined (a render failure is not a pass -- see main()'s same convention).
     """
     corners = _corners(knob_ranges, full_hypercube=full_hypercube)
     if not quiet:
-        print(f"Transient saturation coverage: {Path(schx).name}")
+        print(f"Transient saturation coverage: {label}")
         print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners "
               f"({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)  "
               f"margin={margin}x\n")
 
-    backend = LiveSpiceBackend(schx, oversample=oversample, iterations=iterations)
-    identity = Path(schx).read_bytes()
-    cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}"
     rows = []
     with tempfile.TemporaryDirectory() as scratch:
-        for label, vals in corners:
+        for clabel, vals in corners:
             params = dict(vals); params.update(fixed)
             cpath = findpeak_cache_key(identity, params, cache_extra)
             if cpath.exists() and not no_cache:
                 sat = json.loads(cpath.read_text())
             else:
-                sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v)
+                sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
+                                             lead_silence_s=lead_silence_s)
                 if sat is not None:
                     cpath.write_text(json.dumps(sat))
             onset = sat.get("onset_99pct_input_v") if sat else None
@@ -157,8 +163,8 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                 ok = transient_peak >= onset * margin
                 status = "OK" if ok else "FAIL -- transient never reaches saturation here"
             if not quiet:
-                print(f"  {label:16} onset={onset if onset is None else f'{onset:.3f} V':>10}  {status}")
-            rows.append({"corner": label, "params": params, "onset_v": onset, "ok": ok})
+                print(f"  {clabel:16} onset={onset if onset is None else f'{onset:.3f} V':>10}  {status}")
+            rows.append({"corner": clabel, "params": params, "onset_v": onset, "ok": ok})
 
     failed = [r for r in rows if r["ok"] is False]
     skipped = [r for r in rows if r["ok"] is None]
@@ -176,6 +182,44 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
             print(f"PASSED: transient content reaches saturation at every checked corner.")
 
     return {"ok": not (failed or skipped), "rows": rows}
+
+
+def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
+                   transient_peak: float, margin: float = 1.0, iterations: int = 256,
+                   peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
+                   full_hypercube: bool = True) -> dict:
+    """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
+    this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
+    by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
+    tool's own CLI first). See _check_corners() for the actual check."""
+    backend = LiveSpiceBackend(schx, oversample=oversample, iterations=iterations)
+    identity = Path(schx).read_bytes()
+    cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}"
+    return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube)
+
+
+def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, knob_ranges: dict,
+                                fixed: dict, transient_peak: float, margin: float = 1.0,
+                                maxstep: float = 3e-6, parallel_sims: int = 8,
+                                peak_max_v: float = 40.0, no_cache: bool = False,
+                                quiet: bool = False, full_hypercube: bool = True,
+                                lead_silence_s: float = 3.0) -> dict:
+    """[hand-written ngspice-deck path] For a device whose real component (a MOSFET, a real
+    BJT) has no .schx model at all -- see render_backends.py's NgspiceBackend and
+    preflight.py/prepare_excitation.py's identical --backend ngspice-deck split. `module_file`
+    is the gen_*_ngspice.py module's own `__file__` (its source bytes are the cache identity,
+    same convention as preflight.py's _build_backend -- an edited deck re-checks automatically).
+    See _check_corners() for the actual check."""
+    backend = NgspiceBackend(build_deck, probe_node=probe_node, maxstep=maxstep,
+                             parallel_sims=parallel_sims)
+    identity = Path(module_file).read_bytes()
+    cache_extra = f"maxv={peak_max_v}"
+    return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
+                           lead_silence_s=lead_silence_s)
 
 
 def main():
@@ -196,12 +240,15 @@ def main():
                     help="skip the full 2**n min/max hypercube (only the solo + all-min/"
                          "all-max/center corners) -- use for a config with many knobs where "
                          "2**n would be impractically large")
+    ap.add_argument("--lead-silence-s", type=float, default=3.0,
+                    help="[ngspice-deck] silence prepended before each saturation-sweep probe "
+                         "tone -- see this repo's README ('Known issue: excitation needs a "
+                         "silent lead-in')")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
-    schx = str(cfg["schx"])
+    backend_name = cfg.get("backend", "livespice")
     input_wav = Path(cfg["input"]).expanduser()
-    oversample = args.oversample or cfg.get("oversample", 8)
 
     transient_peak = args.transient_peak
     if transient_peak is None:
@@ -223,14 +270,31 @@ def main():
         k, v = kv.split("="); fixed[k.strip()] = float(v)
 
     print(f"  excitation: {input_wav.name}")
-    result = check_coverage(schx, knob_ranges, fixed, oversample, transient_peak,
-                            margin=args.margin, iterations=args.iterations,
-                            peak_max_v=args.peak_max_v, no_cache=args.no_cache,
-                            full_hypercube=not args.no_full_hypercube)
+    if backend_name == "ngspice-deck":
+        pedal_dir = os.path.expanduser(cfg["pedal_dir"])
+        module = cfg["module"]
+        probe_node = cfg.get("probe_node", "OUT")
+        sys.path.insert(0, os.path.abspath(pedal_dir))
+        mod = importlib.import_module(module)
+        result = check_coverage_ngspice_deck(mod.build_deck, mod.__file__, probe_node,
+                                             knob_ranges, fixed, transient_peak,
+                                             margin=args.margin, peak_max_v=args.peak_max_v,
+                                             no_cache=args.no_cache,
+                                             full_hypercube=not args.no_full_hypercube,
+                                             lead_silence_s=args.lead_silence_s)
+        schx_or_module = module
+    else:
+        schx = str(cfg["schx"])
+        oversample = args.oversample or cfg.get("oversample", 8)
+        result = check_coverage(schx, knob_ranges, fixed, oversample, transient_peak,
+                                margin=args.margin, iterations=args.iterations,
+                                peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                full_hypercube=not args.no_full_hypercube)
+        schx_or_module = schx
 
     if args.json:
         Path(args.json).write_text(json.dumps({
-            "schx": schx, "input": str(input_wav), "transient_peak_v": transient_peak,
+            "schx": schx_or_module, "input": str(input_wav), "transient_peak_v": transient_peak,
             "margin": args.margin, "corners": result["rows"],
         }, indent=2))
 

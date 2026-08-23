@@ -83,6 +83,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gen_dataset_from_schx import (LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice,
                                     check_oracle, write_probe_clip)
 
+import importlib  # noqa: E402
+
+from tools.ngspice_spicelib import load_input  # noqa: E402
+from tools.prepare_excitation import _parse_fixed  # noqa: E402
+from tools.render_backends import NgspiceBackend  # noqa: E402
+
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
     m = min(len(a), len(b))
@@ -151,14 +157,24 @@ class Renderer:
     at exactly the 2.00s the old 4-window/8s-probe default produced; (3) a per-circuit
     netlist dump + NGSPICE_CIRCUIT_DEFAULTS lookup (method/conv/input_upsample), done
     once up front, same as gen_dataset_from_schx.main() does for the real dataset render.
+
+    BACKEND "ngspice-deck": for a device with no .schx at all (a real MOSFET/BJT .schx has no
+    model for -- see render_backends.py's NgspiceBackend). Reuses that same backend directly
+    (its render_many contract already handles the int16-peak-unnormalization and retry
+    escalation) instead of re-deriving the schx-netlist-translation path's ng_base machinery,
+    which doesn't apply here (there's no schx to dump a netlist from). Each probe window's
+    clip is already a WAV on disk (write_probe_clip, below) -- load_input(vin=None) reads it
+    in ABSOLUTE-VOLTS mode, preserving the clip's own real drive level rather than rescaling
+    it to some fixed peak, same convention preflight.py/prepare_excitation.py use.
     """
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
-                backend="livespice"):
+                backend="livespice", pedal_dir=None, module=None, probe_node="OUT"):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.cache: dict = {}
         self.ng_base = None
+        self.ngd_backend = None
         # Concurrent jobs can legitimately compute the SAME full params dict --
         # e.g. axis=Dist's cell (0.2,0.4) at oth={Tone:0.0} and axis=Tone's cell
         # (0.0,0.2) at oth={Dist:0.4} both render {Dist:0.4, Tone:0.0} -- and the
@@ -178,7 +194,14 @@ class Renderer:
         self.fail_counts: dict = {}
         self._fail_lock = threading.Lock()
 
-        if backend == "ngspice":
+        if backend == "ngspice-deck":
+            # Same segfault as choose_oversample: short clips crash ngspice outright.
+            probe_s = max(probe_s, 8.0)
+            n_windows = 2
+            sys.path.insert(0, _os.path.abspath(pedal_dir))
+            mod = importlib.import_module(module)
+            self.ngd_backend = NgspiceBackend(mod.build_deck, probe_node=probe_node)
+        elif backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
             probe_s = max(probe_s, 8.0)
             n_windows = 2
@@ -223,6 +246,10 @@ class Renderer:
             self.clips.append(c)
         self.win_s = win / sr
 
+        if backend == "ngspice-deck":
+            self.ngd_handles = [load_input(str(c), None, str(td), src_name=f"gridadq_{i}.src")
+                                for i, c in enumerate(self.clips)]
+
     def _note_fail(self, msg: str):
         with self._fail_lock:
             self.fail_counts[msg] = self.fail_counts.get(msg, 0) + 1
@@ -245,6 +272,21 @@ class Renderer:
             return self._render(params, key)
 
     def _render(self, params: dict, key):
+        if self.backend == "ngspice-deck":
+            fixed_dict = _parse_fixed(self.fixed) if self.fixed else {}
+            knobs_full = {**fixed_dict, **params}
+            out = []
+            for i, handle in enumerate(self.ngd_handles):
+                tag = f"{abs(hash(key))}_{i}"
+                ys = self.ngd_backend.render_many([{"params": knobs_full, "tag": tag}], handle, self.td)
+                y = ys.get(tag)
+                if y is None:
+                    self._note_fail("ngspice-deck render did not converge")
+                out.append(None if y is None else np.asarray(y, dtype=np.float64))
+            with self._cache_lock:
+                self.cache[key] = out
+            return out
+
         allp = ",".join(f"{k}={v}" for k, v in params.items())
         if self.fixed:
             allp = f"{self.fixed},{allp}"
@@ -451,9 +493,23 @@ def main() -> None:
 
     cfg = load_config(args.config)
     knobs: dict = cfg["knobs"]
-    schx = Path(_os.path.expanduser(cfg["schx"]))
     inp = Path(_os.path.expanduser(cfg["input"]))
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
+    backend = cfg.get("backend", "livespice")
+    pedal_dir = module = probe_node = None
+    if backend == "ngspice-deck":
+        schx = None
+        pedal_dir = _os.path.expanduser(cfg["pedal-dir"])
+        module = cfg["module"]
+        probe_node = cfg.get("probe-node", "OUT")
+        sys.path.insert(0, _os.path.abspath(pedal_dir))
+        mod = importlib.import_module(module)
+        unknown = set(knobs) - set(mod.KNOB_NAMES)
+        if unknown:
+            sys.exit(f"unknown knob(s) {sorted(unknown)} -- {module}'s real knobs are "
+                     f"{mod.KNOB_NAMES}")
+    else:
+        schx = Path(_os.path.expanduser(cfg["schx"]))
     oversample = cfg.get("oversample", 2)
     if str(oversample).strip().lower() == "auto":
         # This tool measures INTERPOLATION error (grid density in knob-space), a different
@@ -466,7 +522,6 @@ def main() -> None:
         oversample = 4
     else:
         oversample = int(oversample)
-    backend = cfg.get("backend", "livespice")
     check_oracle(backend)
 
     n_perms = int(np.prod([len(v) for v in knobs.values()]))
@@ -474,7 +529,7 @@ def main() -> None:
     print(f"  backend    {backend}")
     print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_perms} permutations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
-    probe_s = max(args.probe_s, 8.0) if backend == "ngspice" else args.probe_s
+    probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck") else args.probe_s
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
 
@@ -487,7 +542,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
-                          backend=backend)
+                          backend=backend, pedal_dir=pedal_dir, module=module,
+                          probe_node=probe_node)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0

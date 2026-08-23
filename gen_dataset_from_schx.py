@@ -110,7 +110,7 @@ def check_oracle(backend: str) -> None:
             print("         cd ../livespice-cli && ./build.sh", file=sys.stderr)
             print("       ...or point $LIVESPICE_CLI at an existing build.", file=sys.stderr)
         sys.exit(1)
-    if backend == "ngspice" and not shutil.which("ngspice"):
+    if backend in ("ngspice", "ngspice-deck") and not shutil.which("ngspice"):
         print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
         sys.exit(1)
 

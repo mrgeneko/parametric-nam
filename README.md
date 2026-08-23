@@ -215,6 +215,11 @@ writing the converged grid straight into `--config`'s `[knobs]` table — one co
 instead of suggest → hand-copy → rerun → repeat. It doesn't touch anything else in the
 file, comments included.
 
+`backend = "ngspice-deck"` in the config renders through a hand-written ngspice deck
+(`pedal-dir`/`module`/`probe-node` in the TOML, same convention as `preflight.py`/
+`prepare_excitation.py` — see Backends, below) instead of a `.schx`, for a device whose
+clipping needs a real component `.schx` has no model for (a MOSFET, a real BJT).
+
 ### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 
 ```bash
@@ -576,7 +581,12 @@ validation ESR (which averages over everything else).
   across the **full min/max hypercube** (every swept knob independently at its own grid
   min or max, not just one knob varied from center) plus the traditional solo-knob
   corners. A corner whose real-playing content never crosses into saturation during
-  training is a corner the network has to extrapolate at inference time.
+  training is a corner the network has to extrapolate at inference time. Supports
+  `backend = "ngspice-deck"` in the config (same `pedal-dir`/`module`/`probe-node`
+  convention as `preflight.py`/`prepare_excitation.py`/`grid_adequacy.py`) for a device
+  with no `.schx` at all — `gen_dataset_from_schx.py`'s own automatic call is
+  livespice-only, since that's the only path it drives; for a hand-deck device, call
+  `check_transient_coverage.py` directly as its own gate before generating.
 - **`tools/scan_film_runaway.py`** (post-training, run by hand against a finished
   `.param.nam`) — replays a real reference clip through every tier at every corner
   (`--config` for the exact trained grid, not just the reduced set) and flags any window
