@@ -65,9 +65,9 @@ sys.path.insert(0, str(HERE.parent))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
-from find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
-from render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
-from knob_classify import classify as _classify_by_name  # noqa: E402
+from tools.find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
+from tools.knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference, matches param_train.py

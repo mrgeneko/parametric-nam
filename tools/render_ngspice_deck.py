@@ -52,8 +52,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-from ngspice_spicelib import load_input, render_grid, render_one  # noqa: E402
+sys.path.insert(0, os.path.dirname(HERE))
+from tools.ngspice_spicelib import load_input, render_grid, render_one  # noqa: E402
 
 
 def main():

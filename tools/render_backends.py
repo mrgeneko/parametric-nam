@@ -42,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from gen_dataset_from_schx import LIVESPICE_CLI  # noqa: E402
 
-from ngspice_spicelib import load_input, render_grid  # noqa: E402 (sibling file, same tools/ dir)
+from tools.ngspice_spicelib import load_input, render_grid  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
 
 

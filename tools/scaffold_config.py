@@ -61,7 +61,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gen_dataset_from_schx import parse_schx_controls
 from measure_truncation import measure, probe_clips
-from knob_classify import classify  # noqa: E402 (sibling file, same tools/ dir; dependency-free)
+from tools.knob_classify import classify  # noqa: E402
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "examples" / "template.config.toml"
 
