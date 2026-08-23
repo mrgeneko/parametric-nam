@@ -15,10 +15,11 @@ build_excitation.py with them. Refuses to build (raises) if any corner's onset c
 determined, rather than silently building against a partial result -- same "refuse to guess"
 convention as preflight.py/check_transient_coverage.py.
 
-After building, running check_transient_coverage.py (livespice) or re-checking the ngspice
-corners directly is still worth doing as an independent gate before training -- this tool
-derives its levels FROM the same onset numbers such a check would verify against, so a clean
-result is expected, not a coincidence, but it isn't a substitute for actually checking.
+After building, running check_transient_coverage.py (livespice or --backend ngspice-deck) is
+still worth doing as an independent gate before training -- this tool derives its levels FROM
+the same onset numbers such a check would verify against, so a clean result is expected, not a
+coincidence, but it isn't a substitute for actually checking. This is only true at
+--realistic-peak-frac's default of 1.0 (not less) -- see that flag's own help text.
 
 Usage:
   livespice: python tools/prepare_excitation.py --backend livespice \\
@@ -182,8 +183,18 @@ def main():
                           "effect saturates)")
     ap.add_argument("--sweep-peak-fracs", default="0.25,0.5,0.75,1.0",
                      help="comma list of fractions of the margined max, passed as --sweep-peaks")
-    ap.add_argument("--realistic-peak-frac", type=float, default=0.5,
-                     help="fraction of worst-case onset used for --realistic-peak")
+    ap.add_argument("--realistic-peak-frac", type=float, default=1.0,
+                     help="fraction of worst-case onset used for --realistic-peak. Default 1.0 "
+                          "(not less) is load-bearing: check_transient_coverage.py's own default "
+                          "margin requires transient_peak >= onset AT THE WORST CORNER, and the "
+                          "worst corner's own onset IS worst-case onset by definition -- any "
+                          "fraction below 1.0 guarantees that check fails there, regardless of "
+                          "margin or grid, contradicting this tool's own claim that a check run "
+                          "afterward should pass cleanly. Lower it only if you deliberately want "
+                          "the real-playing content to stay short of the worst corner (e.g. to "
+                          "match a case where a real player realistically never drives that hard) "
+                          "and are prepared for check_transient_coverage.py to FAIL there as a "
+                          "correct, expected result, not a bug.")
     ap.add_argument("--realistic-dur", type=float, default=None)
     ap.add_argument("--excitation-lead-silence-s", type=float, default=3.0,
                      help="--lead-silence-s passed to build_excitation.py itself (distinct "
