@@ -170,10 +170,30 @@ Discovers the circuit's real controls (ganged pots collapsed to one, same logic
 and prints the same kind of table, but doesn't pick a value out of it automatically: a
 "stalled" candidate in that table can mean a render problem, not convergence, and the
 docs treat it as something to investigate by hand, not a green light. So it writes the
-largest tested candidate as a starting point and leaves the judgment call to you. The
-`[knobs]` grid it writes is a **placeholder** (`--grid-points` evenly-spaced values per
-knob, default 3) — run `tools/grid_adequacy.py --config <output> --apply` next to turn it
-into a measured one.
+largest tested candidate as a starting point and leaves the judgment call to you.
+
+It also writes a **`[knob-kind]` table**, guessing each knob's role (`hi`/`lo`/`mid`
+tone-shaping, `drive` gain/distortion, `rms` volume/level) from its name via
+`tools/knob_classify.py` — the same heuristic `preflight.py` uses for its own direction and
+EQ-swamp checks (see [that Known issue](#known-issue-preflights-eq-knob-checks-can-be-swamped-by-the-circuits-own-gain-control)
+below). A name that matches nothing is written commented-out as `UNCONFIRMED` rather than
+silently defaulted or guessed wrong — **always review this table by hand**: a misclassified
+knob doesn't just get the wrong sensitivity metric in `gen_dataset_from_schx.py`, it also
+silently skips `preflight.py`'s role-aware EQ-check protection for every OTHER knob's
+direction check. Override a bad guess with `preflight.py --knob-kind NAME=kind,...`, or just
+edit the table before your first real run.
+
+The `[knobs]` grid it writes is a **placeholder** (run `tools/grid_adequacy.py --config
+<output> --apply` next to turn it into a measured one) but a role-aware one, not a naive
+`linspace(0,1)` for every knob: a tone/EQ knob (`hi`/`lo`/`mid`) stays evenly spaced but
+narrowed to `[0.2, 0.8]` (`--grid-points` points, default 3) — the fully-CCW/CW extremes
+rarely hold a tone stack's interesting behavior. A gain/volume knob (`drive`/`rms`) is NOT
+evenly spaced: fixed anchors at `min`/`min+0.05`/`min+0.15`/`max-0.05`/`max` (`0.1, 0.15,
+0.25, 0.95, 1.0`) are always included — density where a gain knob's character changes
+fastest near the bottom, plus a point just below max to stabilize that grid cell — merged
+with `--grid-points`' own evenly-spaced baseline across the full range, matching hand-tuned
+grids already used on this fleet (e.g. `Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]`). An
+unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
 
 ### `tools/grid_adequacy.py` — measure whether a knob grid is dense enough
 
@@ -249,6 +269,41 @@ python gen_dataset_from_schx.py --combine <ds>
 `Name` matches the swept knob. To model a mechanically-ganged control (e.g. a dual-gang
 Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `.schx`;
 `--knobs Gain` then moves both wipers in lockstep, and the knob appears once downstream.
+
+### `tools/render_ngspice_deck.py` — render a hand-written ngspice deck's knob sweep
+
+```bash
+python tools/render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
+    --module gen_ocd_ngspice --probe-node OUT \
+    in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
+```
+
+For a device whose circuit is a hand-written ngspice netlist (`gen_<device>_ngspice.py`, kept
+in a private devices repo, exposing `build_deck()`/`KNOB_NAMES`) rather than a `.schx` — the
+same situation `--backend ngspice-deck` addresses on `preflight.py`/`prepare_excitation.py`
+below, and for the same reason: the `.schx` format itself has no component for whatever the
+circuit needs (a real MOSFET, most often) or a topology LiveSPICE's fixed-timestep solver
+can't hold at all. `--pedal-dir`/`--module` point at the private module the same way those two
+tools do; `--probe-node` and `--ok-max-peak` (a render whose peak exceeds this is treated as
+diverged, default 50V) are device-specific and worth passing explicitly rather than trusting a
+default that happened to fit one device.
+
+Writes `caps/cap_0000.wav ...` + `caps/manifest.jsonl` + `caps/mapping.csv` (an exact
+filename→knob-value table for `gen_dataset_from_captures.py --mapping-csv`, sidestepping that
+tool's filename-token convention entirely, since these knob values are already known exactly,
+not encoded in the filename). **`--absolute`** renders a file already built at the
+`V0dBFS=1V` convention (e.g. `tools/build_excitation.py`/`tools/prepare_excitation.py
+--backend ngspice-deck` output) using its own sample values directly as volts, with no
+peak-rescaling — necessary because those files intentionally have different segments at
+different absolute drive levels, which a normal `--vin` rescale would flatten.
+
+Uses `ngspice_spicelib.py` directly, not `render_backends.py`'s `NgspiceBackend` adapter:
+that adapter returns raw audio arrays for `preflight.py`/`find_saturation_point.py`'s own
+metric computation — a different contract than the capture-files-plus-manifest this tool
+produces. Adding a new device means writing `gen_<device>_ngspice.py`, not another copy of
+this render harness too — it used to be one per device (`render_ocd.py`, `render_bd2.py`,
+etc., each a near-identical ~100-line copy differing only in the hardcoded module and a
+couple of device-specific defaults) until this consolidated them.
 
 ### `gen_dataset_from_captures.py` — build a dataset from real hardware captures, no `.schx` needed
 
