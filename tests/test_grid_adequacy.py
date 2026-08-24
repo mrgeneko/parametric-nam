@@ -193,8 +193,9 @@ class TestRendererNgspiceDeck:
         """render_many returns a constant array (one per window) equal to the Gain knob's
         value -- lets a test assert on the exact params a Renderer call forwards."""
 
-        def __init__(self, build_deck, probe_node="OUT"):
+        def __init__(self, build_deck, probe_node="OUT", maxstep=3e-6):
             self.probe_node = probe_node
+            self.maxstep = maxstep
 
         def render_many(self, jobs, handle, scratch):
             tag = jobs[0]["tag"]
@@ -238,7 +239,7 @@ class TestRendererNgspiceDeck:
         inp = self._write_input(tmp_path)
 
         class FailingBackend:
-            def __init__(self, build_deck, probe_node="OUT"):
+            def __init__(self, build_deck, probe_node="OUT", maxstep=3e-6):
                 pass
 
             def render_many(self, jobs, handle, scratch):
@@ -295,3 +296,24 @@ class TestRendererNgspiceDeck:
                 probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
                 module="gen_fake_ngspice", probe_node="OUT", lead_silence_s=5.0)
         assert seen_lead_s and all(v == 5.0 for v in seen_lead_s)
+
+    def test_ngspice_deck_maxstep_reaches_the_backend(self, tmp_path, monkeypatch):
+        """The exact regression this override exists for: the Fulltone OCD's most extreme
+        Gain/Tone corner needed maxstep~1e-7 (measured via tools/measure_ngspice_timestep.py),
+        far finer than NgspiceBackend's 3e-6 default -- this must actually reach the backend
+        grid_adequacy renders through, not just be accepted and silently ignored."""
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        seen_maxsteps = []
+
+        class RecordingBackend(self.FakeNgspiceBackend):
+            def __init__(self, build_deck, probe_node="OUT", maxstep=3e-6):
+                super().__init__(build_deck, probe_node=probe_node, maxstep=maxstep)
+                seen_maxsteps.append(maxstep)
+
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", RecordingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                module="gen_fake_ngspice", probe_node="OUT", ngspice_deck_maxstep=1e-7)
+        assert seen_maxsteps == [1e-7]

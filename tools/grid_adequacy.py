@@ -170,7 +170,7 @@ class Renderer:
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
-                lead_silence_s=None):
+                lead_silence_s=None, ngspice_deck_maxstep=3e-6):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
@@ -202,7 +202,8 @@ class Renderer:
             n_windows = 2
             sys.path.insert(0, _os.path.abspath(pedal_dir))
             mod = importlib.import_module(module)
-            self.ngd_backend = NgspiceBackend(mod.build_deck, probe_node=probe_node)
+            self.ngd_backend = NgspiceBackend(mod.build_deck, probe_node=probe_node,
+                                              maxstep=ngspice_deck_maxstep)
         elif backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
             probe_s = max(probe_s, 8.0)
@@ -498,6 +499,11 @@ def main() -> None:
                          "probe under-settled at the 1.0s default, producing a maxstep- and "
                          "grid-density-dependent 'stuck DC' artifact that looked like runaway "
                          "non-convergence). Default: use write_probe_clip's own 1.0s.")
+    ap.add_argument("--ngspice-deck-maxstep", type=float, default=3e-6,
+                    help="[ngspice-deck] ngspice timestep ceiling -- measure with "
+                         "tools/measure_ngspice_timestep.py rather than guessing; the ecosystem "
+                         "default is too coarse for at least one circuit found so far (the "
+                         "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -552,7 +558,8 @@ def main() -> None:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
                           backend=backend, pedal_dir=pedal_dir, module=module,
-                          probe_node=probe_node, lead_silence_s=args.lead_silence_s)
+                          probe_node=probe_node, lead_silence_s=args.lead_silence_s,
+                          ngspice_deck_maxstep=args.ngspice_deck_maxstep)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0

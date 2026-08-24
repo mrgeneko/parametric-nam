@@ -244,6 +244,11 @@ def main():
                     help="[ngspice-deck] silence prepended before each saturation-sweep probe "
                          "tone -- see this repo's README ('Known issue: excitation needs a "
                          "silent lead-in')")
+    ap.add_argument("--maxstep", type=float, default=3e-6,
+                    help="[ngspice-deck] ngspice timestep ceiling -- measure with "
+                         "tools/measure_ngspice_timestep.py rather than guessing; the ecosystem "
+                         "default is too coarse for at least one circuit found so far (the "
+                         "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -278,7 +283,8 @@ def main():
         mod = importlib.import_module(module)
         result = check_coverage_ngspice_deck(mod.build_deck, mod.__file__, probe_node,
                                              knob_ranges, fixed, transient_peak,
-                                             margin=args.margin, peak_max_v=args.peak_max_v,
+                                             margin=args.margin, maxstep=args.maxstep,
+                                             peak_max_v=args.peak_max_v,
                                              no_cache=args.no_cache,
                                              full_hypercube=not args.no_full_hypercube,
                                              lead_silence_s=args.lead_silence_s)
