@@ -169,9 +169,11 @@ class Renderer:
     """
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
-                backend="livespice", pedal_dir=None, module=None, probe_node="OUT"):
+                backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
+                lead_silence_s=None):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
+        self.lead_silence_s = lead_silence_s
         self.cache: dict = {}
         self.ng_base = None
         self.ngd_backend = None
@@ -242,7 +244,7 @@ class Renderer:
         self.lead_n = 0
         for i, st in enumerate(starts):
             c = td / f"probe{i}.wav"
-            self.lead_n = write_probe_clip(x[st:st + win], sr, c)
+            self.lead_n = write_probe_clip(x[st:st + win], sr, c, lead_s=self.lead_silence_s)
             self.clips.append(c)
         self.win_s = win / sr
 
@@ -489,6 +491,13 @@ def main() -> None:
                          "hand-copy, rerun, repeat.")
     ap.add_argument("--max-iterations", type=int, default=5,
                     help="cap on --apply's suggest/reverify loop (default 5)")
+    ap.add_argument("--lead-silence-s", type=float, default=None,
+                    help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
+                         "own settling time is longer (e.g. a slow RC network -- found directly "
+                         "on the Fulltone OCD, whose ~5s C10/RVOL2 time constant left every "
+                         "probe under-settled at the 1.0s default, producing a maxstep- and "
+                         "grid-density-dependent 'stuck DC' artifact that looked like runaway "
+                         "non-convergence). Default: use write_probe_clip's own 1.0s.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -543,7 +552,7 @@ def main() -> None:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
                           backend=backend, pedal_dir=pedal_dir, module=module,
-                          probe_node=probe_node)
+                          probe_node=probe_node, lead_silence_s=args.lead_silence_s)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0

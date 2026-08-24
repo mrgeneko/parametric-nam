@@ -79,7 +79,7 @@ def esr_terms(a: np.ndarray, b: np.ndarray, lead_n: int, sr: int) -> tuple[float
             float(np.sum(b[sk:m] ** 2)))
 
 
-def probe_clips(input_wav: Path, probe_s: float, n_windows: int, td: Path
+def probe_clips(input_wav: Path, probe_s: float, n_windows: int, td: Path, lead_s: float = None
                 ) -> tuple[list[Path], int, int]:
     """Cut stratified probe windows from the input; returns (clips, lead_n, sr).
 
@@ -94,6 +94,9 @@ def probe_clips(input_wav: Path, probe_s: float, n_windows: int, td: Path
     the probe then measures its own splice), numerator/denominator pooled across
     windows. At the default 10 s of a 60 s sweep this cuts the render bill ~6x, and
     the reference renders (16x the cost of an os=2 render each) with it.
+
+    `lead_s`: forwarded to write_probe_clip -- override for a circuit whose own settling
+    time exceeds write_probe_clip's 1.0 s default (see that function's docstring).
     """
     if probe_s <= 0:
         sr = sf.info(str(input_wav)).samplerate
@@ -110,7 +113,7 @@ def probe_clips(input_wav: Path, probe_s: float, n_windows: int, td: Path
     clips, lead_n = [], 0
     for wi, st in enumerate(starts):
         c = td / f"probe_w{wi}.wav"
-        lead_n = write_probe_clip(sig[st:st + win], sr, c)
+        lead_n = write_probe_clip(sig[st:st + win], sr, c, lead_s=lead_s)
         clips.append(c)
     return clips, lead_n, sr
 
@@ -278,6 +281,10 @@ def main() -> None:
                          "behavior).")
     ap.add_argument("--n-windows", type=int, default=4,
                     help="number of stratified windows --probe-s is split into (default 4)")
+    ap.add_argument("--lead-silence-s", type=float, default=None,
+                    help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
+                         "own settling time is longer (e.g. a slow RC network) -- see that "
+                         "function's docstring. Default: use its own 1.0s.")
     args = ap.parse_args()
 
     cands = tuple(int(c) for c in args.candidates.split(","))
@@ -300,7 +307,8 @@ def main() -> None:
     rows = []
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td)
+        clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td,
+                                        lead_s=args.lead_silence_s)
         if len(clips) > 1 or clips[0] != args.input:
             print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
                   f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")

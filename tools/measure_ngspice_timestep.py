@@ -181,6 +181,13 @@ def main() -> None:
                          "8 -- ngspice SEGFAULTS on shorter clips, same convention as "
                          "grid_adequacy.py's Renderer)")
     ap.add_argument("--n-windows", type=int, default=2)
+    ap.add_argument("--lead-silence-s", type=float, default=None,
+                    help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
+                         "own settling time is longer (e.g. a slow RC network -- found directly "
+                         "on the Fulltone OCD: a ~5s C10/RVOL2 time constant left every probe "
+                         "under-settled at the 1.0s default, producing a maxstep-dependent "
+                         "'stuck DC' artifact that looked like circuit instability). Default: "
+                         "use write_probe_clip's own 1.0s.")
     args = ap.parse_args()
 
     cands = tuple(float(c) for c in args.candidates.split(","))
@@ -200,7 +207,8 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        clips, lead_n, sr = probe_clips(args.input, probe_s, args.n_windows, td)
+        clips, lead_n, sr = probe_clips(args.input, probe_s, args.n_windows, td,
+                                        lead_s=args.lead_silence_s)
         print(f"probing:    {len(clips)} x {probe_s / args.n_windows:.1f}s windows\n")
         print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
         try:

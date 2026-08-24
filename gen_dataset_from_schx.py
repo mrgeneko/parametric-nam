@@ -1037,7 +1037,7 @@ PROBE_LEAD_S = 1.00          # silence, so the solver can find its operating poi
 PROBE_RAMP_S = 0.05          # then ease into the signal instead of stepping into it
 
 
-def write_probe_clip(sig, sr: int, path) -> int:
+def write_probe_clip(sig, sr: int, path, lead_s: float = None) -> int:
     """Write a probe window WITH A QUIET LEAD-IN. Returns the number of lead samples to skip.
 
     A window cut out of the middle of a sweep starts at whatever amplitude the signal happened to be
@@ -1052,9 +1052,19 @@ def write_probe_clip(sig, sr: int, path) -> int:
     Give the same 8 s slice 250 ms of silence and a 50 ms ramp and it converges.
 
     The measurement must then SKIP the lead-in, or the probe scores its own warm-up transient.
+
+    `lead_s`: override PROBE_LEAD_S for a circuit whose own settling time genuinely exceeds the
+    1.0 s default -- found directly on the Fulltone OCD (a ~5 s RC network, C10/RVOL2, same one
+    build_excitation.py/preflight.py/prepare_excitation.py's --lead-silence-s already exists for).
+    Without this, a probe window starting from an under-settled state doesn't just read a biased
+    number -- it can render into a DIFFERENT, WRONG quasi-stable DC point depending on tiny
+    solver-path differences (confirmed: two renders of the identical knob setting, differing only
+    in ngspice's maxstep, got stuck at two different constant DC outputs for seconds, looking like
+    a circuit instability until traced back to this). None of the 1.0 s default's existing callers
+    are affected -- this parameter is opt-in, per-call.
     """
     import numpy as _np
-    lead = int(PROBE_LEAD_S * sr)
+    lead = int((PROBE_LEAD_S if lead_s is None else lead_s) * sr)
     ramp = int(PROBE_RAMP_S * sr)
     seg = _np.asarray(sig, dtype=_np.float64).copy()
     if ramp and len(seg) > ramp:

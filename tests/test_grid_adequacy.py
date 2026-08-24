@@ -271,3 +271,27 @@ class TestRendererNgspiceDeck:
         n_first = len(calls)
         r({"Gain": 0.5})
         assert len(calls) == n_first, "identical params must be a cache hit, not a re-render"
+
+    def test_lead_silence_s_override_reaches_write_probe_clip(self, tmp_path, monkeypatch):
+        """The exact regression this override exists for: a circuit whose real settling time
+        exceeds write_probe_clip's 1.0s default (the Fulltone OCD's ~5s C10/RVOL2 network) needs
+        this to actually reach the probe clips grid_adequacy builds -- not just be accepted and
+        silently ignored."""
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        seen_lead_s = []
+
+        import tools.grid_adequacy as ga
+        real_write_probe_clip = ga.write_probe_clip
+
+        def spy(sig, sr, path, lead_s=None):
+            seen_lead_s.append(lead_s)
+            return real_write_probe_clip(sig, sr, path, lead_s=lead_s)
+
+        monkeypatch.setattr("tools.grid_adequacy.write_probe_clip", spy)
+        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
+                module="gen_fake_ngspice", probe_node="OUT", lead_silence_s=5.0)
+        assert seen_lead_s and all(v == 5.0 for v in seen_lead_s)
