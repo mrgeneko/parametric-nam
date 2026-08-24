@@ -45,8 +45,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from measure_truncation import esr_terms, probe_clips, probe_settings  # noqa: E402
 
-from tools.ngspice_spicelib import load_input  # noqa: E402
-from tools.render_backends import NgspiceBackend  # noqa: E402
+from scipy.io import wavfile  # noqa: E402
+
+from tools.ngspice_spicelib import load_input, render_grid  # noqa: E402
 
 
 def load_config(p: Path) -> dict:
@@ -77,7 +78,18 @@ def load_device(config_path: Path) -> tuple:
 def measure(build_deck, probe_node: str, knobs: list, fixed: dict, clips: list, lead_n: int,
            sr: int, ref_maxstep: float, candidates: tuple, parallel_sims: int, td: Path) -> dict:
     """Worst-over-knob-settings truncation ESR at each candidate maxstep, against a reference
-    at ref_maxstep (must be smaller/finer than every candidate)."""
+    at ref_maxstep (must be smaller/finer than every candidate).
+
+    Calls render_grid() directly with rungs=(maxstep,) -- a genuine SINGLE-SHOT attempt, no
+    escalation -- rather than going through render_backends.NgspiceBackend (whose render_many
+    always uses render_grid's default (maxstep, maxstep/3, maxstep/10) escalation ladder). That
+    escalation is exactly right for a real dataset render (get a working result), but wrong
+    here: a job that fails to converge at the requested maxstep would otherwise be silently
+    retried at a DIFFERENT (finer) one, so two jobs nominally at the "same" maxstep could
+    actually have been rendered at different timesteps -- defeating the very comparison this
+    tool exists to make. Found directly: an earlier version of this tool (using NgspiceBackend)
+    produced a non-converged-looking table because of exactly this contamination.
+    """
     settings = probe_settings(knobs)
     handles = [load_input(str(c), None, str(td), src_name=f"mst_{i}.src")
               for i, c in enumerate(clips)]
@@ -85,26 +97,30 @@ def measure(build_deck, probe_node: str, knobs: list, fixed: dict, clips: list, 
     cache: dict = {}
     fail_counts: dict = {}
 
-    def run_batch(maxstep: float):
-        backend = NgspiceBackend(build_deck, probe_node=probe_node, parallel_sims=parallel_sims,
-                                 maxstep=maxstep)
+    def render_batch(maxstep: float, settings_to_render: list):
         for wi, handle in enumerate(handles):
-            jobs, keymap = [], {}
-            for p in settings:
+            sr_, t_, input_src_ = handle
+            rg_jobs, outfile_to_key = [], {}
+            for p in settings_to_render:
                 full_params = {**fixed, **p}
                 key = (tuple(sorted(p.items())), maxstep, wi)
-                tag = str(abs(hash(key)))
-                jobs.append({"params": full_params, "tag": tag})
-                keymap[tag] = key
-            ys = backend.render_many(jobs, handle, td)
-            for tag, key in keymap.items():
-                y = ys.get(tag)
-                cache[key] = y
-                if y is None:
-                    fail_counts["did not converge"] = fail_counts.get("did not converge", 0) + 1
+                outfile = str(td / f"mst_{abs(hash(key))}.wav")
+                rg_jobs.append((full_params, outfile))
+                outfile_to_key[outfile] = key
+            peaks = render_grid(build_deck, rg_jobs, probe_node, sr_, t_, input_src_, str(td),
+                                maxstep=maxstep, parallel_sims=parallel_sims, rungs=(maxstep,))
+            for outfile, key in outfile_to_key.items():
+                pk = peaks.get(outfile)
+                if pk is None:
+                    cache[key] = None
+                    fail_counts["did not converge at this exact maxstep (no escalation)"] = \
+                        fail_counts.get("did not converge at this exact maxstep (no escalation)", 0) + 1
+                else:
+                    _, y16 = wavfile.read(outfile)
+                    cache[key] = y16.astype(np.float64) / (0.9 * 32767.0) * pk
 
     for ms in (*candidates, ref_maxstep):
-        run_batch(ms)
+        render_batch(ms, settings)
 
     for msg, n in sorted(fail_counts.items(), key=lambda kv: -kv[1]):
         print(f"      {n} render(s) failed: {msg}", file=sys.stderr)
@@ -139,7 +155,7 @@ def measure(build_deck, probe_node: str, knobs: list, fixed: dict, clips: list, 
     # far the reference still moves -- same check measure_truncation.py runs on `ref_os*2`.
     _, at_worst = res[candidates[0]]
     if at_worst is not None:
-        run_batch(ref_maxstep / 2)
+        render_batch(ref_maxstep / 2, [at_worst])  # only the worst setting -- not the full grid
         res["ref_error"] = pooled_esr(tuple(sorted(at_worst.items())), ref_maxstep, ref_maxstep / 2)
     return res
 

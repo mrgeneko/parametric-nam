@@ -99,7 +99,7 @@ def _read_result(raw_path, probe_node, t, sr):
 
 def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
                  maxstep=3e-6, parallel_sims=8, timeout=300,
-                 opt_line="reltol=2e-3 abstol=1e-9 gmin=1e-10 method=gear"):
+                 opt_line="reltol=2e-3 abstol=1e-9 gmin=1e-10 method=gear", rungs=None):
     """Render many (knobs, outfile) jobs in parallel, with the SAME progressively-finer-
     timestep retry escalation every render_*.py used sequentially (maxstep, maxstep/3,
     maxstep/10) -- but each escalation ROUND runs its still-pending jobs in parallel, instead
@@ -109,13 +109,21 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
 
     `probe_node` is looked up as v(<probe_node>) in the raw file -- must match a node name in
     the deck (e.g. 'OUT', 'spk'), same as every render_*.py's existing `wrdata ... v(X)` arg.
+
+    `rungs`: override the escalation ladder (default `(maxstep, maxstep/3, maxstep/10)`).
+    Pass `rungs=(maxstep,)` for a genuine SINGLE-SHOT attempt with no silent escalation --
+    needed by tools/measure_ngspice_timestep.py, which measures maxstep's own effect on the
+    render and would otherwise get a DIFFERENT actual timestep than requested for any job that
+    fails to converge at the nominal one (found directly: a "maxstep=1e-7" run silently
+    resolved to ~1e-8 for a hard corner via this same escalation, invalidating the very
+    comparison the tool exists to make).
     """
     dur = len(t) / sr
     runner = SimRunner(simulator=NGspiceSimulator, parallel_sims=parallel_sims,
                         timeout=timeout, output_folder=tmp)
     results = {}
     pending = list(jobs)
-    for round_i, step in enumerate((maxstep, maxstep / 3, maxstep / 10)):
+    for round_i, step in enumerate(rungs if rungs is not None else (maxstep, maxstep / 3, maxstep / 10)):
         if not pending:
             break
         raw_paths = {}
