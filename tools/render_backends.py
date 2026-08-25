@@ -43,6 +43,7 @@ sys.path.insert(0, str(HERE.parent))
 from gen_dataset_from_schx import LIVESPICE_CLI  # noqa: E402
 
 from tools.ngspice_spicelib import load_input, render_grid  # noqa: E402
+from tools import ltspice_spicelib  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
 
 
@@ -123,4 +124,45 @@ class NgspiceBackend:
                 _, y16 = wavfile.read(outfiles[j["tag"]])
                 # undo render_grid's peak-normalized int16 write -> raw voltage-scale float
                 out[j["tag"]] = y16.astype(np.float64) / (0.9 * 32767.0) * pk
+        return out
+
+
+class LtspiceBackend:
+    """Renders a hand-written LTspice deck via ltspice_spicelib.py's render_grid (one LTspice
+    subprocess per render), for a device whose ngspice-deck counterpart can't converge on real
+    playing content at all -- see ltspice_spicelib.py's own docstring for why (a razor-steep
+    tanh-bounded op-amp B-source is a genuine Newton-solver dead end in ngspice, independent of
+    timestep; LTspice needs a real op-amp macromodel + .ic/uic hints instead, neither of which
+    ngspice's B-source style has room for)."""
+
+    def __init__(self, build_deck, tap="spk", maxstep=3e-6, parallel_sims=8, out_scale=0.05):
+        self.build_deck = build_deck
+        self.tap = tap
+        self.maxstep = maxstep
+        self.parallel_sims = parallel_sims
+        self.out_scale = out_scale
+
+    def prepare_input(self, raw, sr, level_v, scratch, tag):
+        wav_path = f"{scratch}/rawinput_{tag}.wav"
+        sf.write(wav_path, raw.astype(np.float32), sr, subtype="FLOAT")
+        return ltspice_spicelib.load_input(wav_path, level_v, scratch, src_name=f"input_{tag}.wav")
+
+    def render_many(self, jobs, input_handle, scratch):
+        if not jobs:
+            return {}
+        sr_, dur_s_, wav_path_, in_scale_ = input_handle
+        outfiles = {j["tag"]: f"{scratch}/pf_{j['tag']}.wav" for j in jobs}
+        rg_jobs = [(j["params"], outfiles[j["tag"]]) for j in jobs]
+        peaks = ltspice_spicelib.render_grid(self.build_deck, rg_jobs, self.tap, sr_, dur_s_,
+                                             wav_path_, in_scale_, scratch,
+                                             maxstep=self.maxstep, parallel_sims=self.parallel_sims,
+                                             out_scale=self.out_scale)
+        out = {}
+        for j in jobs:
+            pk = peaks[outfiles[j["tag"]]]
+            if pk is None:
+                out[j["tag"]] = None
+            else:
+                y, _ = sf.read(outfiles[j["tag"]], dtype="float64")
+                out[j["tag"]] = y
         return out

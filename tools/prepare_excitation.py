@@ -45,7 +45,7 @@ sys.path.insert(0, str(HERE.parent))
 from run_pipeline import load_config  # noqa: E402
 from tools.check_transient_coverage import _corners  # noqa: E402
 from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
@@ -134,12 +134,27 @@ def _setup(args):
         identity = Path(mod.__file__).read_bytes()
         cache_extra = f"maxv={args.peak_max_v}"
         return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module
+    if args.backend == "ltspice-deck":
+        if not (args.pedal_dir and args.module and args.range):
+            sys.exit("--backend ltspice-deck needs --pedal-dir, --module, and --range")
+        sys.path.insert(0, os.path.abspath(args.pedal_dir))
+        mod = importlib.import_module(args.module)
+        knob_ranges = _parse_ranges(args.range)
+        fixed = _parse_fixed(args.fixed_params)
+        backend = LtspiceBackend(mod.build_deck, tap=args.probe_node,
+                                 maxstep=args.maxstep, parallel_sims=args.parallel_sims,
+                                 out_scale=args.out_scale)
+        identity = Path(mod.__file__).read_bytes()
+        cache_extra = f"maxv={args.peak_max_v}"
+        # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
+        # settling lead-in -- see tools/ltspice_spicelib.py's docstring.
+        return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module
     sys.exit(f"unknown --backend {args.backend!r}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck"])
+    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck", "ltspice-deck"])
 
     # livespice
     ap.add_argument("--config", help="[livespice] per-circuit TOML (same as run_pipeline.py --config)")
@@ -157,6 +172,9 @@ def main():
                      help="[ngspice-deck] silence prepended before each saturation-sweep probe tone "
                           "-- see this repo's README ('Known issue: excitation needs a silent "
                           "lead-in')")
+    ap.add_argument("--out-scale", type=float, default=0.05,
+                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
+                          "tools/ltspice_spicelib.py's docstring")
 
     # shared corner/knob specification (both backends; --config covers this for livespice)
     ap.add_argument("--range", action="append", default=[],

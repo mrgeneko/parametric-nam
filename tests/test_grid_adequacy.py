@@ -317,3 +317,106 @@ class TestRendererNgspiceDeck:
                 probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
                 module="gen_fake_ngspice", probe_node="OUT", ngspice_deck_maxstep=1e-7)
         assert seen_maxsteps == [1e-7]
+
+
+class TestRendererLtspiceDeck:
+    """The Renderer's LTspice-hand-deck mode -- for a device whose ngspice-deck counterpart
+    can't converge on real playing content at all (see tools/ltspice_spicelib.py's own
+    docstring). Same stratified-window machinery as ngspice-deck, rendered through
+    render_backends.LtspiceBackend against a gen_*_ltspice.py module instead."""
+
+    def _write_pedal_module(self, tmp_path, name="gen_fake_ltspice", knob_names=("Gain",)):
+        pedal_dir = tmp_path / "pedals"
+        pedal_dir.mkdir(exist_ok=True)
+        (pedal_dir / f"{name}.py").write_text(
+            f"KNOB_NAMES = {list(knob_names)!r}\ndef build_deck(**kw): return ''\n")
+        return pedal_dir
+
+    def _write_input(self, tmp_path, sr=1000, dur_s=20):
+        inp = tmp_path / "input.wav"
+        sf.write(str(inp), np.zeros(sr * dur_s, dtype=np.float32), sr)
+        return inp
+
+    class FakeLtspiceBackend:
+        """render_many returns a constant array (one per window) equal to the Gain knob's
+        value -- lets a test assert on the exact params a Renderer call forwards. `handle` is
+        ltspice_spicelib.load_input's real (sr, dur_s, wav_path, in_scale) tuple."""
+
+        def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
+            self.tap = tap
+            self.maxstep = maxstep
+            self.out_scale = out_scale
+
+        def render_many(self, jobs, handle, scratch):
+            tag = jobs[0]["tag"]
+            val = jobs[0]["params"].get("Gain", 0.0)
+            sr_, dur_s_, _wav_path, _in_scale = handle
+            return {tag: np.full(int(dur_s_ * sr_), val, dtype=np.float64)}
+
+    def test_uses_two_windows_and_the_ltspice_backends_output(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", self.FakeLtspiceBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                    probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ltspice", probe_node="OUT")
+        out = r({"Gain": 0.7})
+        assert len(out) == 2  # n_windows bumped to 2, same segfault-avoidance as ngspice-deck
+        assert all(np.allclose(w, 0.7) for w in out)
+
+    def test_fixed_params_are_merged_into_the_rendered_knobs(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path, knob_names=("Gain", "Tone"))
+        inp = self._write_input(tmp_path)
+        seen = []
+
+        class RecordingBackend(self.FakeLtspiceBackend):
+            def render_many(self, jobs, handle, scratch):
+                seen.append(dict(jobs[0]["params"]))
+                return super().render_many(jobs, handle, scratch)
+
+        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", RecordingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="Tone=0.3",
+                    td=td, probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ltspice", probe_node="OUT")
+        r({"Gain": 0.5})
+        assert all(p == {"Tone": 0.3, "Gain": 0.5} for p in seen)
+
+    def test_non_convergence_is_recorded_as_none_not_a_crash(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+
+        class FailingBackend:
+            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
+                pass
+
+            def render_many(self, jobs, handle, scratch):
+                return {jobs[0]["tag"]: None}
+
+        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", FailingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                    probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
+                    module="gen_fake_ltspice", probe_node="OUT")
+        out = r({"Gain": 0.5})
+        assert out == [None, None]
+
+    def test_ltspice_deck_maxstep_and_out_scale_reach_the_backend(self, tmp_path, monkeypatch):
+        pedal_dir = self._write_pedal_module(tmp_path)
+        inp = self._write_input(tmp_path)
+        seen = []
+
+        class RecordingBackend(self.FakeLtspiceBackend):
+            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
+                super().__init__(build_deck, tap=tap, maxstep=maxstep, out_scale=out_scale)
+                seen.append((maxstep, out_scale))
+
+        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", RecordingBackend)
+        td = tmp_path / "scratch"; td.mkdir()
+        Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
+                probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
+                module="gen_fake_ltspice", probe_node="OUT", ltspice_deck_maxstep=1e-7,
+                ltspice_out_scale=0.02)
+        assert seen == [(1e-7, 0.02)]

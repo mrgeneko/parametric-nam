@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend
 
 
 class TestLiveSpiceBackendPrepareInput:
@@ -124,3 +124,81 @@ class TestNgspiceBackendRenderMany:
         out = backend.render_many(jobs, input_handle=(1000, np.zeros(1), ("", "")), scratch="/s")
         assert out["a"][0] == pytest.approx(1.0, rel=1e-3)
         assert out["b"][0] == pytest.approx(2.0, rel=1e-3)
+
+
+class TestLtspiceBackendPrepareInput:
+    def test_forwards_raw_as_a_float_wav_to_load_input(self, tmp_path, monkeypatch):
+        # LTspice's own wavefile= needs PCM (see ltspice_spicelib.load_input's docstring), but
+        # prepare_input's OWN write here is an intermediate handed straight to load_input,
+        # which does the PCM-safe rescale itself -- FLOAT here just avoids a second, redundant
+        # lossy round-trip before that happens.
+        seen = {}
+
+        def fake_load_input(wav_path, vin, tmp, src_name):
+            y, sr = sf.read(wav_path, dtype="float32")
+            seen.update(wav_path=wav_path, vin=vin, tmp=tmp, src_name=src_name, peak=float(np.abs(y).max()))
+            return (sr, 1.0, wav_path, 1.0)
+
+        monkeypatch.setattr("tools.render_backends.ltspice_spicelib.load_input", fake_load_input)
+        backend = LtspiceBackend(build_deck=lambda **kw: None)
+        raw = np.array([0.0, 1.0, -1.0], dtype=np.float32)
+        handle = backend.prepare_input(raw, sr=1000, level_v=2.0, scratch=str(tmp_path), tag="t1")
+        assert seen["vin"] == 2.0
+        assert seen["peak"] == pytest.approx(1.0, rel=1e-4)  # unscaled -- load_input does the level_v scaling
+        assert handle == (1000, 1.0, seen["wav_path"], 1.0)
+
+
+class TestLtspiceBackendRenderMany:
+    def test_empty_jobs_returns_empty_dict(self):
+        backend = LtspiceBackend(build_deck=lambda **kw: None)
+        assert backend.render_many([], input_handle=(1000, 1.0, "in.wav", 1.0), scratch="/tmp") == {}
+
+    def test_converged_render_returns_audio_keyed_by_tag(self, tmp_path, monkeypatch):
+        def fake_render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp, **kw):
+            out = {}
+            for knobs, outfile in jobs:
+                sf.write(outfile, np.array([0.1, 0.2, 0.3], dtype=np.float32), sr, subtype="FLOAT")
+                out[outfile] = 0.3
+            return out
+
+        monkeypatch.setattr("tools.render_backends.ltspice_spicelib.render_grid", fake_render_grid)
+        backend = LtspiceBackend(build_deck=lambda **kw: None)
+        jobs = [{"params": {"Gain": 0.5}, "tag": "a"}, {"params": {"Gain": 0.9}, "tag": "b"}]
+        out = backend.render_many(jobs, input_handle=(1000, 1.0, "in.wav", 1.0), scratch=str(tmp_path))
+        assert set(out) == {"a", "b"}
+        assert np.allclose(out["a"], [0.1, 0.2, 0.3], atol=1e-4)
+
+    def test_nonconverged_render_maps_to_none_without_reading_a_missing_file(self, tmp_path, monkeypatch):
+        outfile = str(tmp_path / "pf_a.wav")
+        monkeypatch.setattr("tools.render_backends.ltspice_spicelib.render_grid",
+                            lambda *a, **kw: {outfile: None})
+
+        def boom(path, dtype=None):
+            raise AssertionError("sf.read must not be called for a non-converged render")
+        monkeypatch.setattr("tools.render_backends.sf.read", boom)
+
+        backend = LtspiceBackend(build_deck=lambda **kw: None)
+        out = backend.render_many([{"params": {}, "tag": "a"}], input_handle=(1000, 1.0, "in.wav", 1.0),
+                                  scratch=str(tmp_path))
+        assert out == {"a": None}
+
+    def test_input_handle_fields_are_forwarded_to_render_grid(self, monkeypatch):
+        seen = {}
+
+        def fake_render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp, **kw):
+            seen.update(tap=tap, sr=sr, dur_s=dur_s, wav_path=wav_path, in_scale=in_scale, **kw)
+            return {outfile: None for _knobs, outfile in jobs}
+
+        monkeypatch.setattr("tools.render_backends.ltspice_spicelib.render_grid", fake_render_grid)
+        backend = LtspiceBackend(build_deck=lambda **kw: None, tap="spk", maxstep=1e-7,
+                                 parallel_sims=4, out_scale=0.1)
+        backend.render_many([{"params": {}, "tag": "a"}],
+                            input_handle=(48000, 2.5, "/s/in.wav", 3.0), scratch="/s")
+        assert seen["tap"] == "spk"
+        assert seen["sr"] == 48000
+        assert seen["dur_s"] == 2.5
+        assert seen["wav_path"] == "/s/in.wav"
+        assert seen["in_scale"] == 3.0
+        assert seen["maxstep"] == 1e-7
+        assert seen["parallel_sims"] == 4
+        assert seen["out_scale"] == 0.1

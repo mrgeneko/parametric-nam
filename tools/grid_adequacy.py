@@ -86,8 +86,9 @@ from gen_dataset_from_schx import (LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run
 import importlib  # noqa: E402
 
 from tools.ngspice_spicelib import load_input  # noqa: E402
+from tools import ltspice_spicelib  # noqa: E402
 from tools.prepare_excitation import _parse_fixed  # noqa: E402
-from tools.render_backends import NgspiceBackend  # noqa: E402
+from tools.render_backends import NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -170,13 +171,15 @@ class Renderer:
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
-                lead_silence_s=None, ngspice_deck_maxstep=3e-6):
+                lead_silence_s=None, ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
+                ltspice_out_scale=0.05):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
         self.cache: dict = {}
         self.ng_base = None
         self.ngd_backend = None
+        self.ltd_backend = None
         # Concurrent jobs can legitimately compute the SAME full params dict --
         # e.g. axis=Dist's cell (0.2,0.4) at oth={Tone:0.0} and axis=Tone's cell
         # (0.0,0.2) at oth={Dist:0.4} both render {Dist:0.4, Tone:0.0} -- and the
@@ -204,6 +207,14 @@ class Renderer:
             mod = importlib.import_module(module)
             self.ngd_backend = NgspiceBackend(mod.build_deck, probe_node=probe_node,
                                               maxstep=ngspice_deck_maxstep)
+        elif backend == "ltspice-deck":
+            probe_s = max(probe_s, 8.0)
+            n_windows = 2
+            sys.path.insert(0, _os.path.abspath(pedal_dir))
+            mod = importlib.import_module(module)
+            self.ltd_backend = LtspiceBackend(mod.build_deck, tap=probe_node,
+                                              maxstep=ltspice_deck_maxstep,
+                                              out_scale=ltspice_out_scale)
         elif backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
             probe_s = max(probe_s, 8.0)
@@ -252,6 +263,10 @@ class Renderer:
         if backend == "ngspice-deck":
             self.ngd_handles = [load_input(str(c), None, str(td), src_name=f"gridadq_{i}.src")
                                 for i, c in enumerate(self.clips)]
+        elif backend == "ltspice-deck":
+            self.ltd_handles = [ltspice_spicelib.load_input(str(c), None, str(td),
+                                                             src_name=f"gridadq_{i}.wav")
+                                for i, c in enumerate(self.clips)]
 
     def _note_fail(self, msg: str):
         with self._fail_lock:
@@ -285,6 +300,21 @@ class Renderer:
                 y = ys.get(tag)
                 if y is None:
                     self._note_fail("ngspice-deck render did not converge")
+                out.append(None if y is None else np.asarray(y, dtype=np.float64))
+            with self._cache_lock:
+                self.cache[key] = out
+            return out
+
+        if self.backend == "ltspice-deck":
+            fixed_dict = _parse_fixed(self.fixed) if self.fixed else {}
+            knobs_full = {**fixed_dict, **params}
+            out = []
+            for i, handle in enumerate(self.ltd_handles):
+                tag = f"{abs(hash(key))}_{i}"
+                ys = self.ltd_backend.render_many([{"params": knobs_full, "tag": tag}], handle, self.td)
+                y = ys.get(tag)
+                if y is None:
+                    self._note_fail("ltspice-deck render did not converge")
                 out.append(None if y is None else np.asarray(y, dtype=np.float64))
             with self._cache_lock:
                 self.cache[key] = out
@@ -504,6 +534,10 @@ def main() -> None:
                          "tools/measure_ngspice_timestep.py rather than guessing; the ecosystem "
                          "default is too coarse for at least one circuit found so far (the "
                          "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
+    ap.add_argument("--ltspice-deck-maxstep", type=float, default=3e-6, help="[ltspice-deck]")
+    ap.add_argument("--ltspice-out-scale", type=float, default=0.05,
+                    help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
+                         "tools/ltspice_spicelib.py's docstring")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -512,7 +546,7 @@ def main() -> None:
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
     backend = cfg.get("backend", "livespice")
     pedal_dir = module = probe_node = None
-    if backend == "ngspice-deck":
+    if backend in ("ngspice-deck", "ltspice-deck"):
         schx = None
         pedal_dir = _os.path.expanduser(cfg["pedal-dir"])
         module = cfg["module"]
@@ -544,7 +578,7 @@ def main() -> None:
     print(f"  backend    {backend}")
     print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_perms} permutations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
-    probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck") else args.probe_s
+    probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck", "ltspice-deck") else args.probe_s
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
 
@@ -559,7 +593,9 @@ def main() -> None:
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
                           backend=backend, pedal_dir=pedal_dir, module=module,
                           probe_node=probe_node, lead_silence_s=args.lead_silence_s,
-                          ngspice_deck_maxstep=args.ngspice_deck_maxstep)
+                          ngspice_deck_maxstep=args.ngspice_deck_maxstep,
+                          ltspice_deck_maxstep=args.ltspice_deck_maxstep,
+                          ltspice_out_scale=args.ltspice_out_scale)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0

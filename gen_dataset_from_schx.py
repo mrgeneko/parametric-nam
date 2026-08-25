@@ -113,6 +113,17 @@ def check_oracle(backend: str) -> None:
     if backend in ("ngspice", "ngspice-deck") and not shutil.which("ngspice"):
         print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
         sys.exit(1)
+    if backend == "ltspice-deck":
+        from tools.ltspice_spicelib import LTSPICE_BIN
+        if not LTSPICE_BIN.exists():
+            env = os.environ.get("LTSPICE_BIN")
+            print(f"ERROR: LTspice not found at {LTSPICE_BIN}", file=sys.stderr)
+            if env:
+                print("       ($LTSPICE_BIN is set to this path -- check it's correct)", file=sys.stderr)
+            else:
+                print("       Install LTspice XVII, or point $LTSPICE_BIN at its binary "
+                      "(Contents/MacOS/LTspice inside the .app bundle).", file=sys.stderr)
+            sys.exit(1)
 
 
 # Per-circuit ngspice defaults, keyed by a substring of the .schx filename. Applied

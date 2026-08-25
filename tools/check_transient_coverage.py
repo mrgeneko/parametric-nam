@@ -59,7 +59,7 @@ from run_pipeline import load_config  # noqa: E402
 # itself -- only `from run_pipeline import ...` above (repo root) would resolve; a bare
 # `find_saturation_point` import would 404. This form works both ways.
 from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 SR = 48000
 
@@ -222,6 +222,28 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
                            lead_silence_s=lead_silence_s)
 
 
+def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ranges: dict,
+                                fixed: dict, transient_peak: float, margin: float = 1.0,
+                                maxstep: float = 3e-6, parallel_sims: int = 8,
+                                out_scale: float = 0.05, peak_max_v: float = 40.0,
+                                no_cache: bool = False, quiet: bool = False,
+                                full_hypercube: bool = True) -> dict:
+    """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
+    converge on real playing content at all -- see tools/ltspice_spicelib.py's own docstring.
+    `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
+    cache identity, same convention as check_coverage_ngspice_deck). See _check_corners() for
+    the actual check. No lead_silence_s here (unlike ngspice-deck): LTspice's `.ic`/`uic`
+    initial-condition hints replace the need for a cold-start settling lead-in -- see
+    ltspice_spicelib.py's docstring."""
+    backend = LtspiceBackend(build_deck, tap=tap, maxstep=maxstep, parallel_sims=parallel_sims,
+                             out_scale=out_scale)
+    identity = Path(module_file).read_bytes()
+    cache_extra = f"maxv={peak_max_v}"
+    return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="per-circuit TOML (same as run_pipeline.py --config)")
@@ -245,10 +267,10 @@ def main():
                          "tone -- see this repo's README ('Known issue: excitation needs a "
                          "silent lead-in')")
     ap.add_argument("--maxstep", type=float, default=3e-6,
-                    help="[ngspice-deck] ngspice timestep ceiling -- measure with "
-                         "tools/measure_ngspice_timestep.py rather than guessing; the ecosystem "
-                         "default is too coarse for at least one circuit found so far (the "
-                         "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
+                    help="[ngspice-deck, ltspice-deck] timestep ceiling")
+    ap.add_argument("--out-scale", type=float, default=0.05,
+                    help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
+                         "tools/ltspice_spicelib.py's docstring")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -288,6 +310,20 @@ def main():
                                              no_cache=args.no_cache,
                                              full_hypercube=not args.no_full_hypercube,
                                              lead_silence_s=args.lead_silence_s)
+        schx_or_module = module
+    elif backend_name == "ltspice-deck":
+        pedal_dir = os.path.expanduser(cfg["pedal_dir"])
+        module = cfg["module"]
+        tap = cfg.get("probe_node", "OUT")
+        sys.path.insert(0, os.path.abspath(pedal_dir))
+        mod = importlib.import_module(module)
+        result = check_coverage_ltspice_deck(mod.build_deck, mod.__file__, tap,
+                                             knob_ranges, fixed, transient_peak,
+                                             margin=args.margin, maxstep=args.maxstep,
+                                             out_scale=args.out_scale,
+                                             peak_max_v=args.peak_max_v,
+                                             no_cache=args.no_cache,
+                                             full_hypercube=not args.no_full_hypercube)
         schx_or_module = module
     else:
         schx = str(cfg["schx"])
