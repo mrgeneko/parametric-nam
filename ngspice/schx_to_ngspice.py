@@ -254,7 +254,13 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
 
     body, out_node = [], None
     for c in comps:
-        ty, nm, p = c['type'], c['name'], c['params']
+        ty, p = c['type'], c['params']
+        # SPICE element names are whitespace-delimited tokens -- a component named
+        # "Lead Pre" (this device's own knob name) silently truncates every element
+        # built from it at the space (e.g. "RLead Pre_aw" -> ngspice reads "RLead" as
+        # the element and "Pre_aw" as its first node), producing a garbled netlist
+        # that fails to parse. Found on the EVH 5150's Lead Pre/Lead Post pots.
+        nm = re.sub(r'\s+', '_', c['name'])
         t = terms(c)
         if ty in ('Ground', 'Label', 'NamedWire'):
             continue  # NamedWire = single-terminal net label; node already resolved
