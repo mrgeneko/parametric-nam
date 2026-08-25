@@ -80,7 +80,17 @@ def load_input(infile, vin, tmp, src_name='input.src'):
 
 def _read_result(raw_path, probe_node, t, sr):
     """Read one job's raw file, resample onto the input's own time base (matches every
-    render_*.py's existing np.interp behaviour), return (yv, peak) or (None, None)."""
+    render_*.py's existing np.interp behaviour), return (yv, peak) or (None, None).
+
+    Checks the sim actually REACHED the requested duration, not just that it produced
+    "enough" samples -- an ngspice `tran` that aborts early ("Timestep too small...")
+    still writes a valid, readable raw file for whatever partial time range it completed.
+    Without this check, a partial trace with >= len(t)//2 samples was accepted as
+    converged, and np.interp then silently flat-extrapolates the last simulated value
+    for the remainder of `t` -- indistinguishable from a real signal until inspected
+    sample-by-sample. Found via a real OCD render that aborted at t=5.045s (node na_o)
+    out of a ~8.4s request but still passed the old length-only check, corrupting an
+    LTspice-vs-ngspice comparison with >3s of held-flat fake reference data."""
     if not os.path.exists(raw_path):
         return None, None
     try:
@@ -90,7 +100,9 @@ def _read_result(raw_path, probe_node, t, sr):
         return None, None
     v = np.asarray(trace.get_wave(), dtype=float)
     tv = np.asarray(raw.get_trace('time').get_wave(), dtype=float)
-    if v.ndim < 1 or len(v) < len(t) // 2:
+    if v.ndim < 1 or len(v) < len(t) // 2 or len(tv) == 0:
+        return None, None
+    if tv[-1] < 0.999 * t[-1]:
         return None, None
     yv = np.interp(t, tv, v)
     pk = float(np.max(np.abs(yv)))

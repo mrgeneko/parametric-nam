@@ -113,6 +113,38 @@ class TestReadResult:
         yv, pk = _read_result(str(raw_path), "OUT", t=np.arange(1000), sr=1000)
         assert (yv, pk) == (None, None)
 
+    def test_trace_that_aborted_before_reaching_full_duration_is_rejected(self, tmp_path, monkeypatch):
+        """A `tran` that aborts ("Timestep too small...trouble with node X") mid-run still
+        writes a valid, readable raw file for whatever partial time range it completed -- if
+        that partial trace happens to have >= len(t)//2 samples, the old length-only check
+        accepted it as converged, and np.interp then silently flat-extrapolated the last real
+        value for the rest of the requested duration. Must be rejected so render_grid's
+        escalation ladder retries at a finer maxstep instead of returning held-flat fake data."""
+        raw_path = tmp_path / "x.raw"
+        raw_path.write_bytes(b"placeholder")
+        t = np.arange(1000) / 1000.0
+        tv = np.linspace(0, 0.5 * t[-1], 800)  # plenty of samples, but only reached half the duration
+        v = np.full(800, 0.7)
+
+        class TraceV:
+            def get_wave(self):
+                return v
+
+        class TraceTime:
+            def get_wave(self):
+                return tv
+
+        class FakeRawRead:
+            def __init__(self, path):
+                pass
+
+            def get_trace(self, name):
+                return TraceTime() if name == "time" else TraceV()
+
+        monkeypatch.setattr("tools.ngspice_spicelib.RawRead", FakeRawRead)
+        yv, pk = _read_result(str(raw_path), "OUT", t=t, sr=1000)
+        assert (yv, pk) == (None, None)
+
     def test_successful_trace_is_interpolated_onto_the_input_time_base(self, tmp_path, monkeypatch):
         raw_path = tmp_path / "x.raw"
         raw_path.write_bytes(b"placeholder")
