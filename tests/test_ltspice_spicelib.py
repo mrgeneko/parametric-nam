@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.ltspice_spicelib import load_input, _read_result, render_grid, render_one
+from tools.ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S, load_input,
+                                     _read_result, render_grid, render_one)
 
 
 def write_wav(path, sr, samples, subtype="FLOAT"):
@@ -129,6 +130,44 @@ def make_build_deck(sr, value_fn, n_samples=100, short_by=0):
         sf.write(out_wav, np.full(n, val * out_scale), sr, subtype="FLOAT")
         return "* fake deck\n.end\n"
     return build_deck
+
+
+class TestRenderGridTimeoutScaling:
+    """A flat timeout can't be right for both a grid_adequacy 8s probe and a 60s+ full
+    excitation capture -- found directly this session: a value tuned for short probes
+    silently killed every job partway through a real capture render, which looked exactly
+    like a genuine convergence failure (every job escalated through the whole maxstep ladder
+    and failed again) rather than the timeout-too-short bug it actually was."""
+
+    def _seen_timeout(self, tmp_path, monkeypatch, dur_s, timeout=None):
+        seen = []
+
+        def fake_run(net_path, timeout):
+            seen.append(timeout)
+            return True
+
+        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", fake_run)
+        build_deck = make_build_deck(sr=1000, value_fn=lambda k, m: 0.5,
+                                     n_samples=int(dur_s * 1000))
+        outfile = str(tmp_path / "out.wav")
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        render_grid(build_deck, [({}, outfile)], tap="spk", sr=1000, dur_s=dur_s,
+                   wav_path="in.wav", in_scale=1.0, tmp=str(tmp_path), out_scale=1.0, **kwargs)
+        return seen[0]
+
+    def test_default_timeout_scales_with_duration_not_a_flat_constant(self, tmp_path, monkeypatch):
+        short = self._seen_timeout(tmp_path, monkeypatch, dur_s=1.0)
+        long = self._seen_timeout(tmp_path, monkeypatch, dur_s=60.0)
+        assert long > short
+        assert long == pytest.approx(60.0 * DEFAULT_TIMEOUT_S_PER_AUDIO_S)
+
+    def test_default_timeout_has_a_floor_for_very_short_clips(self, tmp_path, monkeypatch):
+        tiny = self._seen_timeout(tmp_path, monkeypatch, dur_s=0.01)
+        assert tiny == pytest.approx(MIN_TIMEOUT_S)
+
+    def test_explicit_timeout_overrides_the_duration_based_default(self, tmp_path, monkeypatch):
+        seen = self._seen_timeout(tmp_path, monkeypatch, dur_s=60.0, timeout=42.0)
+        assert seen == pytest.approx(42.0)
 
 
 class TestRenderGrid:

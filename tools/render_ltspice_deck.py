@@ -66,6 +66,17 @@ def main():
                           "1/out_scale volts; lower it for a device with a higher native swing.")
     ap.add_argument('--tmp', default=None, help='default: /tmp/render_ltspice_deck_<module>')
     ap.add_argument('--parallel-sims', type=int, default=8, help='concurrent LTspice processes for --grid')
+    ap.add_argument('--timeout', type=float, default=None,
+                     help='per-render subprocess timeout, seconds (default: scales with the '
+                          'input duration -- see tools/ltspice_spicelib.py render_grid\'s own '
+                          'docstring for the formula/reasoning). A flat number here is fragile: '
+                          'a value tuned for grid_adequacy\'s short 8s probes silently kills '
+                          'every job partway through a full 60s excitation capture, which LOOKS '
+                          'exactly like a genuine convergence failure (every job escalates '
+                          'through the whole maxstep ladder and fails again) rather than the '
+                          'timeout-too-short bug it actually is. Only pass this explicitly to '
+                          'override the duration-based default, e.g. for a device measured to '
+                          'need a different ratio.')
     a = ap.parse_args()
 
     sys.path.insert(0, os.path.abspath(a.pedal_dir))
@@ -99,7 +110,8 @@ def main():
             knobs_by_file[outfile] = knobs
         results = render_grid(build_deck, jobs, tap=a.tap, sr=sr, dur_s=dur_s, wav_path=wav_path,
                                in_scale=in_scale, tmp=tmp, maxstep=a.maxstep,
-                               parallel_sims=a.parallel_sims, out_scale=a.out_scale)
+                               parallel_sims=a.parallel_sims, out_scale=a.out_scale,
+                               timeout=a.timeout)
         man = open(os.path.join(a.outdir, 'manifest.jsonl'), 'w')
         for outfile, pk in results.items():
             knobs = knobs_by_file[outfile]
@@ -126,7 +138,7 @@ def main():
         assert a.outfile, "single render needs an outfile"
         knobs = {k: float(v) for k, v in (parse_knob(k) for k in a.knob)}
         pk = render_one(build_deck, knobs, a.outfile, a.tap, sr, dur_s, wav_path, in_scale, tmp,
-                         maxstep=a.maxstep, out_scale=a.out_scale)
+                         maxstep=a.maxstep, out_scale=a.out_scale, timeout=a.timeout)
         pks = f"peak={pk:.3f}V" if pk is not None else "peak=--"
         print(f"  {a.outfile}: knobs={knobs or 'defaults'} "
               f"{pks} {'OK' if pk and pk < a.ok_max_peak else 'FAILED (did not converge)'}")

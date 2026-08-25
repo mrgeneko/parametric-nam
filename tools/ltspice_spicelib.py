@@ -143,8 +143,12 @@ def _read_result(raw_wav, dur_target_n, out_scale):
     return y, pk
 
 
+DEFAULT_TIMEOUT_S_PER_AUDIO_S = 20.0  # see render_grid's timeout= docstring
+MIN_TIMEOUT_S = 120.0
+
+
 def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
-                 maxstep=3e-6, parallel_sims=8, timeout=120, out_scale=0.05, rungs=None):
+                 maxstep=3e-6, parallel_sims=8, timeout=None, out_scale=0.05, rungs=None):
     """Render many (knobs, outfile) jobs, one LTspice subprocess per job, with the same
     progressively-finer-timestep retry escalation ngspice_spicelib.render_grid uses (maxstep,
     maxstep/3, maxstep/10) -- each round runs its still-pending jobs in parallel via
@@ -159,8 +163,23 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
     contract as ngspice_spicelib.render_grid's own `rungs` param -- pass `rungs=(maxstep,)` for
     a genuine single-shot attempt with no silent escalation.
 
+    `timeout`: per-render subprocess ceiling, seconds. None (the default) SCALES WITH `dur_s`
+    (max(MIN_TIMEOUT_S, dur_s * DEFAULT_TIMEOUT_S_PER_AUDIO_S)) rather than being one fixed
+    number for every caller -- found the hard way: a flat 120s default worked fine for
+    grid_adequacy's short 8s probe clips but silently killed every job partway through a real
+    60s excitation capture (measured needing ~7-11 min/render at maxstep=3e-6, ~11s wall-clock
+    per second of audio for OCD's stiffest corners), which LOOKS EXACTLY LIKE a genuine
+    non-convergence (every job "fails" and escalates through the whole rungs ladder) rather
+    than the timeout-too-short bug it actually was. DEFAULT_TIMEOUT_S_PER_AUDIO_S=20 is ~2x that
+    single measured device's worst observed ratio -- a working default, not a validated
+    per-device constant; a future device with a genuinely stiffer circuit or much longer
+    excitation should re-measure rather than assume this holds, and can still pass an explicit
+    `timeout=` to override the scaling entirely.
+
     Returns {outfile: peak} for every job (peak is None for a job that never converged/reached
     full duration after all rounds)."""
+    if timeout is None:
+        timeout = max(MIN_TIMEOUT_S, dur_s * DEFAULT_TIMEOUT_S_PER_AUDIO_S)
     dur_target_n = int(round(dur_s * sr))
     results = {}
     pending = list(jobs)
@@ -198,10 +217,11 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
 
 
 def render_one(build_deck, knobs, outfile, tap, sr, dur_s, wav_path, in_scale, tmp,
-                maxstep=3e-6, out_scale=0.05):
+                maxstep=3e-6, out_scale=0.05, timeout=None):
     """Single-render convenience wrapper matching ngspice_spicelib.render_one's role -- for a
     --knob (single render) CLI path, where render_grid's parallelism has nothing to
-    parallelize."""
+    parallelize. timeout=None scales with dur_s -- see render_grid's own docstring."""
     results = render_grid(build_deck, [(knobs, outfile)], tap, sr, dur_s, wav_path, in_scale,
-                           tmp, maxstep=maxstep, parallel_sims=1, out_scale=out_scale)
+                           tmp, maxstep=maxstep, parallel_sims=1, out_scale=out_scale,
+                           timeout=timeout)
     return results[outfile]
