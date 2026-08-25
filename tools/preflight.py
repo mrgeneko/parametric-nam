@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pre-generation sanity gate for a device dataset -- backend-agnostic (--backend
-{livespice,ngspice-deck}, see render_backends.py). Run this BEFORE rendering a (slow, large)
+{livespice,ngspice-deck,ltspice-deck}, see render_backends.py). Run this BEFORE rendering a (slow, large)
 training dataset. It renders a handful of short probe points through the oracle and refuses
 generation when a knob is dead, moves the WRONG WAY, or the input-level calibration is
 implausible -- the three failure modes that have each cost a full render + train cycle:
@@ -48,6 +48,10 @@ Usage:
   ngspice:   python tools/preflight.py --backend ngspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
       --module gen_ocd_ngspice --probe-node OUT --input sweep.wav [--vin 1.0] \\
       [--exclude-knob Volume] [--find-peak]
+
+  ltspice:   python tools/preflight.py --backend ltspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
+      --module gen_ocd_ltspice --probe-node spk --input sweep.wav [--vin 1.0] \\
+      [--exclude-knob Volume] [--find-peak]
 """
 import argparse
 import importlib
@@ -66,7 +70,7 @@ from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E4
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
 from tools.find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend  # noqa: E402
+from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 from tools.knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
@@ -125,12 +129,24 @@ def _build_backend(args):
         identity = Path(mod.__file__).read_bytes()
         cache_extra = f"maxv={args.peak_max_v}"
         return backend, knobs, identity, cache_extra
+    if args.backend == "ltspice-deck":
+        if not (args.pedal_dir and args.module):
+            sys.exit("--backend ltspice-deck needs --pedal-dir and --module")
+        sys.path.insert(0, os.path.abspath(args.pedal_dir))
+        mod = importlib.import_module(args.module)
+        knobs = [k for k in mod.KNOB_NAMES if k not in args.exclude_knob]
+        backend = LtspiceBackend(mod.build_deck, tap=args.probe_node,
+                                 maxstep=args.maxstep, parallel_sims=args.parallel_sims,
+                                 out_scale=args.out_scale)
+        identity = Path(mod.__file__).read_bytes()
+        cache_extra = f"maxv={args.peak_max_v}"
+        return backend, knobs, identity, cache_extra
     sys.exit(f"unknown --backend {args.backend!r}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck"])
+    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck", "ltspice-deck"])
 
     # livespice-only
     ap.add_argument("--schx", help="[livespice] path to .schx file")
@@ -141,18 +157,24 @@ def main():
     ap.add_argument("--input-level-dbu", type=float, default=None,
                      help="[livespice] override the exported input_level_dbu (default: derived from V0dBFS)")
 
-    # ngspice-only
-    ap.add_argument("--pedal-dir", help="[ngspice-deck] directory containing --module, added to sys.path")
-    ap.add_argument("--module", help="[ngspice-deck] module exposing build_deck/KNOB_NAMES, e.g. gen_ocd_ngspice")
-    ap.add_argument("--probe-node", default="OUT", help="[ngspice-deck] node/tap to render and measure")
-    ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck]")
-    ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck]")
+    # ngspice/ltspice-deck (shared -- both drive a hand-written gen_*_ngspice.py/gen_*_ltspice.py
+    # module exposing build_deck/KNOB_NAMES)
+    ap.add_argument("--pedal-dir", help="[ngspice-deck, ltspice-deck] directory containing --module, added to sys.path")
+    ap.add_argument("--module", help="[ngspice-deck, ltspice-deck] module exposing build_deck/KNOB_NAMES, e.g. gen_ocd_ngspice")
+    ap.add_argument("--probe-node", default="OUT", help="[ngspice-deck, ltspice-deck] node/tap to render and measure")
+    ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck, ltspice-deck]")
+    ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck, ltspice-deck]")
     ap.add_argument("--exclude-knob", action="append", default=[],
-                     help="[ngspice-deck] knob to exclude from the swept check (repeatable) -- e.g. a 0/1 "
-                          "toggle, not a continuous sweep; build_deck's own default applies")
+                     help="[ngspice-deck, ltspice-deck] knob to exclude from the swept check (repeatable) -- "
+                          "e.g. a 0/1 toggle, not a continuous sweep; build_deck's own default applies")
     ap.add_argument("--lead-silence-s", type=float, default=3.0,
                      help="[ngspice-deck] silence prepended before probe content -- see this repo's "
-                          "README ('Known issue: excitation needs a silent lead-in'). 0 to disable.")
+                          "README ('Known issue: excitation needs a silent lead-in'). 0 to disable. "
+                          "Not used for ltspice-deck -- LTspice's own .ic/uic bias hints replace the "
+                          "need for a cold-start settling lead-in, see tools/ltspice_spicelib.py.")
+    ap.add_argument("--out-scale", type=float, default=0.05,
+                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
+                          "tools/ltspice_spicelib.py's docstring")
 
     # shared
     ap.add_argument("--input", required=True, help="the sweep/clip generation will use")

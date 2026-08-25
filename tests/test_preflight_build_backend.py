@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tools.preflight import _build_backend
-from tools.render_backends import NgspiceBackend
+from tools.render_backends import NgspiceBackend, LtspiceBackend
 
 
 def write_fake_pedal_module(tmp_path, name, knob_names=("Gain", "Tone", "Volume")):
@@ -64,6 +64,53 @@ class TestNgspiceDeckBackend:
     def test_missing_pedal_dir_or_module_exits(self):
         with pytest.raises(SystemExit):
             _build_backend(ngspice_args(pedal_dir=None, module=None))
+
+
+def ltspice_args(pedal_dir=None, module=None, exclude_knob=(), probe_node="OUT",
+                  maxstep=3e-6, parallel_sims=8, peak_max_v=40.0, out_scale=0.05):
+    return types.SimpleNamespace(backend="ltspice-deck", pedal_dir=pedal_dir, module=module,
+                                  exclude_knob=list(exclude_knob), probe_node=probe_node,
+                                  maxstep=maxstep, parallel_sims=parallel_sims,
+                                  peak_max_v=peak_max_v, out_scale=out_scale)
+
+
+class TestLtspiceDeckBackend:
+    def test_builds_an_ltspice_backend_with_all_knobs(self, tmp_path):
+        mod_path = write_fake_pedal_module(tmp_path, "pedal_lt_x")
+        backend, knobs, identity, cache_extra = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_x"))
+        assert isinstance(backend, LtspiceBackend)
+        assert knobs == ["Gain", "Tone", "Volume"]
+        assert identity == mod_path.read_bytes()
+
+    def test_exclude_knob_removes_it_from_the_swept_set(self, tmp_path):
+        write_fake_pedal_module(tmp_path, "pedal_lt_y")
+        _, knobs, _, _ = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_y", exclude_knob=["Volume"]))
+        assert knobs == ["Gain", "Tone"]
+        assert "Volume" not in knobs
+
+    def test_probe_node_is_passed_through_as_the_backends_tap(self, tmp_path):
+        write_fake_pedal_module(tmp_path, "pedal_lt_z")
+        backend, _, _, _ = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_z", probe_node="spk"))
+        assert backend.tap == "spk"
+
+    def test_out_scale_is_passed_through_to_the_backend(self, tmp_path):
+        write_fake_pedal_module(tmp_path, "pedal_lt_scale")
+        backend, _, _, _ = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_scale", out_scale=0.02))
+        assert backend.out_scale == 0.02
+
+    def test_cache_extra_reflects_peak_max_v(self, tmp_path):
+        write_fake_pedal_module(tmp_path, "pedal_lt_w")
+        _, _, _, cache_extra = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_w", peak_max_v=5.0))
+        assert "maxv=5.0" in cache_extra
+
+    def test_missing_pedal_dir_or_module_exits(self):
+        with pytest.raises(SystemExit):
+            _build_backend(ltspice_args(pedal_dir=None, module=None))
 
 
 class TestUnknownBackend:
