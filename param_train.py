@@ -2265,7 +2265,7 @@ def main():
         # All tiers, not just the two endpoints -- model.full/model.lite alone
         # silently skipped any middle tier (e.g. a w4 in widths [3,4,8]).
         for m, lbl in zip(model.submodels, model.tier_labels()):
-            prefix = f"[{lbl}] "
+            prefix = f"[{wlabel[lbl]}] "
             sens = param_sensitivity(m, device, sweep_audio)
             for k, v in sens.items():
                 pname = dataset.param_names[int(k.split("_")[-1])] if "_" in k else k
@@ -2285,9 +2285,9 @@ def main():
         for m, lbl in zip(model.submodels, model.tier_labels()):
             results = compute_per_perm_esr(m, dataset.inp, dataset.outputs, dataset.samples,
                                            dataset.param_names, device)
-            print(f"\n{summarize_per_perm_esr(results, lbl)}", file=sys.stderr)
+            print(f"\n{summarize_per_perm_esr(results, wlabel[lbl])}", file=sys.stderr)
             if ckpt_dir is not None:
-                csv_path = ckpt_dir / f"per_perm_esr_{lbl}.csv"
+                csv_path = ckpt_dir / f"per_perm_esr_{wlabel[lbl]}.csv"
                 write_per_perm_esr_csv(results, dataset.param_names, csv_path)
                 print(f"  Wrote {csv_path}", file=sys.stderr)
 
@@ -2308,7 +2308,7 @@ def main():
     print(f"  Verifying round-trip ...", file=sys.stderr)
     for lbl, md in verify_export_round_trip(nam_data, model, num_params, device):
         status = f"OK (max_diff={md:.2e})" if md <= 1e-6 else f"WARN max_diff={md:.2e}"
-        print(f"    [{lbl}] round-trip {status}", file=sys.stderr)
+        print(f"    [{wlabel[lbl]}] round-trip {status}", file=sys.stderr)
 
     print(f"\nDone. Model saved to {args.output}", file=sys.stderr)
 
