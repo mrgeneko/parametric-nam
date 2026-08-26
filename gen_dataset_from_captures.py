@@ -355,6 +355,11 @@ def main():
     perms, rows, meta0 = [], [], {}
     for idx, f in enumerate(sorted(per_file)):
         params = per_file[f]
+        # Announce BEFORE starting, not just the result line after: a .wav/.aif capture's
+        # detect_delay() can block on the NAM calibration subprocess for up to 180s (its own
+        # timeout), and without this the previous file's result line sits on screen for that
+        # whole wait, indistinguishable from a hang.
+        print(f"[{idx+1}/{len(files)}] {f.name} ...", flush=True)
         t0 = time.time()
         if f.suffix.lower() in WET_CAPTURE_EXTS:
             sig, delay, source = _wet_from_wav(f, in_wav, sr_in, target_len=len(inp))
@@ -383,8 +388,8 @@ def main():
         perms.append(params)
         rows.append((idx, params, r))
         status = "OK" if r.ok else "FAIL"
-        print(f"[{idx+1}/{len(files)}] {f.name}  {status}  {' '.join(f'{k}={v}' for k, v in params.items())}"
-              f"{'  ' + r.error if r.error else ''}")
+        print(f"  {status}  {' '.join(f'{k}={v}' for k, v in params.items())}"
+              f"{'  ' + r.error if r.error else ''}  ({proc_t:.1f}s)")
 
     ok_count = sum(1 for _, _, r in rows if r.ok)
     if ok_count == 0:
