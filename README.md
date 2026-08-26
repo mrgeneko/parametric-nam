@@ -277,6 +277,20 @@ python gen_dataset_from_schx.py --combine <ds>
 Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `.schx`;
 `--knobs Gain` then moves both wipers in lockstep, and the knob appears once downstream.
 
+**Typical generation time** scales with circuit complexity, `--oversample`, and backend —
+there's no universal number, but two real measured points: a simple pedal-scale circuit
+renders a permutation in low single-digit seconds under the default `livespice` backend,
+while the EVH 5150 Lead Full (sag) — a 6-stage preamp cascade + 4-tube power amp with
+whole-amp sag — took **~75 min for a full permutation-batch** on the same backend. The
+`--timeout-mult` flag's per-permutation timeout ceiling is built around `oversample 8`
+costing up to **40x realtime** (100s of audio → 4000s) for the hardest corners, since some
+real operating points (e.g. a very low-gain setting) are a genuine 20-40x slower than that
+circuit's own typical corner without ever actually diverging.
+
+**`--backend ngspice` can be dramatically slower than the above, or fail to converge at
+all** — it's the adaptive-timestep tradeoff; see **Backends**, below, for the measured
+numbers (a real 2.7x-slower case and a real total-non-convergence case).
+
 ### `tools/render_ngspice_deck.py` — render a hand-written ngspice deck's knob sweep
 
 ```bash
@@ -432,6 +446,14 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
   an instability (see [Known issue](#known-issue-rare-knob-corner-blowup-filmleakyrelu-runaway)
   below) first appeared, which `best.pt` alone can't answer since it only ever holds the
   single best-so-far snapshot.
+- **Typical training time** depends on dataset size, `--crop-len`/`--batch-size`, and
+  hardware — no universal number, but one real measured example: a two-tier (4ch/8ch)
+  model at `--crop-len 48000 --batch-size 64 --repeats 32` on Apple Silicon (MPS backend)
+  ran **~100-120s/epoch** (median ~104s across 295 epochs of one real run). Open-ended
+  (`--epochs 0`) SGDR runs commonly take **several hours across many restart cycles**
+  before `--stale-cycles` triggers auto-stop — that same run improved its all-time-best
+  ESR on both tiers as late as its 6th 50-epoch cycle (~9 hours of wall time in), so don't
+  read an early plateau as convergence.
 
 ### `param_infer.py` — inference (Python, no C++)
 
@@ -553,6 +575,19 @@ Koren tube models, E+F ideal transformer) and feeds the input via an XSPICE file
 Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
 See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
 and the important fidelity caveats.
+
+**This safety comes at a real, sometimes severe, speed cost** — adaptive timestepping
+means ngspice's solve time grows with the circuit's actual stiffness rather than staying
+fixed, and on a genuinely stiff circuit that growth can be dramatic: measured ~2.7x slower
+than LTspice on the Fender 5E3 at hard drive (step count exploding to 45492 vs LTspice's
+12543 for the same clip), and on the EVH 5150 specifically, ngspice **failed to converge
+on a hard-drive render at all** — aborting within microseconds regardless of timestep,
+integration method, or input upsampling — while a hand-converted LTspice netlist of the
+same circuit (in the separate `ltspice-batch` repo, not this one — there's no
+schx-to-LTspice path here) rendered the same drive/pot position in ~32s. Don't assume a
+slow or stuck ngspice render will eventually finish; time-box it and compare against
+`livespice` (or, for a hand-written-deck device, `ltspice-deck` below) before spending a
+long timeout budget on it.
 
 **Don't confuse this with `preflight.py`/`prepare_excitation.py --backend ngspice-deck`** — a
 different flag on different tools, for a different situation. The `--backend ngspice` above
