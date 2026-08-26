@@ -215,10 +215,12 @@ writing the converged grid straight into `--config`'s `[knobs]` table — one co
 instead of suggest → hand-copy → rerun → repeat. It doesn't touch anything else in the
 file, comments included.
 
-`backend = "ngspice-deck"` in the config renders through a hand-written ngspice deck
-(`pedal-dir`/`module`/`probe-node` in the TOML, same convention as `preflight.py`/
-`prepare_excitation.py` — see Backends, below) instead of a `.schx`, for a device whose
-clipping needs a real component `.schx` has no model for (a MOSFET, a real BJT).
+`backend = "ngspice-deck"` (or `"ltspice-deck"`) in the config renders through a
+hand-written ngspice/LTspice deck (`pedal-dir`/`module`/`probe-node` in the TOML, same
+convention as `preflight.py`/`prepare_excitation.py` — see Backends, below) instead of a
+`.schx`, for a device whose clipping needs a real component `.schx` has no model for (a
+MOSFET, a real BJT) — or, for `ltspice-deck` specifically, a circuit whose ngspice deck
+can't converge on real playing content at all (see Backends).
 
 ### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 
@@ -309,6 +311,33 @@ produces. Adding a new device means writing `gen_<device>_ngspice.py`, not anoth
 this render harness too — it used to be one per device (`render_ocd.py`, `render_bd2.py`,
 etc., each a near-identical ~100-line copy differing only in the hardcoded module and a
 couple of device-specific defaults) until this consolidated them.
+
+### `tools/render_ltspice_deck.py` — render a hand-written LTspice deck's knob sweep
+
+```bash
+python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
+    --module gen_ocd_ltspice --tap spk \
+    in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
+```
+
+LTspice counterpart of `render_ngspice_deck.py` above, for a device whose ngspice-deck
+version can't converge on real playing content **at all**, independent of `maxstep` — found
+on the Fulltone OCD, whose ideal tanh-bounded op-amp B-source is a genuine Newton-solver
+dead end in ngspice (70/70 renders across the full knob grid timed out, at every `maxstep`
+from 3e-6 down to 3e-8). LTspice gets past it with a real op-amp macromodel plus explicit
+`.ic`/`uic` initial-condition hints on the `.tran` line — neither is available through
+ngspice's B-source style. `--pedal-dir`/`--module` point at the same `build_deck()`/
+`KNOB_NAMES` module convention as the ngspice-deck tools; `--tap` (not `--probe-node`) names
+the node to render, matching `render_backends.py`'s `LtspiceBackend`. `--out-scale` scales
+the tap down before LTspice's `.wave` writes it (LTspice's wav output is
++/-1V-PCM-bounded) and `render_grid`/`render_one` divide it back out — raise it toward 1.0
+only if the tap is known to never exceed `1/out_scale` volts. `--timeout` defaults to
+scaling with the input's own duration rather than a flat number (see
+`tools/ltspice_spicelib.py`'s `render_grid` docstring) — a flat timeout tuned for a short
+probe silently kills every job partway through a full excitation capture, which looks
+exactly like a genuine convergence failure.
+
+Same `manifest.jsonl`/`mapping.csv`/`--absolute` output contract as `render_ngspice_deck.py`.
 
 ### `gen_dataset_from_captures.py` — build a dataset from real hardware captures, no `.schx` needed
 
@@ -532,9 +561,23 @@ LiveSPICE. `ngspice-deck` is for a device that has **no `.schx` at all** — a h
 ngspice netlist (`gen_ocd_ngspice.py` and siblings, kept in a private devices repo), typically
 because the circuit needs something `.schx` has no component for (a real MOSFET) or a feedback
 loop LiveSPICE's fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s
-translation. `render_backends.py` is the adapter layer both `preflight.py` and
-`prepare_excitation.py` share across this split (and where a third backend, e.g. LTspice, would
-plug in) — see its module docstring for the two-method contract a backend implements.
+translation.
+
+**LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
+`grid_adequacy.py`/`check_transient_coverage.py`, or `tools/render_ltspice_deck.py`
+directly) — same hand-written-deck situation as `ngspice-deck`, for a device whose
+ngspice deck can't converge on real playing content **at all**, independent of timestep.
+Found on the Fulltone OCD: its ideal tanh-bounded op-amp B-source is a genuine
+Newton-solver dead end in ngspice (70/70 renders across the full knob grid timed out, at
+every `maxstep` from 3e-6 down to 3e-8), while LTspice gets past it with a real op-amp
+macromodel and explicit `.ic`/`uic` initial-condition hints unavailable through ngspice's
+B-source style — see `tools/ltspice_spicelib.py`'s module docstring for the full
+investigation. Needs the native LTspice XVII app (`~/Applications/LTspice.app` or
+`/Applications/LTspice.app`), not a SPICE binary.
+
+`render_backends.py` is the adapter layer `preflight.py` and `prepare_excitation.py` share
+across all three hand-deck/schx splits (`NgspiceBackend`, `LtspiceBackend`) — see its module
+docstring for the two-method contract a backend implements.
 
 ## Known issue: rare knob-corner blowup (FiLM/LeakyReLU runaway)
 
@@ -582,8 +625,9 @@ validation ESR (which averages over everything else).
   min or max, not just one knob varied from center) plus the traditional solo-knob
   corners. A corner whose real-playing content never crosses into saturation during
   training is a corner the network has to extrapolate at inference time. Supports
-  `backend = "ngspice-deck"` in the config (same `pedal-dir`/`module`/`probe-node`
-  convention as `preflight.py`/`prepare_excitation.py`/`grid_adequacy.py`) for a device
+  `backend = "ngspice-deck"` or `"ltspice-deck"` in the config (same
+  `pedal-dir`/`module`/`probe-node` convention as
+  `preflight.py`/`prepare_excitation.py`/`grid_adequacy.py`) for a device
   with no `.schx` at all — `gen_dataset_from_schx.py`'s own automatic call is
   livespice-only, since that's the only path it drives; for a hand-deck device, call
   `check_transient_coverage.py` directly as its own gate before generating.
