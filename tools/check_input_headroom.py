@@ -114,15 +114,23 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as scratch:
         json_path = Path(scratch) / "preflight.json"
         cmd = [sys.executable, str(HERE / "preflight.py"),
+               "--backend", "livespice",
                "--schx", schx, "--knobs", knobs, "--input", inp,
                "--oversample", str(oversample), "--find-peak",
                "--peak-max-v", str(args.peak_max_v), "--json", str(json_path)]
         if fixed:
             cmd += ["--fixed-params", fixed]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        print(r.stdout)
-        if r.returncode not in (0, 1):  # preflight exits 1 on hard-fail knobs, which is fine here
-            print(r.stderr, file=sys.stderr)
+        # Stream, don't capture_output=True: preflight.py --find-peak now reports per-amplitude
+        # sweep progress as it renders (up to 20 real backend renders, each potentially tens of
+        # seconds on a stiff circuit) -- capturing and printing it all at once after the whole
+        # subprocess exits threw that away, leaving a caller (e.g. run_pipeline.py's own
+        # line-by-line relay of THIS script's stdout) with nothing to show for the entire wait.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+        proc.wait()
+        if proc.returncode not in (0, 1):  # preflight exits 1 on hard-fail knobs, which is fine here
             print("ERROR: preflight --find-peak itself failed to run.", file=sys.stderr)
             return 2
         if not json_path.exists():

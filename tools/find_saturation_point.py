@@ -30,7 +30,8 @@ Usage:
 """
 import hashlib
 import math
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,8 @@ def _loglog_interp(x1, y1, x2, y2, ytarget):
 
 
 def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silence_s=0.0,
-                           start_v=0.005, max_v=40.0, npoints=20, sr=SR, workers=8):
+                           start_v=0.005, max_v=40.0, npoints=20, sr=SR, workers=8,
+                           progress=None):
     """Sweep a clean `freq` Hz tone's amplitude (log-spaced, `start_v`..`max_v`, `npoints`
     points) through `backend` at fixed `params`, and find where output RMS stops rising.
 
@@ -55,6 +57,15 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
     too (a single-job "batch") -- parallelized across amplitudes ourselves via a thread pool,
     since the backend's own render_many parallelism is designed for many knob settings against
     ONE shared input, the opposite axis from what a saturation sweep needs.
+
+    `progress`, if given, is called as `progress(done, total, elapsed_s)` as each amplitude's
+    render completes (submission order, not completion order, doesn't matter here -- there's
+    no per-amplitude output to preserve order for). Default None (silent) since some callers
+    (prepare_excitation.py, check_transient_coverage.py) call this once per grid corner and a
+    per-amplitude print at every corner would be far noisier than useful; a one-shot caller
+    like preflight.py --find-peak should pass one, since this sweep (up to `npoints` renders,
+    each a real backend render) used to run with NO output at all -- indistinguishable from a
+    hang for a stiff circuit's renders taking tens of seconds each.
 
     Returns None if every amplitude fails to converge.
     """
@@ -74,8 +85,14 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
         ys = backend.render_many([{"params": params, "tag": tag}], handle, tmp)
         return float(amp), ys.get(tag)
 
+    t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=min(workers, len(log_amps))) as ex:
-        raw_results = list(ex.map(_one, list(enumerate(log_amps))))
+        futures = [ex.submit(_one, ia) for ia in enumerate(log_amps)]
+        raw_results = []
+        for i, fut in enumerate(as_completed(futures), 1):
+            raw_results.append(fut.result())
+            if progress is not None:
+                progress(i, len(futures), time.monotonic() - t0)
 
     curve = []
     for amp, y in raw_results:

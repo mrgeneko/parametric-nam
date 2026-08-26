@@ -938,7 +938,19 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
     # is corrupt (truncated/extended audio), which is exactly the kind of per-permutation
     # failure that must hard-stop the pipeline rather than get silently written into
     # outputs.npy (or crash mid-write with a confusing shape-mismatch traceback).
-    sigs = [np.load(str(p)) for p in npy_paths]
+    #
+    # Time-gated (not every-N-files) heartbeat: a big grid (the JCM800 hot-rod's 1944 perms)
+    # spends real, silent seconds here, indistinguishable from a hang; a small one shouldn't
+    # print anything at all.
+    print(f"loading {n_perms} .npy file(s) ...", flush=True)
+    _t_load, _last_print = time.monotonic(), 0.0
+    sigs = []
+    for i, p in enumerate(npy_paths, 1):
+        sigs.append(np.load(str(p)))
+        now = time.monotonic()
+        if now - _last_print >= 2.0:
+            print(f"  {i}/{n_perms} loaded ({now - _t_load:.0f}s)", flush=True)
+            _last_print = now
     bad_lengths = [(str(p), len(s)) for p, s in zip(npy_paths, sigs) if len(s) != n_samples]
     if bad_lengths:
         for path, count in bad_lengths[:10]:

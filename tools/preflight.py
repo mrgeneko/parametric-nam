@@ -261,8 +261,10 @@ def main():
             print(f"  saturation sweep: CACHED (params={base})  [{cpath.name}]")
         else:
             print(f"  saturation sweep (params={base}):")
+            def _sat_progress(done, total, elapsed):
+                print(f"    {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
             sat = find_saturation_point(backend, base, scratch, lead_silence_s=lead_silence_s,
-                                         max_v=args.peak_max_v)
+                                         max_v=args.peak_max_v, progress=_sat_progress)
             if sat is not None:
                 cpath.write_text(json.dumps(sat))
         if sat is None:
