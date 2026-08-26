@@ -332,7 +332,15 @@ def main():
         return d
 
     MARG = args.dir_margin
-    for knob in knobs:
+    n_knobs = len(knobs)
+    for i, knob in enumerate(knobs, 1):
+        # Each knob's own render(s) run concurrently (render_many's thread pool), so there's
+        # nothing to report WITHIN one knob's probe -- but a stiff circuit's renders can each
+        # take tens of seconds, and with no marker between knobs the previous knob's result
+        # line (printed once its probe finishes) is the last thing on screen for the entire
+        # duration of the NEXT knob's probe, indistinguishable from a hang partway through a
+        # multi-knob device.
+        print(f"  [{i}/{n_knobs}] probing {knob} ...", flush=True)
         kind, label = classify(knob)
         is_eq = kind in ("hi", "lo", "mid")
         rec = {"direction_metric": kind, "label": label}
