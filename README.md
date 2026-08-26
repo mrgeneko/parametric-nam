@@ -789,6 +789,40 @@ default too — it catches the same failure mode via a different knob than the o
 and via a knob `classify()` can't identify as `"drive"` by name. Both mitigations were verified
 independently on OCD; neither alone was assumed sufficient going forward.
 
+## Known issue: audible knob-move transient noise (inference-side, not a training/dataset bug)
+
+**This is a C++ inference-runtime issue (`NeuralAmpModelerCore`'s `ParametricA2FastModel`/
+`ParametricWaveNet`, consumed downstream by e.g. Chainsmith FX), not something in this repo's
+own training or dataset-generation pipeline** — documented here since anyone shipping a model
+trained by `parametric-nam` can hit it. User report: with a silent input (no instrument
+plugged in), moving a parametric model's knob visibly lights up the output peak meters — not
+loud, but real and reproducible.
+
+**Root cause: dilated-convolution ring-buffer state inconsistency across a FiLM conditioning
+change, not DC offset.** The fast inference path's causal convolutions keep a history/ring
+buffer of past layer activations, computed under whatever FiLM gamma/beta was active *when
+they were computed* (FiLM is applied inside each layer, not before/after the stack). When a
+knob changes, new incoming samples get the new conditioning while the ring buffer still holds
+activations computed under the old conditioning — every layer's convolution then mixes old-
+and new-conditioned taps in the same kernel window, a computation that matches neither steady
+state, until the receptive field's worth of new samples flushes the stale history out (measured
+at 6346 samples ≈ 12.4 buffers @ 512/48kHz, identical across channel counts since it's a
+property of the shared kernel/dilation schedule, not any one model's weights). Two earlier,
+more obvious hypotheses were ruled out first: a knob-position-dependent static DC offset
+(measured 30-100x too small to explain the transient) and undersmoothed knob interpolation (a
+single discrete knob move responds well to slower smoothing, ~4x quieter at 100ms vs. 20ms;
+a fast continuous drag barely improves even at a full second of smoothing, since it re-targets
+the smoother every buffer instead of letting it lag).
+
+**Status: root-caused, not fixed.** The 100ms knob-smoothing time constant is kept (helps a
+single deliberate knob move, ~zero cost). The theoretically correct fix — keep a rolling window
+of raw input audio and re-run it through the full stack under the new conditioning when the
+knob changes (throttled, since a full receptive-field forward pass every buffer during a fast
+drag would blow a real-time audio callback's budget) — is identified but not implemented. Fast
+continuous-drag noise remains audible. See internal engineering notes
+("Knob-move transient noise investigation") for the full investigation, including the ruled-out
+hypotheses and the measurements behind each.
+
 ---
 
 ## What a run produces
