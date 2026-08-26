@@ -80,7 +80,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
 from param_train import _input_level_dbu, _schx_input_v0dbfs  # noqa: E402
-from tools.preflight import find_saturation_point  # noqa: E402
+from tools.find_saturation_point import find_saturation_point  # noqa: E402
+from tools.render_backends import LiveSpiceBackend  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
 NAM_FULL = NAM_VENV / "bin" / "nam-full"
@@ -194,8 +195,11 @@ def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_di
     peak_v = peak_raw * v0dbfs
     print(f"[capture_static] excitation-adequacy check: probing saturation onset at "
           f"setting={setting} ...")
+    def _progress(done, total, elapsed):
+        print(f"  {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
+    backend = LiveSpiceBackend(schx, oversample=probe_oversample, iterations=probe_iterations)
     with tempfile.TemporaryDirectory() as scratch:
-        sat = find_saturation_point(schx, setting, probe_oversample, probe_iterations, scratch)
+        sat = find_saturation_point(backend, setting, scratch, progress=_progress)
     report["checked"] = True
     report["excitation_peak_v"] = peak_v
 
