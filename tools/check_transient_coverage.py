@@ -145,12 +145,20 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
 
     rows = []
     with tempfile.TemporaryDirectory() as scratch:
-        for clabel, vals in corners:
+        for i, (clabel, vals) in enumerate(corners, 1):
             params = dict(vals); params.update(fixed)
             cpath = findpeak_cache_key(identity, params, cache_extra)
             if cpath.exists() and not no_cache:
                 sat = json.loads(cpath.read_text())
             else:
+                # Each corner's own saturation sweep is up to 20 real backend renders (see
+                # find_saturation_point.py) -- on a stiff circuit, or with a full 2**n-corner
+                # hypercube (up to 512 corners), that's real minutes-to-hours of work with
+                # nothing printed between corners otherwise. One line per corner as it STARTS
+                # (not per-amplitude within it -- that's for a one-shot caller like preflight.py
+                # --find-peak; here it would mean thousands of lines across a full hypercube).
+                if not quiet:
+                    print(f"  [{i}/{len(corners)}] {clabel} — rendering ...", flush=True)
                 sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
                                              lead_silence_s=lead_silence_s)
                 if sat is not None:
