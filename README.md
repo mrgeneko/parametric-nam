@@ -937,15 +937,17 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 >   runaway *worse* once it occurs — ~7× excitation elevation on the FiLM+LoRA case against
 >   ~1.1× for a FiLM-only model (see the FiLM-runaway discussion above). The mitigations there
 >   (`--spectral-norm`, etc.) have not been re-validated with LoRA enabled.
-> * **No fast path, permanently.** `"film+lora"` falls through to the slower generic
->   `Layer`/`FiLM`/`LoRA` path; the hand-optimized C++ fast path has no LoRA support and never
->   will. The real-time cost of that has not been measured.
+> * **Fast-path support is recent.** LoRA was excluded from the C++ fast path until
+>   NeuralAmpModelerCore `cc0a4a8` (2026-08-17) added it, verified bit-for-bit against the
+>   generic reference across channel widths 3–8; `35456c9` then folded the correction into
+>   `l1x1`'s weight matrix rather than a per-frame GEMV. Real, measured, and profiled in-app —
+>   but only weeks old, and it requires a core at or past those commits.
 > * **Thin exercise of the release plumbing.** The schema_version 1→2 bump, `fold_lora()`, and
 >   the export path have been exercised on very few real checkpoints — a state-dict loading bug
 >   in `release_run.sh` survived until an actual LoRA checkpoint first hit it on 2026-08-21.
 >
-> Useful next steps: a second device at a different knob count, a FiLM-runaway scan with LoRA
-> on, and a real-time cost measurement of the generic path.
+> Useful next steps: a second device at a different knob count, and a FiLM-runaway scan with
+> LoRA on.
 
 **Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
@@ -992,14 +994,21 @@ must stay in sync exactly like the existing `film` branch does.
 itself already has. A LoRA-tagged model is safe to hand to an *older* build of this fork
 that predates LoRA: `require_supported_parametric_model()` rejects `schema_version 2`
 loudly (`"...is newer than this build supports..."`) rather than silently misreading it,
-the same fail-loud contract every schema bump in this project follows. **`ParametricA2FastModel`
-(the hand-optimized C++ fast path) has no LoRA support and never will** — it's a fully
-separate reimplementation with zero shared code with the generic `Layer`/`FiLM`/`LoRA`
-classes. `is_parametric_a2_shape()` gates on `"type"`: `"film"` (or absent) still takes
-the fast path, unaffected by any of this; `"film+lora"` falls through to the slower but
-topology-agnostic generic path. A FiLM-only model built today runs identically, on the
-same fast path, at the same performance, whether or not the LoRA code exists in the
-binary at all.
+the same fail-loud contract every schema bump in this project follows. **`ParametricA2FastModel` (the hand-optimized C++ fast path) supports LoRA as of
+NeuralAmpModelerCore `cc0a4a8` (2026-08-17)** — per-layer additive low-rank correction on
+`layer1x1`'s output, matching `NAM/lora.h`'s `Process()`, with the dispatch detector widened to
+accept `type=="film+lora"` (`schema_version` 2, `lora.rank > 0`) and gated so a malformed config
+still falls back to generic. Verified bit-for-bit against the generic reference across all
+supported channel widths (3–8), including the shipped `rank==channels` edge case. `35456c9`
+then folded the correction into `l1x1`'s weight matrix instead of a per-frame GEMV.
+
+*This paragraph previously said the fast path had no LoRA support "and never will" — that was
+true when written (the exclusion is `f9d4701`) and is now stale; the core's own README was
+corrected in `b3a08e7`.* **A `"film+lora"` model on a core older than `cc0a4a8` still falls
+through to the generic path**, so the performance you get depends on which core you link.
+`is_parametric_a2_shape()` gates on `"type"`: `"film"` (or absent) takes the fast path
+regardless, so a FiLM-only model built today runs identically, at the same performance, whether
+or not the LoRA code exists in the binary at all.
 
 ### NAM ecosystem compatibility
 
