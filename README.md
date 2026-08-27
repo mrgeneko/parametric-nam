@@ -432,9 +432,9 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
 - **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
   `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
   model's receptive field and ~2× faster than 48000.
-- **`--lora-rank N`** (default 0 = off) — **EXPERIMENTAL, see the status note in
-  [LoRA-style knob conditioning](#lora-style-knob-conditioning) before using it on a
-  release run.** Adds a low-rank ("LoRA-style") knob-conditioned
+- **`--lora-rank N`** — **DISABLED (2026-08-27).** Requesting a non-zero rank exits with an
+  error; set `PARAMETRIC_NAM_ALLOW_LORA=1` to override for an ablation. See the status note in
+  [LoRA-style knob conditioning](#lora-style-knob-conditioning). Adds a low-rank ("LoRA-style") knob-conditioned
   weight update to every layer's `l1x1`, alongside FiLM rather than instead of it — see
   that section for the design rationale, config format, and cross-repo requirement. Rank is recoverable from the
   checkpoint's own state-dict shape, so `export_checkpoint.py`/`param_infer.py` never
@@ -923,9 +923,16 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
 ### LoRA-style knob conditioning
 
-> **STATUS: EXPERIMENTAL — has not paid off on shipped ESR.** The mechanism works and the Tweed
-> numbers below are real, but on the one device where both were tried the FiLM-only bundle is
-> the better shipped model, and no width-matched ablation has ever been run. Treat `--lora-rank > 0` as a research setting, not a default, and
+> **STATUS: DISABLED (2026-08-27) — has not paid off on shipped ESR.** `--lora-rank > 0` now
+> exits with an error in both `param_train.py` and `run_pipeline.py`; set
+> `PARAMETRIC_NAM_ALLOW_LORA=1` to override for an ablation. **Only new training is gated —
+> loading, exporting, folding and inferring existing LoRA models is untouched**, so the two
+> archived LoRA bundles keep working (verified: the JCM800 LoRA bundle still renders and
+> responds to knobs through `render_parametric`).
+>
+> The mechanism works and the Tweed numbers below are real, but on the one device where both
+> were tried the FiLM-only bundle is the better shipped model, and no width-matched ablation has
+> ever been run. Treat `--lora-rank > 0` as a research setting, not a default, and
 > do not ship a release run on it without evaluating that run on its own terms.
 >
 > **What the archive actually contains** (`parametric-nam-models`, as of 2026-08-27): 7 LoRA

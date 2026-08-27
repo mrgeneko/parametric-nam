@@ -1693,8 +1693,9 @@ def main():
                     help="Add a low-rank ('LoRA-style') knob-conditioned weight update to "
                          "every layer's l1x1, alongside (not instead of) FiLM -- see internal "
                          "engineering notes ('LoRA-style knob conditioning'). Rank is the "
-                         "bottleneck dimension of the additive update (0 = disabled, the "
-                         "default: existing training runs are unaffected until opted in). "
+                         "bottleneck dimension of the additive update. DISABLED 2026-08-27 "
+                         "-- has not paid off on shipped ESR; set PARAMETRIC_NAM_ALLOW_LORA=1 "
+                         "to override for an ablation. "
                          "Unlike FiLM's diagonal affine rescale of one fixed l1x1 weight, "
                          "this lets the knob genuinely change what l1x1 computes -- aimed at "
                          "the >3-knob ESR ceiling FiLM alone can't lift regardless of "
@@ -1766,6 +1767,28 @@ def main():
                          "dataset's config.json by gen_dataset_from_schx.py -- overrides anything already "
                          "there if both are set.")
     args = ap.parse_args()
+
+    # --- LoRA training is disabled (2026-08-27) -------------------------------------------
+    # Not a code problem: the mechanism works, the C++ fast path supports it since
+    # NeuralAmpModelerCore cc0a4a8, and the numerics are tested. It has not paid off on
+    # SHIPPED ESR -- on the one device where both were tried (JCM800 preamp+power sag), the
+    # FiLM-only 5ch+9ch bundle beats the FiLM+LoRA 4ch+8ch one (0.06016/0.02191 vs
+    # 0.06186/0.02403) and is the one marked CURRENT. Widening a tier is the same remedy for
+    # the same capacity ceiling and costs no schema bump, no rank to choose, and no minimum
+    # core version. See the README's "LoRA-style knob conditioning" status note.
+    #
+    # ONLY new training is gated. Loading, exporting, folding and inferring existing LoRA
+    # models is deliberately untouched -- the two archived LoRA bundles must keep working.
+    # Set PARAMETRIC_NAM_ALLOW_LORA=1 to run the width-matched ablation that would settle it.
+    if args.lora_rank and os.environ.get("PARAMETRIC_NAM_ALLOW_LORA") != "1":
+        sys.exit(
+            "--lora-rank is disabled: LoRA has not paid off on shipped ESR (see the README's\n"
+            "'LoRA-style knob conditioning' status note). Prefer widening a tier -- it lifts the\n"
+            "same capacity ceiling with no schema bump, no rank to pick and no minimum core\n"
+            "version.\n\n"
+            "Existing LoRA models still load, export and infer normally; only NEW LoRA training\n"
+            "is gated. To run the width-matched ablation that would settle this, re-run with\n"
+            "PARAMETRIC_NAM_ALLOW_LORA=1.")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

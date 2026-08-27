@@ -831,8 +831,9 @@ def main():
                         "Forwarded to param_train.py.")
     g.add_argument("--lora-rank",      type=int,   default=0,
                    help="Low-rank ('LoRA-style') additive weight update on every A2Layer's "
-                        "l1x1, alongside FiLM -- see internal engineering notes ('LoRA-style "
-                        "knob conditioning'). Default 0 (off). Forwarded to param_train.py.")
+                        "l1x1, alongside FiLM. DISABLED 2026-08-27 -- has not paid off on "
+                        "shipped ESR; see the README's 'LoRA-style knob conditioning' status "
+                        "note. Set PARAMETRIC_NAM_ALLOW_LORA=1 to override for an ablation.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
     _pre = argparse.ArgumentParser(add_help=False)
@@ -844,6 +845,13 @@ def main():
         ap.set_defaults(**load_config(_cfg_ns.config))
 
     args = ap.parse_args()
+
+    # LoRA training is disabled -- see param_train.py's gate and the README status note.
+    # Checked here too so a pipeline run fails immediately instead of after dataset work.
+    if getattr(args, 'lora_rank', 0) and os.environ.get('PARAMETRIC_NAM_ALLOW_LORA') != '1':
+        sys.exit("--lora-rank is disabled: LoRA has not paid off on shipped ESR (see the "
+                 "README's 'LoRA-style knob conditioning' status note). Prefer widening a "
+                 "tier. Set PARAMETRIC_NAM_ALLOW_LORA=1 to override for an ablation.")
 
     if args.release_only:
         args.skip_generate = args.skip_combine = args.skip_train = True
