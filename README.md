@@ -923,16 +923,36 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
 ### LoRA-style knob conditioning
 
-> **STATUS: EXPERIMENTAL — needs more testing and evaluation.** The mechanism works and the
-> results below are real, but the evidence base is narrow and the known interactions are not
-> characterised. Treat `--lora-rank > 0` as a research setting, not a default, and do not ship a
-> release run on it without evaluating that run on its own terms.
+> **STATUS: EXPERIMENTAL — the benefit has not proven out.** The mechanism works, and the Tweed
+> numbers below are real, but they have not reproduced on a second device and no width-matched
+> ablation has ever been run. Treat `--lora-rank > 0` as a research setting, not a default, and
+> do not ship a release run on it without evaluating that run on its own terms.
 >
-> What "narrow" means concretely:
-> * **One device.** Every number in this section comes from the Tweed 5F6-A Full (sag) — a
->   2-knob testbed for the ESR figures and the 5-knob run for the capacity-ceiling diagnosis.
->   Nothing else in the fleet has been trained with it, so it is unknown whether the gains
->   generalise across topologies, knob counts, or ESR regimes.
+> **What the archive actually contains** (`parametric-nam-models`, as of 2026-08-27): 7 LoRA
+> `.nam` files, but only **two runs on two devices**, both `rank 4` —
+> `tweed-5f6-a-full-sag/2026-08-17_e1cb0e0` (2-knob) and
+> `marshall-jcm800-2203-preamp-and-power-amp-sag/2026-08-21_e1cb0e0` (2-knob).
+>
+> * **No clean head-to-head is archived.** The −72 %/−65 % figures below come from a FiLM-only
+>   2-knob Tweed *testbed* run that was never published, so they cannot be re-checked from the
+>   models repo. The only published FiLM-only Tweed runs are **5-knob** — a different and much
+>   harder problem, not comparable.
+> * **The one near-like-for-like comparison went the other way.** JCM800, same 2 knobs, same
+>   143-perm grid, same excitation:
+>
+>   | | tiers | epochs | ESR lite | ESR full |
+>   |---|---|---|---|---|
+>   | `2026-08-21` FiLM+LoRA | 4ch + 8ch | 3980 | 0.06186 | 0.02403 |
+>   | `2026-08-26` FiLM only | **5ch + 9ch** | 4848 | **0.06016** | **0.02191** |
+>
+>   FiLM-only won on both tiers. It is *not* a LoRA ablation — it also widens the tiers and
+>   trains 22 % longer — so what it shows is that **widening the tiers beat adding LoRA at the
+>   narrower width**, and widening is the alternative remedy for the same capacity ceiling LoRA
+>   was introduced to solve. Margins are small (3 % lite, 9 % full), so this is
+>   inconclusive-to-unfavourable rather than a refutation.
+> * **The missing experiment is a width-matched ablation:** same device, knobs, grid and epoch
+>   budget, 4/8 with and against LoRA. The JCM800 already has the LoRA half at 4/8; it needs
+>   only a FiLM-only 4/8 run at matched epochs.
 > * **A known bad interaction, not yet bounded.** LoRA's extra per-layer capacity makes FiLM
 >   runaway *worse* once it occurs — ~7× excitation elevation on the FiLM+LoRA case against
 >   ~1.1× for a FiLM-only model (see the FiLM-runaway discussion above). The mitigations there
@@ -946,8 +966,8 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 >   the export path have been exercised on very few real checkpoints — a state-dict loading bug
 >   in `release_run.sh` survived until an actual LoRA checkpoint first hit it on 2026-08-21.
 >
-> Useful next steps: a second device at a different knob count, and a FiLM-runaway scan with
-> LoRA on.
+> Useful next steps, in order: the width-matched ablation above; then a FiLM-runaway scan with
+> LoRA on. Until the first of those exists, prefer widening a tier over enabling LoRA.
 
 **Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
