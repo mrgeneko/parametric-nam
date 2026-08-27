@@ -77,8 +77,27 @@ SR = 48000
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference, matches param_train.py
 
 
+_WINDOW_CACHE = {}
+
+
 def _band(y, f_lo, f_hi):
-    Y = np.abs(np.fft.rfft(y.astype(np.float64))) ** 2
+    """Energy in [f_lo, f_hi). Hann-windowed -- NOT optional.
+
+    An unwindowed (rectangular) FFT has -13dB first sidelobes falling only 6dB/octave, so a
+    loud band leaks into a quiet one and swamps it. That is not hypothetical: on the Joyo
+    American Sound the 40-200Hz band sits ~51dB above 400-4000Hz, and turning Bass up 11x
+    raised the *measured* 400-4000 energy 114x (2.23 -> 255.1) -- pure leakage. Both bands
+    then scale together, the lo ratio moves a few percent, its sign is noise, and preflight
+    called a correctly-wired Bass control REVERSED. Hann-windowed, the same band reads
+    0.0593 -> 0.0544 (flat, as a direct per-frequency sweep confirms) and the ratio rises
+    +8118% -- unambiguous. Ratios are unaffected by the window's energy scaling, since every
+    band in a given metric is windowed identically."""
+    y = y.astype(np.float64)
+    w = _WINDOW_CACHE.get(len(y))
+    if w is None:
+        w = np.hanning(len(y))
+        _WINDOW_CACHE[len(y)] = w
+    Y = np.abs(np.fft.rfft(y * w)) ** 2
     f = np.fft.rfftfreq(len(y), 1 / SR)
     return float(Y[(f >= f_lo) & (f < f_hi)].sum())
 
