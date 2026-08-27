@@ -923,9 +923,9 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
 ### LoRA-style knob conditioning
 
-> **STATUS: EXPERIMENTAL — the benefit is unproven either way.** The mechanism works, and the
-> Tweed numbers below are real, but no width-matched ablation has ever been run and the second
-> device's comparison is confounded by an unconverged run. Treat `--lora-rank > 0` as a research setting, not a default, and
+> **STATUS: EXPERIMENTAL — has not paid off on shipped ESR.** The mechanism works and the Tweed
+> numbers below are real, but on the one device where both were tried the FiLM-only bundle is
+> the better shipped model, and no width-matched ablation has ever been run. Treat `--lora-rank > 0` as a research setting, not a default, and
 > do not ship a release run on it without evaluating that run on its own terms.
 >
 > **What the archive actually contains** (`parametric-nam-models`, as of 2026-08-27): 7 LoRA
@@ -937,28 +937,28 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 >   2-knob Tweed *testbed* run that was never published, so they cannot be re-checked from the
 >   models repo. The only published FiLM-only Tweed runs are **5-knob** — a different and much
 >   harder problem, not comparable.
-> * **The one near-like-for-like comparison is inconclusive, and depends entirely on where you
->   stop the clock.** JCM800, same 2 knobs, same 143-perm grid, same excitation. Compared at
->   each run's own final epoch, FiLM-only wins; compared at **matched** epochs, FiLM+LoRA wins
->   on both tiers *with narrower tiers*:
+> * **On shipped ESR — what an end user actually gets — FiLM-only is ahead.** JCM800, same 2
+>   knobs, same 143-perm grid, same excitation:
 >
->   | | tiers | best-so-far @ epoch 3980 | at own final epoch |
->   |---|---|---|---|
->   | `2026-08-21` FiLM+LoRA | 4ch + 8ch | **0.06186 / 0.02403** | 0.06186 / 0.02403 (ended 3980) |
->   | `2026-08-26` FiLM only | 5ch + 9ch | 0.06455 / 0.02440 | **0.06016 / 0.02191** (ended 4848) |
+>   | | tiers | final ESR lite / full |
+>   |---|---|---|
+>   | `2026-08-21` FiLM+LoRA | 4ch + 8ch | 0.06186 / 0.02403 |
+>   | `2026-08-26` FiLM only | 5ch + 9ch | **0.06016 / 0.02191** |
 >
->   **The LoRA run was stopped mid-descent** — its best is epoch 3945 of a run that ended at
->   3980, and its curve was still falling steeply (0.06717 @3400 → 0.06294 @3800 → 0.06186
->   @3945). The FiLM run was flat across that same span and only dropped at ~4600, 868 epochs
->   past where the LoRA run was cut off. So `0.06186 / 0.02403` is a floor, not a converged
->   result, and neither ordering is evidence about LoRA.
+>   The FiLM-only bundle is the better model and is the one marked `CURRENT`. That is the
+>   comparison that matters for choosing what to ship, and it does not favour LoRA.
 >
->   This is the trap `tier-width-vs-knob-count` already warns about: **judge tier capacity only
->   at convergence.** An earlier revision of this note read the final-epoch column alone and
->   concluded FiLM-only had won; that was wrong.
-> * **The missing experiment is a width-matched ablation:** same device, knobs, grid and epoch
->   budget, 4/8 with and against LoRA. The JCM800 already has the LoRA half at 4/8; it needs
->   only a FiLM-only 4/8 run at matched epochs.
+>   *Method caveat, for anyone using this to judge LoRA itself rather than to pick a model:* the
+>   LoRA arm stopped at epoch 3980 (best 3945) while still descending steeply — 0.06717 @3400 →
+>   0.06294 @3800 → 0.06186 @3945 — where the FiLM arm was flat across that span and only
+>   dropped at ~4600, 868 epochs later. At matched epoch 3980 the LoRA arm was marginally
+>   *ahead* on both tiers (0.06186/0.02403 vs 0.06455/0.02440), with narrower tiers. So this
+>   ranks two **runs**, not two **methods** — there is no converged LoRA model here to ship even
+>   if you wanted one.
+>
+>   For the same reason, don't read the older `2026-07-30` run's better-looking 0.0421 / 0.0153
+>   as a third data point: it is a 90-permutation grid on a different excitation, so it covers
+>   less of the knob space and is an easier fit, not a better product.
 > * **A known bad interaction, not yet bounded.** LoRA's extra per-layer capacity makes FiLM
 >   runaway *worse* once it occurs — ~7× excitation elevation on the FiLM+LoRA case against
 >   ~1.1× for a FiLM-only model (see the FiLM-runaway discussion above). The mitigations there
@@ -972,10 +972,10 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 >   the export path have been exercised on very few real checkpoints — a state-dict loading bug
 >   in `release_run.sh` survived until an actual LoRA checkpoint first hit it on 2026-08-21.
 >
-> Useful next steps, in order: the width-matched ablation above, **run to convergence on both
-> arms**; then a FiLM-runaway scan with LoRA on. Until that exists there is no basis for
-> preferring either LoRA or a wider tier on ESR grounds — pick on the other axes (fast-path
-> support, parameter count, the FiLM-runaway interaction).
+> **Practical default: prefer widening a tier over enabling LoRA.** It is the remedy for the
+> same capacity ceiling, it is what the current best JCM800 bundle actually used, and it needs
+> no schema bump, no `rank` to choose, and no minimum core version. Revisit if the
+> width-matched ablation (above, run to convergence on both arms) says otherwise.
 
 **Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
