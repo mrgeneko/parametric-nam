@@ -432,10 +432,11 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
 - **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
   `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
   model's receptive field and ~2× faster than 48000.
-- **`--lora-rank N`** (default 0 = off) adds a low-rank ("LoRA-style") knob-conditioned
+- **`--lora-rank N`** (default 0 = off) — **EXPERIMENTAL, see the status note in
+  [LoRA-style knob conditioning](#lora-style-knob-conditioning) before using it on a
+  release run.** Adds a low-rank ("LoRA-style") knob-conditioned
   weight update to every layer's `l1x1`, alongside FiLM rather than instead of it — see
-  **[LoRA-style knob conditioning](#lora-style-knob-conditioning)** below for the design
-  rationale, config format, and cross-repo requirement. Rank is recoverable from the
+  that section for the design rationale, config format, and cross-repo requirement. Rank is recoverable from the
   checkpoint's own state-dict shape, so `export_checkpoint.py`/`param_infer.py` never
   need it re-specified.
 - **`--cycle-checkpoints`** (default on; `--no-cycle-checkpoints` to disable) saves a
@@ -921,6 +922,30 @@ conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → fil
 Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
 ### LoRA-style knob conditioning
+
+> **STATUS: EXPERIMENTAL — needs more testing and evaluation.** The mechanism works and the
+> results below are real, but the evidence base is narrow and the known interactions are not
+> characterised. Treat `--lora-rank > 0` as a research setting, not a default, and do not ship a
+> release run on it without evaluating that run on its own terms.
+>
+> What "narrow" means concretely:
+> * **One device.** Every number in this section comes from the Tweed 5F6-A Full (sag) — a
+>   2-knob testbed for the ESR figures and the 5-knob run for the capacity-ceiling diagnosis.
+>   Nothing else in the fleet has been trained with it, so it is unknown whether the gains
+>   generalise across topologies, knob counts, or ESR regimes.
+> * **A known bad interaction, not yet bounded.** LoRA's extra per-layer capacity makes FiLM
+>   runaway *worse* once it occurs — ~7× excitation elevation on the FiLM+LoRA case against
+>   ~1.1× for a FiLM-only model (see the FiLM-runaway discussion above). The mitigations there
+>   (`--spectral-norm`, etc.) have not been re-validated with LoRA enabled.
+> * **No fast path, permanently.** `"film+lora"` falls through to the slower generic
+>   `Layer`/`FiLM`/`LoRA` path; the hand-optimized C++ fast path has no LoRA support and never
+>   will. The real-time cost of that has not been measured.
+> * **Thin exercise of the release plumbing.** The schema_version 1→2 bump, `fold_lora()`, and
+>   the export path have been exercised on very few real checkpoints — a state-dict loading bug
+>   in `release_run.sh` survived until an actual LoRA checkpoint first hit it on 2026-08-21.
+>
+> Useful next steps: a second device at a different knob count, a FiLM-runaway scan with LoRA
+> on, and a real-time cost measurement of the generic path.
 
 **Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
