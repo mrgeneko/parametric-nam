@@ -8,7 +8,7 @@ output at all), never measured for ACCURACY. Found directly on the Fulltone OCD
 (gen_ocd_ngspice.py, real 2N7000 MOSFET clipping): re-rendering the IDENTICAL Gain=0.3 probe
 window at maxstep 3e-6 / 1e-6 / 3e-7 gave RMS 1.210 / 1.614 / 1.593 -- a ~33% swing between the
 default and a 10x finer step, and still not settled between the two finer steps.
-tools/grid_adequacy.py --apply was exploding (40 -> 1512+ permutations, ~10-100x over target at
+grid_adequacy.py --apply was exploding (40 -> 1512+ permutations, ~10-100x over target at
 nearly every cell, barely improving as it densified) instead of converging -- exactly the
 signature of an interpolation-error measurement dominated by non-smooth INTEGRATION noise, not
 real circuit curvature.
@@ -28,7 +28,7 @@ reference itself has actually converged (ESR(ref, ref/2) must sit well below the
 candidate's own number, or every column in the table is a floor, not a measurement).
 
 Usage:
-    ./tools/measure_ngspice_timestep.py --input ~/work/parametric-devices/pedals/ocd_excitation_v4.wav \\
+    ./measure_ngspice_timestep.py --input ~/work/parametric-devices/pedals/ocd_excitation_v4.wav \\
         --config ~/work/parametric-nam-models/pedals/fulltone-ocd-lp/config.toml
 """
 from __future__ import annotations
@@ -42,12 +42,12 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from measure_truncation import esr_terms, probe_clips, probe_settings  # noqa: E402
 
 from scipy.io import wavfile  # noqa: E402
 
-from tools.ngspice_spicelib import load_input, render_grid  # noqa: E402
+from ngspice_spicelib import load_input, render_grid  # noqa: E402
 
 
 def load_config(p: Path) -> dict:

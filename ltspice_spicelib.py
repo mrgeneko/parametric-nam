@@ -53,7 +53,7 @@ CONTRACT DIFFERENCES FROM ngspice_spicelib.py (both inherent to LTspice, not sty
     this module divides back out after reading.
 
 Usage from a device's render_X.py (once one exists, mirroring render_ngspice_deck.py):
-    from tools.ltspice_spicelib import load_input, render_grid
+    from ltspice_spicelib import load_input, render_grid
     sr, dur_s, wav_path, in_scale = load_input(infile, vin, tmp, src_name='mydevice_input.wav')
     jobs = [({'Drive': 0.2, 'Tone': 0.5}, 'out1.wav'), ...]
     results = render_grid(build_deck, jobs, tap='spk', sr=sr, dur_s=dur_s, wav_path=wav_path,
@@ -88,7 +88,7 @@ LTSPICE_BIN = _find_ltspice_bin()
 def load_input(infile, vin, tmp, src_name="input.wav"):
     """Read wav, scale to +/-vin (vin=None: absolute-volts mode, the file's own sample values
     used directly -- same convention/use-case as ngspice_spicelib.load_input, e.g. a
-    tools/build_excitation.py file whose segments intentionally sit at different absolute
+    build_excitation.py file whose segments intentionally sit at different absolute
     levels), pad the tail with the held final sample (so a `.tran` requesting exactly the
     returned dur_s lands safely inside the data, matching ngspice_spicelib's own pad), and
     write a PCM_24 WAV pre-divided by `in_scale` so the file itself never exceeds +/-1.0

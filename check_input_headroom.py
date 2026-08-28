@@ -13,7 +13,7 @@ someone asked "was this checked?" after the config was otherwise fully measured 
 Nothing else in the pipeline would have caught it: grid_adequacy.py measures interpolation density,
 not whether the sampled region includes saturation at all.
 
-WHAT THIS CHECKS. Runs tools/preflight.py --find-peak (a clean-tone amplitude sweep at the config's
+WHAT THIS CHECKS. Runs preflight.py --find-peak (a clean-tone amplitude sweep at the config's
 knobs) to find the device's saturation onset -- the input voltage where output RMS stops rising --
 then compares it against the actual peak of the config's own training excitation file. If the
 excitation's peak sits well under the onset, the trained dataset likely never explores that region.
@@ -27,8 +27,8 @@ Volume rather than at high input level. Treat a WARN here as "go investigate at 
 corner directly" (see internal engineering notes), not as an automatic verdict either way.
 
 Usage:
-    ./tools/check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml
-    ./tools/check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml --margin 0.9
+    ./check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml
+    ./check_input_headroom.py --config ~/work/parametric-nam-models/pedals/my-device/config.toml --margin 0.9
 """
 import argparse
 import json

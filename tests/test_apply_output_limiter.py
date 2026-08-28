@@ -1,16 +1,16 @@
-"""Properties tools/apply_output_limiter.py's soft-limit knee and hand-rolled 16-bit WAV
+"""Properties apply_output_limiter.py's soft-limit knee and hand-rolled 16-bit WAV
 round-trip must have. The whole point of this tool is a SMOOTH ceiling -- no new harmonic
 distortion from a hard clip -- so continuity at the threshold and a strictly-bounded (never
 exceeded) ceiling are the properties that actually matter for a training target, not just
 "some compression happens."
 
-See tools/apply_output_limiter.py.
+See apply_output_limiter.py.
 """
 import math
 
 import pytest
 
-from tools.apply_output_limiter import read_wav16, soft_limit, write_wav16
+from apply_output_limiter import read_wav16, soft_limit, write_wav16
 
 
 class TestSoftLimit:

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Render audio through a hand-written LTspice deck, with its knobs as SWEPT PARAMETERS --
 LTspice counterpart of render_ngspice_deck.py, for a device whose ngspice-deck version can't
-converge on real playing content at all (see tools/ltspice_spicelib.py's own docstring: a
+converge on real playing content at all (see ltspice_spicelib.py's own docstring: a
 razor-steep tanh-bounded op-amp B-source is a genuine Newton-solver dead end in ngspice,
 independent of timestep -- confirmed on the Fulltone OCD, 70/70 renders across the full knob
 grid timing out at every maxstep from 3e-6 down to 3e-8).
 
   Single render at a knob setting:
-    python3 tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
+    python3 render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
         --module gen_ocd_ltspice --tap spk \\
         in.wav out.wav --knob Gain=0.8 --knob Tone=0.3
 
   Parametric sweep (the capture driver -- cartesian product of the grids):
-    python3 tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
+    python3 render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
         --module gen_ocd_ltspice --tap spk \\
         in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
   -> caps/cap_0000.wav ... + caps/manifest.jsonl (one {file, knobs:{...}} per line) +
@@ -20,9 +20,9 @@ grid timing out at every maxstep from 3e-6 down to 3e-8).
      --mapping-csv). Only OK (converged) renders are included.
 
 --absolute: use the input file's own sample values directly as volts (V0dBFS=1V convention),
-with NO peak rescaling -- for a file already built by tools/build_excitation.py or
-tools/prepare_excitation.py --backend ltspice-deck. --vin is ignored when this is set. See
-tools/ltspice_spicelib.py's load_input() docstring.
+with NO peak rescaling -- for a file already built by build_excitation.py or
+prepare_excitation.py --backend ltspice-deck. --vin is ignored when this is set. See
+ltspice_spicelib.py's load_input() docstring.
 
 --tap and --ok-max-peak are device-specific, same convention as render_ngspice_deck.py's
 --probe-node/--ok-max-peak -- pass them explicitly rather than relying on a default that
@@ -37,8 +37,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
-from tools.ltspice_spicelib import load_input, render_grid, render_one  # noqa: E402
+sys.path.insert(0, HERE)
+from ltspice_spicelib import load_input, render_grid, render_one  # noqa: E402
 
 
 def main():
@@ -57,7 +57,7 @@ def main():
     ap.add_argument('--vin', type=float, default=0.15)
     ap.add_argument('--absolute', action='store_true',
                      help="use the input file's own sample values as volts directly (V0dBFS=1V "
-                          "convention, e.g. tools/build_excitation.py output) -- ignores --vin")
+                          "convention, e.g. build_excitation.py output) -- ignores --vin")
     ap.add_argument('--maxstep', type=float, default=3e-6)
     ap.add_argument('--out-scale', type=float, default=0.05,
                      help="LTspice .wave output is +/-1V-PCM-bounded -- the deck scales the tap "
@@ -68,7 +68,7 @@ def main():
     ap.add_argument('--parallel-sims', type=int, default=8, help='concurrent LTspice processes for --grid')
     ap.add_argument('--timeout', type=float, default=None,
                      help='per-render subprocess timeout, seconds (default: scales with the '
-                          'input duration -- see tools/ltspice_spicelib.py render_grid\'s own '
+                          'input duration -- see ltspice_spicelib.py render_grid\'s own '
                           'docstring for the formula/reasoning). A flat number here is fragile: '
                           'a value tuned for grid_adequacy\'s short 8s probes silently kills '
                           'every job partway through a full 60s excitation capture, which LOOKS '

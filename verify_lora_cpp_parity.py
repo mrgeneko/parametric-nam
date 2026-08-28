@@ -24,7 +24,7 @@ own header comment) are compensated for here, not in the C++ tool:
     audio -- the head is discarded (--discard-head-sec) to avoid comparing across it.
 
 Usage:
-    .venv/bin/python tools/verify_lora_cpp_parity.py
+    .venv/bin/python verify_lora_cpp_parity.py
 
 Requires NeuralAmpModelerCore's run_tests target already built (produces render_parametric):
     cd ~/work/chainsmith/NeuralAmpModelerCore/build && cmake --build . --target run_tests
@@ -40,7 +40,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from param_train import ParametricA2
 
 KNOB_VALUES = [0.0, 0.25, 0.5, 0.75, 1.0]

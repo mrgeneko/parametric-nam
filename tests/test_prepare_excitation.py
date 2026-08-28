@@ -1,18 +1,18 @@
-"""Properties tools/prepare_excitation.py must have. This tool closes the human-in-the-loop gap
+"""Properties prepare_excitation.py must have. This tool closes the human-in-the-loop gap
 between find_saturation_point.py and build_excitation.py by deriving --sweep-peaks/
 --realistic-peak directly from a MEASURED worst-case onset across the knob grid's corners --
 worst_case_onset's "refuse to guess" behavior (raise rather than silently build against a
 partial sweep) and its worst-case (not average, not first) selection are the properties an
 excitation's whole calibration depends on. Exercised with find_saturation_point stubbed out.
 
-See tools/prepare_excitation.py.
+See prepare_excitation.py.
 """
 import sys
 from pathlib import Path
 
 import pytest
 
-from tools.prepare_excitation import _parse_fixed, _parse_ranges, main, worst_case_onset
+from prepare_excitation import _parse_fixed, _parse_ranges, main, worst_case_onset
 
 
 class TestParseRanges:
@@ -53,7 +53,7 @@ class TestWorstCaseOnset:
             if onset is None:
                 return None
             return {"onset_99pct_input_v": onset, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.prepare_excitation.find_saturation_point", fake)
+        monkeypatch.setattr("prepare_excitation.find_saturation_point", fake)
 
     def test_returns_the_highest_onset_not_the_average_or_first(self, monkeypatch, tmp_path):
         self._stub_onset(monkeypatch, lambda p: 5.0 if p.get("Gain") == 1.0 else 0.1)
@@ -103,14 +103,14 @@ class TestMainRealisticPeakVsCheckTransientCoverage:
 
     def _run_main_and_capture_cmd(self, tmp_path, monkeypatch, worst_onset, extra_argv=()):
         self._write_pedal_module(tmp_path)
-        monkeypatch.setattr("tools.prepare_excitation.worst_case_onset",
+        monkeypatch.setattr("prepare_excitation.worst_case_onset",
                             lambda *a, **kw: (worst_onset, [{"corner": "worst", "onset_v": worst_onset}]))
         captured = {}
 
         def fake_run(cmd, check=True):
             captured["cmd"] = cmd
             return None
-        monkeypatch.setattr("tools.prepare_excitation.subprocess.run", fake_run)
+        monkeypatch.setattr("prepare_excitation.subprocess.run", fake_run)
 
         argv = ["prepare_excitation.py", "--backend", "ngspice-deck",
                 "--pedal-dir", str(tmp_path), "--module", "gen_fake_ngspice",

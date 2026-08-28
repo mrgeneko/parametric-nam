@@ -1,4 +1,4 @@
-"""Properties tools/build_excitation.py's synthesis primitives must have. This tool assembles
+"""Properties build_excitation.py's synthesis primitives must have. This tool assembles
 the actual training excitation the fleet trains on, so a wrong sweep frequency range or a
 transient burst that isn't actually broadband/instant-attack silently produces a worse dataset,
 not a crash. _fade/_audio_provenance/_tool_git_rev are deliberately duplicated from
@@ -6,12 +6,12 @@ pick_dynamic_window.py (see this module's own docstring: independent, no cross-t
 already covered there; this file focuses on what's unique here -- the sweep and synthesized
 transient-burst generators.
 
-See tools/build_excitation.py.
+See build_excitation.py.
 """
 import numpy as np
 import pytest
 
-from tools.build_excitation import SR, _fade, _log_sweep, _transient_burst
+from build_excitation import SR, _fade, _log_sweep, _transient_burst
 
 
 class TestLogSweep:

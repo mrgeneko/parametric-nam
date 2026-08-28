@@ -1,15 +1,15 @@
-"""Properties tools/preflight.py's pure per-render metric functions must have. These decide
+"""Properties preflight.py's pure per-render metric functions must have. These decide
 "dead"/"reversed"/"OK" for a knob check (see the module docstring's Fulltone OCD Tone/Klon Tone
 war stories) -- a subtle bug in a band ratio or the spike/ESR formula reads as the WRONG KNOB
 CONCLUSION on a real circuit, not a crash. Exercised directly against synthetic tones instead
 of a real render, so the metric math is verified independently of any circuit or backend.
 
-See tools/preflight.py.
+See preflight.py.
 """
 import numpy as np
 import pytest
 
-from tools.preflight import SR, _band, esr, metric, spikes
+from preflight import SR, _band, esr, metric, spikes
 
 
 def sine(freq, amp=1.0, dur=1.0, sr=SR):

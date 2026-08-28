@@ -61,11 +61,11 @@ This trains an actual muff model end to end. See `examples/muff/muff.md` for the
 The bundled example above needs nothing beyond what it already cloned. To train your own
 circuit, all you need on top of that is your own `.schx` (e.g. from
 `LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it.
-`tools/scaffold_config.py --schx yours.schx` discovers its real controls and measures a
+`scaffold_config.py --schx yours.schx` discovers its real controls and measures a
 starting `oversample` for you (see [`docs/scripts.md`](docs/scripts.md)) — or copy
 `examples/template.config.toml`
 by hand (see **Per-circuit configs** below for the format). Either way, finish with
-`tools/grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
+`grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
 measured one. No other repos are required.
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
@@ -194,13 +194,13 @@ Full per-script reference (usage, flags, design rationale) lives in
 
 | Script | Purpose |
 |---|---|
-| `tools/scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
-| `tools/grid_adequacy.py` | Measure whether a knob grid is dense enough |
+| `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
+| `grid_adequacy.py` | Measure whether a knob grid is dense enough |
 | `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
-| `tools/build_excitation.py` | Build a training excitation that covers the full input range |
+| `build_excitation.py` | Build a training excitation that covers the full input range |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
-| `tools/render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
-| `tools/render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
+| `render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
+| `render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
 | `gen_dataset_from_captures.py` | Build a dataset from real hardware captures, no `.schx` needed |
 | `param_train.py` | Train a parametric NAM |
 | `param_infer.py` | Inference (Python, no C++) |
@@ -208,7 +208,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `sweep_report.py` | Visualize a set of WAVs at different knob settings |
 | `export_checkpoint.py` | Checkpoint → `.param.nam` |
 | `bake_nam.py` | Freeze a knob setting for stock/upstream NAM plugins |
-| `tools/plot_tone_response.py` | Frequency-response chart for an exported `.nam` |
+| `plot_tone_response.py` | Frequency-response chart for an exported `.nam` |
 | `release_run.sh` | Verify + stage a finished run |
 
 ---
@@ -429,7 +429,7 @@ If you have a real `gen_<device>_ltspice.py` deck module to test against, render
 end-to-end the same way as a final check:
 
 ```bash
-python tools/render_ltspice_deck.py --pedal-dir path/to/your/devices \
+python render_ltspice_deck.py --pedal-dir path/to/your/devices \
     --module gen_mydevice_ltspice --tap spk --absolute --out-scale 0.1 tone.wav out.wav \
     --knob Drive=1 --knob Tone=1 --knob Level=1
 # Compare the reported peak against what the circuit should produce at max drive -- a peak
@@ -463,7 +463,7 @@ elsewhere. The delay-calibration half runs in a **subprocess** under that venv's
 interpreter, not a lazy in-process import — `nam.train.core` depends on `numba`, which
 checks `numpy`'s version at import time, and importing it in-process would hand it
 whatever `numpy` *this* repo's own venv already loaded, not the sibling venv's compatible
-one. A subprocess avoids that entirely; see `tools/nam_delay_helper.py`.
+one. A subprocess avoids that entirely; see `nam_delay_helper.py`.
 
 > **Input formats**: any WAV (16/24/32-bit) and any content read correctly — an earlier
 > O(N²) bug in `livespice_cli`'s WAV reader (fixed in `fa90d57`) once made non-24-bit

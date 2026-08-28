@@ -51,7 +51,7 @@ def load_input(infile, vin, tmp, src_name='input.src'):
 
     `vin=None` selects ABSOLUTE-VOLTS mode: the file's own sample values are used directly as
     volts, with NO peak rescaling. Use this for a file already built at the parametric-nam
-    V0dBFS=1V convention (e.g. tools/build_excitation.py's output), where different SEGMENTS
+    V0dBFS=1V convention (e.g. build_excitation.py's output), where different SEGMENTS
     intentionally sit at different absolute levels (a real-playing clip at --realistic-peak,
     sweeps at each of --sweep-peaks) -- rescaling by the file's own peak would flatten that
     deliberate multi-level structure into one uniform scale, destroying the point of building
@@ -124,7 +124,7 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
 
     `rungs`: override the escalation ladder (default `(maxstep, maxstep/3, maxstep/10)`).
     Pass `rungs=(maxstep,)` for a genuine SINGLE-SHOT attempt with no silent escalation --
-    needed by tools/measure_ngspice_timestep.py, which measures maxstep's own effect on the
+    needed by measure_ngspice_timestep.py, which measures maxstep's own effect on the
     render and would otherwise get a DIFFERENT actual timestep than requested for any job that
     fails to converge at the nominal one (found directly: a "maxstep=1e-7" run silently
     resolved to ~1e-8 for a hard corner via this same escalation, invalidating the very

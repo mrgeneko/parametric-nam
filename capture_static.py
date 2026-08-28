@@ -81,8 +81,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
 from param_train import _input_level_dbu, _schx_input_v0dbfs  # noqa: E402
-from tools.find_saturation_point import find_saturation_point  # noqa: E402
-from tools.render_backends import LiveSpiceBackend  # noqa: E402
+from find_saturation_point import find_saturation_point  # noqa: E402
+from render_backends import LiveSpiceBackend  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
 NAM_FULL = NAM_VENV / "bin" / "nam-full"
@@ -226,7 +226,7 @@ def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_di
     # subtype='FLOAT' is NOT optional: sf.write's default WAV subtype is PCM_16,
     # which silently clips anything outside +/-1.0 -- exactly the amplitude range this
     # scaled excitation needs to represent. Caught this the hard way in
-    # find_saturation_point (tools/preflight.py) -- see that fix's comment.
+    # find_saturation_point (preflight.py) -- see that fix's comment.
     sf.write(str(scaled_path), (x * scale).astype(np.float32), sr, subtype="FLOAT")
     print(f"[capture_static] excitation too quiet for this circuit at this setting -- "
           f"scaling x{scale:.3g} ({peak_v:.3g} V -> {target_v:.3g} V peak), using the "

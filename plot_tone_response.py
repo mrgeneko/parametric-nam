@@ -24,7 +24,7 @@ truth), and the summary reports each tier's error vs the circuit. This is what a
 answers "does the model's Bass/Mid/Treble magnitude match the schx?".
 
 Usage:
-  python tools/plot_tone_response.py \
+  python plot_tone_response.py \
       --model  bundle.optimal.param.nam \
       --config dataset/config.json \
       --out    tone_response.svg \

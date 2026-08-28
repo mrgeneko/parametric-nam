@@ -3,7 +3,7 @@ the delay/latency calibration and alignment logic, which is the one thing a raw 
 that a .nam capture (pure digital inference, phase-aligned by construction) doesn't. See that
 module's detect_delay()/_align_wet() docstrings for the full reasoning.
 
-detect_delay() shells out to tools/nam_delay_helper.py under a sibling neural-amp-modeler
+detect_delay() shells out to nam_delay_helper.py under a sibling neural-amp-modeler
 venv's own interpreter (see detect_delay's docstring for why: a numba/numpy version conflict
 when importing nam.train.core in-process, confirmed hitting it directly). These tests fake
 that subprocess boundary -- monkeypatching _find_nam_site_packages (a fake venv layout under
@@ -80,7 +80,7 @@ def test_detect_delay_when_sibling_venv_has_no_python_binary(monkeypatch, tmp_pa
 
 def _run_detect_delay_with_helper_output(monkeypatch, tmp_path, payload, returncode=0, stderr=""):
     """Wire detect_delay's subprocess call to a canned response matching
-    tools/nam_delay_helper.py's real JSON-on-stdout contract, without spawning it."""
+    nam_delay_helper.py's real JSON-on-stdout contract, without spawning it."""
     site_packages = _fake_sibling_venv(tmp_path)
     monkeypatch.setattr(gdc, "_find_nam_site_packages", lambda: site_packages)
 

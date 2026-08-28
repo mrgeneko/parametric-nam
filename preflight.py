@@ -11,7 +11,7 @@ implausible -- the three failure modes that have each cost a full render + train
                       voltage, not an interface reference)
 
 Exit status is nonzero if any HARD check fails, so a generation script can gate on it:
-  python tools/preflight.py --backend livespice ... && python gen_dataset_from_schx.py ...
+  python preflight.py --backend livespice ... && python gen_dataset_from_schx.py ...
 
 Direction convention: a knob turned UP (value 0->1) should INCREASE the quantity it is named
 for -- Gain/Drive -> more distortion+level, Tone/Treble -> more treble, Bass -> more lows,
@@ -41,15 +41,15 @@ Drive/level knobs are never touched by either mitigation -- they must see the fu
 including saturation.
 
 Usage:
-  livespice: python tools/preflight.py --backend livespice --schx DEVICE.schx --knobs Gain,Tone \\
+  livespice: python preflight.py --backend livespice --schx DEVICE.schx --knobs Gain,Tone \\
       --input sweep.wav [--fixed-params "Volume=1.0"] [--oversample 8] [--iterations 256] \\
       [--find-peak] [--json report.json]
 
-  ngspice:   python tools/preflight.py --backend ngspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
+  ngspice:   python preflight.py --backend ngspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
       --module gen_ocd_ngspice --probe-node OUT --input sweep.wav [--vin 1.0] \\
       [--exclude-knob Volume] [--find-peak]
 
-  ltspice:   python tools/preflight.py --backend ltspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
+  ltspice:   python preflight.py --backend ltspice-deck --pedal-dir ~/work/parametric-devices/pedals \\
       --module gen_ocd_ltspice --probe-node spk --input sweep.wav [--vin 1.0] \\
       [--exclude-knob Volume] [--find-peak]
 """
@@ -65,13 +65,13 @@ import numpy as np
 import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
-from tools.find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
-from tools.knob_classify import classify as _classify_by_name  # noqa: E402
+from find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
+from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference, matches param_train.py
@@ -192,10 +192,10 @@ def main():
                      help="[ngspice-deck] silence prepended before probe content -- see this repo's "
                           "README ('Known issue: excitation needs a silent lead-in'). 0 to disable. "
                           "Not used for ltspice-deck -- LTspice's own .ic/uic bias hints replace the "
-                          "need for a cold-start settling lead-in, see tools/ltspice_spicelib.py.")
+                          "need for a cold-start settling lead-in, see ltspice_spicelib.py.")
     ap.add_argument("--out-scale", type=float, default=0.05,
                      help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
-                          "tools/ltspice_spicelib.py's docstring")
+                          "ltspice_spicelib.py's docstring")
 
     # shared
     ap.add_argument("--input", required=True, help="the sweep/clip generation will use")
@@ -263,7 +263,7 @@ def main():
     #   probe_peak  -- peak of the TRUNCATED probe slice; what the probe renders are driven at.
     #   native_peak -- peak of the WHOLE input; what the dataset will actually be rendered at,
     #                  and therefore the only correct reference for input_level_dbu.
-    # --seconds takes a PREFIX, and an excitation built by tools/build_excitation.py puts its
+    # --seconds takes a PREFIX, and an excitation built by build_excitation.py puts its
     # loud content LAST (real playing, then amplitude-stepped sweeps, then transient bursts).
     # Measured on the Joyo's 38 s excitation: the 10 s prefix peaks at 3.940 V against the
     # file's 14.833 V -- 11.5 dB down -- so deriving the exported dBu from the probe slice
@@ -504,7 +504,7 @@ def main():
                         f"knob checks never saw the excitation's loud region. Direction "
                         f"readings are CLEANER this way (clipping swamps EQ direction), but "
                         f"saturation behaviour there is untested -- that is "
-                        f"tools/check_transient_coverage.py's job.")
+                        f"check_transient_coverage.py's job.")
 
     print()
     for w in warn:  print(f"  WARN: {w}")

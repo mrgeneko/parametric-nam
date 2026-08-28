@@ -40,7 +40,7 @@ Output directory has the exact same contract gen_dataset_from_schx.py produces (
 params.csv, sig/<shard>/<idx>.npy -> outputs.npy after --combine), so param_train.py's
 ParamDataset reads it unmodified -- this file only builds config.json + params.csv + audio, then
 calls gen_dataset_from_schx.combine()/run_post_generation_checks() directly rather than reimplementing
-either. This is a SCATTERED point-sample dataset, not a Cartesian grid -- tools/grid_adequacy.py's
+either. This is a SCATTERED point-sample dataset, not a Cartesian grid -- grid_adequacy.py's
 interpolation-adequacy reasoning does not apply here; there is nothing to interpolate between
 systematically with only a handful of arbitrary points.
 
@@ -150,7 +150,7 @@ _NAM_LOOKBACK_SAMPLES = 10_000
 # so the only thing gating .aif/.aiff out was this list, not a real format limitation.
 WET_CAPTURE_EXTS = (".wav", ".aif", ".aiff")
 
-_NAM_DELAY_HELPER = Path(__file__).resolve().parent / "tools" / "nam_delay_helper.py"
+_NAM_DELAY_HELPER = Path(__file__).resolve().parent / "nam_delay_helper.py"
 
 
 def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
@@ -173,7 +173,7 @@ def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
     module docstring for why that actively misleads) -- only NAM's own impulse-based calibration,
     or a disclosed delay=0.
 
-    RUNS IN A SUBPROCESS (tools/nam_delay_helper.py), under the sibling neural-amp-modeler
+    RUNS IN A SUBPROCESS (nam_delay_helper.py), under the sibling neural-amp-modeler
     venv's OWN interpreter -- not a lazy in-process import like load_nam_model's. nam.train.core
     depends on numba, which checks numpy's version at import time; importing it in-process (even
     after adding the sibling venv's site-packages to sys.path) hands numba whatever numpy module

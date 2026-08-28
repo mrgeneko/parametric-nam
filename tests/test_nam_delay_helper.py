@@ -1,4 +1,4 @@
-"""Properties tools/nam_delay_helper.py must have. It runs as a subprocess under a SIBLING
+"""Properties nam_delay_helper.py must have. It runs as a subprocess under a SIBLING
 venv's interpreter specifically to dodge a numpy/numba version contamination bug (see module
 docstring) -- its whole contract with the caller (gen_dataset_from_captures.py's detect_delay())
 is "exactly one JSON line on stdout, exit 0, even for an expected failure." A raised exception
@@ -6,7 +6,7 @@ or extra stdout output breaks that contract silently. `nam` is not installed in 
 (confirmed -- ModuleNotFoundError), which is itself the real, always-exercised "nam_unavailable"
 path; the other branches are exercised by injecting a fake nam.train.core module.
 
-See tools/nam_delay_helper.py.
+See nam_delay_helper.py.
 """
 import json
 import sys
@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from tools import nam_delay_helper as helper
+import nam_delay_helper as helper
 
 
 class TestEmit:

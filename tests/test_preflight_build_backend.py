@@ -1,19 +1,19 @@
-"""Properties tools/preflight.py's _build_backend dispatch must have. A wrong knob list here
+"""Properties preflight.py's _build_backend dispatch must have. A wrong knob list here
 (e.g. forgetting --exclude-knob) means preflight silently checks the WRONG set of knobs against
 a real device -- the exact class of gap this whole tool exists to close. The livespice path
 (parse_schx_controls/resolve_knobs against a real .schx) is exercised functionally elsewhere in
 this repo's own manual verification; this file covers the ngspice-deck path and the shared
 unknown-backend guard, which need no .schx fixture.
 
-See tools/preflight.py.
+See preflight.py.
 """
 import types
 from pathlib import Path
 
 import pytest
 
-from tools.preflight import _build_backend
-from tools.render_backends import NgspiceBackend, LtspiceBackend
+from preflight import _build_backend
+from render_backends import NgspiceBackend, LtspiceBackend
 
 
 def write_fake_pedal_module(tmp_path, name, knob_names=("Gain", "Tone", "Volume")):

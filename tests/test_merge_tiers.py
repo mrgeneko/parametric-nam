@@ -1,16 +1,16 @@
-"""Properties tools/merge_tiers.py must have. Assembling a multi-tier SlimmableContainer is
+"""Properties merge_tiers.py must have. Assembling a multi-tier SlimmableContainer is
 pure JSON surgery specifically BECAUSE tiers share no weights -- these tests lock in the parts
 that make that surgery safe: refusing to silently merge two products that differ in anything
 but channel width, refusing a silent width collision, and recomputing max_value breakpoints
 exactly the way param_train's max_values() would.
 
-See tools/merge_tiers.py.
+See merge_tiers.py.
 """
 import json
 
 import pytest
 
-from tools.merge_tiers import main, par_of, signature, submodels_of, width_of
+from merge_tiers import main, par_of, signature, submodels_of, width_of
 
 
 def make_bare_nam(width, version="0.7.0", head_mode="skip", schema_version=1,

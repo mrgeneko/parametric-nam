@@ -1,16 +1,16 @@
-"""Properties tools/check_input_headroom.py's read_peak_v() must have. It's a hand-rolled WAV
+"""Properties check_input_headroom.py's read_peak_v() must have. It's a hand-rolled WAV
 parser (no soundfile/scipy) because this tool needs to read the exact peak sample value under
 this fleet's V0dBFS=1V convention across all three formats this fleet actually produces (16-bit
 PCM, 24-bit PCM, 32-bit float) -- a wrong peak here silently changes whether check_input_headroom
 warns that a device's training excitation never reaches its own saturation ceiling.
 
-See tools/check_input_headroom.py.
+See check_input_headroom.py.
 """
 import struct
 
 import pytest
 
-from tools.check_input_headroom import read_peak_v
+from check_input_headroom import read_peak_v
 
 
 def _wav_bytes(audio_format, channels, sr, bits, data):

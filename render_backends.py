@@ -39,11 +39,11 @@ import numpy as np
 import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 from gen_dataset_from_schx import LIVESPICE_CLI  # noqa: E402
 
-from tools.ngspice_spicelib import load_input, render_grid  # noqa: E402
-from tools import ltspice_spicelib  # noqa: E402
+from ngspice_spicelib import load_input, render_grid  # noqa: E402
+import ltspice_spicelib  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
 
 

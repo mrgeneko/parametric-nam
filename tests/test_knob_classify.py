@@ -1,12 +1,12 @@
-"""Properties tools/knob_classify.classify() must have -- it decides which real fleet knobs
+"""Properties knob_classify.classify() must have -- it decides which real fleet knobs
 get a direction check, which get preflight.py's --eq-check-drive-level EQ-swamp protection,
 and which metric gen_dataset_from_schx.py's knob-sensitivity check uses. A wrong or missed
 classification is silent everywhere it matters: an unrecognized name gets the LEAST scrutiny,
 not the most (see classify()'s own docstring).
 
-See tools/knob_classify.py, tools/preflight.py, tools/scaffold_config.py.
+See knob_classify.py, preflight.py, scaffold_config.py.
 """
-from tools.knob_classify import DIRECTION_RULES, TONE_LIKE_KINDS, classify
+from knob_classify import DIRECTION_RULES, TONE_LIKE_KINDS, classify
 
 
 class TestRealFleetNames:

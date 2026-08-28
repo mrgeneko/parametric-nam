@@ -11,7 +11,7 @@ This does NOT touch the dry input file -- only the rendered wet target. Not run 
 invoke explicitly and point a data_config.json's y_path at the output.
 
 Usage:
-  python3 tools/apply_output_limiter.py IN.wav OUT.wav --threshold 0.35 --ceiling 0.6
+  python3 apply_output_limiter.py IN.wav OUT.wav --threshold 0.35 --ceiling 0.6
 
 Below --threshold, samples pass through unchanged. Above it, a smooth tanh knee compresses
 toward an asymptote at --ceiling -- never a hard clip, so no new harmonic-distortion

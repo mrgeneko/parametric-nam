@@ -1,17 +1,17 @@
-"""Properties tools/plot_tone_response.py's measurement primitives must have. freq_response is
+"""Properties plot_tone_response.py's measurement primitives must have. freq_response is
 the actual measurement this whole chart is built on -- a wrong dB number here silently
 mis-documents (or mis-scores against the schx oracle) a shipped model's tone-stack response,
 not a crash. tiers_from_model's ratio/label derivation feeds every render call's --size
 argument, so a wrong ratio renders the WRONG TIER's response and reports it as the right one.
 
-See tools/plot_tone_response.py.
+See plot_tone_response.py.
 """
 import math
 
 import numpy as np
 import pytest
 
-from tools.plot_tone_response import F0, F1, find_oracle_bin, find_render_bin, freq_response, make_sweep, tiers_from_model
+from plot_tone_response import F0, F1, find_oracle_bin, find_render_bin, freq_response, make_sweep, tiers_from_model
 
 
 class TestMakeSweep:
@@ -24,7 +24,7 @@ class TestMakeSweep:
         assert np.abs(conv).max() == pytest.approx(1.0, rel=1e-9)
 
     def test_length_matches_the_configured_duration(self):
-        from tools.plot_tone_response import DUR
+        from plot_tone_response import DUR
         x, _ = make_sweep(48000)
         assert len(x) == int(48000 * DUR)
 
@@ -115,12 +115,12 @@ class TestFindRenderBin:
 
     def test_falls_back_to_which_when_nothing_else_matches(self, monkeypatch):
         monkeypatch.delenv("RENDER_PARAMETRIC", raising=False)
-        monkeypatch.setattr("tools.plot_tone_response.shutil.which", lambda name: "/usr/local/bin/render_parametric")
+        monkeypatch.setattr("plot_tone_response.shutil.which", lambda name: "/usr/local/bin/render_parametric")
         assert find_render_bin(None) == "/usr/local/bin/render_parametric"
 
     def test_returns_none_when_nothing_is_found(self, monkeypatch):
         monkeypatch.delenv("RENDER_PARAMETRIC", raising=False)
-        monkeypatch.setattr("tools.plot_tone_response.shutil.which", lambda name: None)
+        monkeypatch.setattr("plot_tone_response.shutil.which", lambda name: None)
         assert find_render_bin(None) is None
 
 
@@ -132,6 +132,6 @@ class TestFindOracleBin:
 
     def test_returns_none_when_nothing_found(self, monkeypatch, tmp_path):
         monkeypatch.delenv("LIVESPICE_CLI", raising=False)
-        monkeypatch.setattr("tools.plot_tone_response.shutil.which", lambda name: None)
-        monkeypatch.setattr("tools.plot_tone_response.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("plot_tone_response.shutil.which", lambda name: None)
+        monkeypatch.setattr("plot_tone_response.Path.home", lambda: tmp_path)
         assert find_oracle_bin(None) is None

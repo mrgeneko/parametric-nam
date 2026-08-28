@@ -1,18 +1,18 @@
-"""Properties tools/find_saturation_point.py's backend-agnostic saturation sweep must have.
+"""Properties find_saturation_point.py's backend-agnostic saturation sweep must have.
 It underlies preflight.py's --find-peak/--clean-probe-peak (the fix for EQ-knob checks getting
 swamped by clipping at a moderate Gain default) and prepare_excitation.py's excitation-level
 choice -- a wrong ceiling/onset silently mis-sizes both. Exercised here against a FakeBackend
 (no real ngspice/livespice) so the algorithm's own logic -- curve assembly, transient exclusion,
 ceiling/onset selection, failure handling -- is tested independently of any circuit.
 
-See tools/find_saturation_point.py, tools/preflight.py, tools/prepare_excitation.py.
+See find_saturation_point.py, preflight.py, prepare_excitation.py.
 """
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from tools.find_saturation_point import (
+from find_saturation_point import (
     _linear_region_top,
     _loglog_interp,
     find_saturation_point,

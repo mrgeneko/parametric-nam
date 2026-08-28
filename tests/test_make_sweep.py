@@ -1,11 +1,11 @@
 """Properties the training sweep must have. Each one corresponds to something that actually bit us.
 
-See tools/make_sweep.py.
+See make_sweep.py.
 """
 import numpy as np
 import pytest
 
-from tools.make_sweep import SR, build_excitation, flat_burst, log_chirp, silence
+from make_sweep import SR, build_excitation, flat_burst, log_chirp, silence
 
 
 @pytest.fixture(scope="module")

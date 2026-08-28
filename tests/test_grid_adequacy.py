@@ -1,16 +1,16 @@
-"""Properties tools/grid_adequacy.py's pure grid-density math and config-splice helper must
+"""Properties grid_adequacy.py's pure grid-density math and config-splice helper must
 have. This tool exists because training-based grid comparisons were confounded by optimizer
 noise (see module docstring); its whole value is that `esr`/`cell_error`/`suggest_axis` are
 correct WITHOUT training anything. A fake render() stands in for a real circuit so the
 cell-error/suggest/write-back logic is tested independently of ngspice/livespice.
 
-See tools/grid_adequacy.py.
+See grid_adequacy.py.
 """
 import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.grid_adequacy import Renderer, cell_error, esr, measure_grid, suggest_axis, write_knobs
+from grid_adequacy import Renderer, cell_error, esr, measure_grid, suggest_axis, write_knobs
 
 
 class FakeRender:
@@ -206,7 +206,7 @@ class TestRendererNgspiceDeck:
     def test_uses_two_windows_and_the_ngspice_backends_output(self, tmp_path, monkeypatch):
         pedal_dir = self._write_pedal_module(tmp_path)
         inp = self._write_input(tmp_path)
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
         td = tmp_path / "scratch"; td.mkdir()
 
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
@@ -226,7 +226,7 @@ class TestRendererNgspiceDeck:
                 seen.append(dict(jobs[0]["params"]))
                 return super().render_many(jobs, handle, scratch)
 
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", RecordingBackend)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", RecordingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="Tone=0.3",
                     td=td, probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
@@ -245,7 +245,7 @@ class TestRendererNgspiceDeck:
             def render_many(self, jobs, handle, scratch):
                 return {jobs[0]["tag"]: None}
 
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", FailingBackend)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", FailingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                     probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
@@ -263,7 +263,7 @@ class TestRendererNgspiceDeck:
                 calls.append(1)
                 return super().render_many(jobs, handle, scratch)
 
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", CountingBackend)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", CountingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                     probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
@@ -282,15 +282,15 @@ class TestRendererNgspiceDeck:
         inp = self._write_input(tmp_path)
         seen_lead_s = []
 
-        import tools.grid_adequacy as ga
+        import grid_adequacy as ga
         real_write_probe_clip = ga.write_probe_clip
 
         def spy(sig, sr, path, lead_s=None):
             seen_lead_s.append(lead_s)
             return real_write_probe_clip(sig, sr, path, lead_s=lead_s)
 
-        monkeypatch.setattr("tools.grid_adequacy.write_probe_clip", spy)
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
+        monkeypatch.setattr("grid_adequacy.write_probe_clip", spy)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", self.FakeNgspiceBackend)
         td = tmp_path / "scratch"; td.mkdir()
         Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                 probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
@@ -299,7 +299,7 @@ class TestRendererNgspiceDeck:
 
     def test_ngspice_deck_maxstep_reaches_the_backend(self, tmp_path, monkeypatch):
         """The exact regression this override exists for: the Fulltone OCD's most extreme
-        Gain/Tone corner needed maxstep~1e-7 (measured via tools/measure_ngspice_timestep.py),
+        Gain/Tone corner needed maxstep~1e-7 (measured via measure_ngspice_timestep.py),
         far finer than NgspiceBackend's 3e-6 default -- this must actually reach the backend
         grid_adequacy renders through, not just be accepted and silently ignored."""
         pedal_dir = self._write_pedal_module(tmp_path)
@@ -311,7 +311,7 @@ class TestRendererNgspiceDeck:
                 super().__init__(build_deck, probe_node=probe_node, maxstep=maxstep)
                 seen_maxsteps.append(maxstep)
 
-        monkeypatch.setattr("tools.grid_adequacy.NgspiceBackend", RecordingBackend)
+        monkeypatch.setattr("grid_adequacy.NgspiceBackend", RecordingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                 probe_s=8.0, backend="ngspice-deck", pedal_dir=str(pedal_dir),
@@ -328,7 +328,7 @@ def test_fake_ltspice_backends_mirror_the_real_signature():
     surviving minority -- one cell 14x wrong -- while these tests stayed green throughout.
     """
     import inspect
-    from tools.render_backends import LtspiceBackend
+    from render_backends import LtspiceBackend
     real = set(inspect.signature(LtspiceBackend.__init__).parameters)
     fake = set(inspect.signature(TestRendererLtspiceDeck.FakeLtspiceBackend.__init__).parameters)
     missing = real - fake - {"parallel_sims"}   # the fake renders inline, so it needs no pool
@@ -337,7 +337,7 @@ def test_fake_ltspice_backends_mirror_the_real_signature():
 
 class TestRendererLtspiceDeck:
     """The Renderer's LTspice-hand-deck mode -- for a device whose ngspice-deck counterpart
-    can't converge on real playing content at all (see tools/ltspice_spicelib.py's own
+    can't converge on real playing content at all (see ltspice_spicelib.py's own
     docstring). Same stratified-window machinery as ngspice-deck, rendered through
     render_backends.LtspiceBackend against a gen_*_ltspice.py module instead."""
 
@@ -373,7 +373,7 @@ class TestRendererLtspiceDeck:
     def test_uses_two_windows_and_the_ltspice_backends_output(self, tmp_path, monkeypatch):
         pedal_dir = self._write_pedal_module(tmp_path)
         inp = self._write_input(tmp_path)
-        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", self.FakeLtspiceBackend)
+        monkeypatch.setattr("grid_adequacy.LtspiceBackend", self.FakeLtspiceBackend)
         td = tmp_path / "scratch"; td.mkdir()
 
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
@@ -393,7 +393,7 @@ class TestRendererLtspiceDeck:
                 seen.append(dict(jobs[0]["params"]))
                 return super().render_many(jobs, handle, scratch)
 
-        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", RecordingBackend)
+        monkeypatch.setattr("grid_adequacy.LtspiceBackend", RecordingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="Tone=0.3",
                     td=td, probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
@@ -413,7 +413,7 @@ class TestRendererLtspiceDeck:
             def render_many(self, jobs, handle, scratch):
                 return {jobs[0]["tag"]: None}
 
-        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", FailingBackend)
+        monkeypatch.setattr("grid_adequacy.LtspiceBackend", FailingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         r = Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                     probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
@@ -433,7 +433,7 @@ class TestRendererLtspiceDeck:
                                  timeout=timeout)
                 seen.append((maxstep, out_scale, timeout))
 
-        monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", RecordingBackend)
+        monkeypatch.setattr("grid_adequacy.LtspiceBackend", RecordingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                 probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),

@@ -43,7 +43,7 @@ adequacy (which checks interpolation error, not model behavior) and by aggregate
 validation ESR (which averages over everything else).
 
 **Mitigations, all already in this repo**:
-- **`tools/check_transient_coverage.py`** (pre-training gate, run automatically by
+- **`check_transient_coverage.py`** (pre-training gate, run automatically by
   `gen_dataset_from_schx.py` unless `--skip-transient-check`) — checks that the
   excitation's transient content actually reaches each corner's own saturation onset,
   across the **full min/max hypercube** (every swept knob independently at its own grid
@@ -56,7 +56,7 @@ validation ESR (which averages over everything else).
   with no `.schx` at all — `gen_dataset_from_schx.py`'s own automatic call is
   livespice-only, since that's the only path it drives; for a hand-deck device, call
   `check_transient_coverage.py` directly as its own gate before generating.
-- **`tools/scan_film_runaway.py`** (post-training, run by hand against a finished
+- **`scan_film_runaway.py`** (post-training, run by hand against a finished
   `.param.nam`) — replays a real reference clip through every tier at every corner
   (`--config` for the exact trained grid, not just the reduced set) and flags any window
   whose peak is anomalous relative to that model's own typical output. Scanning the
@@ -65,7 +65,7 @@ validation ESR (which averages over everything else).
   excitation** at that permutation, so when investigating a suspected corner, prefer
   `--reference <the training sweep.wav>` over an arbitrary clip; a scan that doesn't
   reproduce the triggering content can give a false sense of safety.
-- **`tools/build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
+- **`build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
   diagnosing the FiLM+LoRA case above) — `check_transient_coverage.py` only checks that
   the excitation's peak *level* reaches saturation onset per corner; it says nothing
   about *shape*. That FiLM+LoRA blowup happened at a trained grid point (not a gap
@@ -119,7 +119,7 @@ settled — a circuit without a slow DC-blocking network won't show this, but th
 know that in advance without checking, since the RC time constant is set by both output-stage
 values, not something knob positions expose directly.
 
-**Fix, applied by default**: `tools/build_excitation.py --lead-silence-s` (default `3.0`)
+**Fix, applied by default**: `build_excitation.py --lead-silence-s` (default `3.0`)
 prepends that many seconds of true silence before the `--input`-derived real-playing segment.
 The silent segment is written into the excitation file itself (not stripped after generation),
 so it also gives the DC-blocking network real settling time before the file's `real` segment
@@ -128,8 +128,8 @@ verified not to need it. This is a cheap, non-device-specific fix — prefer it 
 explicit `.ic` initial-condition statements to a specific device's deck, which would need to be
 hand-derived and re-verified per circuit.
 
-The same fix is also needed in `tools/preflight.py --backend ngspice-deck` and
-`tools/find_saturation_point.py`'s own amplitude sweep (both take `--lead-silence-s`, default
+The same fix is also needed in `preflight.py --backend ngspice-deck` and
+`find_saturation_point.py`'s own amplitude sweep (both take `--lead-silence-s`, default
 `3.0`) — a short knob-direction probe with no lead-in hits the identical cold-start transient,
 and it isn't just noisy, it can flip the answer: that pedal's Tone knob probed REVERSED at a
 5-second probe with no lead-in and correctly OK once probed with a lead-in (or a long-enough
@@ -146,7 +146,7 @@ component values before trusting the default.
 
 ## Known issue: preflight's EQ-knob checks can be swamped by the circuit's own gain control
 
-`tools/preflight.py`'s dead/reversed-knob check holds every non-tested knob at a flat `0.5`
+`preflight.py`'s dead/reversed-knob check holds every non-tested knob at a flat `0.5`
 center. For a low-to-moderate-gain circuit that's fine, but for a genuinely high-gain device
 (one real pedal's stages run up to ~50dB combined), `0.5` on the Gain/Drive knob can already be
 deep into saturation — and hard clipping SWAMPS a passive tone stack's real effect, since the

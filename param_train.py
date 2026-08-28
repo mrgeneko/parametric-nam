@@ -733,7 +733,7 @@ def parse_widths(spec) -> list[int]:
     A single width ('5' -> [5]) is allowed: it trains ONE tier, exported as a
     1-submodel container (see SlimmableParametricA2 for how the single tier maps
     to the `full` role). Useful for training an extra width to later splice into
-    an existing container with tools/merge_tiers.py."""
+    an existing container with merge_tiers.py."""
     if not spec:
         return list(K_DEFAULT_WIDTHS)
     if isinstance(spec, (list, tuple)):

@@ -88,11 +88,11 @@ def check_oracle(backend: str) -> None:
     clear, actionable message (built vs. not built vs. wrong path) if not -- instead
     of letting the first real render fail deep into a run with a raw subprocess
     FileNotFoundError, which is what happens with no check at all (confirmed: this is
-    exactly what tools/grid_adequacy.py and run_pipeline.py's own STEP 0 used to hit,
+    exactly what grid_adequacy.py and run_pipeline.py's own STEP 0 used to hit,
     since neither called this check before this was factored out to be shared).
 
     Callers: gen_dataset_from_schx.py's own generation path, run_pipeline.py (once, up
-    front, covering every step that will need the oracle), tools/grid_adequacy.py."""
+    front, covering every step that will need the oracle), grid_adequacy.py."""
     if backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
         sys.exit(1)
@@ -114,7 +114,7 @@ def check_oracle(backend: str) -> None:
         print("ngspice not found on PATH. Install it (e.g. apt install ngspice).", file=sys.stderr)
         sys.exit(1)
     if backend == "ltspice-deck":
-        from tools.ltspice_spicelib import LTSPICE_BIN
+        from ltspice_spicelib import LTSPICE_BIN
         if not LTSPICE_BIN.exists():
             env = os.environ.get("LTSPICE_BIN")
             print(f"ERROR: LTspice not found at {LTSPICE_BIN}", file=sys.stderr)
@@ -1035,7 +1035,7 @@ def input_provenance(wav: Path) -> dict:
         "rms": round(float(np.sqrt((d.astype(np.float64) ** 2).mean())), 6),
     }
     # BUILD RECIPE: if this excitation was constructed (not the raw licensed source itself --
-    # e.g. tools/build_excitation.py's composite/trimmed outputs), it writes a sidecar
+    # e.g. build_excitation.py's composite/trimmed outputs), it writes a sidecar
     # <stem>.recipe.json next to the WAV recording exactly how (source file + hash, tool git rev,
     # every CLI arg). Embed it here so it rides along automatically into every dataset's
     # config.json -> parametric-nam-models' dataset_config.json, with no per-device wiring.
@@ -1726,10 +1726,10 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
     #     while a direct per-band spectral comparison showed a real, physically-correct effect
     #     (Bass: +1.4dB in 80-300Hz; Middle: +2.5 to +4.1dB in 300Hz-8kHz) -- a false alarm from
     #     the metric, not a broken knob. Declare a knob "tone" (or the more specific hi/lo/mid --
-    #     same vocabulary tools/preflight.py's classify() and scaffold_config.py's auto-tagging
-    #     use, see tools/knob_classify.py) in the config to get the right check for it; anything
+    #     same vocabulary preflight.py's classify() and scaffold_config.py's auto-tagging
+    #     use, see knob_classify.py) in the config to get the right check for it; anything
     #     left unspecified keeps the old RMS-only behavior.
-    from tools.knob_classify import TONE_LIKE_KINDS
+    from knob_classify import TONE_LIKE_KINDS
     print("  Knob sensitivity:")
     tone_knobs = [k for k in knobs if knob_kind.get(k) in TONE_LIKE_KINDS or knob_kind.get(k) == "tone"]
     band_power_cache: dict = {}
@@ -1942,7 +1942,7 @@ def main():
                          "backend only). See internal engineering notes: this refuses to "
                          "start generation if the excitation's transient-bearing content never "
                          "reaches saturation at some knob-grid corner (checked via "
-                         "tools/check_transient_coverage.py against the full min/max hypercube "
+                         "check_transient_coverage.py against the full min/max hypercube "
                          "corner set) -- exactly the gap that under-covered Tweed 5F6-A's "
                          "mixed low-volume/high-tone corner and produced a real ~100x blowup "
                          "there (the solo-only corner set this check used to run missed it "
@@ -2220,10 +2220,10 @@ def main():
     # transient-bearing content never reaches saturation at some knob-grid corner --
     # exactly the gap that under-covered Tweed 5F6-A and produced the FiLM/LeakyReLU
     # runaway there, found only after a full ~16h training run. Only supported for the
-    # livespice backend (tools/preflight.py's find_saturation_point is livespice_cli-only).
+    # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
     if not args.skip_transient_check and args.backend == "livespice" and not args.random:
-        from tools.check_transient_coverage import check_coverage, _transient_peak_from_recipe
+        from check_transient_coverage import check_coverage, _transient_peak_from_recipe
         transient_peak = args.transient_peak
         if transient_peak is None:
             transient_peak = _transient_peak_from_recipe(in_wav)

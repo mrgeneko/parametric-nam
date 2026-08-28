@@ -66,7 +66,7 @@ something `.schx` has no component for (a real MOSFET) or a feedback loop LiveSP
 fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s translation.
 
 **LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
-`grid_adequacy.py`/`check_transient_coverage.py`, or `tools/render_ltspice_deck.py`
+`grid_adequacy.py`/`check_transient_coverage.py`, or `render_ltspice_deck.py`
 directly) — the same deck-module situation as `ngspice-deck`. Two circumstances call for it:
 a device whose ngspice deck can't converge on real playing content **at all**, independent of
 timestep; and a device where every backend converges but LTspice is the one whose answer is
@@ -75,7 +75,7 @@ Found on one real pedal: its ideal tanh-bounded op-amp B-source is a genuine
 Newton-solver dead end in ngspice (70/70 renders across the full knob grid timed out, at
 every `maxstep` from 3e-6 down to 3e-8), while LTspice gets past it with a real op-amp
 macromodel and explicit `.ic`/`uic` initial-condition hints unavailable through ngspice's
-B-source style — see `tools/ltspice_spicelib.py`'s module docstring for the full
+B-source style — see `ltspice_spicelib.py`'s module docstring for the full
 investigation.
 
 **Also worth reaching for when ngspice *does* converge.** On another real pedal both SPICE

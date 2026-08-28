@@ -1,17 +1,17 @@
-"""Properties tools/render_ngspice_deck.py's CLI orchestration must have. It replaced 6
+"""Properties render_ngspice_deck.py's CLI orchestration must have. It replaced 6
 near-identical per-device render scripts (see module docstring); the only genuinely
 device-specific logic left is knob-name validation and the grid/manifest/mapping.csv
 bookkeeping around ngspice_spicelib's load_input/render_grid/render_one, which are stubbed
 out here so this file's own argument handling and output-writing logic is tested directly.
 
-See tools/render_ngspice_deck.py.
+See render_ngspice_deck.py.
 """
 import json
 import sys
 
 import pytest
 
-from tools.render_ngspice_deck import main
+from render_ngspice_deck import main
 
 
 def write_fake_pedal_module(tmp_path, name, knob_names=("Gain", "Tone")):
@@ -32,7 +32,7 @@ def common_args(tmp_path, module, infile="in.wav", extra=()):
 class TestKnobValidation:
     def test_unknown_knob_name_exits(self, tmp_path, monkeypatch):
         write_fake_pedal_module(tmp_path, "pedal_a")
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_a", extra=[
             "out.wav", "--knob", "Bogus=0.5"]))
@@ -43,9 +43,9 @@ class TestKnobValidation:
 class TestSingleRender:
     def test_reports_ok_when_peak_under_threshold(self, tmp_path, monkeypatch, capsys):
         write_fake_pedal_module(tmp_path, "pedal_b")
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
-        monkeypatch.setattr("tools.render_ngspice_deck.render_one", lambda *a, **kw: 1.2)
+        monkeypatch.setattr("render_ngspice_deck.render_one", lambda *a, **kw: 1.2)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_b", extra=[
             "out.wav", "--knob", "Gain=0.5"]))
         main()
@@ -53,18 +53,18 @@ class TestSingleRender:
 
     def test_reports_failed_when_render_does_not_converge(self, tmp_path, monkeypatch, capsys):
         write_fake_pedal_module(tmp_path, "pedal_c")
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
-        monkeypatch.setattr("tools.render_ngspice_deck.render_one", lambda *a, **kw: None)
+        monkeypatch.setattr("render_ngspice_deck.render_one", lambda *a, **kw: None)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_c", extra=["out.wav"]))
         main()
         assert "FAILED" in capsys.readouterr().out
 
     def test_peak_above_ok_max_peak_is_reported_failed(self, tmp_path, monkeypatch, capsys):
         write_fake_pedal_module(tmp_path, "pedal_d")
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
-        monkeypatch.setattr("tools.render_ngspice_deck.render_one", lambda *a, **kw: 999.0)
+        monkeypatch.setattr("render_ngspice_deck.render_one", lambda *a, **kw: 999.0)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_d", extra=["out.wav"]))
         main()
         assert "FAILED" in capsys.readouterr().out
@@ -73,7 +73,7 @@ class TestSingleRender:
 class TestGridRequiresOutdir:
     def test_grid_without_outdir_raises(self, tmp_path, monkeypatch):
         write_fake_pedal_module(tmp_path, "pedal_e")
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_e", extra=[
             "--grid", "Gain=0.1,0.5,0.9"]))
@@ -85,12 +85,12 @@ class TestGridManifestAndMapping:
     def test_writes_a_manifest_row_per_combo_and_a_cartesian_product_count(self, tmp_path, monkeypatch):
         write_fake_pedal_module(tmp_path, "pedal_f")
         outdir = tmp_path / "caps"
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
 
         def fake_render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp, maxstep, parallel_sims):
             return {outfile: 1.0 for _knobs, outfile in jobs}
-        monkeypatch.setattr("tools.render_ngspice_deck.render_grid", fake_render_grid)
+        monkeypatch.setattr("render_ngspice_deck.render_grid", fake_render_grid)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_f", extra=[
             "--grid", "Gain=0.1,0.5,0.9", "Tone=0.2,0.8", "--outdir", str(outdir)]))
         main()
@@ -106,9 +106,9 @@ class TestGridManifestAndMapping:
         def fake_render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp, maxstep, parallel_sims):
             # first job "fails" (None peak), second "converges"
             return {jobs[0][1]: None, jobs[1][1]: 1.0}
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
-        monkeypatch.setattr("tools.render_ngspice_deck.render_grid", fake_render_grid)
+        monkeypatch.setattr("render_ngspice_deck.render_grid", fake_render_grid)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_g", extra=[
             "--grid", "Gain=0.1,0.9", "--outdir", str(outdir)]))
         main()
@@ -125,9 +125,9 @@ class TestGridManifestAndMapping:
 
         def fake_render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp, maxstep, parallel_sims):
             return {jobs[0][1]: 999.0}
-        monkeypatch.setattr("tools.render_ngspice_deck.load_input",
+        monkeypatch.setattr("render_ngspice_deck.load_input",
                              lambda *a, **kw: (1000, [0] * 10, "src"))
-        monkeypatch.setattr("tools.render_ngspice_deck.render_grid", fake_render_grid)
+        monkeypatch.setattr("render_ngspice_deck.render_grid", fake_render_grid)
         monkeypatch.setattr(sys, "argv", common_args(tmp_path, "pedal_h", extra=[
             "--grid", "Gain=0.5", "--outdir", str(outdir)]))
         main()

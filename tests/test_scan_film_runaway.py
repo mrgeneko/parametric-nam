@@ -1,4 +1,4 @@
-"""Tests for tools/scan_film_runaway.py's model-reconstruction path.
+"""Tests for scan_film_runaway.py's model-reconstruction path.
 
 Had zero test coverage before -- not even for its pre-existing (non-LoRA) behavior. The gap
 that actually mattered: load_all_submodels() reconstructed every submodel with lora_rank=0
@@ -10,7 +10,7 @@ import json
 
 import torch
 
-from tools.scan_film_runaway import load_all_submodels
+from scan_film_runaway import load_all_submodels
 from param_train import SlimmableParametricA2
 
 

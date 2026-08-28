@@ -4,10 +4,10 @@ Full per-script reference for parametric-nam. See the main README's Quick Start 
 
 # Scripts
 
-## `tools/scaffold_config.py` — generate a starting `config.toml` for a new circuit
+## `scaffold_config.py` — generate a starting `config.toml` for a new circuit
 
 ```bash
-python tools/scaffold_config.py --schx path/to/circuit.schx
+python scaffold_config.py --schx path/to/circuit.schx
 ```
 
 Discovers the circuit's real controls (ganged pots collapsed to one, same logic
@@ -22,7 +22,7 @@ largest tested candidate as a starting point and leaves the judgment call to you
 
 It also writes a **`[knob-kind]` table**, guessing each knob's role (`hi`/`lo`/`mid`
 tone-shaping, `drive` gain/distortion, `rms` volume/level) from its name via
-`tools/knob_classify.py` — the same heuristic `preflight.py` uses for its own direction and
+`knob_classify.py` — the same heuristic `preflight.py` uses for its own direction and
 EQ-swamp checks (see [that Known issue](known-issues.md#known-issue-preflights-eq-knob-checks-can-be-swamped-by-the-circuits-own-gain-control)).
 A name that matches nothing is written commented-out as `UNCONFIRMED` rather than
 silently defaulted or guessed wrong — **always review this table by hand**: a misclassified
@@ -31,7 +31,7 @@ silently skips `preflight.py`'s role-aware EQ-check protection for every OTHER k
 direction check. Override a bad guess with `preflight.py --knob-kind NAME=kind,...`, or just
 edit the table before your first real run.
 
-The `[knobs]` grid it writes is a **placeholder** (run `tools/grid_adequacy.py --config
+The `[knobs]` grid it writes is a **placeholder** (run `grid_adequacy.py --config
 <output> --apply` next to turn it into a measured one) but a role-aware one, not a naive
 `linspace(0,1)` for every knob: a tone/EQ knob (`hi`/`lo`/`mid`) stays evenly spaced but
 narrowed to `[0.2, 0.8]` (`--grid-points` points, default 3) — the fully-CCW/CW extremes
@@ -43,12 +43,12 @@ with `--grid-points`' own evenly-spaced baseline across the full range, matching
 grids already used on this fleet (e.g. `Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]`). An
 unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
 
-## `tools/grid_adequacy.py` — measure whether a knob grid is dense enough
+## `grid_adequacy.py` — measure whether a knob grid is dense enough
 
 ```bash
-./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
-./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
-./tools/grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
+./grid_adequacy.py --config path/to/device-config.toml --target 0.009
+./grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
+./grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
 ```
 
 Renders the circuit's true output at each grid cell's midpoint and compares it against
@@ -96,14 +96,14 @@ against a high-oversample reference (not the next rung up, which understates the
 you're chasing — training past that point just teaches the model the integrator's own
 mistakes.
 
-## `tools/build_excitation.py` — build a training excitation that covers the full input range
+## `build_excitation.py` — build a training excitation that covers the full input range
 
 A sweep/DI file on its own (e.g. `T3K-sweep-v3.wav`) samples its own loud region essentially
 never — a model trained on it alone never sees the device saturating, and goes
 out-of-distribution the moment a hot input arrives. Build a proper training excitation from it:
 
 ```bash
-python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
+python build_excitation.py --input examples/T3K-sweep-v3.wav \
     --output ~/work/tmp/DEVICE_excitation.wav \
     --realistic-peak <below the device's measured saturation onset> \
     --sweep-peaks <levels up to the device's max output + headroom>
@@ -111,7 +111,7 @@ python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
 
 That concatenates the `--input` clip with amplitude-stepped log sweeps that **do** reach
 maximum output, plus a leading silence so the render is not sampling a cold-start transient.
-Then gate it with `tools/check_transient_coverage.py`, which fails if any knob corner's
+Then gate it with `check_transient_coverage.py`, which fails if any knob corner's
 transient content never reaches that corner's own saturation onset.
 
 **Not called by `run_pipeline.py`** — it's a manual step you run once per device to produce
@@ -188,10 +188,10 @@ circuit's own typical corner without ever actually diverging.
 all** — it's the adaptive-timestep tradeoff; see [Backends](backends.md) for the measured
 numbers (a real 2.7x-slower case and a real total-non-convergence case).
 
-## `tools/render_ngspice_deck.py` — render a hand-written ngspice deck's knob sweep
+## `render_ngspice_deck.py` — render a hand-written ngspice deck's knob sweep
 
 ```bash
-python tools/render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
+python render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
     --module gen_ocd_ngspice --probe-node OUT \
     in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
 ```
@@ -210,7 +210,7 @@ Writes `caps/cap_0000.wav ...` + `caps/manifest.jsonl` + `caps/mapping.csv` (an 
 filename→knob-value table for `gen_dataset_from_captures.py --mapping-csv`, sidestepping that
 tool's filename-token convention entirely, since these knob values are already known exactly,
 not encoded in the filename). **`--absolute`** renders a file already built at the
-`V0dBFS=1V` convention (e.g. `tools/build_excitation.py`/`tools/prepare_excitation.py
+`V0dBFS=1V` convention (e.g. `build_excitation.py`/`prepare_excitation.py
 --backend ngspice-deck` output) using its own sample values directly as volts, with no
 peak-rescaling — necessary because those files intentionally have different segments at
 different absolute drive levels, which a normal `--vin` rescale would flatten.
@@ -223,10 +223,10 @@ this render harness too — it used to be one per device (`render_ocd.py`, `rend
 etc., each a near-identical ~100-line copy differing only in the hardcoded module and a
 couple of device-specific defaults) until this consolidated them.
 
-## `tools/render_ltspice_deck.py` — render an LTspice deck's knob sweep
+## `render_ltspice_deck.py` — render an LTspice deck's knob sweep
 
 ```bash
-python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
+python render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
     --module gen_ocd_ltspice --tap spk \
     in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
 ```
@@ -244,7 +244,7 @@ the tap down before LTspice's `.wave` writes it (LTspice's wav output is
 +/-1V-PCM-bounded) and `render_grid`/`render_one` divide it back out — raise it toward 1.0
 only if the tap is known to never exceed `1/out_scale` volts. `--timeout` defaults to
 scaling with the input's own duration rather than a flat number (see
-`tools/ltspice_spicelib.py`'s `render_grid` docstring) — a flat timeout tuned for a short
+`ltspice_spicelib.py`'s `render_grid` docstring) — a flat timeout tuned for a short
 probe silently kills every job partway through a full excitation capture, which looks
 exactly like a genuine convergence failure.
 
@@ -450,10 +450,10 @@ key that stock loaders ignore but a parametric-aware host (`NAMix`,
 anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
 where embedding the full master in every tone just multiplies size.
 
-## `tools/plot_tone_response.py` — frequency-response chart for an exported `.nam`
+## `plot_tone_response.py` — frequency-response chart for an exported `.nam`
 
 ```bash
-python tools/plot_tone_response.py \
+python plot_tone_response.py \
     --model bundle.optimal.param.nam --config dataset/config.json \
     --out tone_response.svg --summary tone_response.md \
     --schx circuit.schx

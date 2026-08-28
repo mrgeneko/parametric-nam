@@ -73,9 +73,9 @@ nothing else in the output says so. Measured on the Joyo American Sound: 38 of 4
 out, and the table put one cell at 0.6578 (18.8x over) where a clean re-run measured 0.0475
 (1.4x). If the cause is a timeout rather than true non-convergence, raise --ltspice-timeout.
 
-    ./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
-    ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
-    ./tools/grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
+    ./grid_adequacy.py --config path/to/device-config.toml --target 0.009
+    ./grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
+    ./grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
 """
 from __future__ import annotations
 
@@ -93,16 +93,16 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import (LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice,
                                     check_oracle, write_probe_clip)
 
 import importlib  # noqa: E402
 
-from tools.ngspice_spicelib import load_input  # noqa: E402
-from tools import ltspice_spicelib  # noqa: E402
-from tools.prepare_excitation import _parse_fixed  # noqa: E402
-from tools.render_backends import NgspiceBackend, LtspiceBackend  # noqa: E402
+from ngspice_spicelib import load_input  # noqa: E402
+import ltspice_spicelib  # noqa: E402
+from prepare_excitation import _parse_fixed  # noqa: E402
+from render_backends import NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -550,7 +550,7 @@ def main() -> None:
                          "non-convergence). Default: use write_probe_clip's own 1.0s.")
     ap.add_argument("--ngspice-deck-maxstep", type=float, default=3e-6,
                     help="[ngspice-deck] ngspice timestep ceiling -- measure with "
-                         "tools/measure_ngspice_timestep.py rather than guessing; the ecosystem "
+                         "measure_ngspice_timestep.py rather than guessing; the ecosystem "
                          "default is too coarse for at least one circuit found so far (the "
                          "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
     ap.add_argument("--ltspice-deck-maxstep", type=float, default=3e-6, help="[ltspice-deck]")
@@ -558,7 +558,7 @@ def main() -> None:
                     help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
     ap.add_argument("--ltspice-out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
-                         "tools/ltspice_spicelib.py's docstring")
+                         "ltspice_spicelib.py's docstring")
     args = ap.parse_args()
 
     cfg = load_config(args.config)

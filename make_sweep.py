@@ -32,7 +32,7 @@ DETERMINISTIC. Same inputs -> same bytes. No RNG anywhere: the "noise" burst is 
 frequency-domain construction, not random. A training input that cannot be regenerated is a training
 input whose datasets cannot be reproduced, which is the mistake that lost sweep120s.
 
-    ./tools/make_sweep.py --playing ../sweep-files/sweepv4.wav -o ../sweep-files/mysweep.wav
+    ./make_sweep.py --playing ../sweep-files/sweepv4.wav -o ../sweep-files/mysweep.wav
 """
 from __future__ import annotations
 

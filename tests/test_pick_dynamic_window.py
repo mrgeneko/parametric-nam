@@ -1,15 +1,15 @@
-"""Properties tools/pick_dynamic_window.py's provenance and fade helpers must have. This tool
+"""Properties pick_dynamic_window.py's provenance and fade helpers must have. This tool
 replaced a hand-rolled, undocumented "slide a window and pick the loudest" one-liner used at
 least three times in this codebase's history -- the provenance recipe it writes is what makes
 a later regen of the SAME window reproducible, and the fade is what keeps the cut from clicking
 since it's cut from mid-file, not from silence.
 
-See tools/pick_dynamic_window.py.
+See pick_dynamic_window.py.
 """
 import numpy as np
 import pytest
 
-from tools.pick_dynamic_window import SR, _audio_provenance, _fade, _tool_git_rev
+from pick_dynamic_window import SR, _audio_provenance, _fade, _tool_git_rev
 
 
 class TestAudioProvenance:
@@ -83,18 +83,18 @@ class TestToolGitRev:
         class R:
             returncode = 0
             stdout = "abc1234\n"
-        monkeypatch.setattr("tools.pick_dynamic_window.subprocess.run", lambda *a, **kw: R())
+        monkeypatch.setattr("pick_dynamic_window.subprocess.run", lambda *a, **kw: R())
         assert _tool_git_rev() == "abc1234"
 
     def test_returns_none_on_nonzero_exit(self, monkeypatch):
         class R:
             returncode = 128
             stdout = ""
-        monkeypatch.setattr("tools.pick_dynamic_window.subprocess.run", lambda *a, **kw: R())
+        monkeypatch.setattr("pick_dynamic_window.subprocess.run", lambda *a, **kw: R())
         assert _tool_git_rev() is None
 
     def test_returns_none_if_subprocess_raises(self, monkeypatch):
         def boom(*a, **kw):
             raise FileNotFoundError("git not installed")
-        monkeypatch.setattr("tools.pick_dynamic_window.subprocess.run", boom)
+        monkeypatch.setattr("pick_dynamic_window.subprocess.run", boom)
         assert _tool_git_rev() is None

@@ -11,7 +11,7 @@ match param_train's max_values()), and write a new container. No training, no
 PyTorch, and w3/w8 come through byte-for-byte from the file you already shipped.
 
   # add a separately-trained w5 tier to an existing [3,8] model -> [3,5,8]
-  python tools/merge_tiers.py \
+  python merge_tiers.py \
       jcm800-2203-preamp.composite.param.nam  jcm800preamp_w5.best_full.param.nam \
       --out jcm800-2203-preamp.3-5-8.param.nam
 

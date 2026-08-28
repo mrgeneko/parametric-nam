@@ -13,7 +13,7 @@ Cuts the three most mechanical steps out of writing a new device's config.toml b
      from a real number instead of a guess -- but it does NOT pick one for you; see WHY
      NOT below.
   3. GUESS KNOB ROLES. Each discovered name is run through knob_classify.classify() --
-     the same hi/lo/mid/drive/rms heuristic tools/preflight.py uses for its own direction
+     the same hi/lo/mid/drive/rms heuristic preflight.py uses for its own direction
      and EQ-swamp checks -- and written into a [knob-kind] table. This is explicitly a
      GUESS, not a determination: a name that matches no known keyword is written
      commented-out as UNCONFIRMED rather than silently defaulted, and every guessed line
@@ -27,7 +27,7 @@ WHAT IT DOES NOT DO.
 The knob GRID stays a placeholder -- role-aware (see GUESS KNOB ROLES / _grid_for_kind
 below), not a naive linspace(0,1) for every knob regardless of role, but still a starting
 point, not a measured one. A good grid needs render probes at values the circuit's actual
-response curve implies, which is exactly tools/grid_adequacy.py --apply's job. Run that next.
+response curve implies, which is exactly grid_adequacy.py --apply's job. Run that next.
 
 WHY IT DOESN'T PICK AN OVERSAMPLE FOR YOU.
 measure_truncation.py's own docs describe a "stall" -- a candidate's error falling much
@@ -40,12 +40,12 @@ not a derived one) and prints the full table so you can apply the same judgment 
 docs walk through, by hand.
 
 Usage:
-    python tools/scaffold_config.py --schx path/to/circuit.schx
-    python tools/scaffold_config.py --schx path/to/circuit.schx --input my_sweep.wav \\
+    python scaffold_config.py --schx path/to/circuit.schx
+    python scaffold_config.py --schx path/to/circuit.schx --input my_sweep.wav \\
         --output my_device/config.toml --grid-points 4
 
 Then:
-    python tools/grid_adequacy.py --config <output> --apply
+    python grid_adequacy.py --config <output> --apply
 """
 from __future__ import annotations
 
@@ -58,12 +58,12 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import parse_schx_controls
 from measure_truncation import measure, probe_clips
-from tools.knob_classify import classify  # noqa: E402
+from knob_classify import classify  # noqa: E402
 
-TEMPLATE = Path(__file__).resolve().parent.parent / "examples" / "template.config.toml"
+TEMPLATE = Path(__file__).resolve().parent / "examples" / "template.config.toml"
 
 
 def _replace_line(text: str, key: str, new_line: str) -> str:
@@ -137,7 +137,7 @@ def _format_knobs(names: list, n_points: int) -> list:
 
 def _format_knob_kind(names: list) -> list:
     """Auto-guess each knob's role from its NAME via knob_classify.classify() -- the same
-    heuristic tools/preflight.py uses for its own direction/EQ-swamp checks. A guess is
+    heuristic preflight.py uses for its own direction/EQ-swamp checks. A guess is
     ALWAYS a guess: an unconventional or non-English name can silently match nothing, so
     every line gets a trailing comment naming the label that drove the guess (or flagging
     UNCONFIRMED for a no-match) precisely so this doesn't read as more certain than it is --
@@ -259,7 +259,7 @@ def main() -> None:
     if unconfirmed:
         print(f"  [knob-kind]: {len(unconfirmed)}/{len(names)} name(s) matched no known "
               f"keyword, left UNCONFIRMED (commented out): {', '.join(unconfirmed)} -- "
-              f"classify by hand (hi/lo/mid/drive/rms, see tools/knob_classify.py)")
+              f"classify by hand (hi/lo/mid/drive/rms, see knob_classify.py)")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text)
@@ -269,7 +269,7 @@ def main() -> None:
     axes = ", ".join(f"{name}={n}" for name, n in counts.items())
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} permutations)")
-    print(f"  next: python tools/grid_adequacy.py --config {output} --apply   "
+    print(f"  next: python grid_adequacy.py --config {output} --apply   "
           f"# refine the placeholder grid")
 
 

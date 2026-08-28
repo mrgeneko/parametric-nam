@@ -1,4 +1,4 @@
-"""Wires tools/verify_lora_cpp_parity.py into the test suite (LoRA plan Phase 5).
+"""Wires verify_lora_cpp_parity.py into the test suite (LoRA plan Phase 5).
 
 This is the check that actually proves Python and C++ agree on the LoRA math, not just that
 each side's own test suite passes in isolation -- see the module docstring on
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.verify_lora_cpp_parity import find_render_parametric, run_parity_check
+from verify_lora_cpp_parity import find_render_parametric, run_parity_check
 
 NAM_CORE = Path.home() / "work/chainsmith/NeuralAmpModelerCore"
 

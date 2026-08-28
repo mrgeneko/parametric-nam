@@ -1,4 +1,4 @@
-"""Properties tools/check_transient_coverage.py must have. Built after a real miss: Tweed
+"""Properties check_transient_coverage.py must have. Built after a real miss: Tweed
 5F6-A's shipped excitation cleared saturation at its own overall peak, but the transient
 (real-playing) segment never did at a corner where two knobs sat at grid-min while three
 others sat at grid-max simultaneously -- a corner the "solo extreme" set literally cannot
@@ -7,14 +7,14 @@ specifically to catch that. check_coverage is exercised with find_saturation_poi
 LiveSpiceBackend stubbed out, so the per-corner pass/fail/skip bookkeeping is tested
 independently of any real circuit render.
 
-See tools/check_transient_coverage.py.
+See check_transient_coverage.py.
 """
 import json
 from pathlib import Path
 
 import pytest
 
-from tools.check_transient_coverage import (
+from check_transient_coverage import (
     _corners,
     _transient_peak_from_recipe,
     check_coverage,
@@ -104,7 +104,7 @@ class TestCheckCoverage:
     @pytest.fixture(autouse=True)
     def sandbox(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)  # keep findpeak_cache_key off the real ~/.cache
-        monkeypatch.setattr("tools.check_transient_coverage.LiveSpiceBackend", DummyBackend)
+        monkeypatch.setattr("check_transient_coverage.LiveSpiceBackend", DummyBackend)
         self.schx = tmp_path / "device.schx"
         self.schx.write_text("dummy circuit")
 
@@ -116,7 +116,7 @@ class TestCheckCoverage:
             if onset is None:
                 return None
             return {"onset_99pct_input_v": onset, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point", fake)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
     def test_all_corners_passing_is_ok(self, monkeypatch):
         self._stub_onset(monkeypatch, lambda p: 0.1)
@@ -166,7 +166,7 @@ class TestCheckCoverageNgspiceDeck:
     @pytest.fixture(autouse=True)
     def sandbox(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr("tools.check_transient_coverage.NgspiceBackend", DummyBackend)
+        monkeypatch.setattr("check_transient_coverage.NgspiceBackend", DummyBackend)
         self.module_file = tmp_path / "gen_fake_ngspice.py"
         self.module_file.write_text("KNOB_NAMES = ['Gain']\n")
 
@@ -176,7 +176,7 @@ class TestCheckCoverageNgspiceDeck:
             if onset is None:
                 return None
             return {"onset_99pct_input_v": onset, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point", fake)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
     def test_all_corners_passing_is_ok(self, monkeypatch):
         self._stub_onset(monkeypatch, lambda p: 0.1)
@@ -201,15 +201,15 @@ class TestCheckCoverageNgspiceDeck:
 
         def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
             return {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point", fake)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
-        real_findpeak_cache_key = __import__("tools.check_transient_coverage",
+        real_findpeak_cache_key = __import__("check_transient_coverage",
                                              fromlist=["findpeak_cache_key"]).findpeak_cache_key
 
         def spy(identity_bytes, params, extra):
             seen_identities.append(identity_bytes)
             return real_findpeak_cache_key(identity_bytes, params, extra)
-        monkeypatch.setattr("tools.check_transient_coverage.findpeak_cache_key", spy)
+        monkeypatch.setattr("check_transient_coverage.findpeak_cache_key", spy)
 
         check_coverage_ngspice_deck(build_deck=lambda **kw: None, module_file=str(self.module_file),
                                     probe_node="OUT", knob_ranges={"Gain": [0.5]}, fixed={},
@@ -225,7 +225,7 @@ class TestCheckCoverageLtspiceDeck:
     @pytest.fixture(autouse=True)
     def sandbox(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr("tools.check_transient_coverage.LtspiceBackend", DummyBackend)
+        monkeypatch.setattr("check_transient_coverage.LtspiceBackend", DummyBackend)
         self.module_file = tmp_path / "gen_fake_ltspice.py"
         self.module_file.write_text("KNOB_NAMES = ['Gain']\n")
 
@@ -235,7 +235,7 @@ class TestCheckCoverageLtspiceDeck:
             if onset is None:
                 return None
             return {"onset_99pct_input_v": onset, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point", fake)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
     def test_all_corners_passing_is_ok(self, monkeypatch):
         self._stub_onset(monkeypatch, lambda p: 0.1)
@@ -258,15 +258,15 @@ class TestCheckCoverageLtspiceDeck:
 
         def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
             return {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point", fake)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
-        real_findpeak_cache_key = __import__("tools.check_transient_coverage",
+        real_findpeak_cache_key = __import__("check_transient_coverage",
                                              fromlist=["findpeak_cache_key"]).findpeak_cache_key
 
         def spy(identity_bytes, params, extra):
             seen_identities.append(identity_bytes)
             return real_findpeak_cache_key(identity_bytes, params, extra)
-        monkeypatch.setattr("tools.check_transient_coverage.findpeak_cache_key", spy)
+        monkeypatch.setattr("check_transient_coverage.findpeak_cache_key", spy)
 
         check_coverage_ltspice_deck(build_deck=lambda **kw: None, module_file=str(self.module_file),
                                     tap="spk", knob_ranges={"Gain": [0.5]}, fixed={},
@@ -286,9 +286,9 @@ class TestMainLtspiceDeckDispatch:
         import soundfile as sf
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr("tools.check_transient_coverage.LtspiceBackend",
+        monkeypatch.setattr("check_transient_coverage.LtspiceBackend",
                             lambda *a, **kw: object())
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point",
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point",
                             lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0:
                             {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
                              "ceiling_at_input_v": 1.0, "curve": []})
@@ -325,9 +325,9 @@ class TestMainNgspiceDeckDispatch:
         import soundfile as sf
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr("tools.check_transient_coverage.NgspiceBackend",
+        monkeypatch.setattr("check_transient_coverage.NgspiceBackend",
                             lambda *a, **kw: object())
-        monkeypatch.setattr("tools.check_transient_coverage.find_saturation_point",
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point",
                             lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0:
                             {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
                              "ceiling_at_input_v": 1.0, "curve": []})

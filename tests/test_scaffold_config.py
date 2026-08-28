@@ -1,15 +1,15 @@
-"""Properties tools/scaffold_config.py's placeholder-grid generation and TOML-splice helpers
+"""Properties scaffold_config.py's placeholder-grid generation and TOML-splice helpers
 must have. The grid math encodes real, empirically-found density needs (see README's
 scaffold_config.py section): a gain/volume knob's audible character changes fastest near the
 bottom of its range, and a second point just below max stabilizes that grid cell -- these
 tests lock in the actual numbers, not just "some grid comes out."
 
-See tools/scaffold_config.py.
+See scaffold_config.py.
 """
 import numpy as np
 import pytest
 
-from tools.scaffold_config import (
+from scaffold_config import (
     _format_knob_kind,
     _format_knobs,
     _grid_for_kind,

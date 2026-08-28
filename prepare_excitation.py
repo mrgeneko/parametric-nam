@@ -22,11 +22,11 @@ coincidence, but it isn't a substitute for actually checking. This is only true 
 --realistic-peak-frac's default of 1.0 (not less) -- see that flag's own help text.
 
 Usage:
-  livespice: python tools/prepare_excitation.py --backend livespice \\
+  livespice: python prepare_excitation.py --backend livespice \\
       --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \\
       --real-clip examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
 
-  ngspice:   python tools/prepare_excitation.py --backend ngspice-deck \\
+  ngspice:   python prepare_excitation.py --backend ngspice-deck \\
       --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \\
       --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \\
       --real-clip ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \\
@@ -41,11 +41,11 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
-from tools.check_transient_coverage import _corners  # noqa: E402
-from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from check_transient_coverage import _corners  # noqa: E402
+from find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
+from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
@@ -147,7 +147,7 @@ def _setup(args):
         identity = Path(mod.__file__).read_bytes()
         cache_extra = f"maxv={args.peak_max_v}"
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
-        # settling lead-in -- see tools/ltspice_spicelib.py's docstring.
+        # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module
     sys.exit(f"unknown --backend {args.backend!r}")
 
@@ -176,7 +176,7 @@ def main():
                           "lead-in')")
     ap.add_argument("--out-scale", type=float, default=0.05,
                      help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
-                          "tools/ltspice_spicelib.py's docstring")
+                          "ltspice_spicelib.py's docstring")
 
     # shared corner/knob specification (both backends; --config covers this for livespice)
     ap.add_argument("--range", action="append", default=[],
@@ -272,7 +272,7 @@ def main():
           f"across {len(rows)} corners), not a guess. For ngspice, render with your "
           f"render_*.py's --absolute flag (no --vin rescaling) to preserve this file's "
           f"intentional multi-level structure; for livespice, run "
-          f"tools/check_transient_coverage.py against the same config as an independent gate.")
+          f"check_transient_coverage.py against the same config as an independent gate.")
 
 
 if __name__ == "__main__":

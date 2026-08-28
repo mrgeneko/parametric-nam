@@ -26,7 +26,7 @@ way to reach a narrower tier's weights through this CLI at all). Works for any t
 3-way [3,5,8] slimmable container scans all three), not just 2.
 
 Usage:
-  python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
+  python scan_film_runaway.py --nam PATH/TO/model.param.nam \
       --reference PATH/TO/real_playing.wav [--chunk-s 5.0] \
       [--flag-ratio 8.0] [--flag-abs 3.0]
 
@@ -34,7 +34,7 @@ Usage:
   # for measured cost: the default reduced set is ~2 min for 13 corners on a 190s reference;
   # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
   # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
-  python tools/scan_film_runaway.py --nam PATH/TO/model.param.nam \
+  python scan_film_runaway.py --nam PATH/TO/model.param.nam \
       --config ~/work/parametric-nam-models/amps/tweed-5f6-a-full-sag/config.toml
 """
 import argparse
@@ -50,7 +50,7 @@ import soundfile as sf
 import torch
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from param_train import ParametricA2
 from run_pipeline import load_config
 from gen_dataset_from_schx import grid_permutations

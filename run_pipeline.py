@@ -64,9 +64,9 @@ def load_config(path: Path) -> dict:
       [knob-kind]  NAME = kind          -> --knob-kind NAME=kind,... (which metric
                                            gen_dataset_from_schx.py's post-generation
                                            sensitivity check uses for this knob, AND
-                                           (passed the same way to tools/preflight.py)
+                                           (passed the same way to preflight.py)
                                            which knobs it holds low while checking an
-                                           EQ knob's direction -- see tools/knob_classify.py.
+                                           EQ knob's direction -- see knob_classify.py.
                                            kind is "hi"/"lo"/"mid" (an EQ/tone knob --
                                            checked by per-band spectral power spread,
                                            since RMS is the wrong metric for an EQ knob
@@ -77,7 +77,7 @@ def load_config(path: Path) -> dict:
                                            tone-detection path here, but doesn't carry
                                            enough information for preflight.py's
                                            drive-knob detection -- prefer hi/lo/mid/
-                                           drive/rms going forward. tools/scaffold_config.py
+                                           drive/rms going forward. scaffold_config.py
                                            auto-guesses this table from each knob's name;
                                            always review its guesses by hand)
     `widths = [3, 4, 8]` becomes the "3,4,8" string --widths expects.
@@ -780,7 +780,7 @@ def main():
                         "See internal engineering notes.")
     g.add_argument("--grid-target",    type=float, default=0.03,
                    help="the interpolation ESR the knob grid must support (default 0.03, the "
-                        "audibility floor -- NOT the training-fidelity ESR; see tools/grid_adequacy.py)")
+                        "audibility floor -- NOT the training-fidelity ESR; see grid_adequacy.py)")
     g.add_argument("--skip-headroom-check", action="store_true",
                    help="skip the STEP 0b input-headroom check. It finds the device's saturation "
                         "onset (--find-peak, at default knob settings) and compares it against the "
@@ -790,7 +790,7 @@ def main():
                         "the grid check): a low ratio can be a real gap or a genuine high-headroom "
                         "device, and telling those apart needs a check at the grid's own hottest "
                         "knob setting, not just this default-knobs probe. See "
-                        "tools/check_input_headroom.py.")
+                        "check_input_headroom.py.")
     g.add_argument("--headroom-margin", type=float, default=0.8,
                    help="WARN if excitation peak < margin * saturation onset (default 0.8)")
     g.add_argument("--seed",           type=int,   default=42)
@@ -931,12 +931,12 @@ def main():
             section("STEP 0 / 3 — Grid Adequacy", fh)
             log("Measuring whether the knob grid can even represent the target ESR. A cell whose "
                 "interpolation error exceeds it cannot be fixed by training — the data does not "
-                "contain what the model would need. Re-run tools/grid_adequacy.py --suggest for a "
+                "contain what the model would need. Re-run grid_adequacy.py --suggest for a "
                 "proposed regrid, or pass --skip-grid-check to render anyway.", fh)
             # stream_run aborts the pipeline on a non-zero exit, which is exactly what a too-coarse
             # grid deserves: rendering and training on it would burn hours to hit a floor we already
             # know about.
-            stream_run([PYTHON, str(HERE / "tools" / "grid_adequacy.py"),
+            stream_run([PYTHON, str(HERE / "grid_adequacy.py"),
                         "--config", str(args.config),
                         "--target", str(args.grid_target)],
                        fh, "grid-adequacy")
@@ -948,7 +948,7 @@ def main():
         # model can only learn what's in the data -- if every rendered permutation stays in the
         # device's linear region, dataset and grid can both be perfect and the trained model still
         # has no idea what the device's breakup/saturation character is. See
-        # tools/check_input_headroom.py's docstring for the TAD Blackface 85 Reverb case that
+        # check_input_headroom.py's docstring for the TAD Blackface 85 Reverb case that
         # exposed this gap (2026-07-31): nothing else in the pipeline would have caught it.
         #
         # WARN, don't abort: --find-peak probes at DEFAULT (0.5) knob settings, not the grid's own
@@ -961,9 +961,9 @@ def main():
             section("STEP 0b / 3 — Input Headroom", fh)
             log("Checking whether the excitation reaches this device's own saturation onset at "
                 "default knob settings. A WARN here is a prompt to check the grid's own hottest "
-                "corner directly, not an automatic verdict -- see tools/check_input_headroom.py. "
+                "corner directly, not an automatic verdict -- see check_input_headroom.py. "
                 "Pass --skip-headroom-check to skip.", fh)
-            cmd = [PYTHON, str(HERE / "tools" / "check_input_headroom.py"),
+            cmd = [PYTHON, str(HERE / "check_input_headroom.py"),
                    "--config", str(args.config), "--margin", str(args.headroom_margin)]
             log(f"CMD: {' '.join(str(c) for c in cmd)}", fh)
             fh.write("\n"); fh.flush()

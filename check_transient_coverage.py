@@ -20,10 +20,10 @@ against the excitation's transient peak.
 
 Exit status is nonzero if any corner fails, so a generation script can gate on it
 (same convention as preflight.py):
-  python tools/check_transient_coverage.py ... && python gen_dataset_from_schx.py ...
+  python check_transient_coverage.py ... && python gen_dataset_from_schx.py ...
 
 Usage:
-  livespice:   python tools/check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
+  livespice:   python check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
       [--transient-peak 0.2] [--margin 1.0] [--oversample 8] [--iterations 256] \
       [--json report.json] [--no-cache]
 
@@ -51,15 +51,10 @@ import numpy as np
 import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
-# Package-qualified (not `from find_saturation_point import ...`): direct script execution
-# auto-adds HERE (tools/) to sys.path so either form works, but importing this module as
-# tools.check_transient_coverage (e.g. from gen_dataset_from_schx.py) does NOT add tools/
-# itself -- only `from run_pipeline import ...` above (repo root) would resolve; a bare
-# `find_saturation_point` import would 404. This form works both ways.
-from tools.find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
-from tools.render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
+from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 SR = 48000
 
@@ -254,7 +249,7 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                                 no_cache: bool = False, quiet: bool = False,
                                 full_hypercube: bool = True) -> dict:
     """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
-    converge on real playing content at all -- see tools/ltspice_spicelib.py's own docstring.
+    converge on real playing content at all -- see ltspice_spicelib.py's own docstring.
     `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
     cache identity, same convention as check_coverage_ngspice_deck). See _check_corners() for
     the actual check. No lead_silence_s here (unlike ngspice-deck): LTspice's `.ic`/`uic`
@@ -295,7 +290,7 @@ def main():
                     help="[ngspice-deck, ltspice-deck] timestep ceiling")
     ap.add_argument("--out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
-                         "tools/ltspice_spicelib.py's docstring")
+                         "ltspice_spicelib.py's docstring")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))

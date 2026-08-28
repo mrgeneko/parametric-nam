@@ -1,4 +1,4 @@
-"""Properties tools/ltspice_spicelib.py's input-preparation and result-reading helpers must
+"""Properties ltspice_spicelib.py's input-preparation and result-reading helpers must
 have -- the LTspice counterpart of test_ngspice_spicelib.py, for the contract differences that
 LTspice's PCM-only, +/-1V-bounded wavefile=/.wave I/O force (see that module's own docstring):
 load_input's in_scale must keep the written file's peak under 1.0 regardless of how many volts
@@ -7,7 +7,7 @@ partway through rather than accept whatever partial data it produced -- the exac
 fixed in ngspice_spicelib.py this session, baked in here from the start instead of discovered
 the same way twice.
 
-See tools/ltspice_spicelib.py.
+See ltspice_spicelib.py.
 """
 import inspect
 
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S,
+from ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S,
                                     default_timeout, ensure_save, load_input,
                                      _read_result, render_grid, render_one)
 
@@ -107,7 +107,7 @@ class TestReadResult:
 
 
 class FakeLtspiceRun:
-    """Stands in for tools.ltspice_spicelib._run_ltspice: instead of actually invoking the
+    """Stands in for ltspice_spicelib._run_ltspice: instead of actually invoking the
     LTspice binary, writes a .wave file at the raw_wav path build_deck's own call embedded --
     mirrors what a real render would leave on disk for _read_result to then pick up."""
 
@@ -201,7 +201,7 @@ class TestRenderGridTimeoutScaling:
             seen.append(timeout)
             return True
 
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", fake_run)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", fake_run)
         build_deck = make_build_deck(sr=1000, value_fn=lambda k, m: 0.5,
                                      n_samples=int(dur_s * 1000))
         outfile = str(tmp_path / "out.wav")
@@ -215,7 +215,7 @@ class TestRenderGridTimeoutScaling:
         of them. Measured: a 10 s render took ~129 s alone but blew past a 200 s ceiling with
         8 concurrent -- a timeout that ignores parallel_sims reports that as a convergence
         failure."""
-        from tools.ltspice_spicelib import default_timeout
+        from ltspice_spicelib import default_timeout
         monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
         solo = default_timeout(38.0, parallel_sims=1)
         eight = default_timeout(38.0, parallel_sims=8)
@@ -226,14 +226,14 @@ class TestRenderGridTimeoutScaling:
     def test_default_timeout_covers_the_render_that_actually_timed_out(self, monkeypatch):
         """The regression this whole parameter exists for: 10 s of audio, 8 concurrent, which
         needed more than the old flat max(120, dur*20) = 200 s."""
-        from tools.ltspice_spicelib import default_timeout
+        from ltspice_spicelib import default_timeout
         monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
         assert default_timeout(10.0, parallel_sims=8) > 200.0
 
     def test_env_scale_multiplies_the_default_for_slower_hardware(self, monkeypatch):
         """An older CPU or a spinning disk is not something the caller should have to hand-tune
         per invocation -- LTSPICE_TIMEOUT_SCALE is the one lever."""
-        from tools.ltspice_spicelib import default_timeout
+        from ltspice_spicelib import default_timeout
         monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
         base = default_timeout(38.0, parallel_sims=6)
         monkeypatch.setenv("LTSPICE_TIMEOUT_SCALE", "3")
@@ -241,7 +241,7 @@ class TestRenderGridTimeoutScaling:
 
     def test_a_junk_env_scale_falls_back_to_1_rather_than_crashing(self, monkeypatch):
         """A typo in an env var must not take down a multi-hour render run."""
-        from tools.ltspice_spicelib import default_timeout
+        from ltspice_spicelib import default_timeout
         monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
         base = default_timeout(38.0, parallel_sims=6)
         monkeypatch.setenv("LTSPICE_TIMEOUT_SCALE", "not-a-number")
@@ -268,7 +268,7 @@ class TestRenderGridTimeoutScaling:
 
 class TestRenderGrid:
     def test_converged_render_is_read_back_and_unscaled(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         build_deck = make_build_deck(sr=1000, value_fn=lambda knobs, maxstep: 0.5, n_samples=100)
         outfile = str(tmp_path / "out.wav")
         results = render_grid(build_deck, [({"Gain": 0.5}, outfile)], tap="spk", sr=1000,
@@ -277,7 +277,7 @@ class TestRenderGrid:
         assert results[outfile] == pytest.approx(0.5, rel=1e-3)
 
     def test_every_job_gets_its_own_outfile(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         build_deck = make_build_deck(sr=1000, value_fn=lambda knobs, maxstep: knobs["Gain"], n_samples=100)
         jobs = [({"Gain": 0.2}, str(tmp_path / "a.wav")), ({"Gain": 0.8}, str(tmp_path / "b.wav"))]
         results = render_grid(build_deck, jobs, tap="spk", sr=1000, dur_s=0.1, wav_path="in.wav",
@@ -286,7 +286,7 @@ class TestRenderGrid:
         assert results[jobs[1][1]] == pytest.approx(0.8, rel=1e-3)
 
     def test_a_run_that_never_reaches_full_duration_escalates_to_a_finer_rung(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         # first rung's build_deck always writes a too-short file; the SECOND rung's maxstep
         # (passed to build_deck) writes the full length -- simulates a finer timestep
         # succeeding where the coarse one aborted.
@@ -303,7 +303,7 @@ class TestRenderGrid:
         assert results[outfile] == pytest.approx(0.5, rel=1e-3)
 
     def test_all_rungs_failing_returns_none(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         build_deck = make_build_deck(sr=1000, value_fn=lambda k, m: 0.5, n_samples=10)  # always too short
         outfile = str(tmp_path / "out.wav")
         results = render_grid(build_deck, [({}, outfile)], tap="spk", sr=1000, dur_s=1.0,
@@ -319,7 +319,7 @@ class TestRenderGrid:
             sf.write(out_wav, np.full(10, 0.5), 1000, subtype="FLOAT")  # always too short
             return "* fake\n.end\n"
 
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         outfile = str(tmp_path / "out.wav")
         results = render_grid(build_deck, [({}, outfile)], tap="spk", sr=1000, dur_s=1.0,
                               wav_path="in.wav", in_scale=1.0, tmp=str(tmp_path),
@@ -330,7 +330,7 @@ class TestRenderGrid:
 
 class TestRenderOne:
     def test_returns_the_single_jobs_peak(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
+        monkeypatch.setattr("ltspice_spicelib._run_ltspice", lambda net_path, timeout: True)
         build_deck = make_build_deck(sr=1000, value_fn=lambda k, m: 0.7, n_samples=50)
         outfile = str(tmp_path / "out.wav")
         pk = render_one(build_deck, {"Gain": 0.5}, outfile, "spk", 1000, 0.05, "in.wav", 1.0,

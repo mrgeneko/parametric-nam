@@ -1,4 +1,4 @@
-"""Properties tools/ngspice_spicelib.py's input-preparation and result-reading helpers must
+"""Properties ngspice_spicelib.py's input-preparation and result-reading helpers must
 have. load_input's vin=None "absolute volts" mode is what lets a multi-level excitation (real
 clip at one peak, sweeps at several others, all in one file) survive into ngspice without being
 flattened by a single peak-rescale -- see its own docstring and render_ngspice_deck.py's
@@ -6,13 +6,13 @@ flattened by a single peak-rescale -- see its own docstring and render_ngspice_d
 render_grid's retry escalation treat a genuinely failed render as "still pending" instead of
 crashing the whole sweep.
 
-See tools/ngspice_spicelib.py.
+See ngspice_spicelib.py.
 """
 import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from tools.ngspice_spicelib import _read_result, load_input
+from ngspice_spicelib import _read_result, load_input
 
 
 def write_wav(path, sr, samples, dtype):
@@ -90,7 +90,7 @@ class TestReadResult:
             def __init__(self, path):
                 raise ValueError("bad raw file")
 
-        monkeypatch.setattr("tools.ngspice_spicelib.RawRead", BoomRawRead)
+        monkeypatch.setattr("ngspice_spicelib.RawRead", BoomRawRead)
         yv, pk = _read_result(str(raw_path), "OUT", t=np.arange(100), sr=1000)
         assert (yv, pk) == (None, None)
 
@@ -109,7 +109,7 @@ class TestReadResult:
             def get_trace(self, name):
                 return ShortTrace()
 
-        monkeypatch.setattr("tools.ngspice_spicelib.RawRead", FakeRawRead)
+        monkeypatch.setattr("ngspice_spicelib.RawRead", FakeRawRead)
         yv, pk = _read_result(str(raw_path), "OUT", t=np.arange(1000), sr=1000)
         assert (yv, pk) == (None, None)
 
@@ -141,7 +141,7 @@ class TestReadResult:
             def get_trace(self, name):
                 return TraceTime() if name == "time" else TraceV()
 
-        monkeypatch.setattr("tools.ngspice_spicelib.RawRead", FakeRawRead)
+        monkeypatch.setattr("ngspice_spicelib.RawRead", FakeRawRead)
         yv, pk = _read_result(str(raw_path), "OUT", t=t, sr=1000)
         assert (yv, pk) == (None, None)
 
@@ -167,7 +167,7 @@ class TestReadResult:
             def get_trace(self, name):
                 return TraceTime() if name == "time" else TraceV()
 
-        monkeypatch.setattr("tools.ngspice_spicelib.RawRead", FakeRawRead)
+        monkeypatch.setattr("ngspice_spicelib.RawRead", FakeRawRead)
         yv, pk = _read_result(str(raw_path), "OUT", t=t, sr=1000)
         assert pk == pytest.approx(0.7)
         assert len(yv) == len(t)

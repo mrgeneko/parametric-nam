@@ -9,12 +9,12 @@ adding a new device now means writing gen_<device>_ngspice.py, not another ~100-
 this file too.
 
   Single render at a knob setting:
-    python3 tools/render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
+    python3 render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
         --module gen_ocd_ngspice --probe-node OUT \\
         in.wav out.wav --knob Gain=0.8 --knob Tone=0.3
 
   Parametric sweep (the capture driver -- cartesian product of the grids):
-    python3 tools/render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
+    python3 render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \\
         --module gen_ocd_ngspice --probe-node OUT \\
         in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
   -> caps/cap_0000.wav ... + caps/manifest.jsonl (one {file, knobs:{...}} per line) +
@@ -32,8 +32,8 @@ names, plus a manifest) -- forcing both needs through one abstraction would have
 awkward than sharing the lower-level primitives both already use.
 
 --absolute: use the input file's own sample values directly as volts (V0dBFS=1V convention),
-with NO peak rescaling -- for a file already built by tools/build_excitation.py or
-tools/prepare_excitation.py --backend ngspice-deck, whose different segments intentionally sit
+with NO peak rescaling -- for a file already built by build_excitation.py or
+prepare_excitation.py --backend ngspice-deck, whose different segments intentionally sit
 at different absolute drive levels (a real-playing clip at --realistic-peak, sweeps at each
 --sweep-peaks value). --vin is ignored when this is set (rescaling by the file's own single
 peak would flatten that deliberate multi-level structure). See ngspice_spicelib.py's
@@ -52,8 +52,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
-from tools.ngspice_spicelib import load_input, render_grid, render_one  # noqa: E402
+sys.path.insert(0, HERE)
+from ngspice_spicelib import load_input, render_grid, render_one  # noqa: E402
 
 
 def main():
@@ -72,7 +72,7 @@ def main():
     ap.add_argument('--vin', type=float, default=0.15)
     ap.add_argument('--absolute', action='store_true',
                      help="use the input file's own sample values as volts directly (V0dBFS=1V "
-                          "convention, e.g. tools/build_excitation.py output) -- ignores --vin")
+                          "convention, e.g. build_excitation.py output) -- ignores --vin")
     ap.add_argument('--maxstep', type=float, default=3e-6)
     ap.add_argument('--tmp', default=None, help='default: /tmp/render_ngspice_deck_<module>')
     ap.add_argument('--parallel-sims', type=int, default=8, help='concurrent ngspice processes for --grid')

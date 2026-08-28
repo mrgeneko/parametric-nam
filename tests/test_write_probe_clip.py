@@ -1,7 +1,7 @@
 """Properties gen_dataset_from_schx.write_probe_clip()'s lead-in override must have. Found
 directly while retraining the Fulltone OCD: write_probe_clip's hardcoded 1.0s default lead-in
 is far short of that circuit's ~5s C10/RVOL2 RC settling time, so every probe window built by
-measure_truncation.py / tools/grid_adequacy.py / tools/measure_ngspice_timestep.py (all of which
+measure_truncation.py / grid_adequacy.py / measure_ngspice_timestep.py (all of which
 call this function, directly or via probe_clips()) started from an under-settled state -- and
 which quasi-stable-but-WRONG DC point the render then landed in depended on tiny solver-path
 differences (maxstep, grid density), looking like circuit instability or runaway non-convergence

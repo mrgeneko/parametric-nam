@@ -1,8 +1,8 @@
-"""Properties tools/measure_ngspice_timestep.py must have. Built directly from a real
+"""Properties measure_ngspice_timestep.py must have. Built directly from a real
 production incident: NgspiceBackend's hardcoded maxstep=3e-6 default turned out to be genuinely
 too coarse for the Fulltone OCD's real 2N7000 MOSFET clipping (re-rendering the identical knob
 setting at 3e-6/1e-6/3e-7 gave RMS 1.210/1.614/1.593 -- a real, unconverged bias, not noise),
-which is exactly what made tools/grid_adequacy.py --apply explode instead of converge.
+which is exactly what made grid_adequacy.py --apply explode instead of converge.
 
 A second, subtler bug surfaced immediately after: this tool originally rendered through
 render_backends.NgspiceBackend, whose render_many always uses render_grid's default
@@ -15,14 +15,14 @@ single-shot attempt, no escalation -- which is exactly what these tests pin down
 render_grid records which maxstep it was actually called with, so a regression back to going
 through NgspiceBackend's escalating path would show up as a wrong recorded maxstep.
 
-See tools/measure_ngspice_timestep.py.
+See measure_ngspice_timestep.py.
 """
 import numpy as np
 import pytest
 import soundfile as sf
 from scipy.io import wavfile
 
-from tools.measure_ngspice_timestep import load_config, load_device, measure
+from measure_ngspice_timestep import load_config, load_device, measure
 
 
 def write_pedal_module(tmp_path, name="gen_fake_ngspice", knob_names=("Gain",)):
@@ -122,7 +122,7 @@ class TestMeasure:
         # Simulate a real bias that shrinks toward a "true" value (1.0) as maxstep shrinks:
         # 3e-6 -> 1.5 (biased), 1e-6 -> 1.05 (closer), ref (tiny) -> 1.0 (truth).
         bias = {3e-6: 1.5, 1e-6: 1.05, 1e-8: 1.0, 5e-9: 1.0}
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(lambda knobs, ms: bias[ms]))
         clips = make_clips(tmp_path)
         res = measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain"], fixed={},
@@ -137,7 +137,7 @@ class TestMeasure:
         assert e_fine == pytest.approx(((1.05 - 1.0) / 1.0) ** 2, rel=1e-3)
 
     def test_zero_error_when_every_maxstep_agrees(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(lambda knobs, ms: 1.0))
         clips = make_clips(tmp_path)
         res = measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain"], fixed={},
@@ -153,7 +153,7 @@ class TestMeasure:
             seen.append(dict(knobs))
             return 1.0
 
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(value_fn))
         clips = make_clips(tmp_path)
         measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain"],
@@ -162,7 +162,7 @@ class TestMeasure:
         assert seen and all(p.get("Volume") == 1.0 for p in seen)
 
     def test_all_renders_failing_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(lambda knobs, ms: None))
         clips = make_clips(tmp_path)
         with pytest.raises(RuntimeError, match="EVERY render failed"):
@@ -171,7 +171,7 @@ class TestMeasure:
                    candidates=(3e-6,), parallel_sims=2, td=tmp_path)
 
     def test_reports_a_ref_error_against_half_the_reference_maxstep(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(lambda knobs, ms: 1.0))
         clips = make_clips(tmp_path)
         res = measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain"], fixed={},
@@ -186,7 +186,7 @@ class TestMeasure:
         (maxstep, maxstep/3, maxstep/10) escalation. render_grid must always be called with
         rungs=(maxstep,) -- a single, fixed attempt -- for the comparison to mean anything."""
         calls = []
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid",
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid",
                             make_fake_render_grid(lambda knobs, ms: 1.0, calls=calls))
         clips = make_clips(tmp_path)
         measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain"], fixed={},
@@ -211,7 +211,7 @@ class TestMeasure:
                 peaks[outfile] = pk
             return peaks
 
-        monkeypatch.setattr("tools.measure_ngspice_timestep.render_grid", fake_render_grid)
+        monkeypatch.setattr("measure_ngspice_timestep.render_grid", fake_render_grid)
         clips = make_clips(tmp_path)
         ref_maxstep = 1e-8
         measure(build_deck=lambda **kw: None, probe_node="OUT", knobs=["Gain", "Tone"], fixed={},
