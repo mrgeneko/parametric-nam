@@ -247,6 +247,20 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
                 if yv is None:
                     still_pending.append((knobs, outfile))
                     continue
+                # Drop LTspice's .raw once the .wave has been read. A deck WITHOUT a `.save`
+                # directive records every node voltage and device current at every adaptive
+                # timestep: measured 12-13 GB PER RENDER on a 38 s excitation, which filled a
+                # 926 GB disk partway through a 6-knob preflight (141 GB of .raw against 223 MB
+                # of the .wav anyone reads) and would need terabytes across a full knob grid.
+                # `.save V(<tap>)` in the deck is the real fix and costs nothing; this is the
+                # backstop for decks that forget it. Kept on FAILURE, deliberately -- a render
+                # that did not converge is exactly the one worth inspecting.
+                for _leftover in (f"{os.path.splitext(net_path)[0]}.raw",
+                                  f"{os.path.splitext(net_path)[0]}.op.raw"):
+                    try:
+                        os.remove(_leftover)
+                    except OSError:
+                        pass
                 sf.write(outfile, yv.astype(np.float32), sr, subtype="FLOAT")
                 results[outfile] = pk
         pending = still_pending
