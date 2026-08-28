@@ -162,6 +162,15 @@ python param_infer.py --checkpoint /tmp/ckpt/best.pt \
     --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
 ```
 
+For real-time, interactive listening — turning the knobs live instead of re-rendering a file
+per setting — load the exported `.param.nam` into
+[**NAMix**](https://github.com/mrgeneko/NAMix), a free, cross-platform (Linux/macOS/Windows)
+VST3/AU/standalone plugin built specifically to host parametric models like the ones this
+toolchain produces: a model's own knobs surface directly in the plugin UI, driven by
+[our NeuralAmpModelerCore fork](https://github.com/mrgeneko/NeuralAmpModelerCore)'s parametric
+(FiLM-conditioning) support. NAMix's releases also ship several demo `.param.nam` files if you
+just want to try the knob experience before training your own.
+
 ## How it works
 
 ```
