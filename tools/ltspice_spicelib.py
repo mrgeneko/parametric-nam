@@ -144,7 +144,47 @@ def _read_result(raw_wav, dur_target_n, out_scale):
 
 
 DEFAULT_TIMEOUT_S_PER_AUDIO_S = 20.0  # see render_grid's timeout= docstring
-MIN_TIMEOUT_S = 120.0
+MIN_TIMEOUT_S = 300.0
+# Renders do NOT scale with core count. Measured on a 12-core machine: a 10 s Joyo probe took
+# ~129 s running alone but blew past a 200 s ceiling with 8 concurrent -- a >=1.55x slowdown
+# where naive parallel_sims/usable_cores (8/11) predicts none at all. Efficiency cores count
+# toward cpu_count but are far slower, and LTspice is memory-bandwidth-hungry, so oversubscription
+# starts biting well before the core count is reached. This multiplier covers that gap.
+# Two distinct effects, so two terms:
+#   * HARD OVERSUBSCRIPTION -- more jobs than cores means jobs literally wait for a core, and
+#     the slowdown is at least parallel_sims/usable_cores.
+#   * SHARED-RESOURCE CONTENTION -- renders slow each other down well BEFORE the core count is
+#     reached, via memory bandwidth, shared caches, disk, and (on Apple Silicon) efficiency
+#     cores that count toward cpu_count while running far slower. 0.15 per additional job puts
+#     8 concurrent at ~2.05x, comfortably covering the >=1.55x measured above.
+CONTENTION_PER_JOB = 0.15
+# Escape hatch for hardware slower than whatever this was tuned on -- an older CPU, a spinning
+# disk (every render writes a .raw and a .wave), a busy or thermally throttled machine, a
+# network//virtualised filesystem. Multiplies the computed default: LTSPICE_TIMEOUT_SCALE=3 for
+# a machine roughly 3x slower. Prefer this to editing the constants, and prefer an explicit
+# timeout= to either when you actually know the number.
+TIMEOUT_SCALE_ENV = "LTSPICE_TIMEOUT_SCALE"
+
+
+def default_timeout(dur_s, parallel_sims=1):
+    """Per-render wall ceiling when no explicit timeout= is given.
+
+    BIASED GENEROUS ON PURPOSE, because the two failure directions are not symmetric. Too LONG
+    only wastes wall-clock on a genuine hang. Too SHORT produces a WRONG ANSWER that looks like
+    a real result: every render "fails to converge", each caller escalates through the whole
+    maxstep ladder and fails again, and the tools then report dead knobs (preflight.py) or --
+    worse -- a complete, plausible table computed from whichever probes happened to survive
+    (grid_adequacy.py, measured 14x off on one cell). Detecting a hang slowly is cheap;
+    silently mismeasuring is not."""
+    usable = max(1, (os.cpu_count() or 4) - 1)
+    parallel_sims = max(1, int(parallel_sims or 1))
+    contention = (max(1.0, parallel_sims / usable)
+                  * (1.0 + CONTENTION_PER_JOB * (parallel_sims - 1)))
+    try:
+        scale = float(os.environ.get(TIMEOUT_SCALE_ENV, "") or 1.0)
+    except ValueError:
+        scale = 1.0
+    return max(MIN_TIMEOUT_S, dur_s * DEFAULT_TIMEOUT_S_PER_AUDIO_S) * contention * max(scale, 0.0)
 
 
 def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
@@ -163,8 +203,8 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
     contract as ngspice_spicelib.render_grid's own `rungs` param -- pass `rungs=(maxstep,)` for
     a genuine single-shot attempt with no silent escalation.
 
-    `timeout`: per-render subprocess ceiling, seconds. None (the default) SCALES WITH `dur_s`
-    (max(MIN_TIMEOUT_S, dur_s * DEFAULT_TIMEOUT_S_PER_AUDIO_S)) rather than being one fixed
+    `timeout`: per-render subprocess ceiling, seconds. None (the default) scales with `dur_s`
+    AND `parallel_sims` -- see default_timeout() -- rather than being one fixed
     number for every caller -- found the hard way: a flat 120s default worked fine for
     grid_adequacy's short 8s probe clips but silently killed every job partway through a real
     60s excitation capture (measured needing ~7-11 min/render at maxstep=3e-6, ~11s wall-clock
@@ -179,7 +219,7 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
     Returns {outfile: peak} for every job (peak is None for a job that never converged/reached
     full duration after all rounds)."""
     if timeout is None:
-        timeout = max(MIN_TIMEOUT_S, dur_s * DEFAULT_TIMEOUT_S_PER_AUDIO_S)
+        timeout = default_timeout(dur_s, parallel_sims)
     dur_target_n = int(round(dur_s * sr))
     results = {}
     pending = list(jobs)

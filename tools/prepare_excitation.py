@@ -143,7 +143,7 @@ def _setup(args):
         fixed = _parse_fixed(args.fixed_params)
         backend = LtspiceBackend(mod.build_deck, tap=args.probe_node,
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
-                                 out_scale=args.out_scale)
+                                 out_scale=args.out_scale, timeout=args.ltspice_timeout)
         identity = Path(mod.__file__).read_bytes()
         cache_extra = f"maxv={args.peak_max_v}"
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
@@ -168,6 +168,8 @@ def main():
     ap.add_argument("--probe-node", default="OUT", help="[ngspice-deck] node/tap to render and measure")
     ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck]")
     ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck]")
+    ap.add_argument("--ltspice-timeout", type=float, default=None,
+                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
     ap.add_argument("--lead-silence-s", type=float, default=3.0,
                      help="[ngspice-deck] silence prepended before each saturation-sweep probe tone "
                           "-- see this repo's README ('Known issue: excitation needs a silent "
@@ -214,6 +216,14 @@ def main():
                           "and are prepared for check_transient_coverage.py to FAIL there as a "
                           "correct, expected result, not a bug.")
     ap.add_argument("--realistic-dur", type=float, default=None)
+    ap.add_argument("--synth-burst-peaks", default=None,
+                    help="passed through to build_excitation.py. 'auto' uses the derived "
+                         "--sweep-peaks, so a broadband instant-attack burst is inserted at "
+                         "EVERY level -- the Boss DS-1 shipped a model that spiked to 12.39 "
+                         "peak on a real pick attack because its excitation never showed it a "
+                         "stable response to one. Default off, preserving prior behaviour.")
+    ap.add_argument("--synth-burst-dur", type=float, default=None,
+                    help="passed through to build_excitation.py with --synth-burst-peaks")
     ap.add_argument("--excitation-lead-silence-s", type=float, default=3.0,
                      help="--lead-silence-s passed to build_excitation.py itself (distinct "
                           "from --lead-silence-s above, which is for the ngspice sweep probe)")
@@ -245,6 +255,16 @@ def main():
            "--lead-silence-s", str(args.excitation_lead_silence_s)]
     if args.realistic_dur is not None:
         cmd += ["--realistic-dur", str(args.realistic_dur)]
+    if args.synth_burst_peaks:
+        # "auto" mirrors the derived sweep levels, which is what build_excitation.py's own
+        # help recommends ("Typically the same list as --sweep-peaks") -- so saturation-onset
+        # behaviour under a sharp transient is tested at every level rather than only the
+        # loudest, which is the gap a single --noise-burst-* segment leaves.
+        peaks = (",".join(str(p) for p in sweep_peaks)
+                 if args.synth_burst_peaks == "auto" else args.synth_burst_peaks)
+        cmd += ["--synth-burst-peaks", peaks]
+        if args.synth_burst_dur is not None:
+            cmd += ["--synth-burst-dur", str(args.synth_burst_dur)]
     print("running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
 

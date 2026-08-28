@@ -555,14 +555,7 @@ def main() -> None:
                          "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
     ap.add_argument("--ltspice-deck-maxstep", type=float, default=3e-6, help="[ltspice-deck]")
     ap.add_argument("--ltspice-timeout", type=float, default=None,
-                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: "
-                         "ltspice_spicelib's duration-scaled 20 s per audio second (so ~160 s at "
-                         "--probe-s 8). That is a PER-RENDER figure and ignores the concurrent "
-                         "probes competing for cores, so on a slow circuit the default times "
-                         "renders out and they are reported as 'did not converge' -- which is "
-                         "indistinguishable from a real convergence failure, and silently "
-                         "computes the whole table from the surviving minority. If the run "
-                         "reports failed renders, RAISE THIS before believing any cell.")
+                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
     ap.add_argument("--ltspice-out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
                          "tools/ltspice_spicelib.py's docstring")

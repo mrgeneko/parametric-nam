@@ -184,13 +184,7 @@ def main():
     ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck, ltspice-deck]")
     ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck, ltspice-deck]")
     ap.add_argument("--render-timeout", type=float, default=None,
-                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: "
-                         "ltspice_spicelib's duration-scaled 20 s per audio second. That is a "
-                         "PER-RENDER figure and takes no account of --parallel-sims jobs "
-                         "competing for cores, so on a slow circuit the default can time every "
-                         "probe out and report RENDER FAILED -- which looks exactly like a "
-                         "convergence failure. Raise it (or lower --parallel-sims) if a device "
-                         "that renders fine via render_ltspice_deck.py fails every knob here.")
+                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
     ap.add_argument("--exclude-knob", action="append", default=[],
                      help="[ngspice-deck, ltspice-deck] knob to exclude from the swept check (repeatable) -- "
                           "e.g. a 0/1 toggle, not a continuous sweep; build_deck's own default applies")

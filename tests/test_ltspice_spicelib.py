@@ -9,11 +9,14 @@ the same way twice.
 
 See tools/ltspice_spicelib.py.
 """
+import inspect
+
 import numpy as np
 import pytest
 import soundfile as sf
 
-from tools.ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S, load_input,
+from tools.ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S,
+                                    default_timeout, load_input,
                                      _read_result, render_grid, render_one)
 
 
@@ -132,6 +135,12 @@ def make_build_deck(sr, value_fn, n_samples=100, short_by=0):
     return build_deck
 
 
+# render_grid's OWN parallel_sims default, read from its signature rather than restated --
+# the default timeout depends on it, so a change there must not silently invalidate these.
+RENDER_GRID_DEFAULT_PARALLEL_SIMS = (
+    inspect.signature(render_grid).parameters["parallel_sims"].default)
+
+
 class TestRenderGridTimeoutScaling:
     """A flat timeout can't be right for both a grid_adequacy 8s probe and a 60s+ full
     excitation capture -- found directly this session: a value tuned for short probes
@@ -155,15 +164,56 @@ class TestRenderGridTimeoutScaling:
                    wav_path="in.wav", in_scale=1.0, tmp=str(tmp_path), out_scale=1.0, **kwargs)
         return seen[0]
 
+    def test_default_timeout_scales_with_parallel_sims(self, monkeypatch):
+        """Concurrent renders slow each other down, so the ceiling must grow with the number
+        of them. Measured: a 10 s render took ~129 s alone but blew past a 200 s ceiling with
+        8 concurrent -- a timeout that ignores parallel_sims reports that as a convergence
+        failure."""
+        from tools.ltspice_spicelib import default_timeout
+        monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
+        solo = default_timeout(38.0, parallel_sims=1)
+        eight = default_timeout(38.0, parallel_sims=8)
+        assert eight > solo
+        # and must keep growing once genuinely oversubscribed, not plateau at the core count
+        assert default_timeout(38.0, parallel_sims=64) > eight
+
+    def test_default_timeout_covers_the_render_that_actually_timed_out(self, monkeypatch):
+        """The regression this whole parameter exists for: 10 s of audio, 8 concurrent, which
+        needed more than the old flat max(120, dur*20) = 200 s."""
+        from tools.ltspice_spicelib import default_timeout
+        monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
+        assert default_timeout(10.0, parallel_sims=8) > 200.0
+
+    def test_env_scale_multiplies_the_default_for_slower_hardware(self, monkeypatch):
+        """An older CPU or a spinning disk is not something the caller should have to hand-tune
+        per invocation -- LTSPICE_TIMEOUT_SCALE is the one lever."""
+        from tools.ltspice_spicelib import default_timeout
+        monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
+        base = default_timeout(38.0, parallel_sims=6)
+        monkeypatch.setenv("LTSPICE_TIMEOUT_SCALE", "3")
+        assert default_timeout(38.0, parallel_sims=6) == pytest.approx(base * 3.0)
+
+    def test_a_junk_env_scale_falls_back_to_1_rather_than_crashing(self, monkeypatch):
+        """A typo in an env var must not take down a multi-hour render run."""
+        from tools.ltspice_spicelib import default_timeout
+        monkeypatch.delenv("LTSPICE_TIMEOUT_SCALE", raising=False)
+        base = default_timeout(38.0, parallel_sims=6)
+        monkeypatch.setenv("LTSPICE_TIMEOUT_SCALE", "not-a-number")
+        assert default_timeout(38.0, parallel_sims=6) == pytest.approx(base)
+
     def test_default_timeout_scales_with_duration_not_a_flat_constant(self, tmp_path, monkeypatch):
         short = self._seen_timeout(tmp_path, monkeypatch, dur_s=1.0)
         long = self._seen_timeout(tmp_path, monkeypatch, dur_s=60.0)
         assert long > short
-        assert long == pytest.approx(60.0 * DEFAULT_TIMEOUT_S_PER_AUDIO_S)
+        # render_grid's own parallel_sims default applies, so compare against the same
+        # helper rather than re-deriving the arithmetic here
+        assert long == pytest.approx(default_timeout(60.0, RENDER_GRID_DEFAULT_PARALLEL_SIMS))
+        assert long >= 60.0 * DEFAULT_TIMEOUT_S_PER_AUDIO_S
 
     def test_default_timeout_has_a_floor_for_very_short_clips(self, tmp_path, monkeypatch):
         tiny = self._seen_timeout(tmp_path, monkeypatch, dur_s=0.01)
-        assert tiny == pytest.approx(MIN_TIMEOUT_S)
+        assert tiny >= MIN_TIMEOUT_S
+        assert tiny == pytest.approx(default_timeout(0.01, RENDER_GRID_DEFAULT_PARALLEL_SIMS))
 
     def test_explicit_timeout_overrides_the_duration_based_default(self, tmp_path, monkeypatch):
         seen = self._seen_timeout(tmp_path, monkeypatch, dur_s=60.0, timeout=42.0)
