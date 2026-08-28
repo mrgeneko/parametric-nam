@@ -34,17 +34,17 @@ export a single `.param.nam` whose knobs match the real controls.
 1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
    Needs the .NET SDK to build.
 2. **The sweep file** — download `T3K-sweep-v3.wav` from
-   **<https://www.tone3000.com/capture>** into `examples/` (see
-   [The sweep file](#the-sweep-file) below). Feel free to substitute your own favorite sweep or
-   DI recording instead — just point `input` in the config at it. A good input covers the top
-   of the band (real playing alone rarely does) and includes real transient attacks, not just
-   steady tones.
+   **<https://www.tone3000.com/capture>** into `examples/`. Feel free to substitute your own
+   favorite sweep or DI recording instead — just point `input` in the config at it. A good
+   input covers the top of the band (real playing alone rarely does) and includes real
+   transient attacks, not just steady tones.
 
 ```bash
 git clone https://github.com/mrgeneko/parametric-nam
 git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of parametric-nam
 cd livespice-cli && ./build.sh && cd ..
 # .NET 10 SDK required for the build: `apt install dotnet-sdk-10.0` (Linux) / `brew install dotnet` (macOS)
+# / see https://dotnet.microsoft.com/download for Windows or other install methods
 
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
 # download T3K-sweep-v3.wav (see above) into examples/ before running this:
@@ -55,61 +55,6 @@ python run_pipeline.py --config examples/muff/config.toml \
 ```
 
 This trains an actual muff model end to end. See `examples/muff/muff.md` for the circuit notes.
-
-### The sweep file
-
-**This repo does not ship an excitation.** Download **`T3K-sweep-v3.wav`** from
-**<https://www.tone3000.com/capture>** and put it in `examples/` — that is the default `input`
-for `scaffold_config.py`, `gen_dataset_from_captures.py`, and the bundled example configs.
-`examples/*.wav` is gitignored, so it will not be committed back.
-
-```bash
-# after downloading:
-ls examples/T3K-sweep-v3.wav
-```
-
-**On its own it does NOT cover the loud region** — 22 dB crest factor, and only **0.075 %** of
-its samples sit within 6 dB of peak. A model trained on it alone never sees the device
-saturating, and goes out-of-distribution the moment a hot input arrives. **This is the
-excitation defect behind this pipeline's FiLM-runaway blowups** (see
-[Known Issues](docs/known-issues.md) — one shipped pedal model spiked to 12.39 peak on a real
-pick attack where the reference circuit produced 0.46).
-
-So for a real training run, do not feed it in raw — build an excitation from it:
-
-```bash
-python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
-    --output ~/work/tmp/DEVICE_excitation.wav \
-    --realistic-peak <below the device's measured saturation onset> \
-    --sweep-peaks <levels up to the device's max output + headroom>
-```
-
-That concatenates the `--input` clip with amplitude-stepped log sweeps that **do** reach
-maximum output, plus a leading silence so the render is not sampling a cold-start transient.
-Then gate it with `tools/check_transient_coverage.py`, which fails if any knob corner's
-transient content never reaches that corner's own saturation onset.
-
-**Why the TONE3000 sweep, not your own recording?** It is the ecosystem standard — captures
-made against it are directly comparable with everyone else's, and NAM recognises it, so
-blip-based time alignment does real calibration instead of falling back to a disclosed
-`delay=0`. It is not itself a real-playing recording (see "The sweep file" above), but its
-built-in noise-staircase and calibration blips already provide genuine sharp-attack content —
-a plain, transient-free synthesized tone would not.
-
-**Keep transients intact, whatever you use as `--input`.** Sharp-attack content — whether a
-real-playing recording's pick attacks or T3K's own noise-staircase/blip transients — is the
-excitation's source of real transient dynamics; thinning or filtering it (e.g. to work around
-a solver convergence issue during dataset generation) removes
-exactly what a model needs to learn a stable response to a sharp attack — this is the root
-cause of the pedal mentioned above shipping a model that spiked to **12.39** peak on a real
-pick attack where the reference circuit produced **0.46**. If an excitation's transients are
-causing solver divergence, fix the render (oversample, timestep, backend) rather than the
-input.
-
-Note that measurements like truncation error or grid adequacy are properties of the circuit
-**and the specific excitation used**, so they do not automatically carry over if you change
-excitations — `measure_truncation.py` and `grid_adequacy.py` both measure through whatever
-`input` is configured.
 
 ### Bring your own circuit
 
@@ -252,6 +197,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `tools/scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
 | `tools/grid_adequacy.py` | Measure whether a knob grid is dense enough |
 | `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
+| `tools/build_excitation.py` | Build a training excitation that covers the full input range |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
 | `tools/render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
 | `tools/render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
@@ -397,8 +343,10 @@ has no other functional connection to this project or to hotspice's emitter.)
 git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of this repo
 cd livespice-cli && ./build.sh
 ```
-(.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS. `--recurse-submodules`
-matters — LiveSPICE has its own nested submodule; a plain clone leaves it empty and the build fails.)
+(.NET 10 SDK: `apt install dotnet-sdk-10.0` on Linux, `brew install dotnet` on macOS, or see
+Microsoft's own installer/instructions at <https://dotnet.microsoft.com/download> for Windows or
+any other install method. `--recurse-submodules` matters — LiveSPICE has its own nested
+submodule; a plain clone leaves it empty and the build fails.)
 
 `gen_dataset_from_schx.py` resolves the binary in this order: **`$LIVESPICE_CLI`** → a sibling
 `../livespice-cli/publish/livespice_cli`. Set the env var if your checkout lives

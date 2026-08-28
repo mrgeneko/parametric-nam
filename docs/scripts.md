@@ -96,6 +96,42 @@ against a high-oversample reference (not the next rung up, which understates the
 you're chasing — training past that point just teaches the model the integrator's own
 mistakes.
 
+## `tools/build_excitation.py` — build a training excitation that covers the full input range
+
+A sweep/DI file on its own (e.g. `T3K-sweep-v3.wav`) samples its own loud region essentially
+never — a model trained on it alone never sees the device saturating, and goes
+out-of-distribution the moment a hot input arrives. Build a proper training excitation from it:
+
+```bash
+python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
+    --output ~/work/tmp/DEVICE_excitation.wav \
+    --realistic-peak <below the device's measured saturation onset> \
+    --sweep-peaks <levels up to the device's max output + headroom>
+```
+
+That concatenates the `--input` clip with amplitude-stepped log sweeps that **do** reach
+maximum output, plus a leading silence so the render is not sampling a cold-start transient.
+Then gate it with `tools/check_transient_coverage.py`, which fails if any knob corner's
+transient content never reaches that corner's own saturation onset.
+
+**Not called by `run_pipeline.py`** — it's a manual step you run once per device to produce
+the excitation file that `--dataset-dir`'s generation step (`gen_dataset_from_schx.py`, via
+`run_pipeline.py`'s `input` config setting) then consumes.
+
+**Keep transients intact, whatever you use as `--input`.** Sharp-attack content — whether a
+real-playing recording's pick attacks or a standard capture sweep's own built-in noise-staircase/
+calibration-blip transients — is the excitation's source of real transient dynamics; thinning or
+filtering it (e.g. to work around a solver convergence issue during dataset generation) removes
+exactly what a model needs to learn a stable response to a sharp attack — a real shipped pedal
+model once spiked to **12.39** peak on a real pick attack where the reference circuit produced
+**0.46**, traced back to exactly this. If an excitation's transients are causing solver
+divergence, fix the render (oversample, timestep, backend) rather than the input.
+
+Note that measurements like truncation error or grid adequacy are properties of the circuit
+**and the specific excitation used**, so they do not automatically carry over if you change
+excitations — `measure_truncation.py` and `grid_adequacy.py` both measure through whatever
+`input` is configured.
+
 ## `gen_dataset_from_schx.py` — generate the dataset
 
 Simulates the circuit across knob permutations, one WAV per permutation, then combines
