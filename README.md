@@ -265,19 +265,20 @@ all in [`docs/reference.md`](docs/reference.md).
 
 ## System Requirements
 
-Training parametric NAM models is GPU- and memory-intensive; a GPU is required in
-practice. Real device grids run into hundreds or thousands of permutations (e.g. a real
-5-knob amp's 1944), and real training budgets run into the tens of thousands of
-gradient steps (see `--target-steps` above) — CPU-only training isn't realistically
-feasible for a real run, not just slow. `--device auto` (the default) refuses to start
-if no GPU is detected, rather than silently queuing a run that will never finish —
-pass `--device cpu` explicitly if you genuinely want to (e.g. a short debugging run).
+Training parametric NAM models is GPU- and memory-intensive. Real device grids run into
+hundreds or thousands of permutations (e.g. a real 5-knob amp's 1944), and real training
+budgets run into the tens of thousands of gradient steps (see `--target-steps` above) —
+CPU-only training isn't realistically feasible for a real run, not just slow. `--device auto`
+(the default) refuses to start if no GPU/MPS device is detected, rather than silently queuing
+a run that will never finish — pass `--device cpu` explicitly if you genuinely want to (e.g. a
+short debugging run).
 
-- **GPU VRAM**: 16 GB+ — needed for comfortable training of slimmable models
-  with 4 widths at batch-size 16+.
-- **System RAM**: 24 GB+.
+**This repo has mostly been developed and tested on Apple Silicon Macs with 24 GB+ unified
+memory** (`--device auto` picks `mps` there). It has not been systematically benchmarked
+across the NVIDIA/AMD VRAM spectrum, so treat any specific VRAM number below as a rough,
+anecdotal data point from one machine, not a validated requirement.
 
-### Notes for AMD GPU users
+### Notes for AMD GPU users (anecdotal — not the main tested path)
 
 PyTorch's ROCm build may lack compiled kernels for certain GPU architectures.
 If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
@@ -306,11 +307,12 @@ If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
    done
    ```
 
-Even with these workarounds, GPUs with only 4 GB VRAM (e.g. RX 6400) are
-**not sufficient** for training slimmable WaveNet models — they consistently
-fail with `illegal memory access` regardless of batch size or crop length, and
-CPU training isn't a realistic fallback (see System Requirements above). You
-need a GPU with more VRAM.
+On the one card this was actually tried on (a 4 GB RX 6400), training the default
+multi-tier slimmable config still failed with `illegal memory access` after these
+workarounds, across the batch sizes/crop lengths tried. A single, narrower `--widths`
+value (skipping the multi-tier slimmable forward pass entirely) was never tried on that
+card and would use meaningfully less memory, so it may be worth trying before ruling GPU
+training out on similarly memory-constrained hardware.
 
 ---
 
