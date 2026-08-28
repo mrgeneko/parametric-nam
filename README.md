@@ -29,25 +29,32 @@ export a single `.param.nam` whose knobs match the real controls.
 ### Try it now
 
 `examples/muff/` holds a real, complete recipe: the `.schx` circuit and an annotated
-`config.toml`. One thing is not in the repo — **the sweep file**. Download `T3K-sweep-v3.wav`
-from **<https://www.tone3000.com/capture>** into `examples/` before your first run (see
-[The sweep file](#the-sweep-file) below). Feel free to substitute your own favorite sweep or DI
-recording — just point `input` in the config at it. A good input covers the top of the band
-(real playing alone rarely does) and includes real transient attacks, not just steady tones.
-The only external piece is the oracle, which is public:
+`config.toml`. Two things are not in the repo:
+
+1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
+   Needs the .NET SDK to build.
+2. **The sweep file** — download `T3K-sweep-v3.wav` from
+   **<https://www.tone3000.com/capture>** into `examples/` (see
+   [The sweep file](#the-sweep-file) below). Feel free to substitute your own favorite sweep or
+   DI recording instead — just point `input` in the config at it. A good input covers the top
+   of the band (real playing alone rarely does) and includes real transient attacks, not just
+   steady tones.
 
 ```bash
 git clone https://github.com/mrgeneko/parametric-nam
-git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of parametric-nam
+cd livespice-cli && ./build.sh && cd ..
+# .NET 10 SDK required for the build: `apt install dotnet-sdk-10.0` (Linux) / `brew install dotnet` (macOS)
+
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
+# download T3K-sweep-v3.wav (see above) into examples/ before running this:
 
 python run_pipeline.py --config examples/muff/config.toml \
     --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
     --checkpoint-dir /tmp/muff_ckpt
 ```
 
-This trains an actual Big Muff Pi V1 (66#5) model end to end. See
-`examples/muff/muff.md` for the circuit notes.
+This trains an actual muff model end to end. See `examples/muff/muff.md` for the circuit notes.
 
 ### The sweep file
 
