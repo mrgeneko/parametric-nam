@@ -71,9 +71,9 @@ It is a 190 s real-playing clip at 48 kHz. Two properties matter downstream:
 - **On its own it does NOT cover the loud region** — 22 dB crest factor, and only **0.075 %** of
   its samples sit within 6 dB of peak. A model trained on it alone never sees the device
   saturating, and goes out-of-distribution the moment a hot input arrives. **This is the
-  excitation defect behind this pipeline's FiLM-runaway blowups** (see the Known issue below,
-  and the Boss DS-1, whose shipped model spiked to 12.39 peak on a real pick attack where the
-  reference circuit produced 0.46).
+  excitation defect behind this pipeline's FiLM-runaway blowups** (see the Known issue below —
+  one shipped pedal model spiked to 12.39 peak on a real pick attack where the reference
+  circuit produced 0.46).
 
 So for a real training run, do not feed it in raw — build an excitation from it:
 
@@ -89,30 +89,24 @@ output, plus a leading silence so the render is not sampling a cold-start transi
 it with `tools/check_transient_coverage.py`, which fails if any knob corner's transient content
 never reaches that corner's own saturation onset.
 
-**Why not the old bundled sweep?** Until 2026-08-28 this repo shipped its own `sweepv5.wav`
-(original Logic Pro material plus synthesised chirps — ours outright, and freely
-redistributable). **Licensing is not why it went.** It was replaced because the TONE3000 sweep
-is simply the better and more standard choice:
+**Why the TONE3000 sweep, not your own recording?** It is the ecosystem standard — captures
+made against it are directly comparable with everyone else's, and NAM recognises it, so
+blip-based time alignment does real calibration instead of falling back to a disclosed
+`delay=0`.
 
-- **It is the ecosystem standard.** Captures made against it are directly comparable with
-  everyone else's, and NAM recognises it, so blip-based time alignment does real calibration
-  instead of falling back to a disclosed `delay=0`.
-- **Its transients are real.** `sweepv5.wav`'s attacks had been thinned because they caused
-  ngspice divergence during dataset generation — and that is the root cause of the Boss DS-1
-  shipping a model that spiked to **12.39** peak on a real pick attack where the reference
-  circuit produced **0.46**. The model had never been shown a stable response to a sharp attack.
-  The DS-1 was moved onto `sweep-v3.wav` for exactly this reason; the rest of the fleet has now
-  followed.
+**Keep its transients intact if you substitute your own clip.** A real playing recording's
+attacks are the excitation's only source of real transient dynamics; thinning or filtering
+them (e.g. to work around a solver convergence issue during dataset generation) removes
+exactly what a model needs to learn a stable response to a sharp attack — this is the root
+cause of the pedal mentioned above shipping a model that spiked to **12.39** peak on a real
+pick attack where the reference circuit produced **0.46**. If an excitation's transients are
+causing solver divergence, fix the render (oversample, timestep, backend) rather than the
+input.
 
-The trade-off is that `sweepv5.wav` came with the synthesised loud-region coverage already
-attached, whereas `sweep-v3.wav` is real playing only — hence `build_excitation.py` above,
-which adds that coverage back explicitly and at levels tied to the device's *measured*
-saturation point rather than to whatever the source clip happened to contain.
-
-Comments throughout the codebase that cite measurements "on sweepv5" refer to the old file.
-Those numbers are properties of the circuit **and that excitation**, so they do not
-automatically carry over — `measure_truncation.py` and `grid_adequacy.py` both measure through
-whatever `input` is configured.
+Note that measurements like truncation error or grid adequacy are properties of the circuit
+**and the specific excitation used**, so they do not automatically carry over if you change
+excitations — `measure_truncation.py` and `grid_adequacy.py` both measure through whatever
+`input` is configured.
 
 ### Bring your own circuit
 
@@ -318,7 +312,7 @@ trade-off, not a defect, and gating on it would turn a judgement call into an er
 
 What *does* fail the run (**exit 2**) is a **failed render**, because that is the case that
 produces a WRONG table rather than a weaker one: every cell is computed from whichever probes
-survived, and nothing else in the output says so. Measured on the Joyo American Sound, 38 of 48
+survived, and nothing else in the output says so. Measured on one real pedal config, 38 of 48
 probes timed out and the printed table put one cell at 0.6578 (18.8× over) where the clean
 re-run measured 0.0475 (1.4×) — a 14× error, indistinguishable from a real result. If the cause
 is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) or lower
@@ -382,8 +376,8 @@ Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `
 **Typical generation time** scales with circuit complexity, `--oversample`, and backend —
 there's no universal number, but two real measured points: a simple pedal-scale circuit
 renders a permutation in low single-digit seconds under the default `livespice` backend,
-while the EVH 5150 Lead Full (sag) — a 6-stage preamp cascade + 4-tube power amp with
-whole-amp sag — took **~75 min for a full permutation-batch** on the same backend. The
+while a high-gain amp head — a 6-stage preamp cascade + 4-tube power amp with whole-amp
+sag — took **~75 min for a full permutation-batch** on the same backend. The
 `--timeout-mult` flag's per-permutation timeout ceiling is built around `oversample 8`
 costing up to **40x realtime** (100s of audio → 4000s) for the hardest corners, since some
 real operating points (e.g. a very low-gain setting) are a genuine 20-40x slower than that
@@ -438,9 +432,9 @@ python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals
 
 LTspice counterpart of `render_ngspice_deck.py` above, for a device whose ngspice-deck
 version can't converge on real playing content **at all**, independent of `maxstep` — found
-on the Fulltone OCD, whose ideal tanh-bounded op-amp B-source is a genuine Newton-solver
-dead end in ngspice (70/70 renders across the full knob grid timed out, at every `maxstep`
-from 3e-6 down to 3e-8). LTspice gets past it with a real op-amp macromodel plus explicit
+on one pedal, whose ideal tanh-bounded op-amp B-source is a genuine Newton-solver dead end in
+ngspice (70/70 renders across the full knob grid timed out, at every `maxstep` from 3e-6 down
+to 3e-8). LTspice gets past it with a real op-amp macromodel plus explicit
 `.ic`/`uic` initial-condition hints on the `.tran` line — neither is available through
 ngspice's B-source style. `--pedal-dir`/`--module` point at the same `build_deck()`/
 `KNOB_NAMES` module convention as the ngspice-deck tools; `--tap` (not `--probe-node`) names
@@ -460,13 +454,13 @@ Same `manifest.jsonl`/`mapping.csv`/`--absolute` output contract as `render_ngsp
 A `gen_<device>_ltspice.py` module exposes `build_deck()` + `KNOB_NAMES`; where its netlist comes
 from is up to it, and there are two established patterns:
 
-- **Hand-written** (`gen_ocd_ltspice.py`) — necessary when the circuit has no faithful `.schx` at
-  all, e.g. the OCD's real 2N7000 MOSFET clipping, which LiveSPICE has no component for. The
-  netlist is authored directly and is the only description of that circuit.
-- **Derived from the `.schx`** (`gen_joyo_ltspice.py`) — for a device that *does* have an audited
-  `.schx` which LiveSPICE simply cannot solve correctly. It imports the component list from the
-  `.schx`'s own generator (`from gen_joyo_american import NET`) and translates only the syntax,
-  so values, nets and topology have exactly one source. **Prefer this whenever a `.schx` exists.**
+- **Hand-written** — necessary when the circuit has no faithful `.schx` at all, e.g. a real
+  MOSFET clipping stage which LiveSPICE has no component for. The netlist is authored directly
+  and is the only description of that circuit.
+- **Derived from the `.schx`** — for a device that *does* have an audited `.schx` which
+  LiveSPICE simply cannot solve correctly. It imports the component list from the `.schx`'s own
+  generator (e.g. `from gen_mydevice import NET`) and translates only the syntax, so values,
+  nets and topology have exactly one source. **Prefer this whenever a `.schx` exists.**
   A hand-copied netlist is precisely the drift `parametric-devices/tools/check_generator_drift.py`
   exists to catch, and it would go unnoticed here because nothing compares two backends
   automatically. Two requirements: the `.schx` generator must guard its file write behind
@@ -479,14 +473,12 @@ the current `LTspice_26.pkg` are Wine-wrapped and their batch mode silently prod
 See [LTspice on macOS](#ltspice-on-macos-only-for---backend-ltspice-deck) under Build &
 Dependencies before debugging a deck that "won't converge".
 
-Not only for ngspice-can't-converge cases: the **Joyo American Sound**
-(`gen_joyo_ltspice.py`) is here because *LiveSPICE* is the backend that cannot render it.
-`IdealOpAmp` cannot saturate — it has no supply rails at all — and on this pedal rail saturation
-is the dominant nonlinearity at hot settings, so the output reaches **228x full scale** at
-ordinary knob settings — while LiveSPICE's non-ideal
+Not only for ngspice-can't-converge cases: one real pedal is here because *LiveSPICE* is the
+backend that cannot render it. `IdealOpAmp` cannot saturate — it has no supply rails at all —
+and on this pedal rail saturation is the dominant nonlinearity at hot settings, so the output
+reaches **228x full scale** at ordinary knob settings — while LiveSPICE's non-ideal
 `Circuit.OpAmp` makes the circuit too stiff for its fixed-step solver (diverges even at
-`oversample=128`, and `measure_truncation.py` reports STALLS). See
-`parametric-devices/pedals/Joyo American Sound.md`.
+`oversample=128`, and `measure_truncation.py` reports STALLS).
 
 ### `gen_dataset_from_captures.py` — build a dataset from real hardware captures, no `.schx` needed
 
@@ -510,16 +502,16 @@ Two source kinds, auto-detected per file by extension and freely mixable in one 
 
 ```bash
 python gen_dataset_from_captures.py \
-    --captures "~/Downloads/5150 DST *.nam" \
-    --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
+    --captures "~/Downloads/MyAmp DST *.nam" \
+    --output /tmp/myamp_ds --gear-make "Manufacturer" --gear-model "Amp Model 15w"
 
-python gen_dataset_from_captures.py --captures "~/Downloads/Klon *.wav" --output /tmp/klon_ds
+python gen_dataset_from_captures.py --captures "~/Downloads/MyPedal *.wav" --output /tmp/mypedal_ds
 
-python gen_dataset_from_captures.py --combine /tmp/5150_ds   # same --combine flag as gen_dataset_from_schx.py
+python gen_dataset_from_captures.py --combine /tmp/myamp_ds   # same --combine flag as gen_dataset_from_schx.py
 ```
 
 - **Filenames encode the knob settings**, same convention for either source kind.
-  `"5150 DST G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5`
+  `"MyAmp DST G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5`
   (comma-separated `PrefixDigit` tokens, digit → value/10). Override the prefix→knob-name map
   and the digit→value scale per batch with `--knob-map` (e.g. `--knob-map D=Drive`) /
   `--knob-scale`, or skip filename parsing entirely with `--mapping-csv` for conventions too
@@ -645,8 +637,7 @@ throws (`"No config parser registered for architecture: ParametricWaveNet"`). Th
 one specific knob setting into an ordinary static `.nam` instead — FiLM is affine over the
 layer's linear ops, so freezing a setting folds exactly into `conv`/`mixin` weights, no
 retraining, pure offline weight transform. Omitted knobs fall back to their own declared
-default, not a blanket 0.5 (wrong for circuits like the Timmy, whose controls don't center
-at noon).
+default, not a blanket 0.5 (wrong for a circuit whose controls don't center at noon).
 
 By default the output is **dual-payload**: the baked tone at the top level (so any stock
 plugin plays it) plus the full original parametric model under an `embedded_parametric`
@@ -724,7 +715,7 @@ knob sweeps are *relative* (dB vs centre) and cannot see a circuit that is unifo
 reference tube models, uniform audio-rate output, never aborts. The right default for
 essentially everything. But read "never aborts" as a *risk*, not only a feature: its
 `IdealOpAmp` has no supply rails and cannot saturate, so a circuit whose dominant nonlinearity
-is op-amp clipping renders happily and wrongly. Measured on the Joyo American Sound: **228x full
+is op-amp clipping renders happily and wrongly. Measured on one real pedal: **228x full
 scale** at ordinary knob settings, converging cleanly, passing preflight, with every knob
 responding in the correct direction. `measure_truncation.py` reported *textbook* convergence for
 it — truncation error tells you how well you solved the equations you wrote, never whether they
@@ -732,8 +723,8 @@ were the right equations. See `parametric-devices/backends.toml`, which exists t
 these cases.
 
 **ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
-adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. the
-EVH 5150 Lead full) where LiveSPICE's fixed-step solver diverges or needs extreme
+adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. a
+high-gain amp head) where LiveSPICE's fixed-step solver diverges or needs extreme
 oversampling. It translates any `.schx` to an ngspice netlist (exact Dempwolf–Zölzer /
 Koren tube models, E+F ideal transformer) and feeds the input via an XSPICE filesource.
 Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
@@ -743,11 +734,11 @@ and the important fidelity caveats.
 **This safety comes at a real, sometimes severe, speed cost** — adaptive timestepping
 means ngspice's solve time grows with the circuit's actual stiffness rather than staying
 fixed, and on a genuinely stiff circuit that growth can be dramatic: measured ~2.7x slower
-than LTspice on the Fender 5E3 at hard drive (step count exploding to 45492 vs LTspice's
-12543 for the same clip), and on the EVH 5150 specifically, ngspice **failed to converge
-on a hard-drive render at all** — aborting within microseconds regardless of timestep,
-integration method, or input upsampling — while a hand-converted LTspice netlist of the
-same circuit (in the separate `ltspice-batch` repo) rendered the same drive/pot position in
+than LTspice on a tweed-style low-gain amp at hard drive (step count exploding to 45492 vs
+LTspice's 12543 for the same clip), and on a very-high-gain amp head, ngspice **failed to
+converge on a hard-drive render at all** — aborting within microseconds regardless of
+timestep, integration method, or input upsampling — while a hand-converted LTspice netlist of
+the same circuit (in the separate `ltspice-batch` repo) rendered the same drive/pot position in
 ~32s. (There is no *generic* schx-to-LTspice translator here, but a deck can still be derived
 from a `.schx` rather than hand-written — see "Two ways to build a deck" below.) Don't assume a
 slow or stuck ngspice render will eventually finish; time-box it and compare against
@@ -758,10 +749,9 @@ long timeout budget on it.
 different flag on different tools, for a different situation. The `--backend ngspice` above
 still describes the circuit as a `.schx` file, just solves it with ngspice instead of
 LiveSPICE. `ngspice-deck` is for a device that has **no `.schx` at all** — a hand-written
-ngspice netlist (`gen_ocd_ngspice.py` and siblings, kept in a private devices repo), typically
-because the circuit needs something `.schx` has no component for (a real MOSFET) or a feedback
-loop LiveSPICE's fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s
-translation.
+ngspice netlist module (kept in a private devices repo), typically because the circuit needs
+something `.schx` has no component for (a real MOSFET) or a feedback loop LiveSPICE's
+fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s translation.
 
 **LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
 `grid_adequacy.py`/`check_transient_coverage.py`, or `tools/render_ltspice_deck.py`
@@ -769,14 +759,14 @@ directly) — the same deck-module situation as `ngspice-deck`. Two circumstance
 a device whose ngspice deck can't converge on real playing content **at all**, independent of
 timestep; and a device where every backend converges but LTspice is the one whose answer is
 *stable* (see below).
-Found on the Fulltone OCD: its ideal tanh-bounded op-amp B-source is a genuine
+Found on one real pedal: its ideal tanh-bounded op-amp B-source is a genuine
 Newton-solver dead end in ngspice (70/70 renders across the full knob grid timed out, at
 every `maxstep` from 3e-6 down to 3e-8), while LTspice gets past it with a real op-amp
 macromodel and explicit `.ic`/`uic` initial-condition hints unavailable through ngspice's
 B-source style — see `tools/ltspice_spicelib.py`'s module docstring for the full
 investigation.
 
-**Also worth reaching for when ngspice *does* converge.** On the Joyo American Sound both SPICE
+**Also worth reaching for when ngspice *does* converge.** On another real pedal both SPICE
 backends bound the output correctly and agree to 1.3% at the clipping corners, and LTspice was
 still chosen: ngspice's answers kept moving with settle time where LTspice's did not (centre
 0.858 -> 1.137 V going from 0.8 s to 2.5 s of settle, versus 0.9597 -> 0.9590), and it was 2-3x
@@ -798,17 +788,17 @@ knob-grid corner — the model's prediction spikes to tens or hundreds of times 
 peak level on real transient content, while every aggregate metric (val ESR, per-tier
 loss curves) looks fine, because the corner is a single cell out of hundreds-to-thousands
 and contributes almost nothing to the training loss. It has recurred independently on at
-least three shipped/prototype models (the pre-fix Boss DS-1, Tweed 5F6-A Full sag's
-FiLM-only 5-knob release, and Tweed 5F6-A Full sag's FiLM+LoRA 2-knob prototype) at
-different knob combinations, so treat it as a real, recurring failure mode of this
-pipeline, not a one-off — and not specific to either conditioning mechanism. Whether
-LoRA's extra per-layer capacity makes the failure *worse* once it occurs (more room for
-an unconstrained input region to produce an extreme wrong answer) versus FiLM alone is a
-real, plausible hypothesis, not yet confirmed: a same-corner probe against a FiLM-only
-model found only ~1.1× elevation where the FiLM+LoRA case showed ~7×, but on a different
-grid/config, so it's suggestive rather than a controlled comparison.
+least three shipped/prototype models (a pre-fix pedal model, one amp's FiLM-only 5-knob
+release, and that same amp's FiLM+LoRA 2-knob prototype) at different knob combinations, so
+treat it as a real, recurring failure mode of this pipeline, not a one-off — and not specific
+to either conditioning mechanism. Whether LoRA's extra per-layer capacity makes the failure
+*worse* once it occurs (more room for an unconstrained input region to produce an extreme
+wrong answer) versus FiLM alone is a real, plausible hypothesis, not yet confirmed: a
+same-corner probe against a FiLM-only model found only ~1.1× elevation where the FiLM+LoRA
+case showed ~7×, but on a different grid/config, so it's suggestive rather than a controlled
+comparison.
 
-What it looks like, concretely (Tweed 5F6-A Full sag, lite tier): at
+What it looks like, concretely (one 5-knob amp model, lite tier): at
 `NormalVol=BrightVol=0.025` (the swept grid's own minimum) combined with `Treble=Bass=
 Middle=0.8`, the model predicted a peak of **100.2 V** against a ground-truth peak of
 **0.64 V** (156×) — RMS stayed normal, so it's a brief spike, not sustained distortion,
@@ -847,23 +837,23 @@ validation ESR (which averages over everything else).
   `.param.nam`) — replays a real reference clip through every tier at every corner
   (`--config` for the exact trained grid, not just the reduced set) and flags any window
   whose peak is anomalous relative to that model's own typical output. Scanning the
-  Tweed fp32 model with a **generic** guitar reference came back clean even including
-  this exact corner — the spike only showed up against the **actual training excitation**
-  at that permutation, so when investigating a suspected corner, prefer `--reference
-  <the training sweep.wav>` over an arbitrary clip; a scan that doesn't reproduce the
-  triggering content can give a false sense of safety.
+  affected amp's fp32 model with a **generic** guitar reference came back clean even
+  including this exact corner — the spike only showed up against the **actual training
+  excitation** at that permutation, so when investigating a suspected corner, prefer
+  `--reference <the training sweep.wav>` over an arbitrary clip; a scan that doesn't
+  reproduce the triggering content can give a false sense of safety.
 - **`tools/build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
-  diagnosing the Tweed FiLM+LoRA case) — `check_transient_coverage.py` only checks that
+  diagnosing the FiLM+LoRA case above) — `check_transient_coverage.py` only checks that
   the excitation's peak *level* reaches saturation onset per corner; it says nothing
-  about *shape*. The Tweed FiLM+LoRA blowup happened at a trained grid point (not a gap
+  about *shape*. That FiLM+LoRA blowup happened at a trained grid point (not a gap
   needing extrapolation) whose excitation had moderate-level content and separately had
   high-crest-factor (sharp-transient) content, but never both together at the same
   time — that exact (level, shape) combination was simply never in the loss, so nothing
   constrained the model's behavior there. `--synth-burst-peaks` inserts one synthesized,
   deterministic, license-free broadband transient burst (`_transient_burst()`, crest≈8.5,
   instant attack + exponential decay) at every `--sweep-peaks` level, closing that gap
-  directly. Verified end-to-end on the Tweed 2-knob retrain: `scan_film_runaway.py` came
-  back clean across the full grid **at full training convergence** (not just an early
+  directly. Verified end-to-end on a 2-knob retrain of that amp: `scan_film_runaway.py`
+  came back clean across the full grid **at full training convergence** (not just an early
   checkpoint — the original instability itself only emerged well into training, so a
   clean early scan alone doesn't prove a fix held).
 
@@ -889,9 +879,9 @@ slow-charging DC-blocking network — a large output-coupling capacitor into a h
 for instance — real content starting at t=0 captures a genuine but non-representative
 multi-second "circuit powering on" transient instead of the device's true steady behavior.
 
-**Concrete evidence (Fulltone OCD, ngspice backend — `gen_ocd_ngspice.py`/`render_ocd.py` in
-parametric-devices)**: `C10` (10µF) into the Volume pot's low leg (`RVOL2`, up to 500kΩ) gives
-an RC time constant of roughly **5 seconds**. A sustained 200Hz test tone with no lead-in,
+**Concrete evidence (one real pedal, ngspice backend)**: `C10` (10µF) into the Volume pot's
+low leg (`RVOL2`, up to 500kΩ) gives an RC time constant of roughly **5 seconds**. A sustained
+200Hz test tone with no lead-in,
 rendered from t=0, showed output RMS *slowly drifting* for about 15 seconds and then making an
 **abrupt jump to a different, higher steady value at ~16 seconds** — neither of which a real
 pedal, always already running, would ever do. This wasn't a settling-window artifact of a short
@@ -918,12 +908,12 @@ hand-derived and re-verified per circuit.
 The same fix is also needed in `tools/preflight.py --backend ngspice-deck` and
 `tools/find_saturation_point.py`'s own amplitude sweep (both take `--lead-silence-s`, default
 `3.0`) — a short knob-direction probe with no lead-in hits the identical cold-start transient,
-and it isn't just noisy, it can flip the answer: OCD's Tone knob probed REVERSED at a 5-second
-probe with no lead-in and correctly OK once probed with a lead-in (or a long-enough probe to
-outlast the transient on its own). See the next "Known issue" entry for the other, independent
-fix this same investigation needed.
+and it isn't just noisy, it can flip the answer: that pedal's Tone knob probed REVERSED at a
+5-second probe with no lead-in and correctly OK once probed with a lead-in (or a long-enough
+probe to outlast the transient on its own). See the next "Known issue" entry for the other,
+independent fix this same investigation needed.
 
-**Caveat**: 3 seconds was sufficient for the one circuit (OCD) this was diagnosed and verified
+**Caveat**: 3 seconds was sufficient for the one circuit this was diagnosed and verified
 against, not derived from the RC time constant analytically for every possible circuit. A
 circuit with a slower network (larger coupling cap and/or higher-value downstream resistance)
 could need longer — when in doubt, run the sustained-tone check above with the circuit's own
@@ -935,14 +925,14 @@ component values before trusting the default.
 
 `tools/preflight.py`'s dead/reversed-knob check holds every non-tested knob at a flat `0.5`
 center. For a low-to-moderate-gain circuit that's fine, but for a genuinely high-gain device
-(Fulltone OCD's stages run up to ~50dB combined), `0.5` on the Gain/Drive knob can already be
+(one real pedal's stages run up to ~50dB combined), `0.5` on the Gain/Drive knob can already be
 deep into saturation — and hard clipping SWAMPS a passive tone stack's real effect, since the
 extra content an EQ knob lets through just becomes more clipping mush, not more clean signal at
 that band. This reads as a **false REVERSED (or DEAD) direction on a knob that's actually
 correct**, and it isn't just about probe input level — it's the circuit's OWN gain control
 self-saturating regardless of how quiet the input is.
 
-**Concrete evidence (Fulltone OCD, `--backend ngspice-deck`)**: with Gain held at the default
+**Concrete evidence (same pedal, `--backend ngspice-deck`)**: with Gain held at the default
 `0.5` center, Tone probed REVERSED (`-11.6%`) at a 10-second native-level probe — this is the
 SAME Tone pot already verified correct on the LiveSPICE side (`+627%` rising) and independently
 re-verified correct here once the fix below was applied. Confirmed the mechanism directly: a
@@ -1116,33 +1106,32 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
 past ~3, the space of tonal behaviors the backbone must represent as "one shared
 computation, rescaled per knob setting" outgrows what fixed weights can encode — measured
-concretely on the Tweed 5F6-A Full (sag) 5-knob run, where the lite (4ch) tier plateaued
-at median ESR 0.126 on the full grid (not shippable) while the architecturally-identical
-full (8ch) tier reached 0.025. `--lora-rank` added a genuine per-knob weight *delta* —
+concretely on one 5-knob amp run, where the lite (4ch) tier plateaued at median ESR 0.126
+on the full grid (not shippable) while the architecturally-identical full (8ch) tier
+reached 0.025. `--lora-rank` added a genuine per-knob weight *delta* —
 `W_effective = W_l1x1 + A(cond)@B(cond)` — more expressive than FiLM's fixed-computation
 rescale, without a full hypernetwork's unconstrained-weights problem.
 
-**Why it was dropped.** On the one device where both were trained to convergence (JCM800
-preamp+power sag, same 2 knobs, same 143-perm grid, same excitation), FiLM-only won:
+**Why it was dropped.** On the one device (a different, 2-knob amp) where both were trained
+to convergence, same knobs, same grid, same excitation, FiLM-only won:
 
 | | tiers | final ESR lite / full |
 |---|---|---|
-| FiLM+LoRA (`2026-08-21`) | 4ch + 8ch | 0.06186 / 0.02403 |
-| FiLM only (`2026-08-26`) | 5ch + 9ch | **0.06016 / 0.02191** |
+| FiLM+LoRA | 4ch + 8ch | 0.06186 / 0.02403 |
+| FiLM only | 5ch + 9ch | **0.06016 / 0.02191** |
 
 Widening a tier lifts the same capacity ceiling LoRA targets, and costs no schema bump, no
 `rank` to choose, and no minimum core version. LoRA also made the FiLM/LeakyReLU runaway
 instability worse when it occurred (~7x excitation elevation vs ~1.1x for FiLM-only), a
-known bad interaction that was never fully bounded. The earlier Tweed 5F6-A testbed numbers
+known bad interaction that was never fully bounded. The earlier 5-knob-amp testbed numbers
 (FiLM+LoRA cutting ESR ~65-72% vs FiLM-only) were real but never re-run as a clean,
-width-matched, to-convergence ablation, and are not archived for re-checking — the JCM800
+width-matched, to-convergence ablation, and are not archived for re-checking — the 2-knob
 comparison above is the only real head-to-head that exists.
 
-**Archived models**: `parametric-nam-models` has 7 LoRA `.nam` files from two runs (both
-rank 4) — `tweed-5f6-a-full-sag/2026-08-17_e1cb0e0` and
-`marshall-jcm800-2203-preamp-and-power-amp-sag/2026-08-21_e1cb0e0`, both 2-knob. Neither is
-marked `CURRENT` for its device; both remain readable/exportable/foldable via this
-toolchain's own Python tools as noted above, but are no longer usable live in a plugin.
+**Archived models**: `parametric-nam-models` has 7 LoRA `.nam` files from two runs on two
+devices (both rank 4), neither marked `CURRENT` for its device. Both remain
+readable/exportable/foldable via this toolchain's own Python tools as noted above, but are
+no longer usable live in a plugin.
 
 ### NAM ecosystem compatibility
 
@@ -1172,8 +1161,8 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 ## System Requirements
 
 Training parametric NAM models is GPU- and memory-intensive; a GPU is required in
-practice. Real device grids run into hundreds or thousands of permutations (e.g. the
-JCM800 hot-rod's 1944), and real training budgets run into the tens of thousands of
+practice. Real device grids run into hundreds or thousands of permutations (e.g. a real
+5-knob amp's 1944), and real training budgets run into the tens of thousands of
 gradient steps (see `--target-steps` above) — CPU-only training isn't realistically
 feasible for a real run, not just slow. `--device auto` (the default) refuses to start
 if no GPU is detected, rather than silently queuing a run that will never finish —
@@ -1329,13 +1318,16 @@ printf '* rc\nV1 in 0 SINE(0 1 1k)\nR1 in out 1k\nC1 out 0 100n\n.tran 0 5m 0 10
 ~/Applications/LTspice.app/Contents/MacOS/LTspice -b /tmp/rc.net && ls /tmp/rc.raw /tmp/rc.log
 ```
 
-Then render a real device end-to-end (`gen_joyo_ltspice` is the cheapest known-good check):
+If you have a real `gen_<device>_ltspice.py` deck module to test against, render it
+end-to-end the same way as a final check:
 
 ```bash
-python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
-    --module gen_joyo_ltspice --tap spk --absolute --out-scale 0.1 tone.wav out.wav \
-    --knob Voice=1 --knob Drive=1 --knob Bass=1 --knob Treble=1 --knob Mids=1 --knob Level=1
-# -> "peak=3.99V OK".  A Joyo peak in the hundreds means LiveSPICE, not LTspice (see below).
+python tools/render_ltspice_deck.py --pedal-dir path/to/your/devices \
+    --module gen_mydevice_ltspice --tap spk --absolute --out-scale 0.1 tone.wav out.wav \
+    --knob Drive=1 --knob Tone=1 --knob Level=1
+# Compare the reported peak against what the circuit should produce at max drive -- a peak
+# in the hundreds (rather than a plausible few volts) means LiveSPICE, not LTspice, rendered
+# it (see below): IdealOpAmp has no supply rails and cannot saturate.
 ```
 
 One gotcha that is not LTspice's fault: `.net` (or `.cir`) files must be plain SPICE netlists,
