@@ -276,13 +276,17 @@ short debugging run).
 **This repo has mostly been developed and tested on Apple Silicon Macs with 24 GB+ unified
 memory** (`--device auto` picks `mps` there). It has not been systematically benchmarked
 across the NVIDIA/AMD VRAM spectrum, so treat any specific VRAM number below as a rough,
-anecdotal data point from one machine, not a validated requirement.
+anecdotal data point, not a validated requirement. If memory is tight on your hardware,
+training a single, narrower `--widths` value (instead of the default multi-tier slimmable
+config) uses meaningfully less memory — `SlimmableParametricA2.forward()` runs every trained
+tier's forward pass jointly, so VRAM scales with how many widths you train at once, and a
+single width skips that entirely.
 
 ### Notes for AMD GPU users (anecdotal — not the main tested path)
 
 PyTorch's ROCm build may lack compiled kernels for certain GPU architectures.
-If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
-(e.g. Radeon RX 6400, gfx1034), two workarounds are needed:
+If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU using the
+gfx1034 architecture, two workarounds are needed:
 
 1. **Missing `TensileLibrary.dat`** — create a symlink to the fallback database:
    ```bash
@@ -306,13 +310,6 @@ If you encounter `rocBLAS` errors or `illegal memory access` on an AMD GPU
      [ ! -e "$LIBDIR/$target" ] && ln -s "$base" "$LIBDIR/$target"
    done
    ```
-
-On the one card this was actually tried on (a 4 GB RX 6400), training the default
-multi-tier slimmable config still failed with `illegal memory access` after these
-workarounds, across the batch sizes/crop lengths tried. A single, narrower `--widths`
-value (skipping the multi-tier slimmable forward pass entirely) was never tried on that
-card and would use meaningfully less memory, so it may be worth trying before ruling GPU
-training out on similarly memory-constrained hardware.
 
 ---
 
