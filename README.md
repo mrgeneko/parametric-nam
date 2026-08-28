@@ -13,13 +13,15 @@ paired audio, and exports a single `.param.nam` whose knobs match the real contr
 
 ## Quick Start
 
-### Try it now — no sibling repos needed
+### Try it now
 
-`examples/muff/` bundles a real, complete recipe: the `.schx` circuit, the
-`sweepv5.wav` excitation (ours outright, freely licensed), and an annotated `config.toml`. Feel
-free to substitute your own favorite sweep or DI recording — just point `input` in the config at
-it. A good input covers the top of the band (real playing alone rarely does) and includes real
-transient attacks, not just steady tones. The only external piece is the oracle, which is public:
+`examples/muff/` holds a real, complete recipe: the `.schx` circuit and an annotated
+`config.toml`. One thing is not in the repo — **the excitation**. Download `T3K-sweep-v3.wav`
+from **<https://www.tone3000.com/capture>** into `examples/` before your first run (see
+[The sweep file](#the-sweep-file) below). Feel free to substitute your own favorite sweep or DI
+recording — just point `input` in the config at it. A good input covers the top of the band
+(real playing alone rarely does) and includes real transient attacks, not just steady tones.
+The only external piece is the oracle, which is public:
 
 ```bash
 git clone https://github.com/mrgeneko/parametric-nam
@@ -33,6 +35,68 @@ python run_pipeline.py --config examples/muff/config.toml \
 
 This trains an actual Big Muff Pi V1 (66#5) model end to end. See
 `examples/muff/Big Muff Pi V1 (66#5).md` for the circuit notes.
+
+### The sweep file
+
+**This repo does not ship an excitation.** Download **`T3K-sweep-v3.wav`** from
+**<https://www.tone3000.com/capture>** and put it in `examples/` — that is the default `input`
+for `scaffold_config.py`, `gen_dataset_from_captures.py`, and the bundled example configs.
+`examples/*.wav` is gitignored, so it will not be committed back.
+
+```bash
+# after downloading:
+ls examples/T3K-sweep-v3.wav
+```
+
+It is a 190 s real-playing clip at 48 kHz. Two properties matter downstream:
+
+- **It is a NAM-recognized standard sweep**, so `gen_dataset_from_captures.py`'s blip-based
+  time alignment does real calibration against it rather than falling back to `delay=0`.
+- **On its own it does NOT cover the loud region** — 22 dB crest factor, and only **0.075 %** of
+  its samples sit within 6 dB of peak. A model trained on it alone never sees the device
+  saturating, and goes out-of-distribution the moment a hot input arrives. **This is the
+  excitation defect behind this pipeline's FiLM-runaway blowups** (see the Known issue below,
+  and the Boss DS-1, whose shipped model spiked to 12.39 peak on a real pick attack where the
+  reference circuit produced 0.46).
+
+So for a real training run, do not feed it in raw — build an excitation from it:
+
+```bash
+python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
+    --output ~/work/tmp/DEVICE_excitation.wav \
+    --realistic-peak <below the device's measured saturation onset> \
+    --sweep-peaks <levels up to the device's max output + headroom>
+```
+
+That concatenates the real clip with amplitude-stepped log sweeps that **do** reach maximum
+output, plus a leading silence so the render is not sampling a cold-start transient. Then gate
+it with `tools/check_transient_coverage.py`, which fails if any knob corner's transient content
+never reaches that corner's own saturation onset.
+
+**Why not the old bundled sweep?** Until 2026-08-28 this repo shipped its own `sweepv5.wav`
+(original Logic Pro material plus synthesised chirps — ours outright, and freely
+redistributable). **Licensing is not why it went.** It was replaced because the TONE3000 sweep
+is simply the better and more standard choice:
+
+- **It is the ecosystem standard.** Captures made against it are directly comparable with
+  everyone else's, and NAM recognises it, so blip-based time alignment does real calibration
+  instead of falling back to a disclosed `delay=0`.
+- **Its transients are real.** `sweepv5.wav`'s attacks had been thinned because they caused
+  ngspice divergence during dataset generation — and that is the root cause of the Boss DS-1
+  shipping a model that spiked to **12.39** peak on a real pick attack where the reference
+  circuit produced **0.46**. The model had never been shown a stable response to a sharp attack.
+  The DS-1 was moved onto `sweep-v3.wav` for exactly this reason; the rest of the fleet has now
+  followed.
+
+The trade-off is that `sweepv5.wav` came with the synthesised loud-region coverage already
+attached, whereas `sweep-v3.wav` is real playing only — hence `build_excitation.py` above,
+which adds that coverage back explicitly and at levels tied to the device's *measured*
+saturation point rather than to whatever the source clip happened to contain.
+
+Comments throughout the codebase that cite measurements "on sweepv5" refer to the old file.
+Those numbers are properties of the circuit **and that excitation**, so they do not
+automatically carry over — `measure_truncation.py` and `grid_adequacy.py` both measure through
+whatever `input` is configured.
 
 ### Bring your own circuit
 
@@ -238,7 +302,7 @@ is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) o
 ### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 
 ```bash
-./measure_truncation.py --input examples/sweepv5.wav --config path/to/device-config.toml
+./measure_truncation.py --input examples/T3K-sweep-v3.wav --config path/to/device-config.toml
 ```
 
 LiveSPICE integrates with BDF2 (O(h²)), so the simulated circuit is never quite the real
@@ -414,8 +478,8 @@ Two source kinds, auto-detected per file by extension and freely mixable in one 
   sample-rate mismatch against the shared sweep is resampled automatically). A real analog
   signal chain has its own latency the `.nam` path's pure inference doesn't, so each capture is
   time-aligned via best-effort NAM blip-based calibration before use — real calibration only
-  for a NAM-recognized standard sweep (e.g. `sweep-v3.wav`); capturing against this repo's own
-  bundled `sweepv5.wav` always falls back to a disclosed `delay=0`, same as
+  for a NAM-recognized standard sweep — `T3K-sweep-v3.wav` IS one, so calibration is real on
+  the default input; a non-standard excitation falls back to a disclosed `delay=0`, same as
   `capture_static.py`'s identical fallback for a non-standard excitation. `neural-amp-modeler`
   is optional — without it every raw capture just uses `delay=0` too.
 
@@ -439,7 +503,8 @@ python gen_dataset_from_captures.py --combine /tmp/5150_ds   # same --combine fl
   batches are a scattered handful of points, not a dense grid, and most tokens in any given
   set of files won't vary at all.
 - Every file is aligned against a **shared sweep input** (`--input`, same convention as the
-  `.schx` pipeline — defaults to `sweepv5.wav`), producing exactly one permutation per file.
+  `.schx` pipeline — defaults to `examples/T3K-sweep-v3.wav`), producing exactly one
+  permutation per file.
   This is a **scattered point-sample dataset**, not a Cartesian grid — `grid_adequacy.py`'s
   interpolation reasoning doesn't apply; there's nothing systematic to interpolate between a
   handful of arbitrary points.

@@ -906,7 +906,7 @@ class ParamDataset(torch.utils.data.Dataset):
         # mathematically wrong input/output relationship at the rescaled level -- outputs.npy
         # was rendered from the ORIGINAL unscaled file, not a k-times-louder one.
         #
-        # It also silently broke on real-playing input. sweepv5/v6 (synthetic, sweep-tone-
+        # It also silently broke on real-playing input. The old sweepv5/v6 (synthetic, sweep-tone-
         # dominated, crest factor ~11-12dB, peak-normalized to 0.9 by their own build process)
         # happen to scale DOWN under -18dBFS RMS and stay safe. sweep-v3.wav (real playing,
         # pick-transient crest factor ~21.8dB, native peak already 0.967) scales UP 1.65x under

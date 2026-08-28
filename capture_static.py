@@ -256,7 +256,8 @@ def detect_standard_input(input_wav: Path):
     except _InputValidationError:
         # Despite the (version, strong_match) return signature implying a graceful
         # None for "no match", it actually RAISES when neither a strong nor weak
-        # match is found -- confirmed by hitting this directly on sweepv5.wav.
+        # match is found -- confirmed by hitting this directly on the old sweepv5.wav (the
+        # excitation this repo shipped before 2026-08-28).
         return None
     except Exception as e:
         # A FLOAT-subtype WAV (e.g. ensure_adequate_excitation's scaled copy) isn't a

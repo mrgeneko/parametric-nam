@@ -1,7 +1,8 @@
-# Big Muff Pi V1 (66#5) — worked example, fully self-contained.
+# Big Muff Pi V1 (66#5) — worked example.
 #
-# Everything this config needs (schx, input) is bundled alongside it in this directory / the
-# examples/ dir — no sibling parametric-devices or sweep-files checkout required. See
+# The .schx is bundled alongside this file; the excitation is NOT — download T3K-sweep-v3.wav
+# from https://www.tone3000.com/capture into examples/ first (see README, "The sweep file").
+# No sibling parametric-devices or sweep-files checkout is required beyond that. See
 # "Big Muff Pi V1 (66#5).md" next to this file for the circuit notes.
 #
 #   python run_pipeline.py --config examples/muff/config.toml \
@@ -13,12 +14,26 @@
 
 schx       = "examples/muff/Big Muff Pi V1 (66#5).schx"
 
-# sweepv5.wav: ours outright -- original Logic Pro material plus a synthesised excitation
-# section (see tools/make_sweep.py) -- so it can be bundled and published directly, unlike the
-# licence-restricted sweeps this project also has in its (private) sweep-files repo. It prepends
-# three log chirps (at three drive levels, because a nonlinear circuit's response is a curve PER
-# level) to cover the top of the band real playing barely excites.
-input      = "examples/sweepv5.wav"
+# INPUT CHANGED 2026-08-28: examples/sweepv5.wav (removed from this repo) -> T3K-sweep-v3.wav,
+# the standard TONE3000 capture sweep. Download it from https://www.tone3000.com/capture.
+# Not a licensing move -- sweepv5.wav was ours and freely redistributable. sweep-v3 is simply
+# the better and more standard choice: it is what the ecosystem captures against (so NAM's
+# blip alignment calibrates for real instead of falling back to delay=0), and its attack
+# transients are genuine, where sweepv5's had been thinned -- the documented root cause of the
+# Boss DS-1 shipping a model that spiked to 12.39 peak on a real pick attack.
+#
+# !! THE MEASURED NUMBERS BELOW WERE TAKEN ON sweepv5.wav AND HAVE NOT BEEN RE-MEASURED. !!
+# Both the oversample choice and the knob grid are properties of the circuit AND THE INPUT --
+# truncation error was measured against sweepv5's 20 kHz log chirps at 0.9, and grid_adequacy's
+# residuals are computed through whatever excitation is configured. sweep-v3 is a real-playing
+# clip with a ~22 dB crest factor and a completely different spectral/level distribution, so
+# re-run measure_truncation.py and grid_adequacy.py before trusting either.
+#
+# Note sweep-v3 alone does NOT cover the loud region (0.075% of its samples sit within 6 dB of
+# peak), which is the excitation defect behind this pipeline's FiLM-runaway failures. For a real
+# run, feed it through tools/build_excitation.py, which concatenates the real clip with
+# amplitude-stepped log sweeps that DO reach the device's maximum output.
+input      = "examples/T3K-sweep-v3.wav"
 backend    = "livespice"
 
 # oversample=2 was NOT free. BDF2 is O(h^2), so the simulated circuit is not the real circuit and the
@@ -32,7 +47,7 @@ backend    = "livespice"
 #     t=0 and the LAST at the very end, which on our sweeps is the leading silence and the near-silent
 #     decay tail. Two of four windows were measuring near-nothing, so the old figure was UNDERSTATED.
 #     Evenly-spaced centres now.
-#   * sweepv5's log chirps run to 20 kHz at 0.9 -- genuinely harder to integrate than a guitar-only
+#   * that file's log chirps ran to 20 kHz at 0.9 -- genuinely harder to integrate than a guitar-only
 #     sweep. Better coverage for the model, more work for BDF2.
 # Re-measured: 3.28e-02 at os=2, and it takes os=16 to get truncation (1.40e-04) clear of the 0.009
 # ESR we are chasing. `--oversample auto` picks 16 unprompted.

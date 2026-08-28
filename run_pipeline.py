@@ -24,7 +24,7 @@ Example — full Dumble clean pipeline:
         --range clean_master=0.1,0.3,0.5,0.7,0.9 \\
         --fixed-params "Rock=0" \\
         --speaker S1 \\
-        --input ~/work/sweep-files/sweepv5.wav \\
+        --input examples/T3K-sweep-v3.wav \\
         --mmap --epochs 200
 """
 

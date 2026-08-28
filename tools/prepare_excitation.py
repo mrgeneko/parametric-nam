@@ -24,7 +24,7 @@ coincidence, but it isn't a substitute for actually checking. This is only true 
 Usage:
   livespice: python tools/prepare_excitation.py --backend livespice \\
       --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \\
-      --real-clip ~/work/sweep-files/sweepv5.wav --output ~/work/tmp/DEVICE_excitation.wav
+      --real-clip examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
 
   ngspice:   python tools/prepare_excitation.py --backend ngspice-deck \\
       --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \\

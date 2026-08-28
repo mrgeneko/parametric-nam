@@ -13,7 +13,7 @@ source kinds, auto-detected per file by extension, freely mixable in one run:
          latency relative to the reference sweep -- so each capture is time-aligned via
          best-effort NAM blip-based calibration before use (see detect_delay). Only NAM's OWN
          recognized standard sweeps (e.g. sweep-v3.wav) get real calibration; capturing against
-         this repo's bundled sweepv5.wav always falls back to a disclosed delay=0, same as
+         a synthetic-headed excitation always falls back to a disclosed delay=0, same as
          capture_static.py's identical fallback for a non-standard excitation.
 
     python gen_dataset_from_captures.py \\
@@ -160,7 +160,7 @@ def detect_delay(dry_wav: Path, wet_wav: Path) -> tuple:
       "nam_standard_calibration"  real calibration -- dry_wav matched a NAM-recognized standard
                                    sweep (e.g. sweep-v3.wav)
       "delay_zero_fallback"       dry_wav isn't a recognized standard file (e.g. this repo's own
-                                   sweepv5.wav), calibration found no usable impulse response, or
+                                   a synthetic sweep head), calibration found no usable impulse response, or
                                    a "successful" result fell outside NAM's own trusted search
                                    window (see _NAM_LOOKAHEAD_SAMPLES/_NAM_LOOKBACK_SAMPLES)
       "nam_unavailable"           the optional neural-amp-modeler package isn't importable, or
@@ -266,7 +266,7 @@ def main():
     ap.add_argument("--captures", nargs="+",
                      help="glob pattern(s) or explicit .nam/.wav/.aif/.aiff file paths -- freely mixable")
     ap.add_argument("--output", type=Path, help="output dataset directory")
-    ap.add_argument("--input", default="examples/sweepv5.wav",
+    ap.add_argument("--input", default="examples/T3K-sweep-v3.wav",
                      help="shared dry sweep, same convention as the .schx pipeline. For raw "
                           "captures this is also the delay-calibration reference -- see "
                           "detect_delay's docstring for why only a NAM-recognized standard "

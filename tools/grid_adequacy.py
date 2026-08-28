@@ -151,7 +151,8 @@ class Renderer:
 
     WHICH PART OF THE INPUT YOU PROBE DECIDES THE ANSWER, and both obvious choices are wrong. The
     first probe_s seconds understates everything (our sweeps open quiet). The single highest-slew
-    window OVERSTATES it: on sweepv5 that window lands inside the chirp section, and measured there
+    window OVERSTATES it: on the old sweepv5 excitation that window landed inside the chirp section,
+    and measured there
     the Big Muff's Sustain 0.03-0.12 cell reads 0.0079 against a whole-file truth of 0.0008 -- a 10x
     exaggeration that would have bought points the model does not need.
 

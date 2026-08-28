@@ -199,9 +199,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--schx", type=Path, required=True)
-    ap.add_argument("--input", default="examples/sweepv5.wav",
+    ap.add_argument("--input", default="examples/T3K-sweep-v3.wav",
                     help="sweep/DI to measure truncation against and record as `input` "
-                         "(default: the bundled examples/sweepv5.wav -- assumes you run "
+                         "(default: examples/T3K-sweep-v3.wav -- NOT bundled, download it "
+                         "from https://www.tone3000.com/capture; assumes you run "
                          "this from the repo root)")
     ap.add_argument("--output", type=Path, default=None,
                     help="config.toml path to write (default: <schx stem>.config.toml "

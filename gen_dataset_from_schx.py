@@ -393,7 +393,8 @@ SPIKE_BULK_RATIO = 2.0
 # only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
 # and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
 # convergence) peaks at ~0.3-0.38 -- comparable to or below this SAME circuit's own normal
-# full-dataset peak range (0.06-1.0 across the shipped 48-perm sweepv5 dataset). The ratio checks
+# full-dataset peak range (0.06-1.0 across the 48-perm dataset built on the old sweepv5.wav
+# excitation, removed from this repo 2026-08-28 -- see README, "The sweep file"). The ratio checks
 # above still flagged it: p99 ("bulk") is a whole-file statistic, and a brief energetic burst in
 # an otherwise-quiet 190s sweep doesn't move it much, so 2x bulk is a low bar to clear during
 # exactly that burst. A GENUINE solver divergence is not a scale question -- historically it

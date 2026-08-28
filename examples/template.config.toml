@@ -8,7 +8,7 @@
 
 schx       = "path/to/your-circuit.schx"   # e.g. from LiveSPICE-Amp-Collection, or your own
 
-input      = "examples/sweepv5.wav"   # ours, freely licensed -- or substitute your own
+input      = "examples/T3K-sweep-v3.wav"   # NOT bundled -- download it first, see README
                                        # sweep/DI. A good one covers the top of the band
                                        # (real playing alone rarely does) and includes real
                                        # transient attacks, not just steady tones.
