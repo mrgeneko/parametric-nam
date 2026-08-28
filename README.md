@@ -1,13 +1,26 @@
 # parametric-nam
 
-Toolchain for converting SPICE circuit schematics (`.schx`) into **parametric**
-Neural Amp Modeler (NAM) files. The resulting `.param.nam` captures a circuit's
-behavior across its **full knob range** — enabling real-time parametric inference
-in a compatible real-time host at a fraction of the CPU cost of live simulation.
+Toolchain for training **parametric** Neural Amp Modeler (NAM) files — `.nam` models whose
+knobs respond live to real knob settings, instead of being baked in at training time — from
+either a SPICE circuit schematic or a set of real hardware captures. The resulting
+`.param.nam` captures a circuit or device's behavior across its **full knob range** —
+enabling real-time parametric inference in a compatible real-time host at a fraction of the
+CPU cost of live simulation.
 
-Given a `.schx` (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`), it simulates
-the circuit across a sweep of knob settings, trains a FiLM-conditioned WaveNet on the
-paired audio, and exports a single `.param.nam` whose knobs match the real controls.
+Two ways to build the same underlying dataset:
+
+- **From a `.schx`** (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`) — simulates the
+  circuit across a sweep of knob settings, no real hardware needed.
+- **From real hardware, no SPICE model at all** (`gen_dataset_from_captures.py`) — a folder of
+  already-captured, fixed-setting files, one per knob setting: either existing `.nam` exports,
+  or your own recorded wet/dry `.wav` pairs (a shared sweep played through the real device and
+  captured back via an audio interface). Each file's **name** encodes its knob settings, e.g.
+  `"MyAmp G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated
+  `PrefixDigit` tokens, digit → value/10) — see `gen_dataset_from_captures.py` below for the
+  full naming convention and how to override it.
+
+Either path feeds the same pipeline: train a FiLM-conditioned WaveNet on the paired audio, and
+export a single `.param.nam` whose knobs match the real controls.
 
 ---
 
@@ -517,8 +530,11 @@ python gen_dataset_from_captures.py --combine /tmp/myamp_ds   # same --combine f
 ```
 
 - **Filenames encode the knob settings**, same convention for either source kind.
-  `"MyAmp DST G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5`
-  (comma-separated `PrefixDigit` tokens, digit → value/10). Override the prefix→knob-name map
+  `"MyAmp DST G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5`, and identically
+  for a `.wav` capture: `"MyPedal G7, B3.wav"` → `Gain=0.7, Bass=0.3` (comma-separated
+  `PrefixDigit` tokens, digit → value/10, using the default prefix map's `G`/`B`/`M`/`T`/`Rvb`/
+  `Rsn`/`Prsn` → `Gain`/`Bass`/`Mids`/`Treble`/`Reverb`/`Resonance`/`Presence`; unrecognized
+  tokens like `"DST"` or a device name are silently ignored). Override the prefix→knob-name map
   and the digit→value scale per batch with `--knob-map` (e.g. `--knob-map D=Drive`) /
   `--knob-scale`, or skip filename parsing entirely with `--mapping-csv` for conventions too
   irregular to tokenize.
