@@ -52,6 +52,22 @@ It is a 190 s real-playing clip at 48 kHz. Two properties matter downstream:
 
 - **It is a NAM-recognized standard sweep**, so `gen_dataset_from_captures.py`'s blip-based
   time alignment does real calibration against it rather than falling back to `delay=0`.
+- **The two full-scale single-sample impulses are NAM's calibration blips — do not remove
+  them.** In `T3K-sweep-v3.wav` they sit at exactly t=10.5 s and t=11.5 s, value 0.99,
+  surrounded by true zero. `nam.train.core._calibrate_latency_v_all` searches around that
+  expected blip location, so stripping them forces `gen_dataset_from_captures.py` /
+  `capture_static.py` to fall back to a disclosed `delay=0` — losing the real calibration that
+  is one of the reasons to use this sweep at all. They are not recording artifacts, despite
+  looking exactly like slate clicks. (A declicked variant is harmless for a RENDERED dataset,
+  where dry and wet are aligned by construction, but it is the wrong input for any real-capture
+  device.) They also double as the hardest transient in the file — a single-sample impulse is
+  maximally broadband with an instant attack, which is useful content for a circuit whose
+  failure mode is runaway on sharp attacks.
+
+  One consequence to be aware of rather than to fix: `build_excitation.py` normalises the real
+  segment by its own max, so the blip (0.99) sets the scale and actual playing lands at ~90.8%
+  of `--realistic-peak` rather than 100% — a −0.8 dB offset, not a defect.
+
 - **On its own it does NOT cover the loud region** — 22 dB crest factor, and only **0.075 %** of
   its samples sit within 6 dB of peak. A model trained on it alone never sees the device
   saturating, and goes out-of-distribution the moment a hot input arrives. **This is the
