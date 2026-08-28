@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from bake_nam import _model_stem, auto_name
+
 import numpy as np
 import pytest
 import torch
@@ -184,3 +186,46 @@ def test_stock_loads_dual_file_ignoring_embed(tmp_path):
     with torch.no_grad():
         y = official(torch.randn(1, 4096))
     assert np.isfinite(np.asarray(y)).all()
+
+class TestAutoName:
+    """auto_name(): the filename must encode the setting that was actually baked.
+
+    -o used to be required, so every caller invented its own scheme -- which is how one capture
+    pack ends up with several conventions, and how a filename drifts from the setting it claims
+    to describe. The caller has already stated the knob values; deriving the name from them is
+    strictly less error-prone than restating them by hand.
+    """
+
+    BAKED = {"Gain": 0.55, "Bass": 0.5, "Treble": 0.2}
+
+    def test_strips_the_double_param_nam_extension(self):
+        assert _model_stem(Path("timmy_v4_optimal.param.nam")) == "timmy_v4_optimal"
+
+    def test_strips_a_plain_nam_extension(self):
+        assert _model_stem(Path("thing.nam")) == "thing"
+
+    def test_encodes_every_knob_and_value(self):
+        assert auto_name(Path("m.param.nam"), self.BAKED) == "m_Gain0.55_Bass0.5_Treble0.2.nam"
+
+    def test_includes_defaulted_knobs_not_just_the_ones_passed(self):
+        """The RESOLVED setting, not the --params string. A knob left out is still baked in at
+        its declared default, so omitting it from the name would describe a different file --
+        and would let two different settings collide on one filename."""
+        full = auto_name(Path("m.param.nam"), {"Gain": 0.7, "Bass": 0.5, "Treble": 0.5})
+        assert "Bass0.5" in full and "Treble0.5" in full
+
+    def test_two_spellings_of_one_value_give_one_name(self):
+        """%g formatting: 0.50 and 0.5 are the same setting and must not make two files."""
+        assert auto_name(Path("m.param.nam"), {"Gain": 0.50}) == \
+               auto_name(Path("m.param.nam"), {"Gain": 0.5})
+
+    def test_width_included_only_when_pinned(self):
+        """Tiers are genuinely different models, so a pack mixing them would collide -- but an
+        unpinned width must not clutter the common case."""
+        assert "w8" in auto_name(Path("m.param.nam"), self.BAKED, channels=8)
+        assert "w" not in auto_name(Path("m.param.nam"), {"Gain": 0.5}).replace("m_", "")
+
+    def test_distinct_settings_give_distinct_names(self):
+        a = auto_name(Path("m.param.nam"), {"Gain": 1.0, "Bass": 0.35, "Treble": 0.8})
+        b = auto_name(Path("m.param.nam"), {"Gain": 1.0, "Bass": 0.8, "Treble": 0.35})
+        assert a != b

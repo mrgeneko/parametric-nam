@@ -8,6 +8,8 @@ freeze the FiLM at a chosen setting → an identical static A2 → an official "
 
   python bake_nam.py --in model.param.nam --params "Gain=0.7,Tone=0.5" -o tone.nam
   python bake_nam.py --in model.param.nam --params "..." --width 8       -o tone.nam
+  python bake_nam.py --in model.param.nam --params "Gain=0.7" -o packdir/   # auto-named
+  python bake_nam.py --in model.param.nam --params "Gain=0.7"              # -> beside the input
 
 Omitted knobs fall back to each knob's DECLARED default (config.parametric.
 parameters[].default) — not a blanket 0.5, which is wrong for many circuits
@@ -68,6 +70,35 @@ def _knob_default(meta: dict) -> float:
     return 0.5
 
 
+def _model_stem(inp: Path) -> str:
+    """'timmy_v4_optimal.param.nam' -> 'timmy_v4_optimal' (strip the DOUBLE extension)."""
+    n = inp.name
+    for suf in (".param.nam", ".nam"):
+        if n.endswith(suf):
+            return n[: -len(suf)]
+    return inp.stem
+
+
+def auto_name(inp: Path, baked: dict, channels=None) -> str:
+    """Encode the RESOLVED setting into the filename.
+
+    Resolved, not the user's --params string: knobs left out fall back to their declared
+    default, so a name built from the raw argument would omit knobs that were nonetheless
+    baked in -- and two different settings could collide on one name.
+
+    Values are formatted with %g, so 0.50 -> '0.5' and two spellings of the same setting give
+    the same file rather than two. The tier width is included only when the caller pinned one,
+    since tiers are genuinely different models and a pack mixing them would otherwise collide.
+
+        timmy_v4_optimal_Gain0.55_Bass0.5_Treble0.2.nam
+    """
+    parts = [_model_stem(inp)]
+    if channels is not None:
+        parts.append(f"w{channels}")
+    parts += [f"{k}{v:g}" for k, v in baked.items()]
+    return "_".join(parts) + ".nam"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -75,7 +106,12 @@ def main():
     ap.add_argument("--params", default="", help="knob=value,... (values as trained, [0,1]); "
                                                  "omitted knobs use their declared default")
     ap.add_argument("--width", type=int, default=None, help="tier width to bake (default: widest)")
-    ap.add_argument("-o", "--out", required=True, type=Path, help="output standard .nam")
+    ap.add_argument("-o", "--out", type=Path, default=None,
+                    help="output standard .nam. A DIRECTORY (or omitted, meaning the input's "
+                         "own directory) auto-names the file from the RESOLVED knob values -- "
+                         "see auto_name(). The caller already stated the setting; making every "
+                         "caller reinvent a filename for it is how one pack ends up with ten "
+                         "naming conventions, and how a name drifts from the setting it claims.")
     ap.add_argument("--sample-rate", type=int, default=48000)
     ap.add_argument("--embed-parametric", action=argparse.BooleanOptionalAction, default=True,
                     help=f"embed the full parametric model under '{EMBED_KEY}' (DEFAULT). The "
@@ -110,6 +146,12 @@ def main():
                                            metadata=nam.get("metadata"))
 
     baked = dict(zip(names, vec)) if vec else "static"
+
+    dest = a.out
+    if dest is None or dest.is_dir():
+        base = dest if dest is not None else a.inp.parent
+        dest = base / auto_name(a.inp, baked if isinstance(baked, dict) else {},
+                                channels if a.width is not None else None)
     md = out.setdefault("metadata", {}) or {}
     md["baked_setting"] = baked                    # self-describing: which knob values
     if a.embed_parametric:
@@ -117,12 +159,12 @@ def main():
         md["parametric_embedded"] = True
     out["metadata"] = md
 
-    a.out.write_text(json.dumps(out, separators=(",", ":")))
+    dest.write_text(json.dumps(out, separators=(",", ":")))
     defaulted = [n for n in names if n not in kv]
     dflt_note = "" if not vec else f"  (defaulted: {defaulted or 'none'})"
     embed_note = (f"  +embedded parametric ('{EMBED_KEY}') — loads in stock AND parametric hosts"
                   if a.embed_parametric else "  [static-only: --no-embed-parametric]")
-    print(f"baked width={channels}ch  params={baked}{dflt_note}{embed_note}  ->  {a.out}")
+    print(f"baked width={channels}ch  params={baked}{dflt_note}{embed_note}  ->  {dest}")
 
 
 if __name__ == "__main__":
