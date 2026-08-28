@@ -48,7 +48,10 @@ for `scaffold_config.py`, `gen_dataset_from_captures.py`, and the bundled exampl
 ls examples/T3K-sweep-v3.wav
 ```
 
-It is a 190 s real-playing clip at 48 kHz. Two properties matter downstream:
+It is a 190 s synthesized capture sweep at 48 kHz — TONE3000's/NAM's standard calibration
+file (frequency sweep + noise-staircase + calibration blips), **not a real-playing
+recording**, despite sampling a wide enough level/frequency range to work well as this
+pipeline's default `--input`. Two properties matter downstream:
 
 - **It is a NAM-recognized standard sweep**, so `gen_dataset_from_captures.py`'s blip-based
   time alignment does real calibration against it rather than falling back to `delay=0`.
@@ -84,19 +87,22 @@ python tools/build_excitation.py --input examples/T3K-sweep-v3.wav \
     --sweep-peaks <levels up to the device's max output + headroom>
 ```
 
-That concatenates the real clip with amplitude-stepped log sweeps that **do** reach maximum
-output, plus a leading silence so the render is not sampling a cold-start transient. Then gate
-it with `tools/check_transient_coverage.py`, which fails if any knob corner's transient content
-never reaches that corner's own saturation onset.
+That concatenates the `--input` clip with amplitude-stepped log sweeps that **do** reach
+maximum output, plus a leading silence so the render is not sampling a cold-start transient.
+Then gate it with `tools/check_transient_coverage.py`, which fails if any knob corner's
+transient content never reaches that corner's own saturation onset.
 
 **Why the TONE3000 sweep, not your own recording?** It is the ecosystem standard — captures
 made against it are directly comparable with everyone else's, and NAM recognises it, so
 blip-based time alignment does real calibration instead of falling back to a disclosed
-`delay=0`.
+`delay=0`. It is not itself a real-playing recording (see "The sweep file" above), but its
+built-in noise-staircase and calibration blips already provide genuine sharp-attack content —
+a plain, transient-free synthesized tone would not.
 
-**Keep its transients intact if you substitute your own clip.** A real playing recording's
-attacks are the excitation's only source of real transient dynamics; thinning or filtering
-them (e.g. to work around a solver convergence issue during dataset generation) removes
+**Keep transients intact, whatever you use as `--input`.** Sharp-attack content — whether a
+real-playing recording's pick attacks or T3K's own noise-staircase/blip transients — is the
+excitation's source of real transient dynamics; thinning or filtering it (e.g. to work around
+a solver convergence issue during dataset generation) removes
 exactly what a model needs to learn a stable response to a sharp attack — this is the root
 cause of the pedal mentioned above shipping a model that spiked to **12.39** peak on a real
 pick attack where the reference circuit produced **0.46**. If an excitation's transients are

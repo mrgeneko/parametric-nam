@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Build a device training excitation that actually covers the full input range.
 
-A high-crest real-playing clip (e.g. sweep-v3.wav, ~22 dB crest) samples its own loud region
+A high-crest --input clip (e.g. sweep-v3.wav, ~22 dB crest) samples its own loud region
 essentially never (<0.1% of time within 6 dB of peak), so a model trained on it alone
 never learns the device's saturation/blocking behavior and goes out-of-distribution when a
-hot input (upstream boost) arrives. This concatenates:
+hot input (upstream boost) arrives. NOTE: sweep-v3.wav (NAM's/TONE3000's standard capture
+sweep) is NOT a real-playing recording despite its high crest factor -- it is itself a
+synthesized capture sweep (frequency sweep + noise-staircase + calibration blips). Its high
+crest factor comes from that structure, not from musical dynamics; a genuine real-playing
+recording works equally well here and is not required to be this specific file. This
+concatenates:
 
-  [ real-playing clip @ --realistic-peak ]  (dynamics/perceptual realism, mostly low level)
+  [ --input clip @ --realistic-peak ]        (dynamics/perceptual realism, mostly low level)
   [ amplitude-stepped log sine sweeps ]      (dense level x frequency coverage of the loud region)
   [ short fade-out to zero ]
 
@@ -123,10 +128,12 @@ def _transient_burst(sec, amp, decay_tau):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="real-playing clip (e.g. sweep-v3.wav)")
+    ap.add_argument("--input", required=True,
+                    help="high-crest source clip (e.g. sweep-v3.wav, itself a synthesized "
+                         "capture sweep, not a real-playing recording -- see module docstring)")
     ap.add_argument("--output", required=True)
     ap.add_argument("--realistic-peak", type=float, default=1.0,
-                    help="peak (V, at V0dBFS=1) to scale the real-playing clip to")
+                    help="peak (V, at V0dBFS=1) to scale the --input clip to")
     ap.add_argument("--realistic-dur", type=float, default=None,
                     help="seconds of --input to keep (prefix), default: the whole file. The "
                          "realistic clip only needs to sample varied dynamics/perceptual content "
@@ -163,8 +170,9 @@ def main():
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="comma list of synthesized transient-burst peak amplitudes (V) -- a "
                          "deterministic, license-free alternative to --noise-burst-* (which "
-                         "depends on a restricted real-playing source and only ever tests ONE "
-                         "level). Inserts one burst per level: broadband (20Hz-16kHz), instant "
+                         "depends on a restricted third-party source, e.g. T3K-sweep-v3's own "
+                         "noise staircase, and only ever tests ONE level). Inserts one burst "
+                         "per level: broadband (20Hz-16kHz), instant "
                          "attack, exponential decay -- crest factor ~8.5 (see "
                          "--synth-burst-decay-tau), matching a real hard pick-attack -- so "
                          "saturation-onset behavior under a sharp transient gets tested at "

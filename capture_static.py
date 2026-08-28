@@ -51,7 +51,8 @@ size/parity) but not real -- almost certainly a swept-tone excitation's own
 self-similarity structure, reshaped by the circuit's frequency-dependent nonlinear
 compression, producing a stable but meaningless envelope-correlation lag. Turned out
 `sweepv5.wav` wasn't the right tool for this: the widely-used `sweep-v3.wav` (this ecosystem's
-usual real-playing excitation source) is, byte-for-byte (MD5 match), NAM's own
+standard capture-sweep excitation source -- a synthesized sweep, not a real-playing recording,
+despite its high crest factor) is, byte-for-byte (MD5 match), NAM's own
 official "Version 3.0.0" standard input file -- the exact file `nam.train.core`'s
 input-version detection and blip-based latency calibration are built around. Running
 that calibration for real (`nam.train.core._calibrate_latency_v3`) on this circuit's

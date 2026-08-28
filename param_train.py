@@ -906,15 +906,17 @@ class ParamDataset(torch.utils.data.Dataset):
         # mathematically wrong input/output relationship at the rescaled level -- outputs.npy
         # was rendered from the ORIGINAL unscaled file, not a k-times-louder one.
         #
-        # It also silently broke on real-playing input. The old sweepv5/v6 (synthetic, sweep-tone-
+        # It also silently broke on high-crest-factor input. The old sweepv5/v6 (synthetic, sweep-tone-
         # dominated, crest factor ~11-12dB, peak-normalized to 0.9 by their own build process)
-        # happen to scale DOWN under -18dBFS RMS and stay safe. sweep-v3.wav (real playing,
-        # pick-transient crest factor ~21.8dB, native peak already 0.967) scales UP 1.65x under
-        # the same formula, pushing its peak to 1.55 -- past 0dBFS in float terms, and (combined
-        # with the linear-rescale error above) a plausible root cause of the "unexpected noise,
-        # including low frequencies, at loud input levels" reported on both the DS-1 and JCM800
-        # retrains: the network trained overwhelmingly around whatever level -18dBFS RMS happened
-        # to rescale each file to, with no host-side input calibration to match it back at
+        # happen to scale DOWN under -18dBFS RMS and stay safe. sweep-v3.wav (NAM's/TONE3000's
+        # standard capture sweep -- itself a synthesized sweep+noise-staircase, not a real-playing
+        # recording, despite the high crest factor -- crest factor ~21.8dB, native peak already
+        # 0.967) scales UP 1.65x under the same formula, pushing its peak to 1.55 -- past 0dBFS in
+        # float terms, and (combined with the linear-rescale error above) a plausible root cause
+        # of the "unexpected noise, including low frequencies, at loud input levels" reported on
+        # two real device retrains: the network trained overwhelmingly around whatever level
+        # -18dBFS RMS happened to rescale each file to, with no host-side input calibration to
+        # match it back at
         # inference (see the host app's updateInputCalibrationGain -- inert unless the
         # .nam declares an input_level, which export_nam below has never written).
         #
