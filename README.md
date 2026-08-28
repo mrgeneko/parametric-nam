@@ -568,13 +568,14 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
 - **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
   `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
   model's receptive field and ~2× faster than 48000.
-- **`--lora-rank N`** — **DISABLED (2026-08-27).** Requesting a non-zero rank exits with an
-  error; set `PARAMETRIC_NAM_ALLOW_LORA=1` to override for an ablation. See the status note in
-  [LoRA-style knob conditioning](#lora-style-knob-conditioning). Adds a low-rank ("LoRA-style") knob-conditioned
-  weight update to every layer's `l1x1`, alongside FiLM rather than instead of it — see
-  that section for the design rationale, config format, and cross-repo requirement. Rank is recoverable from the
-  checkpoint's own state-dict shape, so `export_checkpoint.py`/`param_infer.py` never
-  need it re-specified.
+- **`--lora-rank N`** — **REMOVED (2026-08-27), Python side kept for reading old checkpoints
+  only.** Requesting a non-zero rank exits with an error; set `PARAMETRIC_NAM_ALLOW_LORA=1` to
+  override for an ablation. See the status note in
+  [LoRA-style knob conditioning](#lora-style-knob-conditioning-removed) — the C++ that consumed
+  LoRA-tagged models in a real-time plugin host has been deleted entirely; this flag only
+  matters for training a new ablation or for `export_checkpoint.py`/`param_infer.py` reading an
+  old checkpoint (rank is recoverable from the checkpoint's own state-dict shape, so those never
+  need it re-specified).
 - **`--cycle-checkpoints`** (default on; `--no-cycle-checkpoints` to disable) saves a
   full resumable snapshot (`<ckpt-dir>/cycle_<epoch>.pt`) at every SGDR cycle boundary
   during open-ended (`--epochs 0`) training, alongside the usual `best*.pt`/`latest.pt`
@@ -1096,129 +1097,52 @@ conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → fil
 ```
 Then after all 23 layers: `head.weight → head.bias → head_scale`.
 
-### LoRA-style knob conditioning
+### LoRA-style knob conditioning (removed)
 
-> **STATUS: DISABLED (2026-08-27) — has not paid off on shipped ESR.** `--lora-rank > 0` now
-> exits with an error in both `param_train.py` and `run_pipeline.py`; set
-> `PARAMETRIC_NAM_ALLOW_LORA=1` to override for an ablation. **Only new training is gated —
-> loading, exporting, folding and inferring existing LoRA models is untouched**, so the two
-> archived LoRA bundles keep working (verified: the JCM800 LoRA bundle still renders and
-> responds to knobs through `render_parametric`).
->
-> The mechanism works and the Tweed numbers below are real, but on the one device where both
-> were tried the FiLM-only bundle is the better shipped model, and no width-matched ablation has
-> ever been run. Treat `--lora-rank > 0` as a research setting, not a default, and
-> do not ship a release run on it without evaluating that run on its own terms.
->
-> **What the archive actually contains** (`parametric-nam-models`, as of 2026-08-27): 7 LoRA
-> `.nam` files, but only **two runs on two devices**, both `rank 4` —
-> `tweed-5f6-a-full-sag/2026-08-17_e1cb0e0` (2-knob) and
-> `marshall-jcm800-2203-preamp-and-power-amp-sag/2026-08-21_e1cb0e0` (2-knob).
->
-> * **No clean head-to-head is archived.** The −72 %/−65 % figures below come from a FiLM-only
->   2-knob Tweed *testbed* run that was never published, so they cannot be re-checked from the
->   models repo. The only published FiLM-only Tweed runs are **5-knob** — a different and much
->   harder problem, not comparable.
-> * **On shipped ESR — what an end user actually gets — FiLM-only is ahead.** JCM800, same 2
->   knobs, same 143-perm grid, same excitation:
->
->   | | tiers | final ESR lite / full |
->   |---|---|---|
->   | `2026-08-21` FiLM+LoRA | 4ch + 8ch | 0.06186 / 0.02403 |
->   | `2026-08-26` FiLM only | 5ch + 9ch | **0.06016 / 0.02191** |
->
->   The FiLM-only bundle is the better model and is the one marked `CURRENT`. That is the
->   comparison that matters for choosing what to ship, and it does not favour LoRA.
->
->   *Method caveat, for anyone using this to judge LoRA itself rather than to pick a model:* the
->   LoRA arm stopped at epoch 3980 (best 3945) while still descending steeply — 0.06717 @3400 →
->   0.06294 @3800 → 0.06186 @3945 — where the FiLM arm was flat across that span and only
->   dropped at ~4600, 868 epochs later. At matched epoch 3980 the LoRA arm was marginally
->   *ahead* on both tiers (0.06186/0.02403 vs 0.06455/0.02440), with narrower tiers. So this
->   ranks two **runs**, not two **methods** — there is no converged LoRA model here to ship even
->   if you wanted one.
->
->   For the same reason, don't read the older `2026-07-30` run's better-looking 0.0421 / 0.0153
->   as a third data point: it is a 90-permutation grid on a different excitation, so it covers
->   less of the knob space and is an easier fit, not a better product.
-> * **A known bad interaction, not yet bounded.** LoRA's extra per-layer capacity makes FiLM
->   runaway *worse* once it occurs — ~7× excitation elevation on the FiLM+LoRA case against
->   ~1.1× for a FiLM-only model (see the FiLM-runaway discussion above). The mitigations there
->   (`--spectral-norm`, etc.) have not been re-validated with LoRA enabled.
-> * **Fast-path support is recent.** LoRA was excluded from the C++ fast path until
->   NeuralAmpModelerCore `cc0a4a8` (2026-08-17) added it, verified bit-for-bit against the
->   generic reference across channel widths 3–8; `35456c9` then folded the correction into
->   `l1x1`'s weight matrix rather than a per-frame GEMV. Real, measured, and profiled in-app —
->   but only weeks old, and it requires a core at or past those commits.
-> * **Thin exercise of the release plumbing.** The schema_version 1→2 bump, `fold_lora()`, and
->   the export path have been exercised on very few real checkpoints — a state-dict loading bug
->   in `release_run.sh` survived until an actual LoRA checkpoint first hit it on 2026-08-21.
->
-> **Practical default: prefer widening a tier over enabling LoRA.** It is the remedy for the
-> same capacity ceiling, it is what the current best JCM800 bundle actually used, and it needs
-> no schema bump, no `rank` to choose, and no minimum core version. Revisit if the
-> width-matched ablation (above, run to convergence on both arms) says otherwise.
+> **STATUS: REMOVED (2026-08-27).** Training was disabled first (`--lora-rank > 0` errors
+> unless `PARAMETRIC_NAM_ALLOW_LORA=1` is set), then the C++ that consumed LoRA-tagged models
+> (`NAM/lora.h`, both the generic and hand-optimized fast paths, plus their tests) was deleted
+> entirely from NeuralAmpModelerCore — nothing dead was left behind. **A `"film+lora"`
+> (`schema_version` 2) model can no longer be loaded by any current build of the fork**:
+> `require_supported_parametric_model()` rejects it loudly rather than silently misreading it,
+> the same fail-loud contract every schema bump here follows. This toolchain's own Python
+> tooling (`param_infer.py`, `export_checkpoint.py`, `nam_standard.fold_lora()`) still fully
+> supports loading, exporting, and folding archived LoRA checkpoints — **`fold_lora()` bakes
+> the LoRA delta into an ordinary static model at one fixed knob setting**, which then loads
+> and plays in any plugin, LoRA support or not. What's gone is *real-time, knob-live* LoRA
+> inference in a plugin host (NAMix, Chainsmith) — not the ability to read old checkpoints.
 
-**Why, beyond FiLM.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
+**Why it was tried.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
 per-channel affine rescale of one fixed backbone computation. As swept knob count grows
 past ~3, the space of tonal behaviors the backbone must represent as "one shared
 computation, rescaled per knob setting" outgrows what fixed weights can encode — measured
 concretely on the Tweed 5F6-A Full (sag) 5-knob run, where the lite (4ch) tier plateaued
 at median ESR 0.126 on the full grid (not shippable) while the architecturally-identical
-full (8ch) tier reached 0.025. `--lora-rank` adds a genuine per-knob weight *delta* —
-`W_effective = W_l1x1 + A(cond)@B(cond)` — computed as two small matmuls
-(`A @ (B @ x)`, never materializing the full `channels × channels` delta) rather than a
-scale on a fixed computation. `A`/`B` are produced by a linear map of `cond`, mirroring
-FiLM's own `nn.Linear`, so the result is smooth in the knob value by construction — more
-expressive than FiLM, without the unconstrained-arbitrary-weights problem a full
-hypernetwork would have. Zero-init on `net_A` means LoRA starts as a true no-op (delta ≡
-0), so enabling it never perturbs an otherwise-converged FiLM baseline at step 0.
+full (8ch) tier reached 0.025. `--lora-rank` added a genuine per-knob weight *delta* —
+`W_effective = W_l1x1 + A(cond)@B(cond)` — more expressive than FiLM's fixed-computation
+rescale, without a full hypernetwork's unconstrained-weights problem.
 
-**Additive, not a replacement.** FiLM and LoRA are independently toggleable
-(`--lora-rank 0` = FiLM only, unchanged from before LoRA existed) and, when both are on,
-compose — LoRA is not a mode that turns FiLM off. Measured on the Tweed 5F6-A Full (sag)
-2-knob testbed (81→121-perm grid across two runs): FiLM+LoRA cut lite-tier ESR from
-FiLM-only's ~0.146 to ~0.040 (-72%) and full-tier from ~0.034 to ~0.012 (-65%), matching
-what the capacity-ceiling diagnosis predicted.
+**Why it was dropped.** On the one device where both were trained to convergence (JCM800
+preamp+power sag, same 2 knobs, same 143-perm grid, same excitation), FiLM-only won:
 
-**Config format** — `config.parametric` gains an optional `lora` object, and
-`schema_version` bumps from 1 to 2 (only for LoRA-enabled exports; a non-LoRA export
-still declares 1, byte-for-byte unchanged from before LoRA existed):
-```json
-"parametric": {
-  "type": "film+lora",
-  "schema_version": 2,
-  "condition_size": 2,
-  "lora": {"rank": 4},
-  "film_layers": ["layer_0", "layer_1", ...],
-  "parameters": [...]
-}
-```
-`"type"` is `"film"` (or absent, for every export before this field existed) when
-`--lora-rank 0`, `"film+lora"` otherwise. Weight layout per layer gains an optional LoRA
-block immediately after `film.bias` when active, in lockstep with `weight_count()`/
-`_export_weight_block()`/`_load_weight_block()` (`param_train.py`) — all three of which
-must stay in sync exactly like the existing `film` branch does.
+| | tiers | final ESR lite / full |
+|---|---|---|
+| FiLM+LoRA (`2026-08-21`) | 4ch + 8ch | 0.06186 / 0.02403 |
+| FiLM only (`2026-08-26`) | 5ch + 9ch | **0.06016 / 0.02191** |
 
-**Requires the LoRA-aware NeuralAmpModelerCore fork** — same requirement `"ParametricWaveNet"`
-itself already has. A LoRA-tagged model is safe to hand to an *older* build of this fork
-that predates LoRA: `require_supported_parametric_model()` rejects `schema_version 2`
-loudly (`"...is newer than this build supports..."`) rather than silently misreading it,
-the same fail-loud contract every schema bump in this project follows. **`ParametricA2FastModel` (the hand-optimized C++ fast path) supports LoRA as of
-NeuralAmpModelerCore `cc0a4a8` (2026-08-17)** — per-layer additive low-rank correction on
-`layer1x1`'s output, matching `NAM/lora.h`'s `Process()`, with the dispatch detector widened to
-accept `type=="film+lora"` (`schema_version` 2, `lora.rank > 0`) and gated so a malformed config
-still falls back to generic. Verified bit-for-bit against the generic reference across all
-supported channel widths (3–8), including the shipped `rank==channels` edge case. `35456c9`
-then folded the correction into `l1x1`'s weight matrix instead of a per-frame GEMV.
+Widening a tier lifts the same capacity ceiling LoRA targets, and costs no schema bump, no
+`rank` to choose, and no minimum core version. LoRA also made the FiLM/LeakyReLU runaway
+instability worse when it occurred (~7x excitation elevation vs ~1.1x for FiLM-only), a
+known bad interaction that was never fully bounded. The earlier Tweed 5F6-A testbed numbers
+(FiLM+LoRA cutting ESR ~65-72% vs FiLM-only) were real but never re-run as a clean,
+width-matched, to-convergence ablation, and are not archived for re-checking — the JCM800
+comparison above is the only real head-to-head that exists.
 
-*This paragraph previously said the fast path had no LoRA support "and never will" — that was
-true when written (the exclusion is `f9d4701`) and is now stale; the core's own README was
-corrected in `b3a08e7`.* **A `"film+lora"` model on a core older than `cc0a4a8` still falls
-through to the generic path**, so the performance you get depends on which core you link.
-`is_parametric_a2_shape()` gates on `"type"`: `"film"` (or absent) takes the fast path
-regardless, so a FiLM-only model built today runs identically, at the same performance, whether
-or not the LoRA code exists in the binary at all.
+**Archived models**: `parametric-nam-models` has 7 LoRA `.nam` files from two runs (both
+rank 4) — `tweed-5f6-a-full-sag/2026-08-17_e1cb0e0` and
+`marshall-jcm800-2203-preamp-and-power-amp-sag/2026-08-21_e1cb0e0`, both 2-knob. Neither is
+marked `CURRENT` for its device; both remain readable/exportable/foldable via this
+toolchain's own Python tools as noted above, but are no longer usable live in a plugin.
 
 ### NAM ecosystem compatibility
 
