@@ -29,7 +29,7 @@ export a single `.param.nam` whose knobs match the real controls.
 ### Try it now
 
 `examples/muff/` holds a real, complete recipe: the `.schx` circuit and an annotated
-`config.toml`. One thing is not in the repo — **the excitation**. Download `T3K-sweep-v3.wav`
+`config.toml`. One thing is not in the repo — **the sweep file**. Download `T3K-sweep-v3.wav`
 from **<https://www.tone3000.com/capture>** into `examples/` before your first run (see
 [The sweep file](#the-sweep-file) below). Feel free to substitute your own favorite sweep or DI
 recording — just point `input` in the config at it. A good input covers the top of the band
