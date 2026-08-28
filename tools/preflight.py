@@ -259,8 +259,19 @@ def main():
     if sr != SR:
         sys.exit(f"input sample rate {sr} != {SR}")
     xprobe = x[: int(args.seconds * SR)]
-    native_peak = float(np.abs(xprobe).max()) + 1e-12
-    vin = args.vin if args.vin is not None else native_peak
+    # TWO DIFFERENT LEVELS, and conflating them silently mis-exports the calibration.
+    #   probe_peak  -- peak of the TRUNCATED probe slice; what the probe renders are driven at.
+    #   native_peak -- peak of the WHOLE input; what the dataset will actually be rendered at,
+    #                  and therefore the only correct reference for input_level_dbu.
+    # --seconds takes a PREFIX, and an excitation built by tools/build_excitation.py puts its
+    # loud content LAST (real playing, then amplitude-stepped sweeps, then transient bursts).
+    # Measured on the Joyo's 38 s excitation: the 10 s prefix peaks at 3.940 V against the
+    # file's 14.833 V -- 11.5 dB down -- so deriving the exported dBu from the probe slice
+    # understated it by exactly that, while labelling it "training input peak".
+    probe_peak = float(np.abs(xprobe).max()) + 1e-12
+    native_peak = float(np.abs(x).max()) + 1e-12
+    vin = args.vin if args.vin is not None else probe_peak
+    calib_v = args.vin if args.vin is not None else native_peak
 
     print(f"Preflight ({args.backend}): {Path(args.schx).name if args.schx else args.module}  "
           f"knobs={knobs}  fixed={fixed or '-'}")
@@ -464,17 +475,36 @@ def main():
                 print("    ^ OFF-CONVENTION V0dBFS (expected ~1V => ~-0.8 dBu)")
         report["input_calibration"] = ic
     else:
-        exported_ild = 20.0 * math.log10((vin / math.sqrt(2)) / _DBU_0_RMS_VOLTS)
-        ic = {"vin_volts": vin, "input_peak_dbfs": 20 * math.log10(native_peak + 1e-12),
+        exported_ild = 20.0 * math.log10((calib_v / math.sqrt(2)) / _DBU_0_RMS_VOLTS)
+        ic = {"vin_volts": vin, "calibration_volts": calib_v,
+              "input_peak_dbfs": 20 * math.log10(native_peak + 1e-12),
+              "probe_peak_volts": probe_peak,
               "exported_input_level_dbu": exported_ild}
-        print(f"    training input peak = {native_peak:.3f} ({ic['input_peak_dbfs']:.1f} dBFS)")
-        print(f"    probe vin (V0dBFS-equivalent) = {vin} V")
+        print(f"    training input peak = {native_peak:.3f} ({ic['input_peak_dbfs']:.1f} dBFS)"
+              f"  <- whole file, what the dataset renders at")
+        print(f"    probe vin (V0dBFS-equivalent) = {vin} V"
+              f"{'' if abs(probe_peak - native_peak) < 1e-9 else f'  <- {args.seconds:.0f}s prefix only'}")
         print(f"    input_level_dbu to be EXPORTED = {exported_ild:.2f} dBu")
         if not (-5.0 <= exported_ild <= 24.0):
             warn.append(f"input_level_dbu={exported_ild:.1f} dBu is off the plausible interface "
                         f"range — vin is likely off the 1V ecosystem convention (1V => ~-0.8 dBu).")
             print(f"    ^ OFF-CONVENTION vin (expected ~1V => ~-0.8 dBu; this render used {vin}V)")
         report["input_calibration"] = ic
+
+    # A truncated probe can be far quieter than the file it gates: --seconds takes a PREFIX,
+    # and build_excitation.py puts its loud content LAST. Measured on the Joyo's 38 s
+    # excitation, the 10 s prefix peaks 11.5 dB below the file. Worth saying out loud, because
+    # it cuts both ways -- cleaner direction readings, untested saturation.
+    if probe_peak + 1e-9 < native_peak:
+        _down_db = 20 * math.log10(native_peak / probe_peak)
+        if _down_db >= 3.0:
+            warn.append(f"probe slice is {_down_db:.1f} dB quieter than the full input "
+                        f"({probe_peak:.3f} V vs {native_peak:.3f} V) -- --seconds takes a "
+                        f"PREFIX and build_excitation.py puts its loud content last, so these "
+                        f"knob checks never saw the excitation's loud region. Direction "
+                        f"readings are CLEANER this way (clipping swamps EQ direction), but "
+                        f"saturation behaviour there is untested -- that is "
+                        f"tools/check_transient_coverage.py's job.")
 
     print()
     for w in warn:  print(f"  WARN: {w}")
