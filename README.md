@@ -12,7 +12,7 @@ Two ways to build the same underlying dataset:
 - **From a `.schx`** (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`) — simulates the
   circuit across a sweep of knob settings, no real hardware needed.
 - **From real hardware, no SPICE model at all** (`gen_dataset_from_captures.py`) — a folder of
-  already-captured, fixed-setting files, one per knob setting: either existing `.nam` exports,
+  already-captured, fixed-setting files, one per knob setting: either existing `.nam` files,
   or your own recorded wet/dry `.wav` pairs (a shared sweep played through the real device and
   captured back via an audio interface). Each file's **name** encodes its knob settings, e.g.
   `"MyAmp G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated
