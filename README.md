@@ -16,8 +16,8 @@ Two ways to build the same underlying dataset:
   or your own recorded wet/dry `.wav` pairs (a shared sweep played through the real device and
   captured back via an audio interface). Each file's **name** encodes its knob settings, e.g.
   `"MyAmp G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated
-  `PrefixDigit` tokens, digit → value/10) — see `gen_dataset_from_captures.py` below for the
-  full naming convention and how to override it.
+  `PrefixDigit` tokens, digit → value/10) — see `gen_dataset_from_captures.py` in
+  [`docs/scripts.md`](docs/scripts.md) for the full naming convention and how to override it.
 
 Either path feeds the same pipeline: train a FiLM-conditioned WaveNet on the paired audio, and
 export a single `.param.nam` whose knobs match the real controls.
@@ -71,9 +71,9 @@ ls examples/T3K-sweep-v3.wav
 **On its own it does NOT cover the loud region** — 22 dB crest factor, and only **0.075 %** of
 its samples sit within 6 dB of peak. A model trained on it alone never sees the device
 saturating, and goes out-of-distribution the moment a hot input arrives. **This is the
-excitation defect behind this pipeline's FiLM-runaway blowups** (see the Known issue below —
-one shipped pedal model spiked to 12.39 peak on a real pick attack where the reference
-circuit produced 0.46).
+excitation defect behind this pipeline's FiLM-runaway blowups** (see
+[Known Issues](docs/known-issues.md) — one shipped pedal model spiked to 12.39 peak on a real
+pick attack where the reference circuit produced 0.46).
 
 So for a real training run, do not feed it in raw — build an excitation from it:
 
@@ -117,7 +117,8 @@ The bundled example above needs nothing beyond what it already cloned. To train 
 circuit, all you need on top of that is your own `.schx` (e.g. from
 `LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it.
 `tools/scaffold_config.py --schx yours.schx` discovers its real controls and measures a
-starting `oversample` for you (Scripts, below) — or copy `examples/template.config.toml`
+starting `oversample` for you (see [`docs/scripts.md`](docs/scripts.md)) — or copy
+`examples/template.config.toml`
 by hand (see **Per-circuit configs** below for the format). Either way, finish with
 `tools/grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
 measured one. No other repos are required.
@@ -184,8 +185,9 @@ just want to try the knob experience before training your own.
 ```
 
 Two ways to reach the same dataset contract: simulate a circuit, or point at a folder of
-real captures — see `gen_dataset_from_captures.py` below. `run_pipeline.py` orchestrates the
-`.schx` path's three steps in one command; you can also run each script directly (below).
+real captures — see `gen_dataset_from_captures.py` in [`docs/scripts.md`](docs/scripts.md).
+`run_pipeline.py` orchestrates the `.schx` path's three steps in one command; you can also run
+each script directly (see `docs/scripts.md`).
 
 ---
 
@@ -242,759 +244,53 @@ blank one to copy for a new device.
 
 ## Scripts
 
-### `tools/scaffold_config.py` — generate a starting `config.toml` for a new circuit
-
-```bash
-python tools/scaffold_config.py --schx path/to/circuit.schx
-```
-
-Discovers the circuit's real controls (ganged pots collapsed to one, same logic
-`gen_dataset_from_schx.py --schx X` with no `--knobs` uses to list them) and writes a
-`config.toml` with a `[knobs]` entry per control, copying the rest of
-`examples/template.config.toml` verbatim. For the `livespice` backend (default) it also
-*measures* a starting `oversample` — runs `measure_truncation.py`'s own candidate sweep
-and prints the same kind of table, but doesn't pick a value out of it automatically: a
-"stalled" candidate in that table can mean a render problem, not convergence, and the
-docs treat it as something to investigate by hand, not a green light. So it writes the
-largest tested candidate as a starting point and leaves the judgment call to you.
-
-It also writes a **`[knob-kind]` table**, guessing each knob's role (`hi`/`lo`/`mid`
-tone-shaping, `drive` gain/distortion, `rms` volume/level) from its name via
-`tools/knob_classify.py` — the same heuristic `preflight.py` uses for its own direction and
-EQ-swamp checks (see [that Known issue](#known-issue-preflights-eq-knob-checks-can-be-swamped-by-the-circuits-own-gain-control)
-below). A name that matches nothing is written commented-out as `UNCONFIRMED` rather than
-silently defaulted or guessed wrong — **always review this table by hand**: a misclassified
-knob doesn't just get the wrong sensitivity metric in `gen_dataset_from_schx.py`, it also
-silently skips `preflight.py`'s role-aware EQ-check protection for every OTHER knob's
-direction check. Override a bad guess with `preflight.py --knob-kind NAME=kind,...`, or just
-edit the table before your first real run.
-
-The `[knobs]` grid it writes is a **placeholder** (run `tools/grid_adequacy.py --config
-<output> --apply` next to turn it into a measured one) but a role-aware one, not a naive
-`linspace(0,1)` for every knob: a tone/EQ knob (`hi`/`lo`/`mid`) stays evenly spaced but
-narrowed to `[0.2, 0.8]` (`--grid-points` points, default 3) — the fully-CCW/CW extremes
-rarely hold a tone stack's interesting behavior. A gain/volume knob (`drive`/`rms`) is NOT
-evenly spaced: fixed anchors at `min`/`min+0.05`/`min+0.15`/`max-0.05`/`max` (`0.1, 0.15,
-0.25, 0.95, 1.0`) are always included — density where a gain knob's character changes
-fastest near the bottom, plus a point just below max to stabilize that grid cell — merged
-with `--grid-points`' own evenly-spaced baseline across the full range, matching hand-tuned
-grids already used on this fleet (e.g. `Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]`). An
-unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
-
-### `tools/grid_adequacy.py` — measure whether a knob grid is dense enough
-
-```bash
-./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
-./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
-./tools/grid_adequacy.py --config ... --apply         # iterate suggest+reverify, write the result
-```
-
-Renders the circuit's true output at each grid cell's midpoint and compares it against
-interpolating the two neighboring points — the residual is the interpolation error **the
-grid imposes**, independent of any model. Run this before training, not after: a cell
-whose residual exceeds `--target` is a floor that no training capacity or time can lift,
-since the information was never sampled. `--suggest` proposes a denser/sparser grid and
-prints it as TOML for you to paste into `[knobs]` yourself. `--apply` goes further: it
-bisects the failing cells, re-probes the new grid, and repeats (reusing the same render
-cache across rounds) until every cell clears `--target` or `--max-iterations` runs out,
-writing the converged grid straight into `--config`'s `[knobs]` table — one command
-instead of suggest → hand-copy → rerun → repeat. It doesn't touch anything else in the
-file, comments included.
-
-`backend = "ngspice-deck"` (or `"ltspice-deck"`) in the config renders through a
-hand-written ngspice/LTspice deck (`pedal-dir`/`module`/`probe-node` in the TOML, same
-convention as `preflight.py`/`prepare_excitation.py` — see Backends, below) instead of a
-`.schx`, for a device whose clipping needs a real component `.schx` has no model for (a
-MOSFET, a real BJT) — or, for `ltspice-deck` specifically, a circuit whose ngspice deck
-can't converge on real playing content at all (see Backends).
-
-**Exit status — an over-target cell is not a failure.** It exits **0** even with cells over
-target, because refining one costs renders and permutations and a config may rationally accept a
-coarse cell, coarsen an axis, or fix a knob outright instead of paying. That is a priced
-trade-off, not a defect, and gating on it would turn a judgement call into an error.
-
-What *does* fail the run (**exit 2**) is a **failed render**, because that is the case that
-produces a WRONG table rather than a weaker one: every cell is computed from whichever probes
-survived, and nothing else in the output says so. Measured on one real pedal config, 38 of 48
-probes timed out and the printed table put one cell at 0.6578 (18.8× over) where the clean
-re-run measured 0.0475 (1.4×) — a 14× error, indistinguishable from a real result. If the cause
-is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) or lower
-`--workers`; the same plumbing gap existed in `preflight.py`, now `--render-timeout` there.
-
-### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
-
-```bash
-./measure_truncation.py --input examples/T3K-sweep-v3.wav --config path/to/device-config.toml
-```
-
-LiveSPICE integrates with BDF2 (O(h²)), so the simulated circuit is never quite the real
-one — the gap is **truncation error**, and it shrinks as `--oversample` rises. Measures it
-against a high-oversample reference (not the next rung up, which understates the error
-~3x) so you can pick an `oversample` whose truncation sits comfortably below the model ESR
-you're chasing — training past that point just teaches the model the integrator's own
-mistakes.
-
-### `gen_dataset_from_schx.py` — generate the dataset
-
-Simulates the circuit across knob permutations, one WAV per permutation, then combines
-them into `outputs.npy`.
-
-```bash
-# List the pots/switches in a schx:
-python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx"
-
-# Grid sweep (factorial — fine for 1–3 knobs):
-python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx" \
-    --knobs drive,tone --range "drive=0,0.5,1" --range "tone=0.2,0.5,0.8" \
-    --input guitar.wav --output <ds> --dry-run   # check perm count + disk first
-
-# Random sampling (for high knob counts — grids explode past ~3 knobs):
-python gen_dataset_from_schx.py --backend livespice --schx "<amp>.schx" \
-    --knobs gain,bass,mid,treble,master --random 200 \
-    --bounds bass=0.15,0.85 --bounds mid=0.15,0.85 --bounds treble=0.15,0.85 \
-    --input guitar.wav --output <ds>
-
-# Combine per-permutation WAVs into outputs.npy:
-python gen_dataset_from_schx.py --combine <ds>
-```
-
-- **`--random N`** samples N points in the knob hypercube (+ deterministic boundary
-  **anchors** so extremes are covered; `--no-anchors` to skip). FiLM interpolates
-  between them — far better than a coarse grid for >3 knobs. Seeded (`--seed`) and
-  extensible.
-- **`--bounds KNOB=lo,hi`** restricts a knob's sampled range (e.g. keep a tone pot in
-  its usable band, or a hot gain pot out of a divergent regime). Recorded in the
-  `.param.nam` so the host maps the knob to the real trained domain.
-- **`--max-crest`** (default 50) fails any permutation whose output crest factor
-  (peak/RMS) exceeds it — a scale-invariant detector for numerical divergence that
-  RMS/length checks miss.
-- **`--fixed-params k=v,...`** pins controls not being swept; **`--speaker`** selects a
-  speaker tap. Knob order in `--knobs` = knob order in the `.param.nam`.
-
-**Ganged (multi-section) pots:** `livespice_cli` drives **every** pot/switch whose
-`Name` matches the swept knob. To model a mechanically-ganged control (e.g. a dual-gang
-Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `.schx`;
-`--knobs Gain` then moves both wipers in lockstep, and the knob appears once downstream.
-
-**Typical generation time** scales with circuit complexity, `--oversample`, and backend —
-there's no universal number, but two real measured points: a simple pedal-scale circuit
-renders a permutation in low single-digit seconds under the default `livespice` backend,
-while a high-gain amp head — a 6-stage preamp cascade + 4-tube power amp with whole-amp
-sag — took **~75 min for a full permutation-batch** on the same backend. The
-`--timeout-mult` flag's per-permutation timeout ceiling is built around `oversample 8`
-costing up to **40x realtime** (100s of audio → 4000s) for the hardest corners, since some
-real operating points (e.g. a very low-gain setting) are a genuine 20-40x slower than that
-circuit's own typical corner without ever actually diverging.
-
-**`--backend ngspice` can be dramatically slower than the above, or fail to converge at
-all** — it's the adaptive-timestep tradeoff; see **Backends**, below, for the measured
-numbers (a real 2.7x-slower case and a real total-non-convergence case).
-
-### `tools/render_ngspice_deck.py` — render a hand-written ngspice deck's knob sweep
-
-```bash
-python tools/render_ngspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
-    --module gen_ocd_ngspice --probe-node OUT \
-    in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
-```
-
-For a device whose circuit is a hand-written ngspice netlist (`gen_<device>_ngspice.py`, kept
-in a private devices repo, exposing `build_deck()`/`KNOB_NAMES`) rather than a `.schx` — the
-same situation `--backend ngspice-deck` addresses on `preflight.py`/`prepare_excitation.py`
-below, and for the same reason: the `.schx` format itself has no component for whatever the
-circuit needs (a real MOSFET, most often) or a topology LiveSPICE's fixed-timestep solver
-can't hold at all. `--pedal-dir`/`--module` point at the private module the same way those two
-tools do; `--probe-node` and `--ok-max-peak` (a render whose peak exceeds this is treated as
-diverged, default 50V) are device-specific and worth passing explicitly rather than trusting a
-default that happened to fit one device.
-
-Writes `caps/cap_0000.wav ...` + `caps/manifest.jsonl` + `caps/mapping.csv` (an exact
-filename→knob-value table for `gen_dataset_from_captures.py --mapping-csv`, sidestepping that
-tool's filename-token convention entirely, since these knob values are already known exactly,
-not encoded in the filename). **`--absolute`** renders a file already built at the
-`V0dBFS=1V` convention (e.g. `tools/build_excitation.py`/`tools/prepare_excitation.py
---backend ngspice-deck` output) using its own sample values directly as volts, with no
-peak-rescaling — necessary because those files intentionally have different segments at
-different absolute drive levels, which a normal `--vin` rescale would flatten.
-
-Uses `ngspice_spicelib.py` directly, not `render_backends.py`'s `NgspiceBackend` adapter:
-that adapter returns raw audio arrays for `preflight.py`/`find_saturation_point.py`'s own
-metric computation — a different contract than the capture-files-plus-manifest this tool
-produces. Adding a new device means writing `gen_<device>_ngspice.py`, not another copy of
-this render harness too — it used to be one per device (`render_ocd.py`, `render_bd2.py`,
-etc., each a near-identical ~100-line copy differing only in the hardcoded module and a
-couple of device-specific defaults) until this consolidated them.
-
-### `tools/render_ltspice_deck.py` — render an LTspice deck's knob sweep
-
-```bash
-python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
-    --module gen_ocd_ltspice --tap spk \
-    in.wav --grid Gain=0,0.5,1 Tone=0,1 Volume=1.0 --outdir caps/
-```
-
-LTspice counterpart of `render_ngspice_deck.py` above, for a device whose ngspice-deck
-version can't converge on real playing content **at all**, independent of `maxstep` — found
-on one pedal, whose ideal tanh-bounded op-amp B-source is a genuine Newton-solver dead end in
-ngspice (70/70 renders across the full knob grid timed out, at every `maxstep` from 3e-6 down
-to 3e-8). LTspice gets past it with a real op-amp macromodel plus explicit
-`.ic`/`uic` initial-condition hints on the `.tran` line — neither is available through
-ngspice's B-source style. `--pedal-dir`/`--module` point at the same `build_deck()`/
-`KNOB_NAMES` module convention as the ngspice-deck tools; `--tap` (not `--probe-node`) names
-the node to render, matching `render_backends.py`'s `LtspiceBackend`. `--out-scale` scales
-the tap down before LTspice's `.wave` writes it (LTspice's wav output is
-+/-1V-PCM-bounded) and `render_grid`/`render_one` divide it back out — raise it toward 1.0
-only if the tap is known to never exceed `1/out_scale` volts. `--timeout` defaults to
-scaling with the input's own duration rather than a flat number (see
-`tools/ltspice_spicelib.py`'s `render_grid` docstring) — a flat timeout tuned for a short
-probe silently kills every job partway through a full excitation capture, which looks
-exactly like a genuine convergence failure.
-
-Same `manifest.jsonl`/`mapping.csv`/`--absolute` output contract as `render_ngspice_deck.py`.
-
-#### Two ways to build a deck
-
-A `gen_<device>_ltspice.py` module exposes `build_deck()` + `KNOB_NAMES`; where its netlist comes
-from is up to it, and there are two established patterns:
-
-- **Hand-written** — necessary when the circuit has no faithful `.schx` at all, e.g. a real
-  MOSFET clipping stage which LiveSPICE has no component for. The netlist is authored directly
-  and is the only description of that circuit.
-- **Derived from the `.schx`** — for a device that *does* have an audited `.schx` which
-  LiveSPICE simply cannot solve correctly. It imports the component list from the `.schx`'s own
-  generator (e.g. `from gen_mydevice import NET`) and translates only the syntax, so values,
-  nets and topology have exactly one source. **Prefer this whenever a `.schx` exists.**
-  A hand-copied netlist is precisely the drift `parametric-devices/tools/check_generator_drift.py`
-  exists to catch, and it would go unnoticed here because nothing compares two backends
-  automatically. Two requirements: the `.schx` generator must guard its file write behind
-  `if __name__ == '__main__'` so importing it has no side effects, and any pot taper must mirror
-  `schx_to_ngspice.adjust_wipe` so a taper change cannot silently mean two different circuits on
-  two backends.
-
-**macOS: the LTspice you install decides whether any of this works** — the Homebrew cask and
-the current `LTspice_26.pkg` are Wine-wrapped and their batch mode silently produces nothing.
-See [LTspice on macOS](#ltspice-on-macos-only-for---backend-ltspice-deck) under Build &
-Dependencies before debugging a deck that "won't converge".
-
-Not only for ngspice-can't-converge cases: one real pedal is here because *LiveSPICE* is the
-backend that cannot render it. `IdealOpAmp` cannot saturate — it has no supply rails at all —
-and on this pedal rail saturation is the dominant nonlinearity at hot settings, so the output
-reaches **228x full scale** at ordinary knob settings — while LiveSPICE's non-ideal
-`Circuit.OpAmp` makes the circuit too stiff for its fixed-step solver (diverges even at
-`oversample=128`, and `measure_truncation.py` reports STALLS).
-
-### `gen_dataset_from_captures.py` — build a dataset from real hardware captures, no `.schx` needed
-
-An alternative to `gen_dataset_from_schx.py` for devices with **no SPICE model** — a set of
-already-captured, fixed-setting files (one per knob setting) instead of a circuit to simulate.
-Two source kinds, auto-detected per file by extension and freely mixable in one run:
-
-- **`.nam`** — an already-trained/exported fixed-setting model (real hardware or amp-modeler
-  export). Run once against the shared sweep to produce its wet render (digital inference,
-  exactly phase-aligned to the input by construction).
-- **`.wav` / `.aif` / `.aiff`** — an already-recorded wet capture: the shared sweep played
-  through the real device and captured directly (e.g. via an audio interface). Any bit depth,
-  sample rate, or channel count libsndfile can read works (stereo is downmixed to mono; a
-  sample-rate mismatch against the shared sweep is resampled automatically). A real analog
-  signal chain has its own latency the `.nam` path's pure inference doesn't, so each capture is
-  time-aligned via best-effort NAM blip-based calibration before use — real calibration only
-  for a NAM-recognized standard sweep — `T3K-sweep-v3.wav` IS one, so calibration is real on
-  the default input; a non-standard excitation falls back to a disclosed `delay=0`, same as
-  `capture_static.py`'s identical fallback for a non-standard excitation. `neural-amp-modeler`
-  is optional — without it every raw capture just uses `delay=0` too.
-
-```bash
-python gen_dataset_from_captures.py \
-    --captures "~/Downloads/MyAmp DST *.nam" \
-    --output /tmp/myamp_ds --gear-make "Manufacturer" --gear-model "Amp Model 15w"
-
-python gen_dataset_from_captures.py --captures "~/Downloads/MyPedal *.wav" --output /tmp/mypedal_ds
-
-python gen_dataset_from_captures.py --combine /tmp/myamp_ds   # same --combine flag as gen_dataset_from_schx.py
-```
-
-- **Filenames encode the knob settings**, same convention for either source kind.
-  `"MyAmp DST G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5`, and identically
-  for a `.wav` capture: `"MyPedal G7, B3.wav"` → `Gain=0.7, Bass=0.3` (comma-separated
-  `PrefixDigit` tokens, digit → value/10, using the default prefix map's `G`/`B`/`M`/`T`/`Rvb`/
-  `Rsn`/`Prsn` → `Gain`/`Bass`/`Mids`/`Treble`/`Reverb`/`Resonance`/`Presence`; unrecognized
-  tokens like `"DST"` or a device name are silently ignored). Override the prefix→knob-name map
-  and the digit→value scale per batch with `--knob-map` (e.g. `--knob-map D=Drive`) /
-  `--knob-scale`, or skip filename parsing entirely with `--mapping-csv` for conventions too
-  irregular to tokenize.
-- **A knob that never changes across the batch is auto-fixed**, not swept — real capture
-  batches are a scattered handful of points, not a dense grid, and most tokens in any given
-  set of files won't vary at all.
-- Every file is aligned against a **shared sweep input** (`--input`, same convention as the
-  `.schx` pipeline — defaults to `examples/T3K-sweep-v3.wav`), producing exactly one
-  permutation per file.
-  This is a **scattered point-sample dataset**, not a Cartesian grid — `grid_adequacy.py`'s
-  interpolation reasoning doesn't apply; there's nothing systematic to interpolate between a
-  handful of arbitrary points.
-- Output has the **same directory contract** `gen_dataset_from_schx.py` produces (`config.json`,
-  `sweep.wav`, `params.csv`, `outputs.npy` after `--combine`), so `run_pipeline.py --config`
-  and `param_train.py` read it completely unmodified — from here on it's the identical
-  training path as a SPICE-rendered dataset.
-- **`--restricted-input`** marks the sweep as licence-restricted-for-training-only (not
-  redistributable) if that's what you're feeding it — writes a `NOTICE` file and an
-  `input_restricted` flag into `config.json` so the dataset directory is self-documenting.
-
-### `param_train.py` — train a parametric NAM
-
-```bash
-python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir <ckpt> \
-    --mmap --crop-len 24000 --batch-size 64 --repeats 8 \
-    --lr 3e-4 --epochs 200
-```
-
-- Training is **always slimmable**: it jointly trains an A2 **Lite 4ch + Full 8ch**
-  and exports both tiers in one SlimmableContainer. `--widths` overrides the tier
-  channel counts (default `4,8`).
-- **Per-tier best-checkpointing**: each tier's own best epoch (they differ) is saved
-  and exported live to `<output>.best_full.param.nam` / `<output>.best_lite.param.nam`
-  (and `.best_w<N>.param.nam` for any middle tier), plus `best.pt` / `best_<tier>.pt`
-  and per-epoch `latest.pt` + `metrics.csv`.
-- **Composite export**: whenever *any* tier improves, its current per-tier bests are
-  also spliced into one combined container and exported live to
-  `<output>.optimal.param.nam` — the same multi-tier artifact `release_run.sh`
-  otherwise builds from checkpoints after the fact, kept up to date automatically so
-  you can spot-test it mid-run without a separate manual export step. Cheap: reuses
-  the per-tier weights already held in memory, no extra disk read and no forward pass.
-- **`--epochs 0`** = open-ended: trains with an SGDR (cosine-warm-restart) schedule
-  until you `touch <ckpt>/STOP` (or SIGINT/SIGTERM). Best models export continuously,
-  so you can stop whenever ESR is good enough. `--restart-period` sets the cycle length.
-- **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
-  `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
-  model's receptive field and ~2× faster than 48000.
-- **`--lora-rank N`** — **REMOVED (2026-08-27), Python side kept for reading old checkpoints
-  only.** Requesting a non-zero rank exits with an error; set `PARAMETRIC_NAM_ALLOW_LORA=1` to
-  override for an ablation. See the status note in
-  [LoRA-style knob conditioning](#lora-style-knob-conditioning-removed) — the C++ that consumed
-  LoRA-tagged models in a real-time plugin host has been deleted entirely; this flag only
-  matters for training a new ablation or for `export_checkpoint.py`/`param_infer.py` reading an
-  old checkpoint (rank is recoverable from the checkpoint's own state-dict shape, so those never
-  need it re-specified).
-- **`--cycle-checkpoints`** (default on; `--no-cycle-checkpoints` to disable) saves a
-  full resumable snapshot (`<ckpt-dir>/cycle_<epoch>.pt`) at every SGDR cycle boundary
-  during open-ended (`--epochs 0`) training, alongside the usual `best*.pt`/`latest.pt`
-  (which are overwritten in place and don't preserve history). Lets you go back and
-  compare a model's behavior at an earlier point in training — e.g. to narrow down when
-  an instability (see [Known issue](#known-issue-rare-knob-corner-blowup-filmleakyrelu-runaway)
-  below) first appeared, which `best.pt` alone can't answer since it only ever holds the
-  single best-so-far snapshot.
-- **Typical training time** depends on dataset size, `--crop-len`/`--batch-size`, and
-  hardware — no universal number, but one real measured example: a two-tier (4ch/8ch)
-  model at `--crop-len 48000 --batch-size 64 --repeats 32` on Apple Silicon (MPS backend)
-  ran **~100-120s/epoch** (median ~104s across 295 epochs of one real run). Open-ended
-  (`--epochs 0`) SGDR runs commonly take **several hours across many restart cycles**
-  before `--stale-cycles` triggers auto-stop — that same run improved its all-time-best
-  ESR on both tiers as late as its 6th 50-epoch cycle (~9 hours of wall time in), so don't
-  read an early plateau as convergence.
-
-### `param_infer.py` — inference (Python, no C++)
-
-```bash
-python param_infer.py --checkpoint <ckpt>/best.pt \
-    --input dry.wav --output-dir out/ \
-    --params "drive=0.5,tone=0.7" --params "drive=0.9,tone=0.3"
-```
-Loads a checkpoint and renders WAVs at arbitrary knob positions. Repeat `--params` for
-multiple outputs. Knob names/order come from the dataset `config.json`.
-
-### `coverage_report.py` — find holes in a sampled dataset
-
-```bash
-python coverage_report.py --dataset <ds> --suggest 5
-```
-Read-only analysis of `params.csv`: success/failure summary, **per-knob boundary
-coverage**, 1-D histograms, pairwise 2-D occupancy, and nearest-neighbour **gap
-analysis** (largest empty regions, optionally emitted as fill points). Pairs with the
-seed-extensible sampler to grow a dataset toward its gaps.
-
-### `sweep_report.py` — visualize a set of WAVs at different knob settings
-
-```bash
-python sweep_report.py /tmp/ds/*_gain_*.wav --param-name gain -o report.html
-```
-
-Self-contained HTML report from any set of WAVs, one per parameter setting (sorted by
-name): overlaid waveforms, frequency spectra, and per-file stats (peak, RMS, RMS
-monotonicity across the sweep, spectral centroid trend). Doesn't care where the WAVs came
-from — point it at a generated dataset's per-permutation renders to eyeball the sweep
-before training (`coverage_report.py` checks the *sampling*, this checks the *audio*), or
-at a batch of `param_infer.py` outputs to eyeball a trained model's knob response.
-
-### `export_checkpoint.py` — checkpoint → `.param.nam`
-
-```bash
-python export_checkpoint.py --checkpoint <ckpt>/latest.pt --dataset <ds> \
-    --output model_final.param.nam --state model
-```
-Re-exports a NAM from any `.pt` (e.g. the final `latest.pt` weights) without retraining.
-
-### `bake_nam.py` — freeze a knob setting for stock/upstream NAM plugins
-
-```bash
-python bake_nam.py --in model.param.nam --params "Gain=0.7,Tone=0.5" -o tone.nam
-```
-
-Standard NAM plugins have no runtime knob input, so a raw `.param.nam` handed to one just
-throws (`"No config parser registered for architecture: ParametricWaveNet"`). This bakes
-one specific knob setting into an ordinary static `.nam` instead — FiLM is affine over the
-layer's linear ops, so freezing a setting folds exactly into `conv`/`mixin` weights, no
-retraining, pure offline weight transform. Omitted knobs fall back to their own declared
-default, not a blanket 0.5 (wrong for a circuit whose controls don't center at noon).
-
-By default the output is **dual-payload**: the baked tone at the top level (so any stock
-plugin plays it) plus the full original parametric model under an `embedded_parametric`
-key that stock loaders ignore but a parametric-aware host (`NAMix`,
-`NeuralAmpModelerPlugin`/"Anti-Static") reads for live knobs — one file, safe to hand
-anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
-where embedding the full master in every tone just multiplies size.
-
-### `tools/plot_tone_response.py` — frequency-response chart for an exported `.nam`
-
-```bash
-python tools/plot_tone_response.py \
-    --model bundle.optimal.param.nam --config dataset/config.json \
-    --out tone_response.svg --summary tone_response.md \
-    --schx circuit.schx
-```
-
-Renders a low-level sweep through every tier of a `SlimmableContainer` `.param.nam`, at each
-tone knob's min/max (the drive knob held low, so the curves reflect frequency shaping, not
-distortion — `--include-drive` charts it anyway), via the real C++ render path
-(`render_parametric`). Draws a grid of magnitude-response curves: rows = tiers, columns =
-swept knobs — self-consistency across tiers by default. Pass `--schx` to also render the
-schematic through the LiveSPICE oracle and overlay it as ground truth, turning the chart
-into a per-knob accuracy check (does the model's Bass/Mid/Treble response actually match the
-circuit?) instead of just tier agreement. Best-effort throughout: falls back to a
-model-only chart if the oracle is unavailable, and exits 0 with a warning (never blocks a
-release) if `render_parametric` itself isn't built.
-
-### `release_run.sh` — verify + stage a finished run
-
-Calls `plot_tone_response.py` above automatically to produce the release bundle's
-`tone_response.svg`/`.md`. Its own defaults assume a private archive layout you don't
-have; override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the
-bundled `examples/muff/` one — continuing straight from the "Try it now" run above:
-
-```bash
-RUN=/tmp/muff DS=/tmp/muff_ds \
-SCHX=examples/muff/"Big Muff Pi V1 (66#5).schx" \
-CONFIG=examples/muff/config.toml \
-    ./release_run.sh
-```
-Packages a finished (or killed) `run_pipeline.py` run into a verified release bundle:
-validates the `.nam` payloads, composes the tiers into one "optimal" container, measures
-what the composite buys, and writes `MANIFEST.md` + `reproduce.sh`. Nothing about the
-model shape is hardcoded — tiers/widths/config are all derived from the run itself.
-
-No git or network dependency — it never touches another repo. Publishing the resulting
-bundle somewhere (e.g. your own model archive) is a separate, optional step; the script
-prints the command for that at the end rather than running it.
+Full per-script reference (usage, flags, design rationale) lives in
+[`docs/scripts.md`](docs/scripts.md). Quick index:
+
+| Script | Purpose |
+|---|---|
+| `tools/scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
+| `tools/grid_adequacy.py` | Measure whether a knob grid is dense enough |
+| `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
+| `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
+| `tools/render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
+| `tools/render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
+| `gen_dataset_from_captures.py` | Build a dataset from real hardware captures, no `.schx` needed |
+| `param_train.py` | Train a parametric NAM |
+| `param_infer.py` | Inference (Python, no C++) |
+| `coverage_report.py` | Find holes in a sampled dataset |
+| `sweep_report.py` | Visualize a set of WAVs at different knob settings |
+| `export_checkpoint.py` | Checkpoint → `.param.nam` |
+| `bake_nam.py` | Freeze a knob setting for stock/upstream NAM plugins |
+| `tools/plot_tone_response.py` | Frequency-response chart for an exported `.nam` |
+| `release_run.sh` | Verify + stage a finished run |
 
 ---
 
 ## Backends
 
-### Choosing one
-
-| symptom | backend |
-|---|---|
-| nothing wrong — it converges and the output is physically plausible | **livespice** |
-| diverges, or needs extreme `oversample` | **ngspice** (`.schx`-native, no deck needed) |
-| converges but the output is **impossible** (bigger than the supply rails allow) | **ltspice-deck** / **ngspice** — see below |
-| ngspice can't converge on real playing content at any `maxstep` | **ltspice-deck** |
-
-The third row is the one that costs you a training run, because it is **silent**: divergence
-announces itself, wrongness does not. Two questions catch it, and neither is a knob sweep —
-knob sweeps are *relative* (dB vs centre) and cannot see a circuit that is uniformly too loud:
-
-1. **Is the absolute output physically possible?** A 9 V pedal cannot output 200 V. Probe absolute
-   node voltages at the hot corners, not transfer ratios.
-2. **Does the model include the nonlinearity that actually dominates there?** If the real circuit
-   spends its time clipping against its rails, a model that cannot saturate is not approximately
-   right — it is unbounded.
-
-**LiveSPICE** (`--backend livespice`, default) — real-time-capable, `.schx`-native,
-reference tube models, uniform audio-rate output, never aborts. The right default for
-essentially everything. But read "never aborts" as a *risk*, not only a feature: its
-`IdealOpAmp` has no supply rails and cannot saturate, so a circuit whose dominant nonlinearity
-is op-amp clipping renders happily and wrongly. Measured on one real pedal: **228x full
-scale** at ordinary knob settings, converging cleanly, passing preflight, with every knob
-responding in the correct direction. `measure_truncation.py` reported *textbook* convergence for
-it — truncation error tells you how well you solved the equations you wrote, never whether they
-were the right equations. See `parametric-devices/backends.toml`, which exists to record exactly
-these cases.
-
-**ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
-adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. a
-high-gain amp head) where LiveSPICE's fixed-step solver diverges or needs extreme
-oversampling. It translates any `.schx` to an ngspice netlist (exact Dempwolf–Zölzer /
-Koren tube models, E+F ideal transformer) and feeds the input via an XSPICE filesource.
-Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
-See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
-and the important fidelity caveats.
-
-**This safety comes at a real, sometimes severe, speed cost** — adaptive timestepping
-means ngspice's solve time grows with the circuit's actual stiffness rather than staying
-fixed, and on a genuinely stiff circuit that growth can be dramatic: measured ~2.7x slower
-than LTspice on a tweed-style low-gain amp at hard drive (step count exploding to 45492 vs
-LTspice's 12543 for the same clip), and on a very-high-gain amp head, ngspice **failed to
-converge on a hard-drive render at all** — aborting within microseconds regardless of
-timestep, integration method, or input upsampling — while a hand-converted LTspice netlist of
-the same circuit (in the separate `ltspice-batch` repo) rendered the same drive/pot position in
-~32s. (There is no *generic* schx-to-LTspice translator here, but a deck can still be derived
-from a `.schx` rather than hand-written — see "Two ways to build a deck" below.) Don't assume a
-slow or stuck ngspice render will eventually finish; time-box it and compare against
-`livespice` (or, for a hand-written-deck device, `ltspice-deck` below) before spending a
-long timeout budget on it.
-
-**Don't confuse this with `preflight.py`/`prepare_excitation.py --backend ngspice-deck`** — a
-different flag on different tools, for a different situation. The `--backend ngspice` above
-still describes the circuit as a `.schx` file, just solves it with ngspice instead of
-LiveSPICE. `ngspice-deck` is for a device that has **no `.schx` at all** — a hand-written
-ngspice netlist module (kept in a private devices repo), typically because the circuit needs
-something `.schx` has no component for (a real MOSFET) or a feedback loop LiveSPICE's
-fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s translation.
-
-**LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
-`grid_adequacy.py`/`check_transient_coverage.py`, or `tools/render_ltspice_deck.py`
-directly) — the same deck-module situation as `ngspice-deck`. Two circumstances call for it:
-a device whose ngspice deck can't converge on real playing content **at all**, independent of
-timestep; and a device where every backend converges but LTspice is the one whose answer is
-*stable* (see below).
-Found on one real pedal: its ideal tanh-bounded op-amp B-source is a genuine
-Newton-solver dead end in ngspice (70/70 renders across the full knob grid timed out, at
-every `maxstep` from 3e-6 down to 3e-8), while LTspice gets past it with a real op-amp
-macromodel and explicit `.ic`/`uic` initial-condition hints unavailable through ngspice's
-B-source style — see `tools/ltspice_spicelib.py`'s module docstring for the full
-investigation.
-
-**Also worth reaching for when ngspice *does* converge.** On another real pedal both SPICE
-backends bound the output correctly and agree to 1.3% at the clipping corners, and LTspice was
-still chosen: ngspice's answers kept moving with settle time where LTspice's did not (centre
-0.858 -> 1.137 V going from 0.8 s to 2.5 s of settle, versus 0.9597 -> 0.9590), and it was 2-3x
-slower at the hard corners (22.5 s vs 7.1 s at all-max). *A result that changes when you lengthen
-the settle has not converged*, whatever the solver reports.
-
-Needs the native LTspice XVII app (`~/Applications/LTspice.app` or `/Applications/LTspice.app`),
-not a SPICE binary — and on macOS **which build you install decides whether batch mode works at
-all**: see [LTspice on macOS](#ltspice-on-macos-only-for---backend-ltspice-deck).
-
-`render_backends.py` is the adapter layer `preflight.py` and `prepare_excitation.py` share
-across all three hand-deck/schx splits (`NgspiceBackend`, `LtspiceBackend`) — see its module
-docstring for the two-method contract a backend implements.
-
-## Known issue: rare knob-corner blowup (FiLM/LeakyReLU runaway)
-
-Trained `.schx` models can develop a **narrow, catastrophic instability** at a specific
-knob-grid corner — the model's prediction spikes to tens or hundreds of times its normal
-peak level on real transient content, while every aggregate metric (val ESR, per-tier
-loss curves) looks fine, because the corner is a single cell out of hundreds-to-thousands
-and contributes almost nothing to the training loss. It has recurred independently on at
-least three shipped/prototype models (a pre-fix pedal model, one amp's FiLM-only 5-knob
-release, and that same amp's FiLM+LoRA 2-knob prototype) at different knob combinations, so
-treat it as a real, recurring failure mode of this pipeline, not a one-off — and not specific
-to either conditioning mechanism. Whether LoRA's extra per-layer capacity makes the failure
-*worse* once it occurs (more room for an unconstrained input region to produce an extreme
-wrong answer) versus FiLM alone is a real, plausible hypothesis, not yet confirmed: a
-same-corner probe against a FiLM-only model found only ~1.1× elevation where the FiLM+LoRA
-case showed ~7×, but on a different grid/config, so it's suggestive rather than a controlled
-comparison.
-
-What it looks like, concretely (one 5-knob amp model, lite tier): at
-`NormalVol=BrightVol=0.025` (the swept grid's own minimum) combined with `Treble=Bass=
-Middle=0.8`, the model predicted a peak of **100.2 V** against a ground-truth peak of
-**0.64 V** (156×) — RMS stayed normal, so it's a brief spike, not sustained distortion,
-and it's invisible to ESR unless you check per-permutation, not just aggregate. A second,
-nearby corner (`Bass=0.5` instead of `0.8`) showed the same signature at 41×. Both
-cleared the same distinctive test: moving `NormalVol`/`BrightVol` off the exact trained
-minimum by as little as **0.025** (to 0.05) — not even to the next grid point — dropped
-the peak straight back to ~0.7 V. That knife-edge sensitivity (fires exactly *at* a
-trained grid value, not in a neighborhood around it) is the fingerprint of this failure:
-it isn't a smooth under-generalization gradient, it's closer to a discontinuity the
-network found room to plant right on a specific training point.
-
-**Why `.schx` training is exposed to this in particular**: the swept knob grid is a
-finite set of discrete points, and *mixed* corners — several knobs simultaneously at
-their own min/max, not just one knob varied in isolation — are combinatorially numerous
-(2ⁿ for n swept knobs) and easy to under-sample relative to how densely the "safe" middle
-of the grid gets covered. A corner like this can go completely unnoticed by grid
-adequacy (which checks interpolation error, not model behavior) and by aggregate
-validation ESR (which averages over everything else).
-
-**Mitigations, all already in this repo**:
-- **`tools/check_transient_coverage.py`** (pre-training gate, run automatically by
-  `gen_dataset_from_schx.py` unless `--skip-transient-check`) — checks that the
-  excitation's transient content actually reaches each corner's own saturation onset,
-  across the **full min/max hypercube** (every swept knob independently at its own grid
-  min or max, not just one knob varied from center) plus the traditional solo-knob
-  corners. A corner whose real-playing content never crosses into saturation during
-  training is a corner the network has to extrapolate at inference time. Supports
-  `backend = "ngspice-deck"` or `"ltspice-deck"` in the config (same
-  `pedal-dir`/`module`/`probe-node` convention as
-  `preflight.py`/`prepare_excitation.py`/`grid_adequacy.py`) for a device
-  with no `.schx` at all — `gen_dataset_from_schx.py`'s own automatic call is
-  livespice-only, since that's the only path it drives; for a hand-deck device, call
-  `check_transient_coverage.py` directly as its own gate before generating.
-- **`tools/scan_film_runaway.py`** (post-training, run by hand against a finished
-  `.param.nam`) — replays a real reference clip through every tier at every corner
-  (`--config` for the exact trained grid, not just the reduced set) and flags any window
-  whose peak is anomalous relative to that model's own typical output. Scanning the
-  affected amp's fp32 model with a **generic** guitar reference came back clean even
-  including this exact corner — the spike only showed up against the **actual training
-  excitation** at that permutation, so when investigating a suspected corner, prefer
-  `--reference <the training sweep.wav>` over an arbitrary clip; a scan that doesn't
-  reproduce the triggering content can give a false sense of safety.
-- **`tools/build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
-  diagnosing the FiLM+LoRA case above) — `check_transient_coverage.py` only checks that
-  the excitation's peak *level* reaches saturation onset per corner; it says nothing
-  about *shape*. That FiLM+LoRA blowup happened at a trained grid point (not a gap
-  needing extrapolation) whose excitation had moderate-level content and separately had
-  high-crest-factor (sharp-transient) content, but never both together at the same
-  time — that exact (level, shape) combination was simply never in the loss, so nothing
-  constrained the model's behavior there. `--synth-burst-peaks` inserts one synthesized,
-  deterministic, license-free broadband transient burst (`_transient_burst()`, crest≈8.5,
-  instant attack + exponential decay) at every `--sweep-peaks` level, closing that gap
-  directly. Verified end-to-end on a 2-knob retrain of that amp: `scan_film_runaway.py`
-  came back clean across the full grid **at full training convergence** (not just an early
-  checkpoint — the original instability itself only emerged well into training, so a
-  clean early scan alone doesn't prove a fix held).
-
-If a corner gets flagged, first check whether it's a *level* problem
-(`check_transient_coverage.py`, fixed by raising `--realistic-peak`/`--sweep-peaks`) or a
-*shape* problem (a real reference clip flags it but the excitation's own peak clears
-onset fine — fixed by `--synth-burst-peaks`, not by more level). Don't just retrain
-longer at the same excitation — the blowup in the Tweed case was a spike lasting well
-under a second inside a single permutation's clip, so it barely moves that permutation's
-own loss, let alone the average across hundreds of permutations; more of the same data
-without closing the actual coverage gap is unlikely to fix it. If neither excitation fix
-applies, narrowing the grid's swept range, adding an explicit loss weight on
-transient/peak error, or excluding that exact corner combination and documenting it as an
-unsupported setting remain the fallback levers.
+Three simulation backends: **`livespice`** (default, real-time-capable, `.schx`-native),
+**`ngspice`** (offline, adaptive-timestep, for stiff/high-gain circuits), and **`ltspice-deck`**
+(for circuits ngspice can't converge on, or where LTspice's answer is the stable one). Full
+comparison, when to reach for each, and the real measured tradeoffs are in
+[`docs/backends.md`](docs/backends.md).
 
 ---
 
-## Known issue: excitation needs a silent lead-in (cold-start settling transient)
+## Known Issues
 
-Every render starts a `.tran` from a cold, all-capacitors-at-0V initial condition, not the
-already-biased-up state a real, already-powered-on device is always in. For a circuit with a
-slow-charging DC-blocking network — a large output-coupling capacitor into a high-value pot,
-for instance — real content starting at t=0 captures a genuine but non-representative
-multi-second "circuit powering on" transient instead of the device's true steady behavior.
+Four documented failure modes and their investigations/fixes live in
+[`docs/known-issues.md`](docs/known-issues.md):
 
-**Concrete evidence (one real pedal, ngspice backend)**: `C10` (10µF) into the Volume pot's
-low leg (`RVOL2`, up to 500kΩ) gives an RC time constant of roughly **5 seconds**. A sustained
-200Hz test tone with no lead-in,
-rendered from t=0, showed output RMS *slowly drifting* for about 15 seconds and then making an
-**abrupt jump to a different, higher steady value at ~16 seconds** — neither of which a real
-pedal, always already running, would ever do. This wasn't a settling-window artifact of a short
-probe: a direct 20-second render showed the same two-phase drift-then-jump behavior end to end.
-Prepending 3 seconds of silence before any real content resolved it completely: every corner
-tested (across both `Gain` and `Tone` extremes) showed the tone snapping to a single stable,
-unchanging RMS/peak within about a second of starting, with zero drift for the remainder of a
-20+ second render. A quick way to rule this out on a new circuit: render a sustained tone with
-no lead-in for at least 20-30 seconds (not just 1-2) and check whether RMS/peak in 1-second
-windows is still changing well after the excitation's actual attack transient should have
-settled — a circuit without a slow DC-blocking network won't show this, but there's no way to
-know that in advance without checking, since the RC time constant is set by both output-stage
-values, not something knob positions expose directly.
-
-**Fix, applied by default**: `tools/build_excitation.py --lead-silence-s` (default `3.0`)
-prepends that many seconds of true silence before the `--input`-derived real-playing segment.
-The silent segment is written into the excitation file itself (not stripped after generation),
-so it also gives the DC-blocking network real settling time before the file's `real` segment
-dynamics are what training actually samples. Set to `0` to disable for a circuit already
-verified not to need it. This is a cheap, non-device-specific fix — prefer it over adding
-explicit `.ic` initial-condition statements to a specific device's deck, which would need to be
-hand-derived and re-verified per circuit.
-
-The same fix is also needed in `tools/preflight.py --backend ngspice-deck` and
-`tools/find_saturation_point.py`'s own amplitude sweep (both take `--lead-silence-s`, default
-`3.0`) — a short knob-direction probe with no lead-in hits the identical cold-start transient,
-and it isn't just noisy, it can flip the answer: that pedal's Tone knob probed REVERSED at a
-5-second probe with no lead-in and correctly OK once probed with a lead-in (or a long-enough
-probe to outlast the transient on its own). See the next "Known issue" entry for the other,
-independent fix this same investigation needed.
-
-**Caveat**: 3 seconds was sufficient for the one circuit this was diagnosed and verified
-against, not derived from the RC time constant analytically for every possible circuit. A
-circuit with a slower network (larger coupling cap and/or higher-value downstream resistance)
-could need longer — when in doubt, run the sustained-tone check above with the circuit's own
-component values before trusting the default.
-
----
-
-## Known issue: preflight's EQ-knob checks can be swamped by the circuit's own gain control
-
-`tools/preflight.py`'s dead/reversed-knob check holds every non-tested knob at a flat `0.5`
-center. For a low-to-moderate-gain circuit that's fine, but for a genuinely high-gain device
-(one real pedal's stages run up to ~50dB combined), `0.5` on the Gain/Drive knob can already be
-deep into saturation — and hard clipping SWAMPS a passive tone stack's real effect, since the
-extra content an EQ knob lets through just becomes more clipping mush, not more clean signal at
-that band. This reads as a **false REVERSED (or DEAD) direction on a knob that's actually
-correct**, and it isn't just about probe input level — it's the circuit's OWN gain control
-self-saturating regardless of how quiet the input is.
-
-**Concrete evidence (same pedal, `--backend ngspice-deck`)**: with Gain held at the default
-`0.5` center, Tone probed REVERSED (`-11.6%`) at a 10-second native-level probe — this is the
-SAME Tone pot already verified correct on the LiveSPICE side (`+627%` rising) and independently
-re-verified correct here once the fix below was applied. Confirmed the mechanism directly: a
-manual amplitude sweep at fixed Gain=0.5 showed Tone's measured direction flipping between
-REVERSED, DEAD, and OK depending purely on probe input level (`1.0V` → reversed, `0.3V` → OK
-`+875%`, `0.1V` → dead, `0.05V` → OK `+80%`) — a clean signature of clipping-swamp, not a real
-circuit fault.
-
-**Fix, applied by default**: `--eq-check-drive-level` (default `0.1`). While checking an
-EQ/tone knob's direction, every OTHER knob `classify()` tags as `"drive"` (Gain, Distortion,
-Overdrive, etc. — the same name-based classification the direction check already used) is held
-at this LOW value instead of the usual `0.5`, so the circuit isn't self-saturating from its own
-gain control while the tone stack's real effect is being measured. This alone fixed OCD's Tone
-reading at every probe duration tested, with no need for a reduced input level at all.
-Volume/level-classified knobs are untouched — they're normally a post-clipping-stage
-attenuator, so they don't change whether the nonlinear stage itself saturates.
-
-**Complementary, not a replacement**: `--find-peak`/`--clean-probe-peak` (input-level scaling,
-probing an EQ knob at both a driven and a linear-region level, pass-if-either) stays on by
-default too — it catches the same failure mode via a different knob than the one under test,
-and via a knob `classify()` can't identify as `"drive"` by name. Both mitigations were verified
-independently on OCD; neither alone was assumed sufficient going forward.
-
-## Known issue: audible knob-move transient noise (inference-side, not a training/dataset bug)
-
-**This is a C++ inference-runtime issue (`NeuralAmpModelerCore`'s `ParametricA2FastModel`/
-`ParametricWaveNet`, consumed downstream by e.g. Chainsmith FX), not something in this repo's
-own training or dataset-generation pipeline** — documented here since anyone shipping a model
-trained by `parametric-nam` can hit it. User report: with a silent input (no instrument
-plugged in), moving a parametric model's knob visibly lights up the output peak meters — not
-loud, but real and reproducible.
-
-**Root cause: dilated-convolution ring-buffer state inconsistency across a FiLM conditioning
-change, not DC offset.** The fast inference path's causal convolutions keep a history/ring
-buffer of past layer activations, computed under whatever FiLM gamma/beta was active *when
-they were computed* (FiLM is applied inside each layer, not before/after the stack). When a
-knob changes, new incoming samples get the new conditioning while the ring buffer still holds
-activations computed under the old conditioning — every layer's convolution then mixes old-
-and new-conditioned taps in the same kernel window, a computation that matches neither steady
-state, until the receptive field's worth of new samples flushes the stale history out (measured
-at 6346 samples ≈ 12.4 buffers @ 512/48kHz, identical across channel counts since it's a
-property of the shared kernel/dilation schedule, not any one model's weights). Two earlier,
-more obvious hypotheses were ruled out first: a knob-position-dependent static DC offset
-(measured 30-100x too small to explain the transient) and undersmoothed knob interpolation (a
-single discrete knob move responds well to slower smoothing, ~4x quieter at 100ms vs. 20ms;
-a fast continuous drag barely improves even at a full second of smoothing, since it re-targets
-the smoother every buffer instead of letting it lag).
-
-**Status: root-caused, not fixed.** The 100ms knob-smoothing time constant is kept (helps a
-single deliberate knob move, ~zero cost). The theoretically correct fix — keep a rolling window
-of raw input audio and re-run it through the full stack under the new conditioning when the
-knob changes (throttled, since a full receptive-field forward pass every buffer during a fast
-drag would blow a real-time audio callback's budget) — is identified but not implemented. Fast
-continuous-drag noise remains audible. See internal engineering notes
-("Knob-move transient noise investigation") for the full investigation, including the ruled-out
-hypotheses and the measurements behind each.
+- **Rare knob-corner blowup (FiLM/LeakyReLU runaway)** — a trained model spikes to tens or
+  hundreds of times its normal peak at a specific, narrow knob-grid corner.
+- **Excitation needs a silent lead-in** — a cold-start settling transient can corrupt renders
+  for circuits with a slow-charging DC-blocking network.
+- **`preflight.py`'s EQ-knob checks can be swamped by the circuit's own gain control** — a
+  high-gain device's default probe settings can produce a false REVERSED/DEAD knob-direction
+  reading.
+- **Audible knob-move transient noise** (inference-side, not a training/dataset bug) — root
+  cause is understood (network ring-buffer state across a conditioning change), not yet fixed.
 
 ---
 
@@ -1017,152 +313,9 @@ git revisions), and a runnable `reproduce.sh`.
 
 ## Reference
 
-### `.param.nam` format
-
-A standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already
-registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a
-custom architecture [our fork of NeuralAmpModelerCore](https://github.com/mrgeneko/NeuralAmpModelerCore)'s
-factory registers. [`NAMix`](https://github.com/mrgeneko/NAMix) and
-[`NeuralAmpModelerPlugin`](https://github.com/mrgeneko/NeuralAmpModelerPlugin) (see
-"Related Repos") are working sample hosts built against it.
-
-```json
-{
-  "version": "0.7.0",
-  "architecture": "SlimmableContainer",
-  "config": {
-    "submodels": [
-      {
-        "max_value": 0.5,
-        "model": {
-          "architecture": "ParametricWaveNet",
-          "config": {
-            "layers": 3,
-            "head_scale": 0.448,
-            "parametric": {
-              "type": "film",
-              "condition_size": 6,
-              "film_layers": ["layer_0", "layer_1", ...],
-              "parameters": [
-                {"name": "volume",       "min": 0.0, "max": 1.0, "default": 0.5},
-                {"name": "treble",       "min": 0.0, "max": 1.0, "default": 0.5},
-                {"name": "middle",       "min": 0.0, "max": 1.0, "default": 0.5},
-                {"name": "bass",         "min": 0.0, "max": 1.0, "default": 0.5},
-                {"name": "mid",          "min": 0.0, "max": 1.0, "default": 0.5},
-                {"name": "clean_master", "min": 0.0, "max": 1.0, "default": 0.5}
-              ]
-            }
-          },
-          "weights": [...]
-        }
-      },
-      {
-        "max_value": 1.0,
-        "model": { "architecture": "ParametricWaveNet", "config": {"layers": 8, ...}, "weights": [...] }
-      }
-    ]
-  },
-  "sample_rate": 48000
-}
-```
-
-`config.parametric.parameters` is the authoritative knob list. Array order = UI
-presentation order. All values normalized 0.0–1.0. `"layers"` is the **channel count**
-(3 or 8), not a layer count — there are always 23 layers. `min`/`max` per knob come from
-the dataset `--bounds`, so the host maps the control to the real trained domain.
-
-**Key design point**: `condition_size` is the number of knobs fed to FiLM. Audio flows
-through `input_mixin` separately (always 1-dim) — knobs never mix with audio.
-
-### Architecture
-
-A2 is a WaveNet variant: 23-layer dilated causal convnet with LeakyReLU and a Conv1D
-head. `ParametricWaveNet` adds FiLM (Feature-wise Linear Modulation) on every layer,
-conditioned on the knob vector. FiLM is initialized to identity (gamma=1, beta=0) so
-training starts from a well-behaved unconditional baseline.
-
-Key constants (must match NeuralAmpModelerCore's A2 fast path exactly):
-- 23 layers: 14 × kernel=6, then 2 × kernel=15, then 7 × kernel=6
-- Dilations: repeating [1,3,7,17,41,101,239] with {1,13} degridding insert
-- LeakyReLU(0.01) on every layer
-- Head: Conv1D kernel=16
-
-Weight layout per layer (for C++ `set_weights_` compatibility):
-```
-conv.weight → conv.bias → mixin.weight → l1x1.weight → l1x1.bias → film.weight → film.bias
-```
-Then after all 23 layers: `head.weight → head.bias → head_scale`.
-
-### LoRA-style knob conditioning (removed)
-
-> **STATUS: REMOVED (2026-08-27).** Training was disabled first (`--lora-rank > 0` errors
-> unless `PARAMETRIC_NAM_ALLOW_LORA=1` is set), then the C++ that consumed LoRA-tagged models
-> (`NAM/lora.h`, both the generic and hand-optimized fast paths, plus their tests) was deleted
-> entirely from NeuralAmpModelerCore — nothing dead was left behind. **A `"film+lora"`
-> (`schema_version` 2) model can no longer be loaded by any current build of the fork**:
-> `require_supported_parametric_model()` rejects it loudly rather than silently misreading it,
-> the same fail-loud contract every schema bump here follows. This toolchain's own Python
-> tooling (`param_infer.py`, `export_checkpoint.py`, `nam_standard.fold_lora()`) still fully
-> supports loading, exporting, and folding archived LoRA checkpoints — **`fold_lora()` bakes
-> the LoRA delta into an ordinary static model at one fixed knob setting**, which then loads
-> and plays in any plugin, LoRA support or not. What's gone is *real-time, knob-live* LoRA
-> inference in a plugin host (NAMix, Chainsmith) — not the ability to read old checkpoints.
-
-**Why it was tried.** FiLM only ever applies `gamma(cond)*x + beta(cond)` — a diagonal
-per-channel affine rescale of one fixed backbone computation. As swept knob count grows
-past ~3, the space of tonal behaviors the backbone must represent as "one shared
-computation, rescaled per knob setting" outgrows what fixed weights can encode — measured
-concretely on one 5-knob amp run, where the lite (4ch) tier plateaued at median ESR 0.126
-on the full grid (not shippable) while the architecturally-identical full (8ch) tier
-reached 0.025. `--lora-rank` added a genuine per-knob weight *delta* —
-`W_effective = W_l1x1 + A(cond)@B(cond)` — more expressive than FiLM's fixed-computation
-rescale, without a full hypernetwork's unconstrained-weights problem.
-
-**Why it was dropped.** On the one device (a different, 2-knob amp) where both were trained
-to convergence, same knobs, same grid, same excitation, FiLM-only won:
-
-| | tiers | final ESR lite / full |
-|---|---|---|
-| FiLM+LoRA | 4ch + 8ch | 0.06186 / 0.02403 |
-| FiLM only | 5ch + 9ch | **0.06016 / 0.02191** |
-
-Widening a tier lifts the same capacity ceiling LoRA targets, and costs no schema bump, no
-`rank` to choose, and no minimum core version. LoRA also made the FiLM/LeakyReLU runaway
-instability worse when it occurred (~7x excitation elevation vs ~1.1x for FiLM-only), a
-known bad interaction that was never fully bounded. The earlier 5-knob-amp testbed numbers
-(FiLM+LoRA cutting ESR ~65-72% vs FiLM-only) were real but never re-run as a clean,
-width-matched, to-convergence ablation, and are not archived for re-checking — the 2-knob
-comparison above is the only real head-to-head that exists.
-
-**Archived models**: `parametric-nam-models` has 7 LoRA `.nam` files from two runs on two
-devices (both rank 4), neither marked `CURRENT` for its device. Both remain
-readable/exportable/foldable via this toolchain's own Python tools as noted above, but are
-no longer usable live in a plugin.
-
-### NAM ecosystem compatibility
-
-Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-07):
-
-- **Our A2 *is* NAM's official "A2" config** — `K_KERNEL_SIZES`/`K_DILATIONS`,
-  LeakyReLU/non-gated, `condition_size=1`, widths `[3,8]` all match NAM's
-  `config_model_packed.json`. A **static** (no-FiLM) A2 is literally a standard NAM
-  model → exports as `"WaveNet"` / `"SlimmableContainer"` and loads in the stock
-  plugin.
-- **`"ParametricWaveNet"` is our custom extension** (A2 + FiLM for knobs) and needs our
-  fork of NeuralAmpModelerCore, which registers it. **Standard NAM plugins cannot drive user knobs**: the core's
-  public API is `process(input, output, num_frames)` — audio in/out, *no* parameter
-  argument, and no `SetParam`/`SetCondition` anywhere. NAM's own FiLM/`condition_dsp`
-  is *input-derived* architecture, not a knob interface. So re-serializing parametric
-  models "to match NAM" would **not** make them plugin-controllable.
-- **Delivering parametric tones to standard plugins = snapshot baking.** FiLM is
-  affine over the layer's linear ops, so freezing a knob setting folds `γ,β` exactly
-  into `conv.weight/bias` + `mixin.weight`, yielding an identical *static* A2 with no
-  FiLM. A parametric-aware host (`NAMix`, `NeuralAmpModelerPlugin`) keeps live knobs;
-  `bake_nam.py` "exports this tone" into a stock-standard `.nam` for hosts that don't.
-  Works on **already-trained** parametric `.nam`s offline (no retrain) — pure weight
-  transform.
-
----
+The `.param.nam` file format, architecture details (weight layout, A2 layer structure), the
+now-removed LoRA-style knob conditioning's history, and NAM ecosystem compatibility notes are
+all in [`docs/reference.md`](docs/reference.md).
 
 ## System Requirements
 
@@ -1333,7 +486,7 @@ python tools/render_ltspice_deck.py --pedal-dir path/to/your/devices \
     --knob Drive=1 --knob Tone=1 --knob Level=1
 # Compare the reported peak against what the circuit should produce at max drive -- a peak
 # in the hundreds (rather than a plausible few volts) means LiveSPICE, not LTspice, rendered
-# it (see below): IdealOpAmp has no supply rails and cannot saturate.
+# it (see docs/backends.md): IdealOpAmp has no supply rails and cannot saturate.
 ```
 
 One gotcha that is not LTspice's fault: `.net` (or `.cir`) files must be plain SPICE netlists,
