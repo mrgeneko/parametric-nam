@@ -118,9 +118,26 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
     if not recipe_path.exists():
         return None
     try:
-        recipe = json.loads(recipe_path.read_text())
-        return float(recipe["args"]["realistic_peak"])
-    except (KeyError, ValueError, json.JSONDecodeError):
+        args = json.loads(recipe_path.read_text())["args"]
+        # The TRANSIENT peak is not just the real-playing segment. build_excitation.py can
+        # append transient BURSTS -- broadband, instant attack, exponential decay, crest ~8.5,
+        # "matching a real hard pick-attack" in its own words -- at levels well above
+        # --realistic-peak, precisely so sharp-attack behaviour is exercised at EVERY level
+        # rather than only the loudest. Reading realistic_peak alone therefore UNDERSTATES what
+        # the file actually contains, and fails corners the excitation genuinely covers.
+        #
+        # Found on the Joyo: realistic_peak 7.4166 V against an all-min onset of 7.417 V failed
+        # by a hair, while the file held 11.125 V and 14.833 V bursts (measured crest 13.6) that
+        # clear it outright.
+        peaks = [float(args["realistic_peak"])]
+        for key in ("synth_burst_peaks", "noise_burst_peak"):
+            val = args.get(key)
+            if isinstance(val, (list, tuple)):
+                peaks += [float(v) for v in val]
+            elif val is not None:
+                peaks.append(float(val))
+        return max(peaks)
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
 
