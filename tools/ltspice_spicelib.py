@@ -61,6 +61,7 @@ Usage from a device's render_X.py (once one exists, mirroring render_ngspice_dec
     # results: {outfile: peak_or_None} -- outfile is written as a FLOAT32 WAV in real volts.
 """
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -117,6 +118,49 @@ def _run_ltspice(net_path, timeout) -> bool:
         return True
     except (subprocess.TimeoutExpired, OSError):
         return False
+
+
+KEEP_FULL_RAW_ENV = "LTSPICE_KEEP_FULL_RAW"
+
+
+def ensure_save(deck):
+    """Give a deck a `.save` if it has none, derived from its OWN `.wave` line.
+
+    WHY THIS IS DEFAULT RATHER THAN ADVICE. Without a `.save`, LTspice records every node
+    voltage and device current at every adaptive timestep into a .raw beside the .wave:
+    measured 12-13 GB PER RENDER on a 38 s excitation. A single six-knob preflight
+    accumulated 141 GB of it against 223 MB of the .wav anything reads, filled a 926 GB disk,
+    and died as `OSError: [Errno 28] No space left on device` raised from whatever unrelated
+    line touched the filesystem next -- nothing in the traceback pointing at .raw. A 675-cell
+    knob grid would have needed roughly 8.8 TB. Deleting each .raw after reading (render_grid
+    does) bounds ACCUMULATION but not PEAK: parallel_sims renders each write theirs in full
+    before any is read. Nobody should have to know this to render a circuit.
+
+    NOT A GUESS. The traces come from the deck's own `.wave` line, which names exactly what it
+    writes -- necessary because the tap argument is not always that node (the Joyo deck writes
+    V(ltout) while tap='spk', so a `.save` built from `tap` would drop the very trace the
+    .wave needs). A deck with no `.wave` at all is left alone; there is nothing to derive from.
+
+    Set LTSPICE_KEEP_FULL_RAW=1 to skip injection when you genuinely want every node in the
+    .raw for debugging -- and have the disk for it."""
+    if re.search(r"^\s*\.save\b", deck, re.M | re.I):
+        return deck
+    if os.environ.get(KEEP_FULL_RAW_ENV):
+        return deck
+    traces = []
+    for m in re.finditer(r"^\s*\.wave\b(.*)$", deck, re.M | re.I):
+        traces += re.findall(r"\b[IVP]\([^)]*\)", m.group(1), re.I)
+    if not traces:
+        return deck
+    seen, uniq = set(), []
+    for t in traces:
+        if t.lower() not in seen:
+            seen.add(t.lower()); uniq.append(t)
+    save_line = ".save " + " ".join(uniq)
+    m = re.search(r"^\s*\.end\s*$", deck, re.M | re.I)
+    if m:
+        return deck[:m.start()] + save_line + "\n" + deck[m.start():]
+    return deck.rstrip("\n") + "\n" + save_line + "\n"
 
 
 def _read_result(raw_wav, dur_target_n, out_scale):
@@ -232,8 +276,8 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
                 tag = os.path.splitext(os.path.basename(outfile))[0]
                 net_path = os.path.join(tmp, f"{tag}_r{round_i}.net")
                 raw_wav = os.path.join(tmp, f"{tag}_r{round_i}_raw.wav")
-                deck = build_deck(wav_path, dur_s, step, raw_wav, knobs=knobs, tap=tap,
-                                   out_scale=out_scale, in_scale=in_scale)
+                deck = ensure_save(build_deck(wav_path, dur_s, step, raw_wav, knobs=knobs,
+                                              tap=tap, out_scale=out_scale, in_scale=in_scale))
                 with open(net_path, "w") as f:
                     f.write(deck)
                 fut = ex.submit(_run_ltspice, net_path, timeout)

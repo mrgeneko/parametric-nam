@@ -16,7 +16,7 @@ import pytest
 import soundfile as sf
 
 from tools.ltspice_spicelib import (DEFAULT_TIMEOUT_S_PER_AUDIO_S, MIN_TIMEOUT_S,
-                                    default_timeout, load_input,
+                                    default_timeout, ensure_save, load_input,
                                      _read_result, render_grid, render_one)
 
 
@@ -139,6 +139,52 @@ def make_build_deck(sr, value_fn, n_samples=100, short_by=0):
 # the default timeout depends on it, so a change there must not silently invalidate these.
 RENDER_GRID_DEFAULT_PARALLEL_SIMS = (
     inspect.signature(render_grid).parameters["parallel_sims"].default)
+
+
+class TestEnsureSave:
+    """A deck without `.save` makes LTspice write every node and device current at every
+    adaptive timestep: 12-13 GB PER RENDER measured on a 38 s excitation, 141 GB accumulated
+    in one six-knob preflight, and ~8.8 TB implied across a 675-cell grid. Injecting it is
+    default rather than advice because the cost is invisible until a disk fills, and the
+    failure surfaces as OSError from whatever unrelated line touches the filesystem next."""
+
+    WAVE = '.wave "/tmp/o.wav" 24 48000 V(ltout)'
+
+    def test_injects_save_derived_from_the_decks_own_wave_line(self):
+        out = ensure_save(f"* d\n{self.WAVE}\n.end\n")
+        assert ".save V(ltout)" in out
+
+    def test_uses_the_wave_node_not_the_tap_argument(self):
+        """The Joyo deck writes V(ltout) while its tap is 'spk' -- a .save built from the tap
+        would drop the very trace .wave needs, breaking the output this path exists for."""
+        out = ensure_save(f"* d\nEoutscale ltout 0 spk 0 0.1\n{self.WAVE}\n.end\n")
+        assert ".save V(ltout)" in out
+        assert ".save V(spk)" not in out
+
+    def test_a_deck_that_already_saves_is_left_alone(self):
+        deck = f"* d\n.save V(x)\n{self.WAVE}\n.end\n"
+        assert ensure_save(deck) == deck
+
+    def test_a_deck_with_no_wave_is_left_alone(self):
+        """Nothing to derive from -- guessing here could only break the render."""
+        deck = "* d\n.tran 0 1 0 1u\n.end\n"
+        assert ensure_save(deck) == deck
+
+    def test_injected_before_end_so_it_is_a_real_directive(self):
+        out = ensure_save(f"* d\n{self.WAVE}\n.end\n")
+        assert out.index(".save") < out.index(".end")
+
+    def test_multiple_wave_traces_are_all_saved_and_deduped(self):
+        deck = ('* d\n.wave "/tmp/a.wav" 24 48000 V(ltout)\n'
+                '.wave "/tmp/b.wav" 24 48000 V(ltout) V(other)\n.end\n')
+        out = ensure_save(deck)
+        line = [ln for ln in out.splitlines() if ln.startswith(".save")][0]
+        assert line.count("V(ltout)") == 1 and "V(other)" in line
+
+    def test_env_opt_out_keeps_the_full_raw_for_debugging(self, monkeypatch):
+        monkeypatch.setenv("LTSPICE_KEEP_FULL_RAW", "1")
+        deck = f"* d\n{self.WAVE}\n.end\n"
+        assert ensure_save(deck) == deck
 
 
 class TestRenderGridTimeoutScaling:
