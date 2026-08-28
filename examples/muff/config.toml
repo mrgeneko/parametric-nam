@@ -3,7 +3,7 @@
 # The .schx is bundled alongside this file; the excitation is NOT — download T3K-sweep-v3.wav
 # from https://www.tone3000.com/capture into examples/ first (see README, "The sweep file").
 # No sibling parametric-devices or sweep-files checkout is required beyond that. See
-# "Big Muff Pi V1 (66#5).md" next to this file for the circuit notes.
+# "muff.md" next to this file for the circuit notes.
 #
 #   python run_pipeline.py --config examples/muff/config.toml \
 #       --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \

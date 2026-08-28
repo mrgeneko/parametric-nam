@@ -47,7 +47,7 @@ python run_pipeline.py --config examples/muff/config.toml \
 ```
 
 This trains an actual Big Muff Pi V1 (66#5) model end to end. See
-`examples/muff/Big Muff Pi V1 (66#5).md` for the circuit notes.
+`examples/muff/muff.md` for the circuit notes.
 
 ### The sweep file
 
