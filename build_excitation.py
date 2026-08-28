@@ -94,9 +94,9 @@ def _log_sweep(f0, f1, dur, amp):
 
 
 def _transient_burst(sec, amp, decay_tau):
-    """Broadband (20 Hz - 16 kHz, Schroeder-phase -- same deterministic construction
-    make_sweep.py's flat_burst() uses) burst with an INSTANT attack (no fade-in) and an
-    exponential decay, mimicking a real hard pick-attack's amplitude envelope (high crest
+    """Broadband (20 Hz - 16 kHz, Schroeder-phase deterministic construction) burst with an
+    INSTANT attack (no fade-in) and an exponential decay, mimicking a real hard
+    pick-attack's amplitude envelope (high crest
     factor: sharp onset, fast decay to near-silence) rather than a sustained tone. No RNG --
     same input always writes the same bytes.
 
