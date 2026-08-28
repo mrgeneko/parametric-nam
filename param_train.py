@@ -1559,6 +1559,18 @@ def main():
     ap.add_argument("--restart-mult", type=int, default=1,
                     help="Open-ended mode: SGDR period multiplier per restart "
                          "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
+    ap.add_argument("--restart-decay", type=float, default=1.0,
+                    help="Open-ended mode: multiply the SGDR restart ceiling (eta_max, for "
+                         "every param group incl. the FiLM group) by this factor at every "
+                         "restart. Every full-LR restart forces a loss spike that costs several "
+                         "epochs of the new cycle just re-descending to where the previous cycle "
+                         "already was (observed: ~7 epochs avg, up to ~30/49 on some late cycles "
+                         "of an OCD run) before any net-new progress happens. Decaying the "
+                         "ceiling shrinks that recovery cost at the price of shrinking later-cycle "
+                         "exploration too. 1.0 = no decay (default, matches original SGDR paper, "
+                         "which flagged per-restart eta_max decay as worth trying but didn't test "
+                         "it). Persists correctly across --resume (baked into the optimizer's "
+                         "per-group 'initial_lr', not the scheduler object).")
     ap.add_argument("--stale-cycles", type=int, default=3,
                     help="Open-ended mode: stop automatically after this many consecutive "
                          "SGDR cycles in which NO tier minted a new best val ESR — the "
@@ -2021,7 +2033,8 @@ def main():
     # Train
     # ------------------------------------------------------------------
     if open_ended:
-        print(f"\nTraining open-ended (SGDR restarts every {args.restart_period} epochs). "
+        decay_note = f", eta_max x{args.restart_decay}/restart" if args.restart_decay != 1.0 else ""
+        print(f"\nTraining open-ended (SGDR restarts every {args.restart_period} epochs{decay_note}). "
               f"Stop with: touch {ckpt_dir / 'STOP' if ckpt_dir else 'STOP'}  (or SIGINT/SIGTERM). "
               f"Best models export live.", file=sys.stderr)
     else:
@@ -2176,6 +2189,22 @@ def main():
         # to 0 on the scheduler.step() that completes a cycle, so this fires exactly at each
         # trough.
         cycle_ended = getattr(scheduler, "T_cur", None) == 0
+
+        # SGDR restart-ceiling decay (--restart-decay < 1.0): shrink eta_max for every
+        # param group by the same factor at each restart, preserving the FiLM group's
+        # relative multiplier. Written into optimizer.param_groups[i]['initial_lr'] (not
+        # just scheduler.base_lrs) so a future --resume reconstructs the decayed ceiling
+        # correctly -- CosineAnnealingWarmRestarts.__init__ reads base_lrs from
+        # 'initial_lr' when last_epoch != -1 (see make_scheduler() above), and that key is
+        # a plain dict entry that round-trips through optimizer.state_dict()/load_state_dict().
+        # One cycle's peak epoch (T_cur==0) still reports the previous cycle's eta_max --
+        # this fires after scheduler.step() already applied it for the current epoch --
+        # so decay effectively starts from each cycle's *second* epoch, a one-epoch lag
+        # that doesn't matter at a 50-epoch restart period.
+        if cycle_ended and args.restart_decay != 1.0:
+            for group in optimizer.param_groups:
+                group["initial_lr"] *= args.restart_decay
+            scheduler.base_lrs = [group["initial_lr"] for group in optimizer.param_groups]
 
         # Periodic checkpoint retention: latest.pt/best*.pt are overwritten in place every
         # epoch/new-best, so neither can answer "what did this tier look like N cycles ago" --
