@@ -67,11 +67,13 @@ class TestNgspiceDeckBackend:
 
 
 def ltspice_args(pedal_dir=None, module=None, exclude_knob=(), probe_node="OUT",
-                  maxstep=3e-6, parallel_sims=8, peak_max_v=40.0, out_scale=0.05):
+                  maxstep=3e-6, parallel_sims=8, peak_max_v=40.0, out_scale=0.05,
+                  render_timeout=None):
     return types.SimpleNamespace(backend="ltspice-deck", pedal_dir=pedal_dir, module=module,
                                   exclude_knob=list(exclude_knob), probe_node=probe_node,
                                   maxstep=maxstep, parallel_sims=parallel_sims,
-                                  peak_max_v=peak_max_v, out_scale=out_scale)
+                                  peak_max_v=peak_max_v, out_scale=out_scale,
+                                  render_timeout=render_timeout)
 
 
 class TestLtspiceDeckBackend:
@@ -111,6 +113,22 @@ class TestLtspiceDeckBackend:
     def test_missing_pedal_dir_or_module_exits(self):
         with pytest.raises(SystemExit):
             _build_backend(ltspice_args(pedal_dir=None, module=None))
+
+
+    def test_render_timeout_is_passed_through_to_the_backend(self, tmp_path):
+        """Without this the backend silently uses render_grid's duration-scaled default, and a
+        circuit slower than that reports every probe as RENDER FAILED -- indistinguishable from
+        a genuine convergence failure, and unfixable from the command line."""
+        write_fake_pedal_module(tmp_path, "pedal_lt_to")
+        backend, _knobs, _identity, _extra = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_to", render_timeout=1800.0))
+        assert backend.timeout == 1800.0
+
+    def test_render_timeout_defaults_to_none_so_the_library_default_applies(self, tmp_path):
+        write_fake_pedal_module(tmp_path, "pedal_lt_td")
+        backend, _knobs, _identity, _extra = _build_backend(
+            ltspice_args(pedal_dir=str(tmp_path), module="pedal_lt_td"))
+        assert backend.timeout is None
 
 
 class TestUnknownBackend:

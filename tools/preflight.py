@@ -156,7 +156,7 @@ def _build_backend(args):
         knobs = [k for k in mod.KNOB_NAMES if k not in args.exclude_knob]
         backend = LtspiceBackend(mod.build_deck, tap=args.probe_node,
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
-                                 out_scale=args.out_scale)
+                                 out_scale=args.out_scale, timeout=args.render_timeout)
         identity = Path(mod.__file__).read_bytes()
         cache_extra = f"maxv={args.peak_max_v}"
         return backend, knobs, identity, cache_extra
@@ -183,6 +183,14 @@ def main():
     ap.add_argument("--probe-node", default="OUT", help="[ngspice-deck, ltspice-deck] node/tap to render and measure")
     ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck, ltspice-deck]")
     ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck, ltspice-deck]")
+    ap.add_argument("--render-timeout", type=float, default=None,
+                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: "
+                         "ltspice_spicelib's duration-scaled 20 s per audio second. That is a "
+                         "PER-RENDER figure and takes no account of --parallel-sims jobs "
+                         "competing for cores, so on a slow circuit the default can time every "
+                         "probe out and report RENDER FAILED -- which looks exactly like a "
+                         "convergence failure. Raise it (or lower --parallel-sims) if a device "
+                         "that renders fine via render_ltspice_deck.py fails every knob here.")
     ap.add_argument("--exclude-knob", action="append", default=[],
                      help="[ngspice-deck, ltspice-deck] knob to exclude from the swept check (repeatable) -- "
                           "e.g. a 0/1 toggle, not a continuous sweep; build_deck's own default applies")

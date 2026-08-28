@@ -135,12 +135,21 @@ class LtspiceBackend:
     timestep; LTspice needs a real op-amp macromodel + .ic/uic hints instead, neither of which
     ngspice's B-source style has room for)."""
 
-    def __init__(self, build_deck, tap="spk", maxstep=3e-6, parallel_sims=8, out_scale=0.05):
+    def __init__(self, build_deck, tap="spk", maxstep=3e-6, parallel_sims=8, out_scale=0.05,
+                 timeout=None):
         self.build_deck = build_deck
         self.tap = tap
         self.maxstep = maxstep
         self.parallel_sims = parallel_sims
         self.out_scale = out_scale
+        # Per-render ceiling, forwarded to render_grid. None keeps its duration-scaled default
+        # (DEFAULT_TIMEOUT_S_PER_AUDIO_S = 20 s per audio second), which assumes a render runs
+        # at better than ~20x realtime. That is a per-render WALL figure, so it does not account
+        # for parallel_sims renders competing for the same cores: on a slow circuit the default
+        # can kill every job and report it as "RENDER FAILED", indistinguishable from a genuine
+        # convergence failure. Measured on the Joyo American Sound, a 10 s probe takes ~129 s
+        # alone (inside the 200 s default) but well past it with 8 running concurrently.
+        self.timeout = timeout
 
     def prepare_input(self, raw, sr, level_v, scratch, tag):
         wav_path = f"{scratch}/rawinput_{tag}.wav"
@@ -156,7 +165,7 @@ class LtspiceBackend:
         peaks = ltspice_spicelib.render_grid(self.build_deck, rg_jobs, self.tap, sr_, dur_s_,
                                              wav_path_, in_scale_, scratch,
                                              maxstep=self.maxstep, parallel_sims=self.parallel_sims,
-                                             out_scale=self.out_scale)
+                                             out_scale=self.out_scale, timeout=self.timeout)
         out = {}
         for j in jobs:
             pk = peaks[outfiles[j["tag"]]]

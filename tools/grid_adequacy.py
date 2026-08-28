@@ -19,7 +19,9 @@ the circuit and the sampling, with no model in it at all. Compare that residual 
 chasing:
 
     residual >> target ESR   the GRID is the limiting factor. No capacity, no training time, and no
-                             architecture can recover what was never sampled. Refine the cell.
+                             architecture can recover what was never sampled. Refine the cell -- or
+                             decide the refinement is not worth its render budget, which is a
+                             legitimate answer (see EXIT STATUS).
     residual << target ESR   the cell is OVERSAMPLED. Those points cost render time and lengthen
                              every epoch (dataset items = perms x repeats) and teach the model
                              nothing it could not have interpolated.
@@ -58,6 +60,18 @@ expense, even though Drive's underlying circuit response was easy to sample. A g
 nothing else corrects for it (loss weighting, tier width, or -- the blunt instrument -- just giving
 the starved knob more grid points so it has more to learn from per epoch). Grid density and training
 balance are separate problems; this tool only measures the first one.
+
+EXIT STATUS.
+An over-target cell does NOT fail the run (exit 0). It is a priced trade-off, not a defect:
+refining costs renders and permutations, and a config may rationally accept a coarse cell,
+coarsen an axis, or fix a knob outright instead of paying. Gating on it would turn a judgement
+call into an error.
+
+FAILED RENDERS DO fail the run (exit 2), because that is the case that silently produces a WRONG
+table rather than a weaker one -- every cell is computed from whatever probes survived, and
+nothing else in the output says so. Measured on the Joyo American Sound: 38 of 48 probes timed
+out, and the table put one cell at 0.6578 (18.8x over) where a clean re-run measured 0.0475
+(1.4x). If the cause is a timeout rather than true non-convergence, raise --ltspice-timeout.
 
     ./tools/grid_adequacy.py --config path/to/device-config.toml --target 0.009
     ./tools/grid_adequacy.py --config ... --suggest       # propose a regrid, print it, stop
@@ -172,7 +186,7 @@ class Renderer:
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
                 lead_silence_s=None, ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
-                ltspice_out_scale=0.05):
+                ltspice_out_scale=0.05, ltspice_timeout=None):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
@@ -214,7 +228,8 @@ class Renderer:
             mod = importlib.import_module(module)
             self.ltd_backend = LtspiceBackend(mod.build_deck, tap=probe_node,
                                               maxstep=ltspice_deck_maxstep,
-                                              out_scale=ltspice_out_scale)
+                                              out_scale=ltspice_out_scale,
+                                              timeout=ltspice_timeout)
         elif backend == "ngspice":
             # Same segfault as choose_oversample: short clips crash ngspice outright.
             probe_s = max(probe_s, 8.0)
@@ -453,7 +468,7 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
             if not np.isfinite(e):
                 verdict = "?"
             elif e > target:
-                verdict = f"**TOO COARSE** ({e/target:.1f}x over) — the grid is the limit here"
+                verdict = f"OVER TARGET ({e/target:.1f}x) — the grid limits this cell"
                 n_coarse += 1
             elif e <= target / 10:
                 verdict = "oversampled — these points teach the model nothing"
@@ -463,9 +478,12 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
             print(f"    {lo:>7.4g} - {hi:<7.4g}  {e:>8.4f}   {verdict}")
         print()
 
-    print(f"  {n_coarse} cell(s) too coarse, {n_over} oversampled.")
+    print(f"  {n_coarse} cell(s) over target, {n_over} oversampled.")
     if n_coarse:
-        print("  A cell over target cannot be fixed by training: the information is not in the data.")
+        print("  Within such a cell the grid, not the model, sets the error floor: no capacity and")
+        print("  no training time recovers what was not sampled. That is a COST, not a verdict --")
+        print("  a cell may be over target because refining it was judged not worth the render")
+        print("  budget, or because the axis was deliberately coarsened. Exit status stays 0.")
 
     return worst_by_axis, n_coarse, n_over
 
@@ -535,6 +553,15 @@ def main() -> None:
                          "default is too coarse for at least one circuit found so far (the "
                          "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
     ap.add_argument("--ltspice-deck-maxstep", type=float, default=3e-6, help="[ltspice-deck]")
+    ap.add_argument("--ltspice-timeout", type=float, default=None,
+                    help="[ltspice-deck] per-render wall ceiling in seconds. Default: "
+                         "ltspice_spicelib's duration-scaled 20 s per audio second (so ~160 s at "
+                         "--probe-s 8). That is a PER-RENDER figure and ignores the concurrent "
+                         "probes competing for cores, so on a slow circuit the default times "
+                         "renders out and they are reported as 'did not converge' -- which is "
+                         "indistinguishable from a real convergence failure, and silently "
+                         "computes the whole table from the surviving minority. If the run "
+                         "reports failed renders, RAISE THIS before believing any cell.")
     ap.add_argument("--ltspice-out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
                          "tools/ltspice_spicelib.py's docstring")
@@ -595,7 +622,8 @@ def main() -> None:
                           probe_node=probe_node, lead_silence_s=args.lead_silence_s,
                           ngspice_deck_maxstep=args.ngspice_deck_maxstep,
                           ltspice_deck_maxstep=args.ltspice_deck_maxstep,
-                          ltspice_out_scale=args.ltspice_out_scale)
+                          ltspice_out_scale=args.ltspice_out_scale,
+                          ltspice_timeout=args.ltspice_timeout)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0
@@ -618,9 +646,10 @@ def main() -> None:
                 print(f"  grid adequate after {iteration} iteration(s).")
                 break
             if iteration >= args.max_iterations:
-                print(f"  WARNING: still {n_coarse} cell(s) too coarse after "
-                      f"{args.max_iterations} iteration(s) -- writing anyway; rerun --apply "
-                      f"to keep refining.")
+                print(f"  NOTE: {n_coarse} cell(s) still over target after "
+                      f"{args.max_iterations} iteration(s) -- writing anyway. Rerun --apply to "
+                      f"keep refining, or accept the cost: each further split multiplies the "
+                      f"permutation count, and a coarse cell may be the cheaper trade.")
                 break
             knobs_cur = {axis: suggest_axis(vals, worst_by_axis[axis], args.target)
                         for axis, vals in knobs_cur.items()}
@@ -639,7 +668,27 @@ def main() -> None:
         tot = int(np.prod([len(v) for v in knobs_cur.values()]))
         print(f"\n  wrote [knobs] ({tot} permutations, was {n_perms}) -> {args.config}")
 
-    sys.exit(1 if n_coarse else 0)
+    # EXIT POLICY, and it is deliberately the opposite of what it looks like it should be.
+    #
+    # Over-target cells do NOT fail the run. They are a priced trade-off: refining a cell costs
+    # render time and permutations, and a config may rationally accept a coarse cell (or coarsen
+    # an axis, or fix a knob outright) rather than pay. Gating on it turns a judgement call into
+    # an error and trains people to pass --force at a measurement.
+    #
+    # FAILED RENDERS DO fail the run, which is the case that actually burned us. A run that could
+    # not render every probe still prints a complete, plausible table -- computed from whatever
+    # survived -- with nothing in the exit status to say so. Measured on the Joyo American Sound:
+    # 38 of 48 probes timed out and the table it printed put one cell at 0.6578 (18.8x over) where
+    # the clean re-run measured 0.0475 (1.4x). A 14x error, indistinguishable from a real result.
+    # An incomplete measurement is not a weaker measurement, it is a wrong one.
+    n_failed = sum(render.fail_counts.values())
+    if n_failed:
+        print(f"\n  MEASUREMENT INVALID: {n_failed} render(s) failed -- every number above was\n"
+              f"  computed from the probes that survived. Do not act on this table. If the cause\n"
+              f"  is a timeout rather than true non-convergence, raise --ltspice-timeout (or\n"
+              f"  lower --workers) and re-run.", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

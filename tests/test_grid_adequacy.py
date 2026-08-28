@@ -319,6 +319,22 @@ class TestRendererNgspiceDeck:
         assert seen_maxsteps == [1e-7]
 
 
+def test_fake_ltspice_backends_mirror_the_real_signature():
+    """Every LtspiceBackend stand-in in this file must accept what the real class does.
+
+    A double that accepts FEWER kwargs silently turns a production TypeError into a green test
+    suite. That is not hypothetical: grid_adequacy could not forward a render timeout, which on
+    a slow circuit made every probe "fail to converge" and produced a table computed from the
+    surviving minority -- one cell 14x wrong -- while these tests stayed green throughout.
+    """
+    import inspect
+    from tools.render_backends import LtspiceBackend
+    real = set(inspect.signature(LtspiceBackend.__init__).parameters)
+    fake = set(inspect.signature(TestRendererLtspiceDeck.FakeLtspiceBackend.__init__).parameters)
+    missing = real - fake - {"parallel_sims"}   # the fake renders inline, so it needs no pool
+    assert not missing, f"FakeLtspiceBackend is missing {sorted(missing)}"
+
+
 class TestRendererLtspiceDeck:
     """The Renderer's LTspice-hand-deck mode -- for a device whose ngspice-deck counterpart
     can't converge on real playing content at all (see tools/ltspice_spicelib.py's own
@@ -342,10 +358,11 @@ class TestRendererLtspiceDeck:
         value -- lets a test assert on the exact params a Renderer call forwards. `handle` is
         ltspice_spicelib.load_input's real (sr, dur_s, wav_path, in_scale) tuple."""
 
-        def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
+        def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05, timeout=None):
             self.tap = tap
             self.maxstep = maxstep
             self.out_scale = out_scale
+            self.timeout = timeout
 
         def render_many(self, jobs, handle, scratch):
             tag = jobs[0]["tag"]
@@ -389,7 +406,8 @@ class TestRendererLtspiceDeck:
         inp = self._write_input(tmp_path)
 
         class FailingBackend:
-            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
+            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05,
+                         timeout=None):
                 pass
 
             def render_many(self, jobs, handle, scratch):
@@ -409,14 +427,16 @@ class TestRendererLtspiceDeck:
         seen = []
 
         class RecordingBackend(self.FakeLtspiceBackend):
-            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05):
-                super().__init__(build_deck, tap=tap, maxstep=maxstep, out_scale=out_scale)
-                seen.append((maxstep, out_scale))
+            def __init__(self, build_deck, tap="OUT", maxstep=3e-6, out_scale=0.05,
+                         timeout=None):
+                super().__init__(build_deck, tap=tap, maxstep=maxstep, out_scale=out_scale,
+                                 timeout=timeout)
+                seen.append((maxstep, out_scale, timeout))
 
         monkeypatch.setattr("tools.grid_adequacy.LtspiceBackend", RecordingBackend)
         td = tmp_path / "scratch"; td.mkdir()
         Renderer(schx=None, inp=inp, oversample=2, iterations=256, fixed="", td=td,
                 probe_s=8.0, backend="ltspice-deck", pedal_dir=str(pedal_dir),
                 module="gen_fake_ltspice", probe_node="OUT", ltspice_deck_maxstep=1e-7,
-                ltspice_out_scale=0.02)
-        assert seen == [(1e-7, 0.02)]
+                ltspice_out_scale=0.02, ltspice_timeout=1800.0)
+        assert seen == [(1e-7, 0.02, 1800.0)]

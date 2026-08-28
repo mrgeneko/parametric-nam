@@ -222,6 +222,19 @@ convention as `preflight.py`/`prepare_excitation.py` — see Backends, below) in
 MOSFET, a real BJT) — or, for `ltspice-deck` specifically, a circuit whose ngspice deck
 can't converge on real playing content at all (see Backends).
 
+**Exit status — an over-target cell is not a failure.** It exits **0** even with cells over
+target, because refining one costs renders and permutations and a config may rationally accept a
+coarse cell, coarsen an axis, or fix a knob outright instead of paying. That is a priced
+trade-off, not a defect, and gating on it would turn a judgement call into an error.
+
+What *does* fail the run (**exit 2**) is a **failed render**, because that is the case that
+produces a WRONG table rather than a weaker one: every cell is computed from whichever probes
+survived, and nothing else in the output says so. Measured on the Joyo American Sound, 38 of 48
+probes timed out and the printed table put one cell at 0.6578 (18.8× over) where the clean
+re-run measured 0.0475 (1.4×) — a 14× error, indistinguishable from a real result. If the cause
+is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) or lower
+`--workers`; the same plumbing gap existed in `preflight.py`, now `--render-timeout` there.
+
 ### `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 
 ```bash
@@ -326,7 +339,7 @@ this render harness too — it used to be one per device (`render_ocd.py`, `rend
 etc., each a near-identical ~100-line copy differing only in the hardcoded module and a
 couple of device-specific defaults) until this consolidated them.
 
-### `tools/render_ltspice_deck.py` — render a hand-written LTspice deck's knob sweep
+### `tools/render_ltspice_deck.py` — render an LTspice deck's knob sweep
 
 ```bash
 python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
@@ -352,6 +365,39 @@ probe silently kills every job partway through a full excitation capture, which 
 exactly like a genuine convergence failure.
 
 Same `manifest.jsonl`/`mapping.csv`/`--absolute` output contract as `render_ngspice_deck.py`.
+
+#### Two ways to build a deck
+
+A `gen_<device>_ltspice.py` module exposes `build_deck()` + `KNOB_NAMES`; where its netlist comes
+from is up to it, and there are two established patterns:
+
+- **Hand-written** (`gen_ocd_ltspice.py`) — necessary when the circuit has no faithful `.schx` at
+  all, e.g. the OCD's real 2N7000 MOSFET clipping, which LiveSPICE has no component for. The
+  netlist is authored directly and is the only description of that circuit.
+- **Derived from the `.schx`** (`gen_joyo_ltspice.py`) — for a device that *does* have an audited
+  `.schx` which LiveSPICE simply cannot solve correctly. It imports the component list from the
+  `.schx`'s own generator (`from gen_joyo_american import NET`) and translates only the syntax,
+  so values, nets and topology have exactly one source. **Prefer this whenever a `.schx` exists.**
+  A hand-copied netlist is precisely the drift `parametric-devices/tools/check_generator_drift.py`
+  exists to catch, and it would go unnoticed here because nothing compares two backends
+  automatically. Two requirements: the `.schx` generator must guard its file write behind
+  `if __name__ == '__main__'` so importing it has no side effects, and any pot taper must mirror
+  `schx_to_ngspice.adjust_wipe` so a taper change cannot silently mean two different circuits on
+  two backends.
+
+**macOS: the LTspice you install decides whether any of this works** — the Homebrew cask and
+the current `LTspice_26.pkg` are Wine-wrapped and their batch mode silently produces nothing.
+See [LTspice on macOS](#ltspice-on-macos-only-for---backend-ltspice-deck) under Build &
+Dependencies before debugging a deck that "won't converge".
+
+Not only for ngspice-can't-converge cases: the **Joyo American Sound**
+(`gen_joyo_ltspice.py`) is here because *LiveSPICE* is the backend that cannot render it.
+`IdealOpAmp` cannot saturate — it has no supply rails at all — and on this pedal rail saturation
+is the dominant nonlinearity at hot settings, so the output reaches **228x full scale** at
+ordinary knob settings — while LiveSPICE's non-ideal
+`Circuit.OpAmp` makes the circuit too stiff for its fixed-step solver (diverges even at
+`oversample=128`, and `measure_truncation.py` reports STALLS). See
+`parametric-devices/pedals/Joyo American Sound.md`.
 
 ### `gen_dataset_from_captures.py` — build a dataset from real hardware captures, no `.schx` needed
 
@@ -564,9 +610,35 @@ prints the command for that at the end rather than running it.
 
 ## Backends
 
+### Choosing one
+
+| symptom | backend |
+|---|---|
+| nothing wrong — it converges and the output is physically plausible | **livespice** |
+| diverges, or needs extreme `oversample` | **ngspice** (`.schx`-native, no deck needed) |
+| converges but the output is **impossible** (bigger than the supply rails allow) | **ltspice-deck** / **ngspice** — see below |
+| ngspice can't converge on real playing content at any `maxstep` | **ltspice-deck** |
+
+The third row is the one that costs you a training run, because it is **silent**: divergence
+announces itself, wrongness does not. Two questions catch it, and neither is a knob sweep —
+knob sweeps are *relative* (dB vs centre) and cannot see a circuit that is uniformly too loud:
+
+1. **Is the absolute output physically possible?** A 9 V pedal cannot output 200 V. Probe absolute
+   node voltages at the hot corners, not transfer ratios.
+2. **Does the model include the nonlinearity that actually dominates there?** If the real circuit
+   spends its time clipping against its rails, a model that cannot saturate is not approximately
+   right — it is unbounded.
+
 **LiveSPICE** (`--backend livespice`, default) — real-time-capable, `.schx`-native,
-reference tube models, uniform audio-rate output, never aborts. Use it for essentially
-everything.
+reference tube models, uniform audio-rate output, never aborts. The right default for
+essentially everything. But read "never aborts" as a *risk*, not only a feature: its
+`IdealOpAmp` has no supply rails and cannot saturate, so a circuit whose dominant nonlinearity
+is op-amp clipping renders happily and wrongly. Measured on the Joyo American Sound: **228x full
+scale** at ordinary knob settings, converging cleanly, passing preflight, with every knob
+responding in the correct direction. `measure_truncation.py` reported *textbook* convergence for
+it — truncation error tells you how well you solved the equations you wrote, never whether they
+were the right equations. See `parametric-devices/backends.toml`, which exists to record exactly
+these cases.
 
 **ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
 adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. the
@@ -584,8 +656,9 @@ than LTspice on the Fender 5E3 at hard drive (step count exploding to 45492 vs L
 12543 for the same clip), and on the EVH 5150 specifically, ngspice **failed to converge
 on a hard-drive render at all** — aborting within microseconds regardless of timestep,
 integration method, or input upsampling — while a hand-converted LTspice netlist of the
-same circuit (in the separate `ltspice-batch` repo, not this one — there's no
-schx-to-LTspice path here) rendered the same drive/pot position in ~32s. Don't assume a
+same circuit (in the separate `ltspice-batch` repo) rendered the same drive/pot position in
+~32s. (There is no *generic* schx-to-LTspice translator here, but a deck can still be derived
+from a `.schx` rather than hand-written — see "Two ways to build a deck" below.) Don't assume a
 slow or stuck ngspice render will eventually finish; time-box it and compare against
 `livespice` (or, for a hand-written-deck device, `ltspice-deck` below) before spending a
 long timeout budget on it.
@@ -601,15 +674,27 @@ translation.
 
 **LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
 `grid_adequacy.py`/`check_transient_coverage.py`, or `tools/render_ltspice_deck.py`
-directly) — same hand-written-deck situation as `ngspice-deck`, for a device whose
-ngspice deck can't converge on real playing content **at all**, independent of timestep.
+directly) — the same deck-module situation as `ngspice-deck`. Two circumstances call for it:
+a device whose ngspice deck can't converge on real playing content **at all**, independent of
+timestep; and a device where every backend converges but LTspice is the one whose answer is
+*stable* (see below).
 Found on the Fulltone OCD: its ideal tanh-bounded op-amp B-source is a genuine
 Newton-solver dead end in ngspice (70/70 renders across the full knob grid timed out, at
 every `maxstep` from 3e-6 down to 3e-8), while LTspice gets past it with a real op-amp
 macromodel and explicit `.ic`/`uic` initial-condition hints unavailable through ngspice's
 B-source style — see `tools/ltspice_spicelib.py`'s module docstring for the full
-investigation. Needs the native LTspice XVII app (`~/Applications/LTspice.app` or
-`/Applications/LTspice.app`), not a SPICE binary.
+investigation.
+
+**Also worth reaching for when ngspice *does* converge.** On the Joyo American Sound both SPICE
+backends bound the output correctly and agree to 1.3% at the clipping corners, and LTspice was
+still chosen: ngspice's answers kept moving with settle time where LTspice's did not (centre
+0.858 -> 1.137 V going from 0.8 s to 2.5 s of settle, versus 0.9597 -> 0.9590), and it was 2-3x
+slower at the hard corners (22.5 s vs 7.1 s at all-max). *A result that changes when you lengthen
+the settle has not converged*, whatever the solver reports.
+
+Needs the native LTspice XVII app (`~/Applications/LTspice.app` or `/Applications/LTspice.app`),
+not a SPICE binary — and on macOS **which build you install decides whether batch mode works at
+all**: see [LTspice on macOS](#ltspice-on-macos-only-for---backend-ltspice-deck).
 
 `render_backends.py` is the adapter layer `preflight.py` and `prepare_excitation.py` share
 across all three hand-deck/schx splits (`NgspiceBackend`, `LtspiceBackend`) — see its module
@@ -1174,6 +1259,74 @@ submodule (a sign the pin points somewhere other than pristine upstream).
 ```bash
 apt install ngspice        # Linux;  macOS: brew install ngspice
 ```
+
+### LTspice on macOS (only for `--backend ltspice-deck`)
+
+**Install the native build from analog.com — NOT `brew install --cask ltspice`, and NOT the
+current `LTspice_26.pkg`.** Both of those are the *Windows* binary wrapped in CrossOver/Wine.
+The GUI launches and looks fine, which is what makes this worth writing down: `-b` batch mode
+then produces **no `.raw`, no `.log`, no output of any kind, and exit status 0** — even on a
+five-line RC netlist. There is nothing to debug against, and it looks exactly like a circuit
+that failed to converge. Verified 2026-08-27 against LTspice 26.0.2.1 (`NSPrincipalClass =
+CXApplication` in its `Info.plist` is the giveaway; a Wine-backed bottle also shows up as
+`~/Library/Application Support/LTspice/Bottles/`).
+
+The working install is **LTspice XVII 17.2.4**, ADI's last native macOS release ("Download for
+MacOS 10.15 and forward"), a universal arm64/x86_64 binary. It runs correctly on macOS 26.
+
+Three requirements, each of which silently breaks it if missed:
+
+1. **The bundle must be named exactly `LTspice.app`.** It hardcodes its own name internally.
+   Renamed — even to something as close as `LTspice17.app` — every launch dies at startup with
+   `NSInvalidArgumentException ... 'data parameter is nil'` from `newJSONValue`, before it
+   reads your netlist. The crash names JSON, so it reads like a corrupt install or a failed
+   update check; it is neither.
+2. **`~/Library/Application Support/LTspice/lib/sub/` must exist**, holding
+   `UniversalOpAmp2.lib` and friends. The installer's `postinstall` unpacks `lib.zip` there.
+   `gen_ocd_ltspice.py` and `gen_joyo_ltspice.py` reference that path directly.
+3. **If a newer `LTspice.app` is already in `/Applications`, the 17.2.4 installer will not
+   replace it** — macOS Installer refuses to overwrite a bundle carrying a higher
+   `CFBundleVersion`, so 26.0.2.1 blocks it. It fails *silently*: the receipt registers
+   (`pkgutil --pkg-info com.analog.LTspice` reports 17.2.4) and `lib.zip` lands, but the app
+   is untouched. Check what you actually have before trusting the receipt:
+
+```bash
+plutil -p /Applications/LTspice.app/Contents/Info.plist | grep -E "ShortVersion|PrincipalClass"
+#   want: "17.2.4"     and  NSPrincipalClass => "LTapplication"
+#   wrong: "26.0.2.1"  and  NSPrincipalClass => "CXApplication"   <- Wine, batch mode is dead
+```
+
+If 26 is in the way and you want to keep it, install 17.2.4 to `~/Applications/LTspice.app`
+instead — the name is what matters, not the directory, and
+`ltspice_spicelib._find_ltspice_bin()` searches `~/Applications` **first**, then
+`/Applications`, then honours an explicit `LTSPICE_BIN` env var override. Extract the app from
+the pkg without running the installer:
+
+```bash
+pkgutil --expand-full ~/Downloads/LTspice.pkg /tmp/ltpkg17
+ditto /tmp/ltpkg17/LTspice.pkg/Payload/Applications/LTspice.app ~/Applications/LTspice.app
+xattr -dr com.apple.quarantine ~/Applications/LTspice.app
+```
+
+Smoke-test batch mode before blaming a circuit — this must write `rc.raw` and `rc.log`:
+
+```bash
+printf '* rc\nV1 in 0 SINE(0 1 1k)\nR1 in out 1k\nC1 out 0 100n\n.tran 0 5m 0 10u\n.end\n' > /tmp/rc.net
+~/Applications/LTspice.app/Contents/MacOS/LTspice -b /tmp/rc.net && ls /tmp/rc.raw /tmp/rc.log
+```
+
+Then render a real device end-to-end (`gen_joyo_ltspice` is the cheapest known-good check):
+
+```bash
+python tools/render_ltspice_deck.py --pedal-dir ~/work/parametric-devices/pedals \
+    --module gen_joyo_ltspice --tap spk --absolute --out-scale 0.1 tone.wav out.wav \
+    --knob Voice=1 --knob Drive=1 --knob Bass=1 --knob Treble=1 --knob Mids=1 --knob Level=1
+# -> "peak=3.99V OK".  A Joyo peak in the hundreds means LiveSPICE, not LTspice (see below).
+```
+
+One gotcha that is not LTspice's fault: `.net` (or `.cir`) files must be plain SPICE netlists,
+and LTspice **requires braces** around B-source expressions (`B1 a b V={min(...)}`), unlike
+ngspice where they are optional.
 
 ### NeuralAmpModelerCore (C++ inference only)
 Not required for training or Python inference — only for C++ inference validation and
