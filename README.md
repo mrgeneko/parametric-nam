@@ -102,9 +102,17 @@ circuit, all you need on top of that is your own `.schx` (e.g. from
 `scaffold_config.py --schx yours.schx` discovers its real controls and measures a
 starting `oversample` for you (see [`docs/scripts.md`](docs/scripts.md)) — or copy
 `examples/template.config.toml`
-by hand (see **Per-circuit configs** below for the format). Either way, finish with
+by hand (see **Per-circuit configs** below for the format). Then finish with
 `grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
 measured one. No other repos are required.
+
+**Before training on it for real** (the bundled muff example's own config cuts this corner —
+see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
+with `check_transient_coverage.py`. `run_pipeline.py` does **not** do this automatically —
+unlike grid adequacy, it has no built-in check that the excitation's real-playing content
+actually reaches saturation at every knob corner, and skipping this step is exactly how a real
+shipped model (Tweed 5F6-A) ended up never seeing saturation at some corners and misbehaving on
+real hot input later (see `docs/scripts.md`).
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip). If your checkout isn't a sibling of this repo, point at it explicitly:
@@ -236,6 +244,8 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |
 | `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
 | `build_excitation.py` | Build a training excitation that covers the full input range |
+| `prepare_excitation.py` | Size an excitation from measured saturation onset, automatically |
+| `check_transient_coverage.py` | Gate: does the excitation reach saturation at every knob corner? |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
 | `render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
 | `render_ltspice_deck.py` | Render an LTspice deck's knob sweep |

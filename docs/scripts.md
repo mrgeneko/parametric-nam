@@ -132,6 +132,87 @@ Note that measurements like truncation error or grid adequacy are properties of 
 excitations — `measure_truncation.py` and `grid_adequacy.py` both measure through whatever
 `input` is configured.
 
+## `prepare_excitation.py` — size an excitation from measured saturation onset, automatically
+
+Closes the manual gap `build_excitation.py` above leaves: someone has to read a saturation-onset
+number by hand and pick `--realistic-peak`/`--sweep-peaks` themselves — literally how every
+existing device's excitation was sized before this tool existed (e.g. the Timmy's excitation,
+peak-sized from a direct output-V-vs-input-V sweep at one hand-picked knob setting).
+
+Runs `find_saturation_point.py` at **every corner** of the knob grid (the same all-min/all-max/
+center/solo-extreme/full-hypercube set `check_transient_coverage.py` below checks against, not
+just one setting), takes the **worst-case (highest) onset** across them, and derives both levels
+from it:
+
+- `--sweep-peaks` max = `--margin × worst-case onset` (default margin **2.0x** — past the onset,
+  not just at it), staged as fractions of that (`--sweep-peak-fracs`, default `0.25,0.5,0.75,1.0`).
+- `--realistic-peak` = `--realistic-peak-frac × worst-case onset` (default frac **1.0**, not
+  lower — `check_transient_coverage.py`'s default margin requires the transient content to reach
+  the worst corner's own onset, and the worst corner's onset *is* worst-case onset by definition;
+  any fraction below 1.0 guarantees that check fails there).
+
+Then invokes `build_excitation.py` with the derived levels. Refuses to build if any corner's
+onset can't be determined, rather than silently building against a partial result (same
+"refuse to guess" convention as `preflight.py`/`check_transient_coverage.py`).
+
+```bash
+# livespice:
+python prepare_excitation.py --backend livespice \
+    --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
+    --real-clip examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
+
+# ngspice-deck:
+python prepare_excitation.py --backend ngspice-deck \
+    --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \
+    --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \
+    --real-clip ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \
+    --output ~/work/tmp/ocd_excitation.wav
+```
+
+**`--peak-max-v`** (default 40, the sweep ceiling `find_saturation_point` hunts within) needs to
+sit well above the true onset or you read a false onset off your own probe's ceiling instead of
+the real plateau — caught directly on the Fulltone OCD: `--peak-max-v 10` reported a suspicious
+9.947V onset (right at its own ceiling); re-measuring at `--peak-max-v 25` gave the real,
+comfortably-interior 7.836V. 40V suits an amp; use something like 3–5V for a small pedal circuit.
+
+Running `check_transient_coverage.py` afterward is still worth doing as an independent gate — a
+clean result is *expected* (this tool derives its levels from the same onset numbers that check
+verifies against) but not guaranteed, and this is only true at `--realistic-peak-frac`'s default
+of 1.0.
+
+## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
+
+Pre-generation gate answering a narrower, more dangerous question than "does the excitation have
+enough peak somewhere": does the excitation's **transient-bearing** content (the real-playing
+segment, not just the sweep tail) actually reach saturation at **every** knob-grid corner?
+
+This is not hypothetical — it's the exact failure this tool was built to catch. Tweed 5F6-A's
+`--realistic-peak` had been chosen for input-signal realism, not cross-checked against the
+measured onset, so the real-playing content stayed in the *linear* region at every corner tested
+while only the sweep (a smooth tone, no attack shape) crossed into saturation there. The network
+never saw a transient and saturation together at that corner, and ran open-loop when a real one
+eventually arrived.
+
+For every corner (same set `prepare_excitation.py` uses above), finds that corner's own
+saturation onset (`find_saturation_point.py`) and compares it against the excitation's transient
+peak. Exit status is nonzero if any corner fails, so a generation script can gate on it:
+
+```bash
+python check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
+    [--transient-peak 0.2] [--margin 1.0] [--oversample 8] [--iterations 256] \
+    [--json report.json] [--no-cache] \
+    && python gen_dataset_from_schx.py ...
+```
+
+`--transient-peak` (the excitation's real-playing-segment peak, in volts at V0dBFS=1) is
+auto-read from the excitation's `<stem>.recipe.json` sidecar (`build_excitation.py`'s
+`args.realistic_peak`) if present; otherwise it's **required** — this tool refuses to guess it
+from the raw audio rather than silently mis-slicing the file's realistic/sweep boundary.
+`--margin` (default 1.0) is how far past each corner's own onset the transient peak must reach.
+For a hand-written ngspice deck with no `.schx` at all, `--backend ngspice-deck` takes the same
+`[knobs]`/`[fixed]`/pedal-dir/module/probe-node TOML convention as `preflight.py`/
+`prepare_excitation.py`.
+
 ## `gen_dataset_from_schx.py` — generate the dataset
 
 Simulates the circuit across knob permutations, one WAV per permutation, then combines
