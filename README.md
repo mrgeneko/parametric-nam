@@ -87,6 +87,19 @@ cd livespice-cli && ./build.sh && cd ..
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
 # download T3K-sweep-v3.wav (see above) into examples/ before running this:
 
+# For a NEW circuit, start here -- discovers the real controls straight from the .schx and
+# measures a real starting oversample, rather than hand-typing a config from scratch (shown
+# here against the bundled muff circuit as a concrete example; see "Bring your own circuit"
+# below for the full explanation):
+python scaffold_config.py --schx "examples/muff/Big Muff Pi V1 (66#5).schx" \
+    --output /tmp/muff_scaffold.config.toml
+# scaffold_config.py's own knob grid is a role-aware PLACEHOLDER, not a measured one --
+# review it (and anything else you want to change) by hand, then run
+# `grid_adequacy.py --config /tmp/muff_scaffold.config.toml --apply` to refine it into a
+# real, measured grid before training on it for real.
+
+# This walkthrough continues with the bundled, already-reviewed example config instead of
+# the placeholder above, so it stays fast and reproducible:
 python run_pipeline.py --config examples/muff/config.toml \
     --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
     --checkpoint-dir /tmp/muff_ckpt
