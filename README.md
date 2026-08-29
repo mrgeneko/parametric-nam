@@ -30,7 +30,7 @@ export a single `.param.nam` whose knobs match the real controls.
 
 The most common path: you already have per-setting captures of a real device — no SPICE
 circuit, oracle, or sweep-file download needed. A folder of already-exported, fixed-setting
-`.nam` files, one per knob setting, each named to encode its own settings (e.g. `"5150 DST G2,
+`.nam` files, one per knob setting, each named to encode its own settings (e.g. `"MyAmp G2,
 B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` — see `gen_dataset_from_captures.py`
 in [`docs/scripts.md`](docs/scripts.md) for the full naming convention):
 
@@ -39,12 +39,12 @@ git clone https://github.com/mrgeneko/parametric-nam
 cd parametric-nam && ./setup.sh --no-cli && . .venv/bin/activate   # --no-cli: no oracle/schx needed here
 
 python gen_dataset_from_captures.py \
-    --captures "~/Downloads/5150 DST *.nam" \
-    --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
-python gen_dataset_from_captures.py --combine /tmp/5150_ds
+    --captures "~/Downloads/MyAmp DST *.nam" \
+    --output /tmp/myamp_ds --gear-make "Manufacturer" --gear-model "Amp Model 15w"
+python gen_dataset_from_captures.py --combine /tmp/myamp_ds
 
-python param_train.py --dataset /tmp/5150_ds --output /tmp/5150.param.nam \
-    --checkpoint-dir /tmp/5150_ckpt
+python param_train.py --dataset /tmp/myamp_ds --output /tmp/myamp.param.nam \
+    --checkpoint-dir /tmp/myamp_ckpt
 ```
 
 ### Train from real hardware captures (`.wav` files)
@@ -55,11 +55,11 @@ filename-encoding convention as above:
 
 ```bash
 python gen_dataset_from_captures.py \
-    --captures "~/Downloads/Klon *.wav" --output /tmp/klon_ds
-python gen_dataset_from_captures.py --combine /tmp/klon_ds
+    --captures "~/Downloads/MyPedal *.wav" --output /tmp/mypedal_ds
+python gen_dataset_from_captures.py --combine /tmp/mypedal_ds
 
-python param_train.py --dataset /tmp/klon_ds --output /tmp/klon.param.nam \
-    --checkpoint-dir /tmp/klon_ckpt
+python param_train.py --dataset /tmp/mypedal_ds --output /tmp/mypedal.param.nam \
+    --checkpoint-dir /tmp/mypedal_ckpt
 ```
 
 ### Try it now
