@@ -8,6 +8,14 @@
 # the rest, e.g.:
 #   pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu124
 #   pip install -r requirements.txt
+#
+# For AMD GPUs (Linux only), ROCm needs to be installed at the OS level first
+# (see https://rocm.docs.amd.com), then the matching ROCm torch build instead of the
+# CUDA one above, e.g. (torch 2.12.1 -> ROCm 7.2):
+#   pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/rocm7.2
+#   pip install -r requirements.txt
+# See also the "Notes for AMD GPU users" section in README.md for post-install
+# rocBLAS/gfx-architecture workarounds this repo has needed.
 
 torch==2.12.1
 numpy==2.5.0

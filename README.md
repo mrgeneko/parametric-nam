@@ -328,6 +328,11 @@ pip install -r requirements.txt
 For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
 (see the note at the top of `requirements.txt`), then `pip install -r requirements.txt`.
 
+For AMD GPUs (Linux only), [ROCm](https://rocm.docs.amd.com) needs to be installed at the
+OS level first, then the matching ROCm `torch` build in place of the CUDA one (see the same
+note in `requirements.txt`) — and see "Notes for AMD GPU users" below for kernel-compatibility
+workarounds this repo has needed past that point.
+
 ### .NET SDK + the oracle (for dataset generation)
 
 `livespice_cli` — **the oracle** — lives in
