@@ -243,20 +243,31 @@ Full per-script reference (usage, flags, design rationale) lives in
 | Script | Purpose |
 |---|---|
 | `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
+| `preflight.py` | Pre-generation sanity gate — probes a handful of points through the oracle before a full render; also provides `--find-peak` (saturation onset) |
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |
 | `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
+| `measure_ngspice_timestep.py` | ngspice equivalent of `measure_truncation.py` — measures `maxstep` truncation error for a hand-written ngspice deck |
 | `build_excitation.py` | Build a training excitation that covers the full input range |
 | `prepare_excitation.py` | Size an excitation from measured saturation onset, automatically |
 | `check_transient_coverage.py` | Gate: does the excitation reach saturation at every knob corner? |
 | `check_input_headroom.py` | Warn if the excitation doesn't reach saturation at default knob settings (runs automatically as `run_pipeline.py` Step 0b) |
+| `pick_dynamic_window.py` | Cut the most-dynamic N-second window out of a long real-playing clip |
+| `apply_output_limiter.py` | Opt-in: soft-limit a rendered training-target WAV so the trainer sees an explicit output ceiling |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
 | `render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
 | `render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
 | `gen_dataset_from_captures.py` | Build a dataset from real hardware captures, no `.schx` needed |
+| `capture_static.py` | Capture a *static* (non-parametric) NAM at one fixed knob setting via the official upstream `neural-amp-modeler` trainer |
 | `param_train.py` | Train a parametric NAM |
-| `param_infer.py` | Inference (Python, no C++) |
+| `merge_tiers.py` | Assemble a multi-tier `SlimmableContainer .param.nam` from one or more existing `.param.nam` files' submodels |
+| `param_infer.py` | Inference (Python, no C++), from a training checkpoint, multiple knob-setting `--params` sets per run |
+| `infer.py` | Older/simpler inference: loads a `.param.nam` directly, single-run or `--sweep` mode |
+| `ab_realtime_playback.py` | A/B the Python forward pass against the host app's C++ playback (FiLM parity check) |
 | `coverage_report.py` | Find holes in a sampled dataset |
 | `sweep_report.py` | Visualize a set of WAVs at different knob settings |
+| `per_perm_esr.py` | Per-permutation validation ESR for a trained model — the standard way to judge an A/B |
+| `level_band_esr.py` | ESR split by output level band — catches fade-out/quiet-tail bugs |
+| `scan_film_runaway.py` | Scan a published `.nam` bundle for the FiLM/LeakyReLU runaway instability |
 | `export_checkpoint.py` | Checkpoint → `.param.nam` |
 | `bake_nam.py` | Freeze a knob setting for stock/upstream NAM plugins |
 | `plot_tone_response.py` | Frequency-response chart for an exported `.nam` |
