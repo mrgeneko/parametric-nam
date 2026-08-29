@@ -511,10 +511,8 @@ ngspice where they are optional.
 - [`NeuralAmpModelerCore`](https://github.com/mrgeneko/NeuralAmpModelerCore) — our fork,
   public. Adds the `"ParametricWaveNet"` architecture + live knob support on top of Steven
   Atkinson's original DSP core.
-- Sample host apps with working parametric-knob support, both public, both built against
-  that fork: [`NAMix`](https://github.com/mrgeneko/NAMix) (Linux VST3/standalone) and
-  [`NeuralAmpModelerPlugin`](https://github.com/mrgeneko/NeuralAmpModelerPlugin) — rebranded
-  "Anti-Static" — (macOS/Windows VST3/AU/standalone)
+- Sample host app with working parametric-knob support, public, built against that fork:
+  [`NAMix`](https://github.com/mrgeneko/NAMix) (Linux/macOS/Windows VST3/AU/standalone)
 
 ## Credits & Attribution
 
