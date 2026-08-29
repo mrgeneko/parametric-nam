@@ -483,8 +483,8 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
   override for an ablation. See the status note in
   [LoRA-style knob conditioning](reference.md#lora-style-knob-conditioning-removed) — the C++ that consumed
   LoRA-tagged models in a real-time plugin host has been deleted entirely; this flag only
-  matters for training a new ablation or for `export_checkpoint.py`/`param_infer.py` reading an
-  old checkpoint (rank is recoverable from the checkpoint's own state-dict shape, so those never
+  matters for training a new ablation or for `export_checkpoint.py`/`checkpoint_infer.py` reading
+  an old checkpoint (rank is recoverable from the checkpoint's own state-dict shape, so those never
   need it re-specified).
 - **`--cycle-checkpoints`** (default on; `--no-cycle-checkpoints` to disable) saves a
   full resumable snapshot (`<ckpt-dir>/cycle_<epoch>.pt`) at every SGDR cycle boundary
@@ -503,15 +503,19 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
   ESR on both tiers as late as its 6th 50-epoch cycle (~9 hours of wall time in), so don't
   read an early plateau as convergence.
 
-## `param_infer.py` — inference (Python, no C++)
+## `checkpoint_infer.py` — inference from a training checkpoint (Python, no C++)
 
 ```bash
-python param_infer.py --checkpoint <ckpt>/best.pt \
+python checkpoint_infer.py --checkpoint <ckpt>/best.pt \
     --input dry.wav --output-dir out/ \
     --params "drive=0.5,tone=0.7" --params "drive=0.9,tone=0.3"
 ```
-Loads a checkpoint and renders WAVs at arbitrary knob positions. Repeat `--params` for
-multiple outputs. Knob names/order come from the dataset `config.json`.
+Loads a `.pt` training checkpoint and renders WAVs at arbitrary knob positions. Repeat
+`--params` for multiple outputs. Knob names/order come from the dataset `config.json`.
+
+See `nam_infer.py` for the equivalent that loads directly from an exported `.param.nam`
+file instead — no checkpoint needed, e.g. for a released model you don't have the
+training run for.
 
 ## `coverage_report.py` — find holes in a sampled dataset
 
@@ -534,7 +538,8 @@ name): overlaid waveforms, frequency spectra, and per-file stats (peak, RMS, RMS
 monotonicity across the sweep, spectral centroid trend). Doesn't care where the WAVs came
 from — point it at a generated dataset's per-permutation renders to eyeball the sweep
 before training (`coverage_report.py` checks the *sampling*, this checks the *audio*), or
-at a batch of `param_infer.py` outputs to eyeball a trained model's knob response.
+at a batch of `checkpoint_infer.py`/`nam_infer.py` outputs to eyeball a trained model's knob
+response.
 
 ## `export_checkpoint.py` — checkpoint → `.param.nam`
 

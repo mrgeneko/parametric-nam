@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-param_infer.py — Run inference with a trained parametric NAM model.
+checkpoint_infer.py — Run inference from a training checkpoint (.pt) with a trained
+parametric NAM model. See nam_infer.py for the equivalent that loads directly from an
+exported .param.nam file instead, with no checkpoint needed.
 
 Usage:
-  python param_infer.py --checkpoint best.pt --input audio.wav --output-dir /path/to/out \
+  python checkpoint_infer.py --checkpoint best.pt --input audio.wav --output-dir /path/to/out \
     --params "volume=0.5,mid=0.5,treble=0.5,middle=0.5,bass=0.5,clean_master=0.5" \
     --params "volume=0.8,mid=0.5,treble=0.7,middle=0.5,bass=0.3,clean_master=0.7"
 """

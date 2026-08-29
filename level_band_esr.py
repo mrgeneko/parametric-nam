@@ -38,7 +38,7 @@ import soundfile as sf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from param_infer import load_model
+from checkpoint_infer import load_model
 
 BANDS = [
     (-6.0, 999.0, "louder than -6 dB"),

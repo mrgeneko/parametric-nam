@@ -149,7 +149,7 @@ that fleet rather than to using this toolchain standalone.
 ### Listen
 
 ```bash
-python param_infer.py --checkpoint /tmp/ckpt/best.pt \
+python checkpoint_infer.py --checkpoint /tmp/ckpt/best.pt \
     --input dry.wav --output-dir /tmp/out/ --params "Sustain=0.7,Tone=0.4"
 ```
 
@@ -172,7 +172,7 @@ just want to try the knob experience before training your own.
                          Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
                              ↓  param_train.py  (train A2 Lite 4ch + Full 8ch jointly, FiLM knob conditioning)
                          .param.nam  (SlimmableContainer)
-                             ↓  param_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
+                             ↓  checkpoint_infer.py  (PyTorch inference at arbitrary knob positions — no C++)
                              ↓  NeuralAmpModelerCore  (ParametricWaveNet factory, C++ inference)
                          Real-time inference in a compatible host app
 ```
@@ -260,8 +260,8 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `capture_static.py` | Capture a *static* (non-parametric) NAM at one fixed knob setting via the official upstream `neural-amp-modeler` trainer |
 | `param_train.py` | Train a parametric NAM |
 | `merge_tiers.py` | Assemble a multi-tier `SlimmableContainer .param.nam` from one or more existing `.param.nam` files' submodels |
-| `param_infer.py` | Inference (Python, no C++), from a training checkpoint, multiple knob-setting `--params` sets per run |
-| `infer.py` | Older/simpler inference: loads a `.param.nam` directly, single-run or `--sweep` mode |
+| `checkpoint_infer.py` | Inference (Python, no C++), from a training checkpoint, multiple knob-setting `--params` sets per run |
+| `nam_infer.py` | Inference directly from an exported `.param.nam`, no checkpoint needed — single-run (`--params`) or single-knob `--sweep` |
 | `ab_realtime_playback.py` | A/B the Python forward pass against the host app's C++ playback (FiLM parity check) |
 | `coverage_report.py` | Find holes in a sampled dataset |
 | `sweep_report.py` | Visualize a set of WAVs at different knob settings |

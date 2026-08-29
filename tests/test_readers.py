@@ -1,5 +1,5 @@
-"""Tests for the modules that LOAD models — infer.py, param_infer.py, export_checkpoint.py —
-and for run_pipeline's config mapping.
+"""Tests for the modules that LOAD models — nam_infer.py, checkpoint_infer.py,
+export_checkpoint.py — and for run_pipeline's config mapping.
 
 These had no coverage, which mattered: the skip-only refactor edited all three, and the one
 invariant they must all uphold is the guard. Models are SKIP-ONLY; a legacy residual (or
@@ -18,8 +18,8 @@ import pytest
 import soundfile as sf
 import torch
 
+import checkpoint_infer
 import export_checkpoint
-import param_infer
 import param_train
 import run_pipeline
 from param_train import ParametricA2, check_parametric_schema
@@ -28,11 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _skip_model_file(path: Path, num_params: int = 2) -> Path:
-    """A current (skip) parametric .param.nam.
-
-    NOTE num_params=1 for the infer.py tests: infer.py's CLI can only drive a SINGLE knob
-    (--gain2). It cannot run a multi-knob model at all — a pre-existing limitation, not a
-    regression (it is why ab_realtime_playback.py exists). Tracked below."""
+    """A current (skip) parametric .param.nam."""
     names = ["SUSTAIN", "TONE"][:num_params]
     m = ParametricA2(3, num_params)
     d = m.export_nam(
@@ -77,7 +73,7 @@ def test_guard_rejects_a_newer_schema():
             {"head_mode": "skip", "schema_version": param_train.K_PARAM_SCHEMA_VERSION + 1})
 
 
-# --------------------------------------------------------------------------- infer.py
+# ------------------------------------------------------------------------ nam_infer.py
 
 def _tiny_wav(path: Path, seconds=0.2, sr=48000) -> Path:
     t = np.linspace(0, seconds, int(sr * seconds), endpoint=False, dtype=np.float32)
@@ -85,17 +81,17 @@ def _tiny_wav(path: Path, seconds=0.2, sr=48000) -> Path:
     return path
 
 
-def _run_infer(model: Path, wav: Path, out: Path):
+def _run_infer(model: Path, wav: Path, out: Path, params: str):
     return subprocess.run(
-        [sys.executable, "infer.py", "--model", str(model), "--input", str(wav),
-         "--output", str(out), "--gain2", "0.5"],
+        [sys.executable, "nam_infer.py", "--model", str(model), "--input", str(wav),
+         "--output", str(out), "--params", params],
         cwd=ROOT, capture_output=True, text=True)
 
 
 def test_infer_runs_a_skip_model(tmp_path):
-    model = _skip_model_file(tmp_path / "m.param.nam", num_params=1)   # infer.py: 1 knob only
+    model = _skip_model_file(tmp_path / "m.param.nam", num_params=1)
     wav = _tiny_wav(tmp_path / "in.wav")
-    r = _run_infer(model, wav, tmp_path / "out.wav")
+    r = _run_infer(model, wav, tmp_path / "out.wav", "SUSTAIN=0.5")
     assert r.returncode == 0, r.stdout + r.stderr
     assert (tmp_path / "out.wav").exists()
 
@@ -106,23 +102,23 @@ def test_infer_rejects_a_legacy_model(tmp_path, mode):
     model = _make_legacy(_skip_model_file(tmp_path / "m.param.nam", num_params=1), mode)
     wav = _tiny_wav(tmp_path / "in.wav")
     out = tmp_path / "out.wav"
-    r = _run_infer(model, wav, out)
+    r = _run_infer(model, wav, out, "SUSTAIN=0.5")
     assert r.returncode != 0
     assert "no longer supported" in (r.stdout + r.stderr)
     assert not out.exists()
 
 
-# ------------------------------------------------------------------- export_checkpoint.py
-
-@pytest.mark.xfail(reason="KNOWN GAP: infer.py's CLI exposes only --gain2, so it cannot "
-                          "drive a multi-knob model. Not a regression — ab_realtime_playback.py "
-                          "exists because of it. Fix: give infer.py a --params flag like "
-                          "bake_nam's.", strict=True)
 def test_infer_can_drive_a_multi_knob_model(tmp_path):
+    """Was a KNOWN GAP (nam_infer.py, formerly infer.py, exposed only a single --gain2
+    value and couldn't drive more than one knob) -- fixed by --params, matching
+    bake_nam.py's "name=value,..." convention."""
     model = _skip_model_file(tmp_path / "m.param.nam", num_params=2)
     wav = _tiny_wav(tmp_path / "in.wav")
-    r = _run_infer(model, wav, tmp_path / "out.wav")
+    r = _run_infer(model, wav, tmp_path / "out.wav", "SUSTAIN=0.5,TONE=0.5")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ------------------------------------------------------------------- export_checkpoint.py
 
 
 def test_export_checkpoint_infers_slimmable_widths():
@@ -164,9 +160,9 @@ def test_require_tier_agreement_rejects_lora_rank_mismatch():
 
 
 def test_param_infer_load_model_reads_back_lora_rank(tmp_path):
-    """param_infer.py's load_model() threads lora_rank out of a checkpoint's args_dict the
-    same way spectral_norm already was ('free recovery' -- the whole argparse namespace is
-    saved verbatim at training time, see param_infer.py's own comment on this). Without this,
+    """checkpoint_infer.py's load_model() threads lora_rank out of a checkpoint's args_dict
+    the same way spectral_norm already was ('free recovery' -- the whole argparse namespace
+    is saved verbatim at training time, see checkpoint_infer.py's own comment on this). Without this,
     a LoRA checkpoint would silently reconstruct as lora_rank=0 -- load_state_dict would then
     fail loudly (missing lora.* keys) rather than misload, but the model would simply be
     unloadable, defeating the point of inspecting a LoRA checkpoint with this tool at all."""
@@ -185,7 +181,7 @@ def test_param_infer_load_model_reads_back_lora_rank(tmp_path):
         "args_dict": {"dataset": str(dataset_dir), "widths": [3, 8], "lora_rank": 4},
     }, str(ckpt_path))
 
-    model, args_dict = param_infer.load_model(str(ckpt_path))
+    model, args_dict = checkpoint_infer.load_model(str(ckpt_path))
     assert args_dict["lora_rank"] == 4
     for sub in model.submodels:
         assert sub.lora_rank == 4

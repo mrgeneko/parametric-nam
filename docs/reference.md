@@ -89,7 +89,7 @@ Then after all 23 layers: `head.weight → head.bias → head_scale`.
 > (`schema_version` 2) model can no longer be loaded by any current build of the fork**:
 > `require_supported_parametric_model()` rejects it loudly rather than silently misreading it,
 > the same fail-loud contract every schema bump here follows. This toolchain's own Python
-> tooling (`param_infer.py`, `export_checkpoint.py`, `nam_standard.fold_lora()`) still fully
+> tooling (`checkpoint_infer.py`, `export_checkpoint.py`, `nam_standard.fold_lora()`) still fully
 > supports loading, exporting, and folding archived LoRA checkpoints — **`fold_lora()` bakes
 > the LoRA delta into an ordinary static model at one fixed knob setting**, which then loads
 > and plays in any plugin, LoRA support or not. What's gone is *real-time, knob-live* LoRA

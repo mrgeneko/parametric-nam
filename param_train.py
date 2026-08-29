@@ -95,7 +95,7 @@ K_LEAKY_SLOPE = 0.01
 K_PARAM_SCHEMA_VERSION = 1
 # The version a LoRA-enabled export declares. Deliberately NOT folded into
 # K_PARAM_SCHEMA_VERSION (check_parametric_schema's own max-accepted value, checked by
-# infer.py/bake_nam.py/ab_realtime_playback.py) until those readers are updated to actually
+# nam_infer.py/bake_nam.py/ab_realtime_playback.py) until those readers are updated to actually
 # reconstruct lora_rank from a checkpoint/config before calling load_weights() -- bumping the
 # accepted max without also fixing reconstruction would let a LoRA export past the schema
 # check into a model built with lora_rank=0, and _load_weight_block's flat-iterator consumption
@@ -1877,7 +1877,7 @@ def main():
     # WITHOUT spectral_norm, so its conv/mixin/l1x1 state_dict keys are plain (`.weight`), not
     # the parametrized form (`.parametrizations.weight.original`/`._u`/`._v`). Building the model
     # already-wrapped here would make the --init-from load below hard-fail on a key mismatch --
-    # see the same bug class already fixed in export_checkpoint.py/param_infer.py. Deferred to
+    # see the same bug class already fixed in export_checkpoint.py/checkpoint_infer.py. Deferred to
     # right after the load succeeds instead (enable_spectral_norm() there), which immediately
     # clips any layer whose spectral norm exceeds 1 using the just-loaded trained weights as the
     # starting point -- not a fresh random init, so fine-tuning under the now-active constraint
