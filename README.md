@@ -280,7 +280,9 @@ anecdotal data point, not a validated requirement. If memory is tight on your ha
 training a single, narrower `--widths` value (instead of the default multi-tier slimmable
 config) uses meaningfully less memory — `SlimmableParametricA2.forward()` runs every trained
 tier's forward pass jointly, so VRAM scales with how many widths you train at once, and a
-single width skips that entirely.
+single width skips that entirely. `--batch-size` (default 64) is the other lever: on a 16GB
+dedicated GPU, `--batch-size 32` or lower is a reasonable starting point — several fleet models
+were trained at 32 on a 16GB AMD Radeon RX 9070 XT with no issues.
 
 ### Notes for AMD GPU users (anecdotal — not the main tested path)
 
