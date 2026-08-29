@@ -1344,6 +1344,11 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
                     e = [esr_per_example(pred, out, floor).item()]
                 esr_sums = e if esr_sums is None else [a + b for a, b in zip(esr_sums, e)]
                 n += 1
+    if not n:
+        raise RuntimeError(
+            "validation produced no batches -- the val DataLoader is empty. Almost always "
+            "drop_last discarding a val split smaller than one batch; lower --batch-size or "
+            "enlarge the split.")
     return total_loss / n, [s / n for s in esr_sums]
 
 
@@ -1853,10 +1858,21 @@ def main():
     # up to batch_size-1 samples/epoch (here: 34 train, 10 val, ~1%/2.5%) is a small,
     # standard price -- val_passes already averages multiple passes for exactly this kind
     # of noise, and a shape-stable run beats an exhaustive one that hangs.
+    # ... but drop_last must never EMPTY a loader. With fewer samples than one batch, the
+    # only batch is a partial one, drop_last discards it, and the loader yields nothing:
+    # validate() then divides by n=0 and the run dies with a bare ZeroDivisionError several
+    # minutes in, pointing at arithmetic rather than at the split. Hit on the Joyo -- 675
+    # permutations split 642/33 against batch_size 64, so the whole validation set vanished.
+    # The MPS shape-stability argument above only applies when a full batch survives.
+    train_drop = n_train >= args.batch_size
+    val_drop = n_val >= args.batch_size
+    if not val_drop:
+        print(f"  NOTE: val split ({n_val}) < batch size ({args.batch_size}) -- keeping the "
+              f"partial batch, else validation would be empty.", file=sys.stderr)
     train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=train_drop)
     val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
+        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=val_drop)
     print(f"  {n_total} total samples ({n_train} train, {n_val} val)",
           file=sys.stderr)
     print(f"  Params: {dataset.param_names}", file=sys.stderr)
