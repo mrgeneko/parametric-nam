@@ -108,11 +108,12 @@ measured one. No other repos are required.
 
 **Before training on it for real** (the bundled muff example's own config cuts this corner —
 see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
-with `check_transient_coverage.py`. `run_pipeline.py` does **not** do this automatically —
-unlike grid adequacy, it has no built-in check that the excitation's real-playing content
-actually reaches saturation at every knob corner, and skipping this step is exactly how a real
-shipped model (Tweed 5F6-A) ended up never seeing saturation at some corners and misbehaving on
-real hot input later (see `docs/scripts.md`).
+with `check_transient_coverage.py`. `run_pipeline.py` only checks a **weaker version of this
+automatically** (Step 0b below, `check_input_headroom.py`) — a WARN-only check at *default*
+(0.5) knob settings, not a hard gate, and not every knob corner. It's not a substitute:
+skipping the full corner-by-corner check is exactly how a real shipped model (Tweed 5F6-A)
+ended up never seeing saturation at some corners and misbehaving on real hot input later (see
+`docs/scripts.md`).
 
 `setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
 skip). If your checkout isn't a sibling of this repo, point at it explicitly:
@@ -130,11 +131,12 @@ python run_pipeline.py --config path/to/your-device/config.toml \
     --checkpoint-dir /tmp/ckpt
 ```
 
-One command runs **four** steps:
+One command runs **five** steps:
 
 | step | what it does | why it exists |
 |---|---|---|
-| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full permutation count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). |
+| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full permutation count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). Aborts the pipeline on failure. |
+| 0b — Input headroom | checks the excitation reaches the device's saturation onset at *default* knob settings (`check_input_headroom.py`) | catches an excitation that never gets loud enough to show the device's real nonlinear character, independent of grid density. **WARN only, not a gate** — a low ratio can be a real gap or a genuine high-headroom device; only checks default settings, not the grid's own hottest corner (see `prepare_excitation.py`/`check_transient_coverage.py` above for the real, every-corner check). `--skip-headroom-check` to skip. |
 | 1 — Generate | renders the dataset across the knob grid | |
 | 2 — Combine | per-permutation WAVs → `outputs.npy` | |
 | 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
@@ -246,6 +248,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `build_excitation.py` | Build a training excitation that covers the full input range |
 | `prepare_excitation.py` | Size an excitation from measured saturation onset, automatically |
 | `check_transient_coverage.py` | Gate: does the excitation reach saturation at every knob corner? |
+| `check_input_headroom.py` | Warn if the excitation doesn't reach saturation at default knob settings (runs automatically as `run_pipeline.py` Step 0b) |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
 | `render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
 | `render_ltspice_deck.py` | Render an LTspice deck's knob sweep |

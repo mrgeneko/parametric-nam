@@ -213,6 +213,39 @@ For a hand-written ngspice deck with no `.schx` at all, `--backend ngspice-deck`
 `[knobs]`/`[fixed]`/pedal-dir/module/probe-node TOML convention as `preflight.py`/
 `prepare_excitation.py`.
 
+## `check_input_headroom.py` — warn if the excitation doesn't get loud enough (runs automatically)
+
+Runs automatically as `run_pipeline.py`'s **Step 0b**, right after grid adequacy — the only one
+of the excitation-coverage scripts on this page that's wired into the pipeline by default.
+Answers a narrower, cheaper question than `check_transient_coverage.py` above: at *default*
+(0.5) knob settings, does the excitation's peak reach this device's own measured saturation
+onset (`preflight.py --find-peak`)?
+
+A dense knob grid (`grid_adequacy.py`) is a completely different question from an excitation
+that gets loud enough — a model can only learn what's in the data, and a perfectly-dense grid
+rendered entirely in the device's linear region still teaches it nothing about saturation. This
+gap went unnoticed on TAD Blackface 85 Reverb (2026-07-31) until someone asked "was this
+checked?" after the config was otherwise fully measured — nothing else in the pipeline would
+have caught it.
+
+```bash
+python check_input_headroom.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml
+python check_input_headroom.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml --margin 0.9
+```
+
+**WARN, not a gate** — unlike grid adequacy (a provable floor, and `run_pipeline.py` aborts on
+it), a low ratio here can be a real gap *or* a genuine high-headroom device: `--find-peak`
+probes at default knob settings, not the grid's own hottest corner, so a knob that changes how
+hard the excitation drives later stages can have a much lower onset at the grid's extreme than
+at default. TAD Blackface itself is the false-positive case — it turned out to have real, dense
+nonlinear behavior concentrated at **low** Volume rather than at high input level. Treat a WARN
+as "go check the grid's hot corner directly," not an automatic verdict. `run_pipeline.py
+--skip-headroom-check` skips it; `--headroom-margin` (default 0.8) controls the threshold.
+
+For the full, every-corner, hard-gate version of this same question, use
+`prepare_excitation.py`/`check_transient_coverage.py` above instead — this script is a cheap
+automatic tripwire, not a substitute for them.
+
 ## `gen_dataset_from_schx.py` — generate the dataset
 
 Simulates the circuit across knob permutations, one WAV per permutation, then combines
