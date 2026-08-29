@@ -9,8 +9,6 @@ CPU cost of live simulation.
 
 Two ways to build the same underlying dataset:
 
-- **From a `.schx`** (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`) — simulates the
-  circuit across a sweep of knob settings, no real hardware needed.
 - **From real hardware, no SPICE model at all** (`gen_dataset_from_captures.py`) — a folder of
   already-captured, fixed-setting files, one per knob setting: either existing `.nam` files,
   or your own recorded wet/dry `.wav` pairs (a shared sweep played through the real device and
@@ -18,6 +16,8 @@ Two ways to build the same underlying dataset:
   `"MyAmp G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated
   `PrefixDigit` tokens, digit → value/10) — see `gen_dataset_from_captures.py` in
   [`docs/scripts.md`](docs/scripts.md) for the full naming convention and how to override it.
+- **From a `.schx`** (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`) — simulates the
+  circuit across a sweep of knob settings, no real hardware needed.
 
 Either path feeds the same pipeline: train a FiLM-conditioned WaveNet on the paired audio, and
 export a single `.param.nam` whose knobs match the real controls.
@@ -26,9 +26,47 @@ export a single `.param.nam` whose knobs match the real controls.
 
 ## Quick Start
 
+### Train from real hardware captures (`.nam` files)
+
+The most common path: you already have per-setting captures of a real device — no SPICE
+circuit, oracle, or sweep-file download needed. A folder of already-exported, fixed-setting
+`.nam` files, one per knob setting, each named to encode its own settings (e.g. `"5150 DST G2,
+B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` — see `gen_dataset_from_captures.py`
+in [`docs/scripts.md`](docs/scripts.md) for the full naming convention):
+
+```bash
+git clone https://github.com/mrgeneko/parametric-nam
+cd parametric-nam && ./setup.sh --no-cli && . .venv/bin/activate   # --no-cli: no oracle/schx needed here
+
+python gen_dataset_from_captures.py \
+    --captures "~/Downloads/5150 DST *.nam" \
+    --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
+python gen_dataset_from_captures.py --combine /tmp/5150_ds
+
+python param_train.py --dataset /tmp/5150_ds --output /tmp/5150.param.nam \
+    --checkpoint-dir /tmp/5150_ckpt
+```
+
+### Train from real hardware captures (`.wav` files)
+
+Same idea, from your own recorded wet captures instead — a shared sweep played through the
+real device and captured back via an audio interface, one `.wav` per knob setting, same
+filename-encoding convention as above:
+
+```bash
+python gen_dataset_from_captures.py \
+    --captures "~/Downloads/Klon *.wav" --output /tmp/klon_ds
+python gen_dataset_from_captures.py --combine /tmp/klon_ds
+
+python param_train.py --dataset /tmp/klon_ds --output /tmp/klon.param.nam \
+    --checkpoint-dir /tmp/klon_ckpt
+```
+
 ### Try it now
 
-`examples/muff/` holds a real, complete recipe: the `.schx` circuit and an annotated
+The third path — building from a SPICE schematic instead of real captures — is more involved:
+it needs the oracle (`livespice-cli`) built separately and a config recipe for the circuit. But
+`examples/muff/` holds a real, complete one: the `.schx` circuit and an annotated
 `config.toml`. Two things are not in the repo:
 
 1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
