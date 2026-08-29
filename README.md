@@ -504,34 +504,6 @@ One gotcha that is not LTspice's fault: `.net` (or `.cir`) files must be plain S
 and LTspice **requires braces** around B-source expressions (`B1 a b V={min(...)}`), unlike
 ngspice where they are optional.
 
-### NeuralAmpModelerCore (C++ inference only)
-Not required for training or Python inference — only for C++ inference validation and
-host-app integration.
-
-### `neural-amp-modeler` (optional — `.nam`-sourced captures and real `.wav` delay calibration)
-Not required for the `.schx` path, or for a `.wav`-sourced dataset without real calibration
-(it just falls back to a disclosed `delay=0` — see `gen_dataset_from_captures.py`'s
-`detect_delay`). Needed only for **loading an existing `.nam` file as a capture source**
-and for **real NAM blip-based latency calibration** on a `.wav` capture. Build as a sibling
-of `livespice-cli`, not inside this repo:
-
-```bash
-git clone https://github.com/sdatkinson/neural-amp-modeler ../neural-amp-modeler
-cd ../neural-amp-modeler && python3 -m venv venv && ./venv/bin/pip install -e .
-```
-
-Auto-discovered from `~/work/neural-amp-modeler/venv` (same convention
-`capture_static.py` already uses); override with `$NEURAL_AMP_MODELER_HOME` if yours lives
-elsewhere. The delay-calibration half runs in a **subprocess** under that venv's own
-interpreter, not a lazy in-process import — `nam.train.core` depends on `numba`, which
-checks `numpy`'s version at import time, and importing it in-process would hand it
-whatever `numpy` *this* repo's own venv already loaded, not the sibling venv's compatible
-one. A subprocess avoids that entirely; see `nam_delay_helper.py`.
-
-> **Input formats**: any WAV (16/24/32-bit) and any content read correctly — an earlier
-> O(N²) bug in `livespice_cli`'s WAV reader (fixed in `fa90d57`) once made non-24-bit
-> inputs stall.
-
 ## Related Repos
 
 - `LiveSPICE-Amp-Collection` — `.schx` circuit library
