@@ -141,11 +141,6 @@ One command runs **five** steps:
 | 2 — Combine | per-permutation WAVs → `outputs.npy` | |
 | 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
 
-**Adding a *new* device to the private fleet?** That workflow (and the toolchain's other
-methodology docs — grid adequacy, convergence, training budget, retraining, architecture,
-lessons learned) lives in a private internal notes repo, since it's specific to maintaining
-that fleet rather than to using this toolchain standalone.
-
 ### Listen
 
 ```bash
