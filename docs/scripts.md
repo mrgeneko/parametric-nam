@@ -564,9 +564,8 @@ default, not a blanket 0.5 (wrong for a circuit whose controls don't center at n
 
 By default the output is **dual-payload**: the baked tone at the top level (so any stock
 plugin plays it) plus the full original parametric model under an `embedded_parametric`
-key that stock loaders ignore but a parametric-aware host (`NAMix`,
-`NeuralAmpModelerPlugin`/"Anti-Static") reads for live knobs — one file, safe to hand
-anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
+key that stock loaders ignore but a parametric-aware host (`NAMix`) reads for live
+knobs — one file, safe to hand anyone. `--no-embed-parametric` drops that for a static-only file, e.g. for a capture pack
 where embedding the full master in every tone just multiplies size.
 
 ## `plot_tone_response.py` — frequency-response chart for an exported `.nam`

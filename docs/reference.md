@@ -9,9 +9,8 @@
 A standard NAM JSON with `"SlimmableContainer"` as the outer architecture (already
 registered in NeuralAmpModelerCore). Each submodel uses `"ParametricWaveNet"` — a
 custom architecture [our fork of NeuralAmpModelerCore](https://github.com/mrgeneko/NeuralAmpModelerCore)'s
-factory registers. [`NAMix`](https://github.com/mrgeneko/NAMix) and
-[`NeuralAmpModelerPlugin`](https://github.com/mrgeneko/NeuralAmpModelerPlugin) (see
-"Related Repos") are working sample hosts built against it.
+factory registers. [`NAMix`](https://github.com/mrgeneko/NAMix) (see "Related Repos") is a
+working sample host built against it.
 
 ```json
 {
@@ -144,7 +143,7 @@ Verified against `sdatkinson/neural-amp-modeler` + `NeuralAmpModelerCore` (2026-
 - **Delivering parametric tones to standard plugins = snapshot baking.** FiLM is
   affine over the layer's linear ops, so freezing a knob setting folds `γ,β` exactly
   into `conv.weight/bias` + `mixin.weight`, yielding an identical *static* A2 with no
-  FiLM. A parametric-aware host (`NAMix`, `NeuralAmpModelerPlugin`) keeps live knobs;
+  FiLM. A parametric-aware host (`NAMix`) keeps live knobs;
   `bake_nam.py` "exports this tone" into a stock-standard `.nam` for hosts that don't.
   Works on **already-trained** parametric `.nam`s offline (no retrain) — pure weight
   transform.
