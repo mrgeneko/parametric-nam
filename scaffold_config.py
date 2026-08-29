@@ -76,6 +76,16 @@ def _replace_line(text: str, key: str, new_line: str) -> str:
     return pattern.sub(lambda _m: new_line + "\n", text, count=1)
 
 
+def _toml_key(name: str) -> str:
+    """Quote a TOML key unless it's already a valid bare key (letters/digits/underscore/
+    dot/hyphen only). Almost every real knob name in this fleet has a space (e.g. "Lead
+    Pre", "OR Gain"), which is NOT a valid bare TOML key -- writing it unquoted produces a
+    file Python's own tomllib (what run_pipeline.py and grid_adequacy.py both load configs
+    with) refuses to parse. Found 2026-08-29 the hard way: every [knobs]/[knob-kind] line
+    this module ever wrote for a multi-word knob was invalid TOML."""
+    return name if re.fullmatch(r"[A-Za-z0-9_.-]+", name) else f'"{name}"'
+
+
 def _replace_table(text: str, header: str, body_lines: list) -> str:
     """Same consecutive-assignment-lines splice as grid_adequacy.write_knobs, so a
     trailing comment ahead of the next section (like the template's own `[fixed]`
@@ -84,7 +94,10 @@ def _replace_table(text: str, header: str, body_lines: list) -> str:
     if not m:
         raise ValueError(f"template has no [{header}] table")
     start = m.end()
-    assign_re = re.compile(r"^[A-Za-z0-9_.-]+[ \t]*=.*\n", re.MULTILINE)
+    # Bare key OR a quoted key ("..."/'...') -- see _toml_key(); without the quoted
+    # alternative this loop matches zero lines on any already-quoted table, same bug
+    # documented in grid_adequacy.write_knobs.
+    assign_re = re.compile(r'^(?:[A-Za-z0-9_.-]+|"[^"]*"|\'[^\']*\')[ \t]*=.*\n', re.MULTILINE)
     end = start
     while (am := assign_re.match(text, end)):
         end = am.end()
@@ -126,12 +139,13 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
 
 
 def _format_knobs(names: list, n_points: int) -> list:
-    width = max(len(n_) for n_ in names)
+    keys = {name: _toml_key(name) for name in names}
+    width = max(len(k) for k in keys.values())
     lines = []
     for name in names:
         kind, _ = classify(name)
         pts = _grid_for_kind(kind, n_points)
-        lines.append(f"{name:<{width}} = {pts}")
+        lines.append(f"{keys[name]:<{width}} = {pts}")
     return lines
 
 
@@ -142,14 +156,15 @@ def _format_knob_kind(names: list) -> list:
     every line gets a trailing comment naming the label that drove the guess (or flagging
     UNCONFIRMED for a no-match) precisely so this doesn't read as more certain than it is --
     review it by hand before trusting it."""
-    width = max(len(n_) for n_ in names)
+    keys = {name: _toml_key(name) for name in names}
+    width = max(len(k) for k in keys.values())
     lines = []
     for name in names:
         kind, label = classify(name)
         if kind is None:
-            lines.append(f'# {name:<{width}} = "UNCONFIRMED"   # name matched no known keyword -- classify by hand')
+            lines.append(f'# {keys[name]:<{width}} = "UNCONFIRMED"   # name matched no known keyword -- classify by hand')
         else:
-            lines.append(f'{name:<{width}} = "{kind}"   # guessed from name ({label}) -- verify')
+            lines.append(f'{keys[name]:<{width}} = "{kind}"   # guessed from name ({label}) -- verify')
     return lines
 
 

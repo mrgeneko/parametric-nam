@@ -135,13 +135,21 @@ def write_knobs(config_path: Path, knobs: dict) -> None:
     if not m:
         sys.exit(f"--apply: no [knobs] table found in {config_path} -- write it by hand.")
     body_start = m.end()
-    assign_re = re.compile(r"^[A-Za-z0-9_.-]+[ \t]*=.*\n", re.MULTILINE)
+    # Bare TOML keys (letters/digits/underscore/dot/hyphen only) OR a quoted key ("..."/'...') --
+    # almost every real knob name in this fleet has a space (e.g. "Lead Pre", "OR Gain"), which
+    # is NOT a valid bare TOML key, so it's always written quoted (see the write side below).
+    # Missing the quoted-key alternative here made this loop consume ZERO existing lines on any
+    # config already using quoted keys, so --apply inserted a second, unquoted, invalid-TOML
+    # copy of each knob right after the header instead of replacing the original.
+    assign_re = re.compile(r'^(?:[A-Za-z0-9_.-]+|"[^"]*"|\'[^\']*\')[ \t]*=.*\n', re.MULTILINE)
     body_end = body_start
     while (am := assign_re.match(text, body_end)):
         body_end = am.end()
 
-    width = max(len(k) for k in knobs)
-    lines = [f"{name:<{width}} = [{', '.join(repr(float(v)) for v in vals)}]\n"
+    quoted = {name: f'"{name}"' if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) else name
+              for name in knobs}
+    width = max(len(k) for k in quoted.values())
+    lines = [f"{quoted[name]:<{width}} = [{', '.join(repr(float(v)) for v in vals)}]\n"
              for name, vals in knobs.items()]
     config_path.write_text(text[:body_start] + "".join(lines) + text[body_end:])
 
