@@ -12,7 +12,7 @@ general path is `schx_to_ngspice.py` (any `.schx`) driven by the harness.
 
 LiveSPICE uses a fixed timestep. On very high-gain circuits, Newton-Raphson
 overshoots the tube saturation knee and, with no adaptive step, runs away. The
-**EVH 5150 Lead full amp** is the worst case: it diverges to ~+95 dB at the
+**stiff high-gain amp head's Lead full circuit** is the worst case: it diverges to ~+95 dB at the
 default 2× oversample and needs **`--oversample 32`** (~158 s per 5 s of audio)
 to stay bounded.
 
@@ -20,10 +20,10 @@ Real SPICE (ngspice) uses **adaptive timestepping + damped Newton**, which is
 exactly the setting that offline dataset generation can afford (no real-time
 deadline). It converges on the same circuit with **no oversample hack**.
 
-## Result (5150 Lead full)
+## Result (stiff amp head, Lead full)
 
-`gen_evh5150_ngspice.py` translates the LiveSPICE 5150 Lead full circuit
-(`parametric-devices/amps/gen_evh5150_full.py`) to an ngspice netlist and runs it:
+`gen_evh5150_ngspice.py` translates the LiveSPICE Lead full circuit for that amp
+(mirroring its own generator script in the `parametric-devices` repo) to an ngspice netlist and runs it:
 
 | | LiveSPICE (fixed step) | ngspice (adaptive) |
 |---|---|---|
@@ -57,7 +57,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
 4. **It never diverges** — always bounded, even when it can't finish. That is the
    qualitative win over a fixed-step solver (no +95 dB garbage).
 5. **A non-convergence failure can be an input-file problem, not a circuit or
-   solver problem.** On the Boss DS-1 (op-amp gain stage, not tubes), a long
+   solver problem.** On the reverse-linear-drive pedal (op-amp gain stage, not tubes), a long
    chase through device-capacitance/`tmax`/method tuning turned out to be
    whack-a-mole against the wrong root cause: the sweep input had an abrupt
    volume-jump splice (a real discontinuity — adjacent 48kHz samples jumping
@@ -65,8 +65,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
    splice from the input file (not tuning the circuit or the solver) is what
    actually got a clean 121/121. If a failure clusters at the same timestamp
    across very different knob settings, check the input audio at that instant
-   before reaching for more device-model tuning. Full story:
-   `circuit_defaults.toml`'s `["Boss DS-1"]` entry.
+   before reaching for more device-model tuning.
 
 ## Caveats — this proves CONVERGENCE, not fidelity
 
@@ -96,7 +95,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
   tstep silently doubled as the step ceiling, so `--oversample N` forced N× solve
   cost everywhere; see the comment above the `tran` line in `schx_to_ngspice.py`.)
   **Default is 1× (naive) — pass `--oversample 2` (or more) to enable anti-aliasing.**
-  Verified 2× on the 5150: near-Nyquist (18–24 kHz) 12.3%→9.2%. Note the aliasing is
+  Verified 2× on the stiff amp head: near-Nyquist (18–24 kHz) 12.3%→9.2%. Note the aliasing is
   mostly above a cab's rolloff (largely inaudible cab'd) but inflates the full-band
   ESR. See the project's internal engineering notes.
 - **MEMORY — long inputs need `save` (now automatic) + a sane `--workers`.** ngspice
@@ -117,7 +116,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
   convergence at knob settings sensitive to the crude-interpolation "kink"
   artifact — but can just as easily *break* convergence at other settings that
   are sensitive to genuine high-frequency energy the crude interpolation had
-  been masking (verified, isolated A/B on the DS-1). Don't reach for this
+  been masking (verified, isolated A/B on the reverse-linear-drive pedal). Don't reach for this
   before checking whether the input file itself has a genuine discontinuity
   to fix instead (see finding 5) — that's the more likely actual cause and the
   more reliable fix.
@@ -139,22 +138,22 @@ amp), `NO_NFB=1` (open the PI-grid feedback), `FLIP_SEC=1` (reverse OT secondary
 Wired end to end. Usage:
 
 ```bash
-# moderate amp (e.g. JCM800 power amp) — exact DempwolfZolzer tubes:
+# moderate amp (e.g. the British-stack amp's power amp) — exact DempwolfZolzer tubes:
 python gen_dataset_from_schx.py --backend ngspice --schx "<amp>.schx" \
     --knobs presence --values 0.2,0.5,0.8 --input guitar.wav --output ds
 
-# stiff amp (EVH 5150 Lead full) — Koren tubes + OT damping + NFB comp.
+# stiff amp (the stiff amp head's Lead Full circuit) — Koren tubes + OT damping + NFB comp.
 # NOTE: bound leadpost>=0.05 (master at exactly 0 grounds the PI -> degenerate DC
 # operating point -> the solver hangs). presence excluded (subtle + NFB-comp alters it).
 # (config "L" — the re-tuned minimal recipe: no NFB-comp cap; it is stable
 #  without one and the cap is a tone-shaper, not just a stabilizer)
 python gen_dataset_from_schx.py --backend ngspice --koren --ot-damp 3k --ot-snub 100n \
-    --oversample 2 --schx "EVH 5150 Lead Full.schx" \
+    --oversample 2 --schx "Stiff Amp Head Lead Full.schx" \
     --knobs leadpre,leadpost,high,low,mid --bounds leadpost=0.05,1.0 \
     --fixed-params "Presence=0.5" --random 200 --input guitar.wav --output ds
 ```
 
-Full write-up of the 5150 run (convergence recipe, training, aliasing, the
+Full write-up of the stiff amp head's run (convergence recipe, training, aliasing, the
 generalization gap, knob analysis) lives in the project's internal engineering notes.
 
 Done:
@@ -169,37 +168,37 @@ Done:
    → `.npy`, with the crest-factor divergence check.
 5. ✅ **Bounded memory** — `save v(<out>)` stores only the probed node, so long +
    oversampled runs don't OOM (see Caveats for the `--workers` guidance).
-6. ✅ **Boss DS-1 (op-amp gain stage, not tubes)** — LiveSPICE's ideal op-amp
+6. ✅ **The reverse-linear-drive pedal (op-amp gain stage, not tubes)** — LiveSPICE's ideal op-amp
    destabilizes above ~10dB closed-loop gain in this circuit's feedback
    topology; ngspice handles the full documented 0-26.5dB range with
-   `method=gear` + a diode/BJT capacitance bump (auto-applied via
-   `circuit_defaults.toml`, keyed on `"Boss DS-1"`) plus a fixed input file
-   (see finding 5 above — the real blocker was an input-file splice, not the
-   circuit or solver). 121/121 permutations converge, zero failures.
+   `--method gear --conv diode_cjo=100p,bjt_cje=40p,bjt_cjc=20p` plus a fixed
+   input file (see finding 5 above — the real blocker was an input-file
+   splice, not the circuit or solver). 121/121 permutations converge, zero
+   failures.
 
-Result: the **EVH 5150 Lead full converges** (Koren mode) where LiveSPICE
-diverges even at 32× oversample. The JCM800 power amp matches a LiveSPICE render
+Result: the **stiff amp head's Lead full circuit converges** (Koren mode) where LiveSPICE
+diverges even at 32× oversample. The British-stack amp's power amp matches a LiveSPICE render
 at **~0.99 real-guitar correlation** with the default DempwolfZolzer tubes. The
-**Boss DS-1** converges cleanly across its full gain range where LiveSPICE's
+**reverse-linear-drive pedal** converges cleanly across its full gain range where LiveSPICE's
 ideal op-amp cannot.
 
 Open:
 - **Anti-aliasing must be opted into** — default `--oversample 1` still aliases; use
   `2`+ for real datasets. Its ~1.5–2× solve cost + memory (see Caveats) is the trade.
-- **Fidelity is signal- and circuit-dependent**: ~0.99 on the JCM800 (validated vs
-  LiveSPICE). The **5150 full has now been trained + listened to** (no LiveSPICE
+- **Fidelity is signal- and circuit-dependent**: ~0.99 on the British-stack amp (validated vs
+  LiveSPICE). The **stiff amp head's Lead full circuit has now been trained + listened to** (no LiveSPICE
   reference exists): a 5-knob model reached validation ESR ~0.19 but **~0.43 on a
   new DI** — "sounds like the amp, not production-close." Root causes: aliasing +
   training-input under-coverage (a 30 s sweep slice) + 5-knob capacity spread. Full
   analysis + improvement plan in the project's internal engineering notes.
 - **Per-circuit tuning is manual** — `--ot-damp`/`--nfb-comp` values and the NFB
-  node name are hand-set for the 5150; not auto-derived.
+  node name are hand-set for the stiff amp head; not auto-derived.
 - Tube **inter-electrode capacitances** and **pentode grid current** are omitted
-  (small; would tighten the JCM800's last ~1% and level offset).
+  (small; would tighten the British-stack amp's last ~1% and level offset).
 - **The Koren-tubes + heavy-OT-damping compromise is not an ngspice limitation** —
   evaluated [Xyce](https://xyce.sandia.gov/) (more nonlinear continuation/homotopy
   methods) as a potential way to use exact tubes + light damping instead. Verdict:
-  **negative, structurally** — the 5150's failure is a *transient* integration
+  **negative, structurally** — the stiff amp head's failure is a *transient* integration
   instability, and Xyce's continuation methods only apply to *DC operating point*
   solving (confirmed in Xyce's own source). Full test + build notes are in the
   project's internal engineering notes.
@@ -213,5 +212,5 @@ Open:
 Use **LiveSPICE** by default — it's real-time-capable, `.schx`-native, its tube
 models are the reference, it emits uniform audio-rate output, and it never
 aborts (deterministic for batch automation). Reach for **ngspice** only for the
-handful of stiff/high-gain/combined circuits (like the 5150 Lead full) where
+handful of stiff/high-gain/combined circuits (like the stiff amp head's Lead full circuit) where
 LiveSPICE diverges or needs extreme oversampling.

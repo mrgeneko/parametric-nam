@@ -11,7 +11,7 @@ from knob_classify import DIRECTION_RULES, TONE_LIKE_KINDS, classify
 
 class TestRealFleetNames:
     """Names actually used on real, shipped devices this session touched or referenced
-    (OCD, Timmy, BD-2, OD-3, HM-2, JC-120, Dumble) -- a change to DIRECTION_RULES that breaks
+    (this fleet's own pedals and amps) -- a change to DIRECTION_RULES that breaks
     any of these silently degrades preflight.py's checks on a real device, not a hypothetical
     one."""
 

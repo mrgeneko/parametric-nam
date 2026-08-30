@@ -1,6 +1,6 @@
 # Template for a new device's config.toml. Copy this, fill in the fields, and see
 # "Per-circuit configs" in the README for the full field-to-CLI mapping. For a real,
-# fully worked (non-template) example, see examples/muff/config.toml.
+# fully worked (non-template) example, see examples/large_muffin/config.toml.
 #
 #   python run_pipeline.py --config path/to/your-device/config.toml \
 #       --dataset-dir /tmp/ds --nam-output /tmp/model.param.nam \

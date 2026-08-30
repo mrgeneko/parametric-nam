@@ -2,8 +2,8 @@
 """Cut the most-dynamic N-second window out of a long real-playing clip.
 
 Formalizes a pattern that had been hand-rolled ad hoc (a throwaway "python -" one-liner,
-never committed) at least three times in this codebase's history -- the Tweed 5F6-A 17s
-window, the JCM800 95s window, and the Dumble 95s window were each picked this way, with
+never committed) at least three times in this codebase's history -- the tweed-style amp's 17s
+window, the British-stack amp's 95s window, and the boutique dual-channel amp's 95s window were each picked this way, with
 the exact selection logic re-derived from scratch each time and left undocumented beyond a
 config-comment sentence like "picked by sliding a 95s window and taking the highest
 peak/rms".

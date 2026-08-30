@@ -7,8 +7,8 @@ The report shows overlaid waveforms, frequency spectra, and per-file stats.
 
 Usage:
     python sweep_report.py limelight_gain2_*.wav -o report.html
-    python sweep_report.py /tmp/sweep_out/limelight_*.wav --title "Dumble Volume Sweep"
-    python sweep_report.py *.wav --param-name "volume" --model "Dumble ODS"
+    python sweep_report.py /tmp/sweep_out/limelight_*.wav --title "Amp Volume Sweep"
+    python sweep_report.py *.wav --param-name "volume" --model "Boutique Dual-Channel Amp"
 """
 
 import argparse, json, re, sys

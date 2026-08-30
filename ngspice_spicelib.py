@@ -2,10 +2,10 @@
 """Shared ngspice render backend for this repo's per-device render_*.py scripts, using
 spicelib (https://github.com/nunobrum/spicelib) to drive ngspice in PARALLEL instead of the
 sequential subprocess-per-render loop every render_*.py used to hand-roll independently
-(render_bd2.py, render_boss_od3.py, amps/render_ngspice.py were all near-identical copies of
+(several per-pedal render scripts and amps/render_ngspice.py were all near-identical copies of
 the same pattern).
 
-Tried and measured (Boss OD-3, 9-point Drive x Tone sweep, parallel_sims=8): 2.1x wall-clock
+Tried and measured (the mid-boost overdrive pedal, 9-point Drive x Tone sweep, parallel_sims=8): 2.1x wall-clock
 speedup over the sequential baseline (20.7s vs 43.5s), plus spicelib's RawRead parses ngspice's
 binary .raw output directly -- no change needed to how results are read back, since the deck
 strategy below still explicitly `write`s the raw file itself (see next paragraph for why).
@@ -88,7 +88,7 @@ def _read_result(raw_path, probe_node, t, sr):
     Without this check, a partial trace with >= len(t)//2 samples was accepted as
     converged, and np.interp then silently flat-extrapolates the last simulated value
     for the remainder of `t` -- indistinguishable from a real signal until inspected
-    sample-by-sample. Found via a real OCD render that aborted at t=5.045s (node na_o)
+    sample-by-sample. Found via a real render (the MOSFET-clipping pedal) that aborted at t=5.045s (node na_o)
     out of a ~8.4s request but still passed the old length-only check, corrupting an
     LTspice-vs-ngspice comparison with >3s of held-flat fake reference data."""
     if not os.path.exists(raw_path):

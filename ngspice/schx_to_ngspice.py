@@ -152,7 +152,7 @@ def pentode_subckt(name, p):
 # infinitely fast and drives ngspice's timestep to 0 ("timestep too small"). They're
 # small (audio-band negligible). Resolution order per value:
 #   real .schx param (p)  >  per-run convergence override (conv)  >  hardcoded default.
-# High-gain hard-clip stages (e.g. the MT-2) need bigger `diode_cjo` to soften the
+# High-gain hard-clip stages (e.g. the metal-distortion pedal) need bigger `diode_cjo` to soften the
 # clip edges; JFET-heavy circuits may need bigger `jfet_rd`/`jfet_rs`.
 def _cv(p, pkey, conv, ckey, default):
     return p.get(pkey) or conv.get(ckey) or default
@@ -259,7 +259,7 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         # "Lead Pre" (this device's own knob name) silently truncates every element
         # built from it at the space (e.g. "RLead Pre_aw" -> ngspice reads "RLead" as
         # the element and "Pre_aw" as its first node), producing a garbled netlist
-        # that fails to parse. Found on the EVH 5150's Lead Pre/Lead Post pots.
+        # that fails to parse. Found on the stiff amp head's Lead Pre/Lead Post pots.
         nm = re.sub(r'\s+', '_', c['name'])
         t = terms(c)
         if ty in ('Ground', 'Label', 'NamedWire'):
@@ -351,10 +351,10 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
                      'R%s_a %s %s 1meg' % (nm, SA, ST),
                      'R%s_c %s %s 1meg' % (nm, ST, SC),
                      # OT damping: a pure-ideal OT + high loop-gain global NFB (e.g.
-                     # the 5150) oscillates instantly. A plate-to-plate resistive damper
+                     # the stiff amp head) oscillates instantly. A plate-to-plate resistive damper
                      # + a snubber lower the OT Q to converge, at minor HF cost. Light
                      # defaults suit moderate amps; stiff amps need heavier (--ot-damp
-                     # 3k --ot-snub 220n --nfb-comp <node>=1n for the 5150 full).
+                     # 3k --ot-snub 220n --nfb-comp <node>=1n for the stiff amp head's full circuit).
                      'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
                      'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
                      'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
@@ -373,14 +373,14 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
     # KLU direct solver: OPT-IN (conv={'klu': '1'}), not default. It was briefly the
     # default on the theory that KLU beats Sparse 1.3 on repeated factorizations --
     # and the A/B said otherwise, in both directions that matter:
-    #   * 5150 full amp (the big-matrix case KLU should win): with klu the transient
+    #   * the stiff amp head's full circuit (the big-matrix case KLU should win): with klu the transient
     #     ABORTS at 10.7ms ("timestep too small ... dgrid-instance d.xvv5b.dgk");
     #     with Sparse it completes the full render. KLU's different pivoting/roundoff
     #     flips a marginal convergence, fatally.
-    #   * Boss DS-1, 7.5s worst-corner render, all else equal: klu 3.02s vs Sparse
+    #   * the reverse-linear-drive pedal, 7.5s worst-corner render, all else equal: klu 3.02s vs Sparse
     #     2.68s -- SLOWER on a pedal-sized matrix.
     # Keep the plumbing: a circuit that measures faster AND converges with KLU can
-    # set klu=1 in circuit_defaults.toml. Do not turn it on without that A/B.
+    # be run with --conv klu=1. Do not turn it on without that A/B.
     use_klu = str(conv.get('klu', '0')).lower() in ('1', 'true', 'on', 'yes')
 
     # tmax IS the internal step ceiling, and without an explicit one ngspice uses
@@ -395,7 +395,7 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
     # solver always resolves at least 48kHz, LTE takes it finer through clip
     # edges, and oversample keeps its real job — output density for the
     # anti-alias decimation downstream. conv={'tmax': '...'} overrides (smaller
-    # = forced finer everywhere = slower; the DS-1's 20.8333u is now the default).
+    # = forced finer everywhere = slower; the reverse-linear-drive pedal's 20.8333u is now the default).
     tmax = conv.get('tmax') or '20.8333u'
 
     lines += sub_defs + opamp_defs + model_defs + [''] + body + [
@@ -434,7 +434,7 @@ if __name__ == '__main__':
     ap.add_argument('--conv', default='',
                     help='device convergence overrides, key=val,...  keys: diode_cjo diode_tt '
                          'bjt_cje bjt_cjc bjt_tf jfet_cgs jfet_cgd jfet_rd jfet_rs '
-                         '(e.g. diode_cjo=100p for high-gain hard-clip stages like the MT-2)')
+                         '(e.g. diode_cjo=100p for high-gain hard-clip stages like the metal-distortion pedal)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
     conv = dict(kv.split('=', 1) for kv in a.conv.split(',') if '=' in kv)

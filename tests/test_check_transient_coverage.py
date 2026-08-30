@@ -1,5 +1,5 @@
-"""Properties check_transient_coverage.py must have. Built after a real miss: Tweed
-5F6-A's shipped excitation cleared saturation at its own overall peak, but the transient
+"""Properties check_transient_coverage.py must have. Built after a real miss: the tweed-style
+amp's shipped excitation cleared saturation at its own overall peak, but the transient
 (real-playing) segment never did at a corner where two knobs sat at grid-min while three
 others sat at grid-max simultaneously -- a corner the "solo extreme" set literally cannot
 represent (solo holds every OTHER knob at center). _corners' binary hypercube exists
@@ -48,7 +48,7 @@ class TestCornersBaseSet:
 
 class TestCornersBinaryHypercube:
     def test_mixed_extreme_corner_only_exists_with_the_hypercube_enabled(self):
-        """The exact Tweed 5F6-A miss: NormalVol/BrightVol at grid-min while Treble/Bass/Middle
+        """The exact tweed-style-amp miss: NormalVol/BrightVol at grid-min while Treble/Bass/Middle
         sit at grid-max, all at once. No solo-extreme corner can be this -- solo only ever
         moves ONE knob off center."""
         knob_ranges = {"A": [0.0, 1.0], "B": [0.0, 1.0], "C": [0.0, 1.0]}

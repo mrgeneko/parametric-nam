@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Scan a published .nam bundle for the FiLM/LeakyReLU runaway instability.
 
-Background: see internal engineering notes. Two published models (Tweed
-5F6-A Full sag, and the old pre-fix Boss DS-1) were found to blow up 80-260x at a
+Background: see internal engineering notes. Two published models (the tweed-style
+amp's Full sag, and the old pre-fix reverse-linear-drive pedal) were found to blow up 80-260x at a
 narrow (knob-corner x real-transient) combination the training excitation
 under-covered. This tool reproduces that check generically, against ANY
 published .nam -- no training checkpoint or dataset required, since it
@@ -35,7 +35,7 @@ Usage:
   # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
   # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
   python scan_film_runaway.py --nam PATH/TO/model.param.nam \
-      --config ~/work/parametric-nam-models/amps/tweed-5f6-a-full-sag/config.toml
+      --config ~/work/parametric-nam-models/amps/myamp-full-sag/config.toml
 """
 import argparse
 import itertools
@@ -92,7 +92,7 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
     binary hypercube (every knob independently at 0.0 or 1.0, 2**n corners; all-min/
     all-max are 2 of them, deduped below).
 
-    Used to be solo-only. That missed a real corner: Tweed 5F6-A Full's shipped blowup
+    Used to be solo-only. That missed a real corner: the tweed-style amp's Full shipped blowup
     was two volume knobs at min held SIMULTANEOUSLY with three tone knobs at max -- solo
     holds every OTHER knob at 0.5 (center), never at another extreme, so a mixed
     some-low-some-high corner was never scanned. 2**n is exponential; capped at

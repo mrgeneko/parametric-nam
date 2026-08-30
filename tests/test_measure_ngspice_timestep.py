@@ -1,6 +1,6 @@
 """Properties measure_ngspice_timestep.py must have. Built directly from a real
 production incident: NgspiceBackend's hardcoded maxstep=3e-6 default turned out to be genuinely
-too coarse for the Fulltone OCD's real 2N7000 MOSFET clipping (re-rendering the identical knob
+too coarse for the MOSFET-clipping pedal's real 2N7000 MOSFET clipping (re-rendering the identical knob
 setting at 3e-6/1e-6/3e-7 gave RMS 1.210/1.614/1.593 -- a real, unconverged bias, not noise),
 which is exactly what made grid_adequacy.py --apply explode instead of converge.
 

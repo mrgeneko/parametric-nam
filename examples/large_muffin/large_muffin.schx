@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Schematic Name="Big Muff Pi V1 (66#5)" Description="EHX Big Muff Pi V1 66#5 fuzz: 4x 2N5133 + 1N914 clipping (1uF-series) + tone" PartNumber="">
+<Schematic Name="Large Muffin" Description="Silicon fuzz/sustain pedal: 4x 2N5133 + 1N914 clipping (1uF-series) + tone" PartNumber="">
   <Element Type="Circuit.Symbol, Circuit, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" Rotation="0" Flip="false" Position="0,0">
     <Component _Type="Circuit.Input, Circuit, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" V0dBFS="1 V" Name="J_IN" />
   </Element>

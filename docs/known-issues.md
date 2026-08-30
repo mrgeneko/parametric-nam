@@ -168,8 +168,9 @@ circuit fault.
 EQ/tone knob's direction, every OTHER knob `classify()` tags as `"drive"` (Gain, Distortion,
 Overdrive, etc. — the same name-based classification the direction check already used) is held
 at this LOW value instead of the usual `0.5`, so the circuit isn't self-saturating from its own
-gain control while the tone stack's real effect is being measured. This alone fixed OCD's Tone
-reading at every probe duration tested, with no need for a reduced input level at all.
+gain control while the tone stack's real effect is being measured. This alone fixed the
+MOSFET-clipping pedal's Tone reading at every probe duration tested, with no need for a reduced
+input level at all.
 Volume/level-classified knobs are untouched — they're normally a post-clipping-stage
 attenuator, so they don't change whether the nonlinear stage itself saturates.
 
@@ -177,7 +178,7 @@ attenuator, so they don't change whether the nonlinear stage itself saturates.
 probing an EQ knob at both a driven and a linear-region level, pass-if-either) stays on by
 default too — it catches the same failure mode via a different knob than the one under test,
 and via a knob `classify()` can't identify as `"drive"` by name. Both mitigations were verified
-independently on OCD; neither alone was assumed sufficient going forward.
+independently on the MOSFET-clipping pedal; neither alone was assumed sufficient going forward.
 
 ## Known issue: audible knob-move transient noise (inference-side, not a training/dataset bug)
 

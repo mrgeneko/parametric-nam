@@ -63,18 +63,18 @@ def test_export_nam_propagates_gear_and_attribution_metadata():
     --gear-type, baked into the dataset's config.json) and modeled_by (from param_train.py's
     --modeled-by, merged into dataset.config at train time) must all reach the exported .nam's
     metadata -- these were previously readable by export_nam() but had no CLI path to set them
-    anywhere in the pipeline, so a real model (bigmuff_v4_optimal.param.nam) shipped with
+    anywhere in the pipeline, so a real model (large_muffin_v4_optimal.param.nam) shipped with
     modeled_by missing entirely and gear_type silently defaulted to the wrong value ("amp" on
     an actual pedal)."""
     m = ParametricA2(3, 2)
     cfg = {"param_names": ["SUSTAIN", "TONE"],
            "bounds": {"SUSTAIN": [0.0, 1.0], "TONE": [0.0, 1.0]},
-           "gear_make": "Electro-Harmonix", "gear_model": "Big Muff Pi V1", "gear_type": "pedal",
+           "gear_make": "Manufacturer", "gear_model": "Large Muffin", "gear_type": "pedal",
            "modeled_by": "Gene Ko"}
     d = m.export_nam(cfg, {"version": "0.7.0"}, 48000)
     meta = d["metadata"]
-    assert meta["gear_make"] == "Electro-Harmonix"
-    assert meta["gear_model"] == "Big Muff Pi V1"
+    assert meta["gear_make"] == "Manufacturer"
+    assert meta["gear_model"] == "Large Muffin"
     assert meta["gear_type"] == "pedal"
     assert meta["modeled_by"] == "Gene Ko"
 
@@ -86,7 +86,7 @@ def test_knob_default_prefers_declared_then_midpoint():
 
 
 def test_bake_uses_declared_default_not_half(tmp_path):
-    """A no-params bake must use the circuit's declared default (the Timmy case)."""
+    """A no-params bake must use the circuit's declared default (the non-midpoint-default pedal case)."""
     src = _make_parametric_file(tmp_path / "m.param.nam", {"SUSTAIN": 0.3})
     out = _bake(src, tmp_path / "o.nam")
     assert out["architecture"] == "WaveNet"
@@ -199,7 +199,7 @@ class TestAutoName:
     BAKED = {"Gain": 0.55, "Bass": 0.5, "Treble": 0.2}
 
     def test_strips_the_double_param_nam_extension(self):
-        assert _model_stem(Path("timmy_v4_optimal.param.nam")) == "timmy_v4_optimal"
+        assert _model_stem(Path("myamp_v4_optimal.param.nam")) == "myamp_v4_optimal"
 
     def test_strips_a_plain_nam_extension(self):
         assert _model_stem(Path("thing.nam")) == "thing"

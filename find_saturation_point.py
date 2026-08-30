@@ -15,7 +15,7 @@ LEADING SILENCE (`lead_silence_s`, default 0.0): a circuit with a slow-charging 
 network can show a multi-second "powering on" transient before settling to its true steady
 response, since a render always starts from a cold (all-capacitors-at-0V) state -- see this
 repo's README ("Known issue: excitation needs a silent lead-in"). Confirmed directly on
-Fulltone OCD's ngspice deck: a sustained tone with no lead-in showed RMS drifting for ~15s
+the MOSFET-clipping pedal's ngspice deck: a sustained tone with no lead-in showed RMS drifting for ~15s
 then jumping abruptly at ~16s -- a false, unstable reading entirely from measuring
 mid-transient. LiveSPICE circuits haven't shown this so far (default stays 0.0 there); set it
 explicitly for a backend/circuit combination where it matters.

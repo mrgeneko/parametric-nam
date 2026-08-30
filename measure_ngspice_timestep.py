@@ -4,8 +4,8 @@
 WHY THIS FILE EXISTS.
 render_ngspice_deck.py / render_backends.py's NgspiceBackend / ngspice_spicelib.py's
 render_grid() all default `maxstep=3e-6` -- picked so a render usually CONVERGES (produces
-output at all), never measured for ACCURACY. Found directly on the Fulltone OCD
-(gen_ocd_ngspice.py, real 2N7000 MOSFET clipping): re-rendering the IDENTICAL Gain=0.3 probe
+output at all), never measured for ACCURACY. Found directly on the MOSFET-clipping pedal
+(via its ngspice-generator script, real 2N7000 MOSFET clipping): re-rendering the IDENTICAL Gain=0.3 probe
 window at maxstep 3e-6 / 1e-6 / 3e-7 gave RMS 1.210 / 1.614 / 1.593 -- a ~33% swing between the
 default and a 10x finer step, and still not settled between the two finer steps.
 grid_adequacy.py --apply was exploding (40 -> 1512+ permutations, ~10-100x over target at
@@ -28,8 +28,8 @@ reference itself has actually converged (ESR(ref, ref/2) must sit well below the
 candidate's own number, or every column in the table is a floor, not a measurement).
 
 Usage:
-    ./measure_ngspice_timestep.py --input ~/work/parametric-devices/pedals/ocd_excitation_v4.wav \\
-        --config ~/work/parametric-nam-models/pedals/fulltone-ocd-lp/config.toml
+    ./measure_ngspice_timestep.py --input ~/work/parametric-devices/pedals/mypedal_excitation_v4.wav \\
+        --config ~/work/parametric-nam-models/pedals/mypedal/config.toml
 """
 from __future__ import annotations
 
@@ -184,7 +184,7 @@ def main() -> None:
     ap.add_argument("--lead-silence-s", type=float, default=None,
                     help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
                          "own settling time is longer (e.g. a slow RC network -- found directly "
-                         "on the Fulltone OCD: a ~5s C10/RVOL2 time constant left every probe "
+                         "on the MOSFET-clipping pedal: a ~5s C10/RVOL2 time constant left every probe "
                          "under-settled at the 1.0s default, producing a maxstep-dependent "
                          "'stuck DC' artifact that looked like circuit instability). Default: "
                          "use write_probe_clip's own 1.0s.")

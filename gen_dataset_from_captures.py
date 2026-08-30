@@ -17,14 +17,14 @@ source kinds, auto-detected per file by extension, freely mixable in one run:
          capture_static.py's identical fallback for a non-standard excitation.
 
     python gen_dataset_from_captures.py \\
-        --captures "~/Downloads/5150 DST *.nam" \\
-        --output /tmp/5150_ds --gear-make "EVH" --gear-model "5150 Iconic EL34 15w"
+        --captures "~/Downloads/MyAmp DST *.nam" \\
+        --output /tmp/myamp_ds --gear-make "Manufacturer" --gear-model "Amp Model 15w"
 
     python gen_dataset_from_captures.py \\
-        --captures "~/Downloads/Klon *.wav" --output /tmp/klon_ds
+        --captures "~/Downloads/MyPedal *.wav" --output /tmp/mypedal_ds
 
 Each input filename encodes its knob settings as comma-separated tokens, e.g.
-"5150 DST G2, B5, M5, T5, Rvb0, Rsn0, Prsn0.nam" -> Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5,
+"MyAmp DST G2, B5, M5, T5, Rvb0, Rsn0, Prsn0.nam" -> Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5,
 Reverb=0.0, Resonance=0.0, Presence=0.0 (single-digit token -> value/10). The prefix->knob-name
 map and the digit->value scale are BOTH overridable (--knob-map, --knob-scale) because "not every
 set of captures will follow the same naming convention" -- there is also a --mapping-csv escape
@@ -44,7 +44,7 @@ either. This is a SCATTERED point-sample dataset, not a Cartesian grid -- grid_a
 interpolation-adequacy reasoning does not apply here; there is nothing to interpolate between
 systematically with only a handful of arbitrary points.
 
-    python gen_dataset_from_captures.py --combine /tmp/5150_ds   # same --combine flag as gen_dataset_from_schx.py
+    python gen_dataset_from_captures.py --combine /tmp/myamp_ds   # same --combine flag as gen_dataset_from_schx.py
 """
 import argparse
 import csv

@@ -23,19 +23,20 @@ Written float32 so values >1.0 survive (they represent >1 V drive, which is legi
 LEADING SILENCE (--lead-silence-s, default 3.0): every render starts a `.tran` from a cold,
 all-capacitors-at-0V initial condition, not the already-biased-up state a real (already
 powered-on) device is always in. For a circuit with a slow-charging DC-blocking network (e.g.
-a large output-coupling cap into a high-value pot -- Fulltone OCD's C10/Volume-pot leg has a
-~5s RC time constant), starting real content at t=0 captures a genuine but non-representative
-multi-second "circuit powering on" transient: measured directly on the OCD (ngspice backend,
-see gen_ocd_ngspice.py/render_ocd.py in parametric-devices), a sustained tone with no lead-in
-showed RMS slowly drifting for ~15s and then an ABRUPT jump to a different steady value at
-~16s -- neither of which a real, already-running pedal ever does. Prepending 3s of silence
-before any real content let the circuit reach its true, cold-start-independent operating bias
-first; every render taken after that showed the tone snapping to a single stable, unchanging
-level within about a second of starting. Cheap fix, not device-specific -- applied by default
-to every excitation this tool builds, silent segment included in the file (not stripped after
-generation), so it also gives the DC bias network real settling time before the `real`
-segment's own dynamics are what's being sampled. See internal engineering notes and the OCD
-investigation for the concrete before/after traces this was based on.
+a large output-coupling cap into a high-value pot -- the MOSFET-clipping pedal's C10/Volume-pot
+leg has a ~5s RC time constant), starting real content at t=0 captures a genuine but
+non-representative multi-second "circuit powering on" transient: measured directly on that
+pedal (ngspice backend, see its ngspice-generator script in the private devices repo), a
+sustained tone with no lead-in showed RMS slowly drifting for ~15s and then an ABRUPT jump to a
+different steady value at ~16s -- neither of which a real, already-running pedal ever does.
+Prepending 3s of silence before any real content let the circuit reach its true,
+cold-start-independent operating bias first; every render taken after that showed the tone
+snapping to a single stable, unchanging level within about a second of starting. Cheap fix,
+not device-specific -- applied by default to every excitation this tool builds, silent segment
+included in the file (not stripped after generation), so it also gives the DC bias network real
+settling time before the `real` segment's own dynamics are what's being sampled. See internal
+engineering notes and that pedal's own investigation for the concrete before/after traces this
+was based on.
 """
 import argparse
 import hashlib
@@ -152,7 +153,7 @@ def main():
                          "rise) stress-tests saturation onset the way a real pick attack does, "
                          "across the whole spectrum at once, at a level the sweep-tail alone "
                          "doesn't guarantee (see check_transient_coverage.py's docstring -- this "
-                         "is the same gap that under-covered Tweed 5F6-A originally). T3K-sweep-v3 "
+                         "is the same gap that under-covered the tweed-style amp originally). T3K-sweep-v3 "
                          "has exactly this built in already (a 3-step discrete noise staircase "
                          "plus a continuous swell, found by scanning for high spectral-flatness "
                          "windows) -- reusing it beats synthesizing a new one from scratch.")

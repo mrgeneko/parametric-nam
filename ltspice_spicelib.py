@@ -3,9 +3,10 @@
 ngspice_spicelib.py's load_input/render_grid/render_one contract as closely as LTspice's own
 constraints allow.
 
-WHY THIS EXISTS. gen_ocd_ngspice.py's ideal tanh-bounded op-amp (`B{out} {out} 0
-V=4.5+3.0*tanh(2e4*V(vp,vm))`) cannot converge on real playing content in ngspice: found
-directly, re-rendering the full OCD excitation with ngspice_spicelib.render_grid's truncation
+WHY THIS EXISTS. The MOSFET-clipping pedal's ngspice-generator script's ideal tanh-bounded
+op-amp (`B{out} {out} 0 V=4.5+3.0*tanh(2e4*V(vp,vm))`) cannot converge on real playing content
+in ngspice: found directly, re-rendering the full excitation for that pedal with
+ngspice_spicelib.render_grid's truncation
 bug fixed (a render that ABORTS mid-way used to be silently accepted as "converged" if it had
 produced >= 50% of the expected samples -- see that fix's own docstring) showed EVERY one of 70
 renders across the full knob grid timing out at 300s, at every maxstep from 3e-6 down to 3e-8.
@@ -17,7 +18,7 @@ instead of a raw tanh expression) and explicit `.ic` initial-condition hints + `
 degenerate equilibrium for this circuit -- found by probing a bias node directly with a silent
 input and seeing it settle to 0V instead of the correct ~4.5V VREF-centered bias).
 
-Validated (Fulltone OCD, gen_ocd_ltspice.py): at a signal level low enough that ngspice CAN
+Validated (the MOSFET-clipping pedal, via its ltspice-generator script): at a signal level low enough that ngspice CAN
 converge (there's no ngspice ground truth at real playing levels -- see above), LTspice matches
 it almost exactly in steady state (ESR=0.0004, corr=1.0000) after excluding a short (<60ms)
 onset-settling transient from the .ic guess not being perfectly self-consistent. At hard drive,
@@ -31,7 +32,7 @@ CONTRACT DIFFERENCES FROM ngspice_spicelib.py (both inherent to LTspice, not sty
     `wavefile=` input is PCM-only (a FLOAT32 WAV fails: "Fatal Error: Bad wavefile format
     found"), and PCM is hard-bounded to +/-1.0 -- confirmed directly: writing a WAV with
     soundfile's PCM_24 subtype silently CLIPS any sample outside [-1, 1] with no error, so an
-    excitation with peaks well past 1V (routine in this pipeline -- OCD's real excitation peaks
+    excitation with peaks well past 1V (routine in this pipeline -- that pedal's real excitation peaks
     at 11.75V) would be silently corrupted at the input stage if written naively. `in_scale`
     is the divisor applied when writing (wav_value = raw_volts / in_scale, chosen so the file's
     own peak stays under 1.0); every gen_*_ltspice.py build_deck must apply the inverse gain
@@ -137,7 +138,7 @@ def ensure_save(deck):
     before any is read. Nobody should have to know this to render a circuit.
 
     NOT A GUESS. The traces come from the deck's own `.wave` line, which names exactly what it
-    writes -- necessary because the tap argument is not always that node (the Joyo deck writes
+    writes -- necessary because the tap argument is not always that node (the budget clone pedal's deck writes
     V(ltout) while tap='spk', so a `.save` built from `tap` would drop the very trace the
     .wave needs). A deck with no `.wave` at all is left alone; there is nothing to derive from.
 
@@ -189,7 +190,7 @@ def _read_result(raw_wav, dur_target_n, out_scale):
 
 DEFAULT_TIMEOUT_S_PER_AUDIO_S = 20.0  # see render_grid's timeout= docstring
 MIN_TIMEOUT_S = 300.0
-# Renders do NOT scale with core count. Measured on a 12-core machine: a 10 s Joyo probe took
+# Renders do NOT scale with core count. Measured on a 12-core machine: a 10 s budget-clone-pedal probe took
 # ~129 s running alone but blew past a 200 s ceiling with 8 concurrent -- a >=1.55x slowdown
 # where naive parallel_sims/usable_cores (8/11) predicts none at all. Efficiency cores count
 # toward cpu_count but are far slower, and LTspice is memory-bandwidth-hungry, so oversubscription
@@ -252,7 +253,7 @@ def render_grid(build_deck, jobs, tap, sr, dur_s, wav_path, in_scale, tmp,
     number for every caller -- found the hard way: a flat 120s default worked fine for
     grid_adequacy's short 8s probe clips but silently killed every job partway through a real
     60s excitation capture (measured needing ~7-11 min/render at maxstep=3e-6, ~11s wall-clock
-    per second of audio for OCD's stiffest corners), which LOOKS EXACTLY LIKE a genuine
+    per second of audio for that pedal's stiffest corners), which LOOKS EXACTLY LIKE a genuine
     non-convergence (every job "fails" and escalates through the whole rungs ladder) rather
     than the timeout-too-short bug it actually was. DEFAULT_TIMEOUT_S_PER_AUDIO_S=20 is ~2x that
     single measured device's worst observed ratio -- a working default, not a validated

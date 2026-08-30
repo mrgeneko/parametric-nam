@@ -3,7 +3,7 @@
 
 WHY THIS FILE EXISTS AS A FILE.
 The first fleet-wide truncation table (internal engineering notes, commit 9d986c5) was produced by an
-ad-hoc script that was never committed. When its Big Muff number (2.25e-02) later failed to
+ad-hoc script that was never committed. When its Large Muffin number (2.25e-02) later failed to
 reproduce -- a careful re-measurement on the same input, same circuit, same worst corner gives
 9.33e-03 -- there was nothing to audit and no way to find out which of the two was wrong. A
 measurement that decides whether we retrain the entire model fleet has to be re-runnable by
@@ -33,12 +33,12 @@ All renders at 256 Newton iterations, so under-convergence is not a confound (th
 failure and internal engineering notes cover it).
 
 KNOB SETTINGS. Both ends of every knob, plus both corners, plus the mid point -- and we report
-WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the Boss DS-1's Dist pot
+WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the reverse-linear-drive pedal's Dist pot
 is ReverseLinear, so all-max is MINIMUM drive.
 
 Usage:
     ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav \
-        --config ../parametric-nam-models/pedals/big-muff-pi-v1-66-5/config.toml
+        --config ../parametric-nam-models/pedals/mypedal/config.toml
 
 `--config` is the same TOML `run_pipeline.py`/`grid_adequacy.py` take (schx + knobs come straight
 from it, like every other analysis tool here) -- no registry, no `parametric-devices` dependency.
@@ -142,7 +142,7 @@ def load_device(config_path: Path) -> tuple[str, Path, list[str]]:
     """(name, schx, knobs) from a config.toml -- the same file run_pipeline.py trains from.
 
     knobs come from the config's own [knobs] table, not every real control on the device: a
-    recipe that pins a control in [fixed] (e.g. the Big Muff's Volume) isn't swept in training,
+    recipe that pins a control in [fixed] (e.g. Large Muffin's Volume) isn't swept in training,
     so it shouldn't be swept here either -- this measures the truncation error THIS RECIPE will
     actually see, not a hypothetical full-control sweep.
     """
@@ -274,7 +274,7 @@ def main() -> None:
                     help="total seconds of the input to actually render, as stratified windows "
                          "(default 10). Truncation is a property of the solver, not of sweep "
                          "length; windowed+pooled estimates the same whole-file quantity at a "
-                         "fraction of the cost. Validated on the Big Muff vs the documented "
+                         "fraction of the cost. Validated on Large Muffin vs the documented "
                          "whole-file table: ~1.3x HIGH at every rung (the safe direction -- "
                          "borderline circuits get more oversample, not less), same worst "
                          "setting, identical fall ratios. 0 = whole file (slow; the historical "
@@ -333,7 +333,7 @@ def main() -> None:
         atstr = ", ".join(f"{k}={v:g}" for k, v in sorted(at0.items())) if at0 else "-"
 
         # EVERY consecutive ratio, not just the first. Checking only cands[0]/cands[1] would have
-        # passed the JCM800 hot-rod as healthy -- it falls a respectable 4.4x from os=2 to os=4 and
+        # passed the British-stack amp's hot-rod variant as healthy -- it falls a respectable 4.4x from os=2 to os=4 and
         # then STALLS at 1.6x from 4 to 8. The stall is the finding; a verdict that reads only the
         # first rung reports the circuit as smooth and hides it.
         ratios = []

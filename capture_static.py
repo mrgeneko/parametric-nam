@@ -21,14 +21,14 @@ ensure_adequate_excitation) -- see EXCITATION ADEQUACY below for why that one's 
 the coupling.
 
 EXCITATION ADEQUACY: A GIVEN INPUT FILE ISN'T AUTOMATICALLY A GOOD FIT FOR A GIVEN
-CIRCUIT. Hit this for real on the JCM800 2203 power amp (sag): trained "in" 2.5
+CIRCUIT. Hit this for real on the British-stack amp's power-amp section (sag): trained "in" 2.5
 minutes (18 epochs) to a suspiciously good val ESR. Cause: T3K-sweep-v3.wav peaks at
 0.99 V, but a preflight sweep of that exact circuit showed it doesn't reach 99% of its
 own saturation ceiling until ~11.64 V input -- the standard excitation is calibrated
 for a PREAMP's input level, and this schx has no preceding gain stage to drive it
 that hard. The whole 190s render stayed in the linear region; the network learned an
 easy near-linear function and never saw the amp's actual nonlinearity. Same failure
-mode as the JCM800 gain-only PARAMETRIC excitation issue (see that config's blurb),
+mode as the British-stack amp's gain-only PARAMETRIC excitation issue (see that config's blurb),
 just discovered later because a static capture has no grid_adequacy-style pre-check.
 
 Fix: ensure_adequate_excitation() runs a saturation sweep (preflight.py's own
@@ -175,7 +175,7 @@ def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_di
     it isn't opt-in. Returns (report_dict_for_the_manifest, effective_input_path).
 
     margin=1.2: target the excitation's peak at 1.2x the measured 99%-onset voltage --
-    comfortably past the point output stops growing (the JCM800 gain-only parametric
+    comfortably past the point output stops growing (the British-stack amp's gain-only parametric
     fix used a similar ~1.1x margin against its own worst-case onset; 1.2x here since
     a static capture has just one setting to clear, not a whole knob grid's worst
     corner)."""
@@ -353,7 +353,7 @@ def write_model_and_learning_configs(widths: list, max_epochs: int, configs_dir:
     width jointly, as one masked model in one nam-full run (net.name="PackedWaveNet",
     per nam_full_configs/models/wavenet_packed.json), exporting a single
     SlimmableContainer .nam with one discrete submodel per width -- this export shape
-    was verified against a real released model (Deluxe Reverb.nam: 2 submodels,
+    was verified against a real released model (the low-wattage clean combo amp: 2 submodels,
     channels 3 and 8, max_value 0.5/1.0). Matches the fleet's own lite/full split
     without needing a separate capture per width.
 
@@ -561,7 +561,7 @@ def run_nam_full(data_cfg: Path, model_cfg: Path, learning_cfg: Path, outdir: Pa
             break
 
     # Graceful export after SIGINT (checkpoint reload + comparison plots + .nam write)
-    # took >300s on a heavy circuit (EVH 5150 Lead Full sag v30: still legitimately
+    # took >300s on a heavy circuit (the stiff high-gain amp head's sag variant: still legitimately
     # working, not stuck -- confirmed by the .nam existing and loading cleanly once it
     # did finish). A single blocking proc.wait(timeout=...) that raises
     # TimeoutExpired is also the wrong shape here regardless of the exact number: it's

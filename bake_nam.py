@@ -13,7 +13,7 @@ freeze the FiLM at a chosen setting → an identical static A2 → an official "
 
 Omitted knobs fall back to each knob's DECLARED default (config.parametric.
 parameters[].default) — not a blanket 0.5, which is wrong for many circuits
-(e.g. a Timmy's controls don't center at noon).
+(e.g. a pedal whose controls don't center at noon).
 
 BY DEFAULT this emits a DUAL-payload file: the baked static tone at top level (so any
 stock plugin plays it) PLUS the full original parametric model under the
@@ -71,7 +71,7 @@ def _knob_default(meta: dict) -> float:
 
 
 def _model_stem(inp: Path) -> str:
-    """'timmy_v4_optimal.param.nam' -> 'timmy_v4_optimal' (strip the DOUBLE extension)."""
+    """'myamp_v4_optimal.param.nam' -> 'myamp_v4_optimal' (strip the DOUBLE extension)."""
     n = inp.name
     for suf in (".param.nam", ".nam"):
         if n.endswith(suf):
@@ -90,7 +90,7 @@ def auto_name(inp: Path, baked: dict, channels=None) -> str:
     the same file rather than two. The tier width is included only when the caller pinned one,
     since tiers are genuinely different models and a pack mixing them would otherwise collide.
 
-        timmy_v4_optimal_Gain0.55_Bass0.5_Treble0.2.nam
+        myamp_v4_optimal_Gain0.55_Bass0.5_Treble0.2.nam
     """
     parts = [_model_stem(inp)]
     if channels is not None:

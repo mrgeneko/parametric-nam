@@ -12,8 +12,10 @@ livespice backend (no code changes needed for new circuits):
     # List all pots in a schx (omit --knobs):
     python gen_dataset_from_schx.py --backend livespice --schx circuit.schx
 
-cpp backend:
-    python gen_dataset_from_schx.py --backend cpp --circuit marshall_jcm800_2203_preamp_modded \\
+cpp backend (--knobs is required -- the harness has its own schematic registry this script
+cannot see, so there is no default knob list to fall back to):
+    python gen_dataset_from_schx.py --backend cpp --circuit myamp_preamp \\
+        --knobs gain,bass,middle,treble,volume \\
         --input sweep.wav --output ./training_data
 
 Output (sharded by 2-digit prefix — ~100 files per dir):
@@ -29,7 +31,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
 """
 
-import atexit, argparse, csv, fcntl, json, os, re, shutil, signal, subprocess, sys, threading, time, tomllib
+import atexit, argparse, csv, fcntl, json, os, re, shutil, signal, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -126,28 +128,6 @@ def check_oracle(backend: str) -> None:
             sys.exit(1)
 
 
-# Per-circuit ngspice defaults, keyed by a substring of the .schx filename. Applied
-# automatically when the matching CLI flag is unset, so a circuit's known-good
-# convergence/damping config isn't re-typed each run (CLI flags win). Analogous to
-# how the 5150 ot-damp/nfb-comp are hand-set today, but auto-derived per circuit.
-# Data lives in ngspice/circuit_defaults.toml, not here -- add a new circuit's
-# tuning there (a data file), not by editing this shared script.
-def _load_ngspice_circuit_defaults() -> dict:
-    path = HERE / "ngspice" / "circuit_defaults.toml"
-    if not path.exists():
-        return {}
-    with open(path, "rb") as f:
-        return tomllib.load(f)
-
-
-NGSPICE_CIRCUIT_DEFAULTS = _load_ngspice_circuit_defaults()
-
-# CPP backend only — the C++ harness has its own schematic registry
-CPP_CIRCUIT_KNOBS = {
-    "marshall_jcm800_2203_preamp_modded": ["gain_1", "gain_2", "bass", "middle", "treble", "volume"],
-    "marshall_jcm800_2203_preamp":        ["gain", "middle", "treble", "bass1", "volume"],
-}
-
 # ---------------------------------------------------------------------------
 # Orphan-process safeguard
 # Track all live Popen objects so an atexit / SIGTERM handler can kill them.
@@ -190,7 +170,7 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     Two kinds of failure, and they deserve different treatment:
 
       LOUD    the backend throws or refuses. Harmless -- you find out at once, and the permutation is
-              recorded as failed. The Boss MT-2 on livespice is this: Circuit.SimulationDiverged near
+              recorded as failed. The metal-distortion pedal on livespice is this: Circuit.SimulationDiverged near
               t=2.65s, exit 134, no output (its ~250x-gain distortion core is unstable under a fixed
               timestep, and oversample 2 -> 32 does not help). Declared anyway so you learn in two
               seconds instead of after every permutation has crashed in turn, and so you are pointed
@@ -249,13 +229,13 @@ def parse_schx_controls(schx_path: str) -> dict:
 
     We used to key on Name, and so swept things that are not knobs:
 
-        Dumble ODS   'Clean Master' and 'OD Master' share Group "Master" -- ONE knob, two sections.
-                     The shipped dataset swept `clean_master` and left OD Master parked at its
-                     default. On the real device those two wipers are on one shaft: that dataset
-                     covers a region of the knob space the amp CANNOT REACH, and the model was
-                     fitted to it.
-        Klon Centaur its dual-gang Gain is two 100k sections, now Group "Gain". Sweeping them
-                     independently means a 2-D grid where the device has ONE axis.
+        boutique dual-channel amp   'Clean Master' and 'OD Master' share Group "Master" -- ONE
+                     knob, two sections. The shipped dataset swept `clean_master` and left OD
+                     Master parked at its default. On the real device those two wipers are on one
+                     shaft: that dataset covers a region of the knob space the amp CANNOT REACH,
+                     and the model was fitted to it.
+        transparent-overdrive pedal its dual-gang Gain is two 100k sections, now Group "Gain".
+                     Sweeping them independently means a 2-D grid where the device has ONE axis.
 
     Permutations are therefore over CONTROLS: one column per knob, written to every section.
     """
@@ -383,12 +363,13 @@ class Result:
 # perm's own 99th-percentile |amplitude| (its "normal" ceiling, e.g. the clip rail). Both together:
 # the neighbor ratio catches single-sample-ness (real transients span many samples); the bulk ratio
 # keeps legitimate transients that ride near the perm's own peak from tripping it. Validated on the
-# jcm800-sag set: 0 false positives across 1284 clean perms, every clear overshoot (>2x the rail)
-# caught. A band-limited waveform physically cannot satisfy both at once, so this is a safe hard gate.
+# British-stack amp's sag set: 0 false positives across 1284 clean perms, every clear overshoot
+# (>2x the rail) caught. A band-limited waveform physically cannot satisfy both at once, so this is
+# a safe hard gate.
 SPIKE_NEIGHBOR_RATIO = 3.0
 SPIKE_BULK_RATIO = 2.0
 # Absolute floor: below this, don't even consider a sample a candidate spike, regardless of the
-# ratio checks. Found on the Boss DS-1 (sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
+# ratio checks. Found on the reverse-linear-drive pedal (sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
 # smooth, cross-solver-agreeing circuit response to genuine near-Nyquist sweep content (~12kHz,
 # only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
 # and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
@@ -484,10 +465,10 @@ def _filesource(raw_wav: Path, up: int, cache_dir: Path) -> str:
 
     So THE RETRY LADDER'S input_upsample ESCALATION WAS A COMPLETE NO-OP: rungs 1 and 2 re-rendered
     byte-identically to rung 0 and failed the same way, while the log cheerfully announced
-    "escalating to rung 1 ... input_upsample=2". The Boss DS-1's entire convergence story rests on
-    input_upsample. The one lever that fixes it was disconnected.
+    "escalating to rung 1 ... input_upsample=2". The reverse-linear-drive pedal's entire convergence
+    story rests on input_upsample. The one lever that fixes it was disconnected.
 
-    Upsampling matters and is genuinely double-edged (see ngspice/circuit_defaults.toml): ngspice's
+    Upsampling matters and is genuinely double-edged: ngspice's
     filesource has no interpolation mode, so it linearly interpolates the (t, v) pairs at whatever
     internal step it needs. Linear interpolation of near-Nyquist content is a crude reconstruction
     that ACCIDENTALLY low-passes it. Proper bandlimited upsampling removes that accidental damping and
@@ -590,7 +571,7 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
             sig = np.pad(sig, (0, expected_frames - len(sig)))
         sig = sig[:expected_frames]
         # THE DECIMATION FILTER CAN RING PAST THE SIGNAL'S OWN PEAK, isolated single-
-        # sample overshoots at fast transients -- found on the Boss DS-1 (Dist=1.0,
+        # sample overshoots at fast transients -- found on the reverse-linear-drive pedal (Dist=1.0,
         # a guitar pick-attack transient at t=51.6s): sig_hi (the pre-decimate,
         # correctly time-aligned upsampled signal) peaked at 1.007 there, but the
         # FIR-decimated output spiked to 1.074, a single out-of-range sample with
@@ -601,7 +582,7 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
         # chosen here). A lowpass filter should not synthesize peaks the input to
         # it didn't have, so clip to sig_hi's own peak -- self-referential, no
         # magic constant, and a no-op on the overwhelming majority of renders
-        # (verified on the DS-1: 4 samples out of 528,000 in the reproducer).
+        # (verified on the reverse-linear-drive pedal: 4 samples out of 528,000 in the reproducer).
         hi_peak = float(np.max(np.abs(sig_hi)))
         sig = np.clip(sig, -hi_peak, hi_peak)
     else:
@@ -622,10 +603,10 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
 # (isolated Newton overshoot, see its own docstring) returns an error string that matched NONE of
 # these keywords, so a spike failure was never escalated -- it failed once at the base rung and
 # gave up immediately, even though the retry ladder's whole design intent ("failures a stiffer
-# solve can actually fix") explicitly covers this exact failure mode, and the JCM800-sag precedent
-# (internal engineering notes #12) confirms oversample *can* clear these. Found on the Fender Twin (sag): the
-# real dataset generation run hard-failed ~87% of its first 107 permutations, nearly all on spike
-# errors that had never been given a single retry.
+# solve can actually fix") explicitly covers this exact failure mode, and the British-stack amp's
+# sag precedent (internal engineering notes #12) confirms oversample *can* clear these. Found on
+# the high-headroom clean amp (sag): the real dataset generation run hard-failed ~87% of its first
+# 107 permutations, nearly all on spike errors that had never been given a single retry.
 _CONVERGENCE_FAILURE = re.compile(
     r"diverg|NaN|Inf|timestep too small|singular|convergence|no convergence|"
     r"unstable|crest|truncated|timeout|iteration|spike|overshoot",
@@ -639,16 +620,17 @@ def _is_convergence_failure(err: str) -> bool:
 def _rungs(backend: str, oversample: int, ng: dict) -> list:
     """Escalating convergence settings, cheapest first.
 
-    We ALREADY KNEW how to fix these -- the Boss DS-1 needed input_upsample=4, the MT-2 needed
-    diode_cjo damping -- but that knowledge was hand-entered per circuit in circuit_defaults.toml
-    and NEVER REACHED FOR when a render actually failed. A failed permutation just recorded its
-    error and the run carried on with a hole in the dataset.
+    We ALREADY KNEW how to fix these -- the reverse-linear-drive pedal needed input_upsample=4,
+    the metal-distortion pedal needed diode_cjo damping -- but that knowledge lived only in a
+    caller's memory of which flags to pass, and was NEVER REACHED FOR when a render actually
+    failed. A failed permutation just recorded its error and the run carried on with a hole in
+    the dataset.
 
     So: escalate on failure, and record which rung won.
 
     The livespice ladder raises --iterations as well as --oversample, which matters more than it
     looks: livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS and 8 is not enough for stiff circuits.
-    The Ibanez TS-9 needs 45 -- at the default the SOLVER SILENTLY STOPS SHORT and hands back a
+    The mid-hump overdrive pedal needs 45 -- at the default the SOLVER SILENTLY STOPS SHORT and hands back a
     converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
     nothing reports it. (See hotspice, which now measures the cap per circuit.)
     """
@@ -657,21 +639,21 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # RUNG 0 IS ALREADY 256 ITERATIONS, and that is not paranoia -- it is a bug fix.
         #
         # livespice_cli defaults to 8 Newton iterations and 8 IS NOT ENOUGH for a stiff circuit.
-        # The Ibanez TS-9 at Drive=0.5 needs 45; below that THE SOLVER SILENTLY STOPS SHORT and
+        # The mid-hump overdrive pedal at Drive=0.5 needs 45; below that THE SOLVER SILENTLY STOPS SHORT and
         # hands back a converged-LOOKING answer. Measured against the same render at 256, on the
         # ACTUAL dataset input (sweep60_composite.wav): ESR 7.38e-03. That is -21 dB of error,
         # baked into the training data, with nothing to catch it. It is not a crash, so the retry
         # ladder below cannot save us -- there is no failure to retry.
         #
         # And it is FREE: LiveSPICE breaks out of the Newton loop the moment it converges, so a
-        # high ceiling costs nothing where it is not needed. Measured render time, TS-9 and Big
-        # Muff, --iterations 8 vs 128: identical to 0.01 s.
+        # high ceiling costs nothing where it is not needed. Measured render time, the mid-hump
+        # overdrive pedal and Large Muffin, --iterations 8 vs 128: identical to 0.01 s.
         #
         # An under-converged dataset is worse than a failed one. A failed permutation is a hole
         # you can see; an under-converged one is a lie you cannot.
         #
-        # ESCALATION CEILING: 256. Used to stop at os_*4 -- the Mesa Dual Rectifier Orange
-        # channel's Or Master=1.0 corner (max output into the reactive V30 load + sag)
+        # ESCALATION CEILING: 256. Used to stop at os_*4 -- the modern high-gain rectifier-style
+        # amp's Orange channel's Master=1.0 corner (max output into the reactive V30 load + sag)
         # exhausted os=8/16/32 identically as isolated Newton-overshoot spikes (2026-08-30
         # incident), needing a manual re-run past the old ceiling to find out whether more
         # oversample would even help. Doubling on to 256 by default makes that escalation
@@ -688,10 +670,10 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # ESCALATE BEYOND THE DEFAULTS, and never repeat one.
         #
         # The ladder used to be written as `max(up, 2), max(up, 4)` etc., which silently COLLAPSES for
-        # any circuit whose circuit_defaults.toml already applies the fixes. The Boss DS-1 ships with
-        # input_upsample=4, method=gear AND diode_cjo -- so every rung came out IDENTICAL, and a
-        # failing permutation was retried five times with exactly the same settings. A retry ladder
-        # that does not escalate is just a slower failure.
+        # any circuit whose caller already passes fixed --conv/--method/--input-upsample flags. The
+        # reverse-linear-drive pedal, run with input_upsample=4, method=gear AND diode_cjo already
+        # set -- every rung came out IDENTICAL, and a failing permutation was retried five times with
+        # exactly the same settings. A retry ladder that does not escalate is just a slower failure.
         #
         # NOTE `conv` is a DICT here ({"diode_cjo": "100p", ...}), parsed from the k=v,k=v CLI string
         # long before this point -- it is NOT the string it looks like. Treating it as one raised
@@ -706,7 +688,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
             if r != out[-1]:          # only if it actually changes something
                 out.append(r)
 
-        # tmax: cheapest-first, tried BEFORE input_upsample. Found on the Boss DS-1 (Dist<=0.4,
+        # tmax: cheapest-first, tried BEFORE input_upsample. Found on the reverse-linear-drive pedal (Dist<=0.4,
         # Tone>=0.6, sweep-v3-declicked.wav): a "ngspice killed by signal 11" crash at the
         # default tmax (one audio period, 20.8333u) that input_upsample escalation never fixed
         # (measured up to 4x -- no effect, consistent with input_upsample's OWN retirement note
@@ -730,10 +712,10 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         escalate(input_upsample=up * 2)          # BEYOND the default, not up to it
         escalate(input_upsample=up * 4)
 
-        if base.get("method") != "gear":         # the DS-1's fix
+        if base.get("method") != "gear":         # the reverse-linear-drive pedal's fix
             escalate(method="gear")
 
-        c = dict(out[-1].get("conv") or {})      # the MT-2's fix
+        c = dict(out[-1].get("conv") or {})      # the metal-distortion pedal's fix
         if "diode_cjo" not in c:
             c["diode_cjo"] = "100p"
             escalate(conv=c)
@@ -763,7 +745,8 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
 
     A failed permutation used to record its error and be forgotten -- leaving a hole in the
     dataset that only surfaced later as "WARNING: N .npy files but M OK rows". We already knew
-    how to fix these (the DS-1 needed input_upsample=4, the MT-2 needed diode_cjo damping); that
+    how to fix these (the reverse-linear-drive pedal needed input_upsample=4, the metal-distortion
+    pedal needed diode_cjo damping); that
     knowledge was just never reached for automatically.
 
     start_rung: begin the ladder here instead of at 0. Set from a previous run's params.csv --
@@ -846,7 +829,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             if oversample and oversample != 2:
                 args += ["--oversample", str(oversample)]
             # livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS, and 8 is not enough for stiff
-            # circuits -- the Ibanez TS-9 needs 45. Below that the solver stops short and returns
+            # circuits -- the mid-hump overdrive pedal needs 45. Below that the solver stops short and returns
             # a converged-LOOKING answer that is 5.8e-03 wrong, silently. Not a crash: worse.
             if iterations:
                 args += ["--iterations", str(iterations)]
@@ -949,7 +932,7 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
     # failure that must hard-stop the pipeline rather than get silently written into
     # outputs.npy (or crash mid-write with a confusing shape-mismatch traceback).
     #
-    # Time-gated (not every-N-files) heartbeat: a big grid (the JCM800 hot-rod's 1944 perms)
+    # Time-gated (not every-N-files) heartbeat: a big grid (the British-stack amp's hot-rod variant's 1944 perms)
     # spends real, silent seconds here, indistinguishable from a hang; a small one shouldn't
     # print anything at all.
     print(f"loading {n_perms} .npy file(s) ...", flush=True)
@@ -1064,7 +1047,7 @@ def input_provenance(wav: Path) -> dict:
 PROBE_LEAD_S = 1.00          # silence, so the solver can find its operating point.
                              # 1.0 s deliberately: it is the SAME warmup convention gen_dataset_from_schx
                              # already uses (warmup_s=1.0) and that the sweeps themselves open with.
-                             # 0.25 s was empirically enough for the DS-1, but having two different
+                             # 0.25 s was empirically enough for the reverse-linear-drive pedal, but having two different
                              # "how long until the circuit has settled" constants is how you end up
                              # with one of them quietly wrong.
 PROBE_RAMP_S = 0.05          # then ease into the signal instead of stepping into it
@@ -1078,7 +1061,7 @@ def write_probe_clip(sig, sr: int, path, lead_s: float = None) -> int:
     solution from an uninitialised state at t=0, and ngspice simply DIVERGES: "diverged at t~0",
     every rung, no output.
 
-    It cost a long detour to find. The Boss DS-1 failed at Dist=0.2 on an 8 s slice and I blamed, in
+    It cost a long detour to find. The reverse-linear-drive pedal failed at Dist=0.2 on an 8 s slice and I blamed, in
     order, the new sweep's chirps, the oversample `auto` had picked, and the retry ladder escalating
     the wrong way. All three were wrong: it failed IDENTICALLY on the old sweep, at every oversample,
     and at every input_upsample. The full 94 s file rendered fine -- because IT BEGINS WITH SILENCE.
@@ -1087,7 +1070,7 @@ def write_probe_clip(sig, sr: int, path, lead_s: float = None) -> int:
     The measurement must then SKIP the lead-in, or the probe scores its own warm-up transient.
 
     `lead_s`: override PROBE_LEAD_S for a circuit whose own settling time genuinely exceeds the
-    1.0 s default -- found directly on the Fulltone OCD (a ~5 s RC network, C10/RVOL2, same one
+    1.0 s default -- found directly on the MOSFET-clipping pedal (a ~5 s RC network, C10/RVOL2, same one
     build_excitation.py/preflight.py/prepare_excitation.py's --lead-silence-s already exists for).
     Without this, a probe window starting from an under-settled state doesn't just read a biased
     number -- it can render into a DIFFERENT, WRONG quasi-stable DC point depending on tiny
@@ -1212,7 +1195,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     ship a contaminated target. The finer render is not the truth; it is merely less wrong. Writing
     e_h for the error at timestep h, what you measure is ||e_h - e_h/2||, not ||e_h||, and the two
     differ by a constant factor because the errors are correlated and largely cancel. Measured on the
-    Big Muff (sweep60_composite, worst corner, whole file, 256 iterations):
+    Large Muffin (sweep60_composite, worst corner, whole file, 256 iterations):
 
         os     ESR vs 2*os (difference)     ESR vs os=32 (reference)     understated by
          2            2.83e-03                     9.33e-03                  3.3x
@@ -1222,7 +1205,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     So we render a reference at `ref_os` and compare every candidate against THAT.
 
     Probed at BOTH ENDS of every knob and at both corners -- "all knobs at max" is NOT reliably the
-    stiff setting (the Boss DS-1's Dist pot is ReverseLinear, so all-max is MINIMUM drive).
+    stiff setting (the reverse-linear-drive pedal's Dist pot is ReverseLinear, so all-max is MINIMUM drive).
 
     Probed on STRATIFIED WINDOWS spanning the input, with numerator and denominator POOLED across
     them: sum(err) / sum(sig) is exactly the whole-file ESR restricted to the sampled windows, and an
@@ -1243,7 +1226,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
         ref_os = min(ref_os, 8)
 
         # FEWER, LONGER WINDOWS -- because NGSPICE SEGFAULTS ON SHORT CLIPS.
-        # Measured on the Boss DS-1: a 2.00 s clip exits -11 (SIGSEGV) with no output; 3.00 s and up
+        # Measured on the reverse-linear-drive pedal: a 2.00 s clip exits -11 (SIGSEGV) with no output; 3.00 s and up
         # run fine. The probe was cutting 4 windows of 1 s and adding a 1 s lead -- landing on exactly
         # 2 s and crashing every render.
         #
@@ -1500,7 +1483,7 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
     solver stops short of the answer and returns a perfectly plausible waveform: normal RMS, normal
     crest, no NaN. Every check passes. The data is simply WRONG.
 
-    The Ibanez TS-9 at Drive=0.5 needs 45 Newton iterations. livespice_cli defaults to 8. On the
+    The mid-hump overdrive pedal at Drive=0.5 needs 45 Newton iterations. livespice_cli defaults to 8. On the
     real dataset input the resulting error is ESR 7.38e-03 -- -21 dB -- and it went straight into
     the training set of a shipped model with nothing to catch it.
 
@@ -1519,7 +1502,7 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
                                  adequate, but it must NEVER be an error -- an audit that fires on
                                  every circuit is an audit nobody reads.
 
-    (The first cut of this function doubled the oversample too, and duly reported the Big Muff --
+    (The first cut of this function doubled the oversample too, and duly reported Large Muffin --
     which is Newton-converged at 8 iterations, ESR 0.00e+00 -- as "UNDER-CONVERGED". It was
     measuring the method, not the mistake.)
 
@@ -1540,7 +1523,7 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
     import tempfile
 
     # BOTH ends of every knob, plus both corners. "All knobs at max" is NOT reliably the stiff
-    # setting: the Boss DS-1's Dist pot is ReverseLinear, so all-max is MINIMUM drive -- and its
+    # setting: the reverse-linear-drive pedal's Dist pot is ReverseLinear, so all-max is MINIMUM drive -- and its
     # truncation error is 1.9e-02 at the DEFAULTS and 3.3e-04 at all-max, i.e. 57x worse in the
     # direction we would not have looked. Probe both ends and let the measurement decide.
     picks = []
@@ -1824,7 +1807,7 @@ def acquire_generation_lock(out_dir: Path):
     passes every render/RMS/convergence check but its params.csv no longer lines up 1:1 with the
     combined outputs.npy -- ParamDataset pairs the i-th row with output row i, so knobs get
     matched to the WRONG audio (and rows past the .npy count run off the end). This is exactly
-    the failure that produced 288 duplicate top-gain rows in the jcm800-sag run (two harnesses,
+    the failure that produced 288 duplicate top-gain rows in the British-stack-sag run (two harnesses,
     28 concurrent renders).
 
     flock is advisory but auto-releases when the fd closes -- process exit, crash, or kill --
@@ -1886,7 +1869,8 @@ def main():
                     "tmax caps the max internal solver step; the default is one audio period "
                     "(20.8333u) regardless of oversample — set it SMALLER to force finer steps "
                     "through hard transients (slower). klu=1 opts into the KLU solver — measure "
-                    "first; it broke the 5150 and was slower on the DS-1 (see schx_to_ngspice.py). "
+                    "first; it broke the stiff amp head and was slower on the reverse-linear-drive "
+                    "pedal (see schx_to_ngspice.py). "
                     "Auto-set per-circuit if omitted.")
     ap.add_argument("--method", default="", choices=["", "trap", "gear"],
                     help="ngspice: integration method (default trap). Auto-set per-circuit if omitted.")
@@ -1900,17 +1884,19 @@ def main():
 
     # livespice backend
     ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
-    ap.add_argument("--knobs", help="comma-separated knob names to vary (livespice); "
-                               "omit to list all pots in the schx")
+    ap.add_argument("--knobs", help="comma-separated knob names to vary. livespice: omit to list "
+                               "all pots in the schx. cpp: required -- the harness has its own "
+                               "schematic registry this script cannot see, so there is nothing to "
+                               "default to.")
 
     # cpp backend
     ap.add_argument("--circuit", help="circuit name (cpp)")
 
     ap.add_argument("--gear-make", default="", help="physical gear manufacturer, written into "
-                     "the exported .nam's metadata (e.g. --gear-make 'Electro-Harmonix'). "
+                     "the exported .nam's metadata (e.g. --gear-make 'Manufacturer'). "
                      "Falls back to --circuit if omitted.")
     ap.add_argument("--gear-model", default="", help="physical gear model name, written into "
-                     "the exported .nam's metadata (e.g. --gear-model 'Big Muff Pi V1'). "
+                     "the exported .nam's metadata (e.g. --gear-model 'Model Name'). "
                      "Falls back to --circuit if omitted.")
     ap.add_argument("--gear-type", default="", help="kind of gear being modeled, written into "
                      "the exported .nam's metadata -- e.g. 'pedal', 'amp', 'amp_cab', 'preamp'. "
@@ -1952,7 +1938,7 @@ def main():
                          "start generation if the excitation's transient-bearing content never "
                          "reaches saturation at some knob-grid corner (checked via "
                          "check_transient_coverage.py against the full min/max hypercube "
-                         "corner set) -- exactly the gap that under-covered Tweed 5F6-A's "
+                         "corner set) -- exactly the gap that under-covered the tweed-style amp's "
                          "mixed low-volume/high-tone corner and produced a real ~100x blowup "
                          "there (the solo-only corner set this check used to run missed it "
                          "entirely -- see check_transient_coverage.py's _corners() docstring).")
@@ -1967,14 +1953,16 @@ def main():
     ap.add_argument("--defaults", help="per-knob DEFAULT value, k=v,... (in trained units). "
                     "Recorded in the .nam's parameters[].default so a bake with no --params "
                     "uses the circuit's real default position, not the range midpoint "
-                    "(e.g. a Timmy's controls don't center at noon).")
+                    "(e.g. a pedal whose controls don't center at noon).")
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
                          "truncation, the gap between the simulated circuit and the real one. At the "
                          "default of 2 that error EQUALS OR EXCEEDS the ESR of the model trained on "
-                         "the data for most of our fleet (Dumble 6.1x the model ESR, hot-rod 3.6x, "
-                         "Big Muff 1.0x, Timmy 1.0x) -- the target is wronger than the model, and "
+                         "the data for most of our fleet (the boutique dual-channel amp 6.1x the "
+                         "model ESR, the British-stack amp's hot-rod variant 3.6x, Large Muffin "
+                         "1.0x, the non-midpoint-default pedal 1.0x) -- the target is wronger than "
+                         "the model, and "
                          "capacity is being spent fitting it. 'auto' climbs 2/4/8/16 until the "
                          "truncation measured against a converged reference is under --trunc-target, "
                          "probing both ends of every knob. See internal engineering notes and "
@@ -2079,12 +2067,10 @@ def main():
     else:  # cpp
         if not args.circuit:
             ap.error("--circuit is required for --backend cpp")
-        if args.circuit not in CPP_CIRCUIT_KNOBS:
-            print(f"Unknown circuit '{args.circuit}'. Known: {list(CPP_CIRCUIT_KNOBS)}", file=sys.stderr)
-            sys.exit(1)
-        knobs = CPP_CIRCUIT_KNOBS[args.circuit]
-        if args.knobs:
-            knobs = [k.strip() for k in args.knobs.split(",")]
+        if not args.knobs:
+            ap.error("--knobs is required for --backend cpp (the harness has its own schematic "
+                     "registry this script cannot see, so there is no default knob list)")
+        knobs = [k.strip() for k in args.knobs.split(",")]
         circuit_label = args.circuit
 
     if not args.input:
@@ -2227,7 +2213,7 @@ def main():
     # Transient/saturation coverage gate (see internal engineering notes).
     # Hard-fails BEFORE the (slow, expensive) generation run starts if the excitation's
     # transient-bearing content never reaches saturation at some knob-grid corner --
-    # exactly the gap that under-covered Tweed 5F6-A and produced the FiLM/LeakyReLU
+    # exactly the gap that under-covered the tweed-style amp and produced the FiLM/LeakyReLU
     # runaway there, found only after a full ~16h training run. Only supported for the
     # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
@@ -2278,11 +2264,9 @@ def main():
         insig, _isr = sf.read(str(in_wav))
         if insig.ndim > 1:
             insig = insig.mean(axis=1)
-        # convergence overrides: CLI --conv/--method/--input-upsample win, else per-circuit default (auto)
-        _cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
-        _conv_str = args.conv or _cdef.get("conv", "")
-        _method = args.method or _cdef.get("method", "trap")
-        _input_up = args.input_upsample or int(_cdef.get("input_upsample", 1) or 1)
+        _conv_str = args.conv or ""
+        _method = args.method or "trap"
+        _input_up = args.input_upsample or 1
         conv = dict(kv.split("=", 1) for kv in _conv_str.split(",") if "=" in kv)
         fsrc = out_dir / "input_fsrc.txt"
         fsrc_sr = sr  # NOTE: local to the filesource write -- `sr` itself (48kHz)
@@ -2380,7 +2364,7 @@ def main():
     # forever. Every later row then landed in a file with NO header, and any downstream
     # csv.DictReader (e.g. run_pipeline.py's check_missing_permutations) silently misreads the
     # first DATA row as the header -- every dict key becomes garbage, no error until something
-    # tries r['idx'] and KeyErrors. (2026-08-02: hit exactly this on the EVH 5150 v30 dataset --
+    # tries r['idx'] and KeyErrors. (2026-08-02: hit exactly this on the stiff amp head's v30 dataset --
     # a killed first attempt left a headerless params.csv the resumed run appended onto.)
     #
     # Check content, not just existence, and REPAIR in place if headerless (append-mode alone

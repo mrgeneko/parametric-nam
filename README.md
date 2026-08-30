@@ -66,7 +66,7 @@ python param_train.py --dataset /tmp/mypedal_ds --output /tmp/mypedal.param.nam 
 
 The third path — building from a SPICE schematic instead of real captures — is more involved:
 it needs the oracle (`livespice-cli`) built separately and a config recipe for the circuit. But
-`examples/muff/` holds a real, complete one: the `.schx` circuit and an annotated
+`examples/large_muffin/` holds a real, complete one: the `.schx` circuit and an annotated
 `config.toml`. Two things are not in the repo:
 
 1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
@@ -89,28 +89,28 @@ cd parametric-nam && ./setup.sh && . .venv/bin/activate
 
 # For a NEW circuit, start here -- discovers the real controls straight from the .schx and
 # measures a real starting oversample, rather than hand-typing a config from scratch (shown
-# here against the bundled muff circuit as a concrete example; see "Bring your own circuit"
+# here against the bundled Large Muffin circuit as a concrete example; see "Bring your own circuit"
 # below for the full explanation):
-python scaffold_config.py --schx "examples/muff/large_muffin.schx" \
-    --output /tmp/muff_scaffold.config.toml
+python scaffold_config.py --schx "examples/large_muffin/large_muffin.schx" \
+    --output /tmp/large_muffin_scaffold.config.toml
 # scaffold_config.py's own knob grid is a role-aware PLACEHOLDER, not a measured one --
 # review it (and anything else you want to change) by hand, then run
-# `grid_adequacy.py --config /tmp/muff_scaffold.config.toml --apply` to refine it into a
+# `grid_adequacy.py --config /tmp/large_muffin_scaffold.config.toml --apply` to refine it into a
 # real, measured grid before training on it for real.
 
 # This walkthrough continues with the bundled, already-reviewed example config instead of
 # the placeholder above, so it stays fast and reproducible:
-python run_pipeline.py --config examples/muff/config.toml \
-    --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
-    --checkpoint-dir /tmp/muff_ckpt
+python run_pipeline.py --config examples/large_muffin/config.toml \
+    --dataset-dir /tmp/large_muffin_ds --nam-output /tmp/large_muffin.param.nam \
+    --checkpoint-dir /tmp/large_muffin_ckpt
 # The example config's target-steps (25000) is a starting point, not a guarantee -- it may
 # not reach a low ESR by then. Raise --target-steps (or pass --epochs/--repeats directly)
 # for a longer fixed run, or resume the same checkpoint dir past its original end point with:
-#   python run_pipeline.py --config examples/muff/config.toml ... \
-#       --resume /tmp/muff_ckpt/latest.pt --target-steps 50000
+#   python run_pipeline.py --config examples/large_muffin/config.toml ... \
+#       --resume /tmp/large_muffin_ckpt/latest.pt --target-steps 50000
 ```
 
-This trains an actual muff model end to end. See `examples/muff/muff.md` for the circuit notes.
+This trains an actual Large Muffin model end to end. See `examples/large_muffin/large_muffin.md` for the circuit notes.
 
 ### Bring your own circuit
 
@@ -124,12 +124,12 @@ by hand (see **Per-circuit configs** below for the format). Then finish with
 `grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
 measured one. No other repos are required.
 
-**Before training on it for real** (the bundled muff example's own config cuts this corner —
+**Before training on it for real** (the bundled Large Muffin example's own config cuts this corner —
 see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
 with `check_transient_coverage.py`. `run_pipeline.py` only checks a **weaker version of this
 automatically** (Step 0b below, `check_input_headroom.py`) — a WARN-only check at *default*
 (0.5) knob settings, not a hard gate, and not every knob corner. It's not a substitute:
-skipping the full corner-by-corner check is exactly how a real shipped model (Tweed 5F6-A)
+skipping the full corner-by-corner check is exactly how a real shipped model (the tweed-style amp)
 ended up never seeing saturation at some corners and misbehaving on real hot input later (see
 `docs/scripts.md`).
 
@@ -244,7 +244,7 @@ table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
 
 **This repo carries no per-device configs of its own** beyond the bundled example — a
 `config.toml` is a *living* recipe you maintain alongside your own circuits, distinct from
-a specific run's *frozen* `reproduce.sh` output. `examples/muff/config.toml` is a fully
+a specific run's *frozen* `reproduce.sh` output. `examples/large_muffin/config.toml` is a fully
 worked, annotated example of the format; `examples/template.config.toml` is a minimal
 blank one to copy for a new device.
 
@@ -474,7 +474,7 @@ Three requirements, each of which silently breaks it if missed:
    update check; it is neither.
 2. **`~/Library/Application Support/LTspice/lib/sub/` must exist**, holding
    `UniversalOpAmp2.lib` and friends. The installer's `postinstall` unpacks `lib.zip` there.
-   `gen_ocd_ltspice.py` and `gen_joyo_ltspice.py` reference that path directly.
+   Per-device LTspice deck generators in your private devices repo may reference that path directly.
 3. **If a newer `LTspice.app` is already in `/Applications`, the 17.2.4 installer will not
    replace it** — macOS Installer refuses to overwrite a bundle carrying a higher
    `CFBundleVersion`, so 26.0.2.1 blocks it. It fails *silently*: the receipt registers

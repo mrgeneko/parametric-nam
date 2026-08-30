@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-# Default prefix -> knob-name map, matching the 5150 DST community captures this was built for.
+# Default prefix -> knob-name map, matching the amp-community-style "MyAmp DST" captures this was built for.
 # A token's ALPHA PREFIX (not just its first letter) is the dict key, so "Rvb"/"Rsn"/"Prsn" never
 # collide with "R" or with each other -- filename splitting isolates the whole prefix run before
 # lookup, see parse_filename_tokens.
@@ -28,14 +28,14 @@ _TOKEN_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
 
 def parse_filename_tokens(stem: str, prefix_map: dict, scale_overrides: dict) -> tuple:
     """Extract every "PREFIXdigits" token from a filename stem (e.g. "G2, B5, M5, T5, Rvb0" or
-    "Kot DST T3 Drv2") into {knob_name: float_value}, skipping any token whose prefix isn't in
-    prefix_map (unknown/device-name tokens like "Kot"/"DST"/"5150" are expected and silently
+    "Xyz DST T3 Drv2") into {knob_name: float_value}, skipping any token whose prefix isn't in
+    prefix_map (unknown/device-name tokens like "Xyz"/"DST"/"MyAmp" are expected and silently
     ignored, not an error).
 
     Scans EVERY comma-or-whitespace-separated word in the whole stem, not just the last word of
     each comma segment -- a filename can carry more than one relevant token per segment with no
-    comma between them (e.g. "T3 Drv2" has two: King of Tone captures use "Kot DST T3 Drv2", Tone
-    and Drive back to back with only a space). Treating commas as just another word-separator
+    comma between them (e.g. "T3 Drv2" has two: some dual-drive pedal captures use "Xyz DST T3
+    Drv2", Tone and Drive back to back with only a space). Treating commas as just another word-separator
     (rather than iterating comma-segments and taking each one's last word) handles both
     conventions with the same code path.
 

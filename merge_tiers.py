@@ -12,8 +12,8 @@ PyTorch, and w3/w8 come through byte-for-byte from the file you already shipped.
 
   # add a separately-trained w5 tier to an existing [3,8] model -> [3,5,8]
   python merge_tiers.py \
-      jcm800-2203-preamp.composite.param.nam  jcm800preamp_w5.best_full.param.nam \
-      --out jcm800-2203-preamp.3-5-8.param.nam
+      myamp.composite.param.nam  myamp_w5.best_full.param.nam \
+      --out myamp.3-5-8.param.nam
 
 Each input may be a SlimmableContainer (all its submodels are taken) or a bare
 ParametricWaveNet (taken as one submodel — e.g. a single-width run's export).

@@ -3,7 +3,7 @@
 (--backend {livespice,ngspice-deck}, see render_backends.py). Closes the manual human-in-the-loop
 gap that's existed between find_saturation_point.py and build_excitation.py: until now,
 someone had to read an onset number by hand and pick --realistic-peak/--sweep-peaks themselves
-(this is literally how every existing config's excitation was sized, e.g. Timmy's "peak sized
+(this is literally how every existing config's excitation was sized, e.g. the non-midpoint-default pedal's "peak sized
 from a direct Gain=0.5-vs-1.0 output-V-vs-input-V sweep" config comment).
 
 Runs find_saturation_point() at EVERY corner of the knob grid (reusing check_transient_
@@ -199,7 +199,7 @@ def main():
     ap.add_argument("--margin", type=float, default=2.0,
                      help="sweep-peaks max = margin x worst-case onset (default 2.0x -- past "
                           "the onset, not just at it, matching this repo's own precedent, e.g. "
-                          "Timmy's excitation peak sized with headroom past where Gain's own "
+                          "the non-midpoint-default pedal's excitation peak sized with headroom past where Gain's own "
                           "effect saturates)")
     ap.add_argument("--sweep-peak-fracs", default="0.25,0.5,0.75,1.0",
                      help="comma list of fractions of the margined max, passed as --sweep-peaks")
@@ -219,7 +219,7 @@ def main():
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="passed through to build_excitation.py. 'auto' uses the derived "
                          "--sweep-peaks, so a broadband instant-attack burst is inserted at "
-                         "EVERY level -- the Boss DS-1 shipped a model that spiked to 12.39 "
+                         "EVERY level -- the reverse-linear-drive pedal shipped a model that spiked to 12.39 "
                          "peak on a real pick attack because its excitation never showed it a "
                          "stable response to one. Default off, preserving prior behaviour.")
     ap.add_argument("--synth-burst-dur", type=float, default=None,

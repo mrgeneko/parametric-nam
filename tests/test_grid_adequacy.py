@@ -275,7 +275,7 @@ class TestRendererNgspiceDeck:
 
     def test_lead_silence_s_override_reaches_write_probe_clip(self, tmp_path, monkeypatch):
         """The exact regression this override exists for: a circuit whose real settling time
-        exceeds write_probe_clip's 1.0s default (the Fulltone OCD's ~5s C10/RVOL2 network) needs
+        exceeds write_probe_clip's 1.0s default (the MOSFET-clipping pedal's ~5s C10/RVOL2 network) needs
         this to actually reach the probe clips grid_adequacy builds -- not just be accepted and
         silently ignored."""
         pedal_dir = self._write_pedal_module(tmp_path)
@@ -298,7 +298,7 @@ class TestRendererNgspiceDeck:
         assert seen_lead_s and all(v == 5.0 for v in seen_lead_s)
 
     def test_ngspice_deck_maxstep_reaches_the_backend(self, tmp_path, monkeypatch):
-        """The exact regression this override exists for: the Fulltone OCD's most extreme
+        """The exact regression this override exists for: the MOSFET-clipping pedal's most extreme
         Gain/Tone corner needed maxstep~1e-7 (measured via measure_ngspice_timestep.py),
         far finer than NgspiceBackend's 3e-6 default -- this must actually reach the backend
         grid_adequacy renders through, not just be accepted and silently ignored."""

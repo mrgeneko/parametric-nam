@@ -40,8 +40,9 @@ peak would flatten that deliberate multi-level structure). See ngspice_spicelib.
 load_input() docstring.
 
 --probe-node and --ok-max-peak are device-specific (the per-device files this replaces used
-different values: 'spk'/50 for OCD and BD-2, 'nspout'/200 for the JC-120, 'OUT'/50 for OD-3 and
-HM-2) -- pass them explicitly rather than relying on a default that happened to fit one device.
+different values: 'spk'/50 for one pedal and another, 'nspout'/200 for a solid-state chorus
+combo amp, 'OUT'/50 for a mid-boost overdrive pedal and a heavy-metal distortion pedal) --
+pass them explicitly rather than relying on a default that happened to fit one device.
 """
 import argparse
 import csv

@@ -1,0 +1,10 @@
+# Optional: only needed for `--backend ngspice` / `--backend ngspice-deck` (see
+# docs/backends.md). The default `livespice` backend does not need this.
+#
+#   pip install -r requirements.txt -r requirements-ngspice.txt
+#
+# spicelib is GPL-3.0 licensed (https://github.com/nunobrum/spicelib) -- kept out of the
+# default requirements.txt so installing the base toolchain doesn't pull in a GPL
+# dependency unless you actually need the ngspice backend.
+
+spicelib==1.6.3

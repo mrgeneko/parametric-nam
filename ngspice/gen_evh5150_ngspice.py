@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Prototype: translate the EVH 5150 Lead FULL amp to an ngspice netlist.
+"""Prototype: translate the stiff high-gain amp head's Lead FULL circuit to an ngspice netlist.
 
 Proof-of-concept for an *offline* ngspice dataset-generation backend, as an
 alternative to livespice_cli for the stiff / high-gain / combined circuits where
 LiveSPICE's fixed-timestep solver diverges and needs extreme oversampling.
 
-The 5150 Lead *full* amp is the motivating case: in LiveSPICE it diverges to
+The stiff amp head's Lead *full* circuit is the motivating case: in LiveSPICE it diverges to
 ~+95 dB at the default 2x oversample and needs --oversample 32 (~158 s per 5 s
 of audio) to stay bounded. ngspice, with adaptive timestepping + trapezoidal
 integration, converges cleanly on the same circuit with NO oversample hack.
@@ -55,7 +55,7 @@ NO_NFB = os.environ.get('NO_NFB') == '1'
 PREAMP_ONLY = os.environ.get('PREAMP_ONLY') == '1'
 FLIP_SEC = os.environ.get('FLIP_SEC') == '1'
 
-# ---- component list mirrors amps/gen_evh5150_full.py in the parametric-devices repo ----
+# ---- component list mirrors this amp's own generator script in the parametric-devices repo ----
 def gstage(name, gin, gres, gleak, pr, ck, cc, bp, pout, cpl):
     g = 'n%s_g' % name; p = 'n%s_p' % name; k = 'n%s_k' % name
     e = [('Rg%s' % name, 'R', {'Resistance': gres}, {'A': gin, 'B': g}),
@@ -152,7 +152,7 @@ def cval(s):  # '22 nF'->'22n', '1 µF'->'1u', '250 pF'->'250p'
 
 def node(n): return '0' if n == 'GND' else n
 
-lines = ['* EVH 5150 Lead Full -> ngspice (Koren tubes, baked pots, coupled-inductor OT)', '']
+lines = ['* Stiff high-gain amp head, Lead Full -> ngspice (Koren tubes, baked pots, coupled-inductor OT)', '']
 # --- Koren tube subcircuit library (params = LiveSPICE Koren-family values) ---
 lines += [
  '* --- 12AX7 triode (Koren): Mu=83.5 Ex=1.4 Kg1=1060 Kp=600 Kvb=300 ---',
@@ -227,7 +227,7 @@ lines += ['',
  # small"); Sparse completes it. And itl4 < ~1000 aborts at 32.5ms -- the step
  # cut-and-retry does NOT substitute for Newton iterations at the hard moments,
  # so the high limit is load-bearing on this amp (it costs nothing where it
- # does not bind: the DS-1 renders bit-identically at itl4=10 vs 500).
+ # does not bind: the reverse-linear-drive pedal renders bit-identically at itl4=10 vs 500).
  '.options method=%s reltol=1e-3 abstol=1e-9 vntol=1e-6 itl1=1000 itl4=1000 gmin=1e-12' % METHOD,
  '.control',
  'set filetype=ascii',

@@ -1,18 +1,18 @@
-# Big Muff Pi V1 (66#5) — worked example.
+# Large Muffin (a classic silicon fuzz/sustain pedal circuit) — worked example.
 #
 # The .schx is bundled alongside this file; the excitation is NOT — download T3K-sweep-v3.wav
 # from https://www.tone3000.com/capture into examples/ first (see README, "The sweep file").
 # No sibling parametric-devices or sweep-files checkout is required beyond that. See
-# "muff.md" next to this file for the circuit notes.
+# "large_muffin.md" next to this file for the circuit notes.
 #
-#   python run_pipeline.py --config examples/muff/config.toml \
-#       --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
-#       --checkpoint-dir /tmp/muff_ckpt
+#   python run_pipeline.py --config examples/large_muffin/config.toml \
+#       --dataset-dir /tmp/large_muffin_ds --nam-output /tmp/large_muffin.param.nam \
+#       --checkpoint-dir /tmp/large_muffin_ckpt
 #
 # Output paths (--dataset-dir/--nam-output/--checkpoint-dir) stay on the CLI so one
 # recipe drives many runs; any value here is overridden by a CLI flag.
 
-schx       = "examples/muff/large_muffin.schx"
+schx       = "examples/large_muffin/large_muffin.schx"
 
 # INPUT CHANGED 2026-08-28: examples/sweepv5.wav (removed from this repo) -> T3K-sweep-v3.wav,
 # the standard TONE3000 capture sweep. Download it from https://www.tone3000.com/capture.
@@ -20,7 +20,8 @@ schx       = "examples/muff/large_muffin.schx"
 # the better and more standard choice: it is what the ecosystem captures against (so NAM's
 # blip alignment calibrates for real instead of falling back to delay=0), and its attack
 # transients are genuine, where sweepv5's had been thinned -- the documented root cause of the
-# Boss DS-1 shipping a model that spiked to 12.39 peak on a real pick attack.
+# reverse-linear-drive pedal (see level_band_esr.py) shipping a model that spiked to 12.39 peak on
+# a real pick attack.
 #
 # !! THE MEASURED NUMBERS BELOW WERE TAKEN ON sweepv5.wav AND HAVE NOT BEEN RE-MEASURED. !!
 # Both the oversample choice and the knob grid are properties of the circuit AND THE INPUT --
@@ -80,7 +81,8 @@ crop-len   = 48000
 #
 # `epochs` stays a knob because it is NOT a budget quantity: it is the LR SCHEDULE LENGTH
 # (CosineAnnealingLR, T_max=epochs, one step per epoch). Deriving IT instead breaks on a large grid --
-# the JCM800's 1944 perms would give nine epochs, i.e. nine points on the cosine curve.
+# the British-stack amp's hot-rod variant's 1944 perms would give nine epochs, i.e. nine points on
+# the cosine curve.
 #
 # DETERMINE IT WITH AN OPEN-ENDED RUN:  --epochs 0 --restart-period 50
 # That switches to SGDR warm restarts -- the LR cycles down and RESTARTS -- so you get a BEST-PER-CYCLE
@@ -94,7 +96,7 @@ target-steps = 25000
 
 # --- knob grid (12 x 5 = 60 perms) ---
 #
-# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/muff/config.toml --target 0.009
+# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/large_muffin/config.toml --target 0.009
 # It renders the circuit's TRUE output at each cell's midpoint and compares it against interpolating
 # the two neighbours. The residual is the error the GRID imposes -- no model in it. Above the ESR you
 # are chasing, the grid is the limiting factor and no amount of training can fix it.
@@ -108,7 +110,7 @@ target-steps = 25000
 #     Sustain 0.85-1.00                     0.0899      10x OVER TARGET -- unlearnable
 #     Tone    all 8 cells                   0.0000      perfectly interpolable
 #
-# So it was simultaneously too dense almost everywhere and too coarse in the one place a Big Muff
+# So it was simultaneously too dense almost everywhere and too coarse in the one place this pedal
 # actually lives. This grid has HALF the permutations and ZERO cells over target (worst: 0.0051).
 # Tone stays at 5 rather than the 3 the measurement permits: its points are nearly free, and 3
 # conditioning points is thin for a shipped model. Its linearity is not luck -- the tone control is a
@@ -125,7 +127,7 @@ TONE    = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 # Volume is a passive output divider (level only, no tone) — fixed, not trained.
 #
-# This makes this a VARIANT of the device, not "the Big Muff": it freezes a knob a user would
+# This makes this a VARIANT of the device, not "Large Muffin" itself: it freezes a knob a user would
 # expect to turn. That is a deliberate choice (a level control teaches the model nothing a gain
 # stage does not), but it is a property of the product and it should be stated rather than
 # discovered.

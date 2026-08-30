@@ -8,13 +8,13 @@ to <dataset-dir>/pipeline.log (or --log).
 Steps auto-skip when their outputs already exist; use --force-generate
 to wipe and regenerate, or --skip-*/--only-* for manual control.
 
-Example — full Dumble clean pipeline:
+Example — full boutique dual-channel amp clean pipeline:
     python run_pipeline.py \\
-        --dataset-dir ~/work/tmp/dumble_clean \\
-        --nam-output   ~/work/tmp/dumble_clean.param.nam \\
-        --checkpoint-dir ~/work/tmp/dumble_clean_ckpt \\
+        --dataset-dir ~/work/tmp/amp_clean \\
+        --nam-output   ~/work/tmp/amp_clean.param.nam \\
+        --checkpoint-dir ~/work/tmp/amp_clean_ckpt \\
         --backend livespice \\
-        --schx "$HOME/work/parametric-devices/amps/Dumble Overdrive Special Preamp.schx" \\
+        --schx "$HOME/work/parametric-devices/amps/Boutique Dual-Channel Amp Preamp.schx" \\
         --knobs volume,mid,treble,middle,bass,clean_master \\
         --range volume=0.1,0.3,0.5,0.7,0.9 \\
         --range mid=0.0,1.0 \\
@@ -408,7 +408,7 @@ def build_release(args, fh, timings=None):
     # "lite", last is always "full", middles keep their literal width label -- so the CSV column
     # (display) and the file-role suffix (nam_variant tag) can differ and must be matched by
     # POSITION, not by hardcoding "val_esr_full"/"val_esr_lite" (that only ever matched a [3,*,8]
-    # run and KeyError'd on anything else, e.g. the EVH 5150 [5,8] run this was found on).
+    # run and KeyError'd on anything else, e.g. the stiff amp head's [5,8] run this was found on).
     tiers = []  # list of (role_suffix, display_label, best_row)
     final = None
     if metrics.exists():
@@ -538,7 +538,7 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
 
     A SPICE convergence failure isn't just "one fewer training example" -- it can
     indicate a real problem with the circuit or with how well the solver's
-    settings cover the parameter space (see the Boss DS-1 case: two failures at
+    settings cover the parameter space (see the reverse-linear-drive pedal case: two failures at
     Dist=0.6, a non-boundary value, turned out to be a fixable convergence gap in
     the ngspice BJT model, not incidental flakiness). It's also load-bearing for
     correctness: ParamDataset indexes outputs.npy by each sample's position in the
@@ -607,7 +607,7 @@ def build_train_cmd(args, dataset_dir, epochs, repeats):
     # param_train.py's own default matches "off" when the flag is omitted -- it doesn't
     # (param_train.py --amp also defaults to "fp16"), so a caller's explicit --amp off
     # request silently fell through to fp16 instead, with nothing reporting the mismatch.
-    # See the 2026-07-31 dumble-rock incident: this crashed training with an MPS/GradScaler
+    # See the 2026-07-31 boutique-amp incident: this crashed training with an MPS/GradScaler
     # TypeError that --amp off was specifically meant to avoid.
     train_cmd += ["--amp", args.amp]
     if args.init_from:           train_cmd += ["--init-from", args.init_from]
@@ -690,7 +690,7 @@ def main():
                    help="oversampling factor, or 'auto' to measure the truncation-error-minimizing "
                         "value per circuit (ngspice and livespice both supported -- see "
                         "gen_dataset_from_schx.py --oversample auto). Default 2; high-gain amps need more "
-                        "for stability, e.g. EVH 5150 Lead full = 32.")
+                        "for stability, e.g. the stiff amp head's Lead full circuit = 32.")
     g.add_argument("--trunc-target", type=float, default=1e-3,
                    help="with --oversample auto: the truncation ESR to get under (default 1e-3)")
     g.add_argument("--random",       type=int, metavar="N",
@@ -720,7 +720,7 @@ def main():
     g.add_argument("--timeout-mult", type=float, default=1.0,
                    help="Scale gen_dataset_from_schx.py's auto-computed per-permutation timeout "
                         "(default: %(default)s). Some circuits have a genuine, reproducible "
-                        "solver slowdown at specific corners (e.g. the EVH 5150 family at low "
+                        "solver slowdown at specific corners (e.g. the stiff amp head's family at low "
                         "Lead Pre, ~20-40x slower without ever actually diverging) -- set this "
                         "per-circuit via `timeout-mult = N` in --config once measured, rather "
                         "than discovering it from a failed run and re-running with the flag. "
@@ -767,7 +767,7 @@ def main():
                    help="Ask for a TRAINING BUDGET directly and let repeats be derived from it, "
                         "instead of backing into one. total steps = epochs × n_perms × repeats × "
                         "(1-val_split) / batch. Because that depends on n_perms, changing the knob "
-                        "grid otherwise changes how long the model trains — regridding the Big Muff "
+                        "grid otherwise changes how long the model trains — regridding Large Muffin "
                         "126→60 perms silently HALVED its budget. 0 = off (use --repeats).")
     g.add_argument("--skip-grid-check", action="store_true",
                    help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
@@ -1061,12 +1061,12 @@ def main():
             # It depends on n_perms. Which means CHANGING THE KNOB GRID SILENTLY CHANGES HOW LONG THE
             # MODEL TRAINS, and nobody was watching. Two ways that already bit:
             #
-            #   - Regridding the Big Muff from 14x9=126 to 12x5=60 HALVED its budget (24,300 steps ->
+            #   - Regridding Large Muffin from 14x9=126 to 12x5=60 HALVED its budget (24,300 steps ->
             #     11,700). The resulting model would have looked worse and the regrid would have been
             #     blamed, inverting the truth.
             #   - repeats=30 was copied into every config, so the budget is a side-effect of how many
-            #     knobs a circuit happens to have: the Big Muff got ~11.7k steps and the JCM800
-            #     hot-rod (9x6x6x6 = 1944 perms) got ~369k. A 30x spread, chosen by nobody.
+            #     knobs a circuit happens to have: Large Muffin got ~11.7k steps and the British-stack
+            #     amp's hot-rod variant (9x6x6x6 = 1944 perms) got ~369k. A 30x spread, chosen by nobody.
             #
             # So: derive it, print it, and let a config ask for a budget directly (target-steps)
             # rather than back into one via repeats.
@@ -1109,7 +1109,7 @@ def main():
                 # `epochs` is NOT a budget quantity -- it is the LR SCHEDULE LENGTH. CosineAnnealingLR
                 # uses T_max=epochs and steps once per epoch, so epochs decides how finely the LR
                 # anneals and how many validation/checkpoint opportunities there are. Derive it from
-                # the budget and a big grid destroys it: the JCM800 hot-rod has 1944 permutations, so
+                # the budget and a big grid destroys it: the British-stack amp's hot-rod variant has 1944 permutations, so
                 # a data-derived repeats=94 gives 2569 steps/epoch and epochs = 24300/2569 = NINE.
                 # Nine points on the cosine curve, nine chances to checkpoint a best model.
                 #

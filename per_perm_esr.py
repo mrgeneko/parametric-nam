@@ -48,8 +48,8 @@ def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
 
     BATCHED over permutations and CHUNKED over time -- this used to be one
     full-length batch-1 forward per permutation per tier, by far the longest
-    post-training stage on big grids (a 1,944-perm JCM800 grid is hours; the
-    288-perm 5150 is ~an hour per tier). The input audio is identical across
+    post-training stage on big grids (a 1,944-perm British-stack-amp grid is hours; the
+    288-perm stiff-amp-head one is ~an hour per tier). The input audio is identical across
     permutations, so `batch_perms` param vectors ride one expanded input chunk;
     time is processed in `chunk_s` windows with `context_n` samples of real
     left-context prepended. The model is strictly causal with a 6,347-sample

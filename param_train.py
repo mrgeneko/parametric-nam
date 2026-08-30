@@ -161,7 +161,7 @@ class FiLM(nn.Module):
         self.net = nn.Linear(cond_dim, 2 * channels)
         # Small NON-zero weight so the knob modulates from step 0. A pure-zero init
         # leaves FiLM at identity for ALL cond, and it then under-learns subtle /
-        # level-invariant knob effects (the 5150 gain knob changes tone but not
+        # level-invariant knob effects (the stiff amp head's gain knob changes tone but not
         # level — exactly that case), producing a near-dead knob. Bias still starts
         # near-identity: gamma≈1, beta≈0.
         nn.init.normal_(self.net.weight, std=0.1)
@@ -251,7 +251,7 @@ def register_knob_boost_hooks(model: nn.Module, param_names: list[str],
     faster without touching the loss function (which stays an honest,
     unweighted measure of fit quality) or any other knob's learning rate --
     unlike --film-lr-mult, which boosts the whole conditioning vector at once.
-    Generic over any knob name / any device: this has no TS-9-, Drive-, or
+    Generic over any knob name / any device: this has no mid-hump-overdrive-, Drive-, or
     circuit-specific logic, it only needs a name present in param_names.
     """
     col_mult: dict[int, float] = {}
@@ -405,7 +405,7 @@ def _input_level_dbu(v0dbfs_volts: float) -> float:
     to NAM's own formula, but the INPUT to it is not a measurement. There is no physical
     interface anywhere in this (ngspice/livespice) pipeline -- V0dBFS is the schx author's
     ASSUMED nominal input level for the circuit, not anything measured. It's a plausible
-    stand-in (the DS-1's 0.1V is a commonly-cited "typical guitar pickup output" figure,
+    stand-in (the reverse-linear-drive pedal's 0.1V is a commonly-cited "typical guitar pickup output" figure,
     not an arbitrary constant) but its provenance has not been verified per-schx against a
     documented source -- treat the exported input_level_dbu as an assumption a host's
     calibration UI can act on, not a measured calibration reference."""
@@ -650,7 +650,7 @@ class ParametricA2(nn.Module):
             # Declared default: the circuit's real default knob position (used by
             # bake_nam when no --params is given). Falls back to the range midpoint
             # only if the circuit doesn't declare one — midpoint is wrong for many
-            # controls (e.g. a Timmy's don't center at noon).
+            # controls (e.g. a non-midpoint-default pedal's don't center at noon).
             dflt = defaults.get(name)
             dflt = float(dflt) if dflt is not None else round((lo + hi) / 2, 4)
             entry = {
@@ -1107,8 +1107,8 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> t
     our own measurement (internal engineering notes), NOT an appeal to NAM.
 
     This is the whole point. Plain MSE is an ABSOLUTE error, so a crop's influence on the
-    gradient is proportional to its ENERGY — which has two consequences we measured on the
-    Big Muff and both of them are bad:
+    gradient is proportional to its ENERGY — which has two consequences we measured on
+    Large Muffin and both of them are bad:
 
       * ACROSS the knob grid, output RMS spans 0.090 .. 0.755 — a 70x ENERGY ratio. Under MSE
         the loudest 8% of permutations take 28% of the gradient and the quietest half get 17%.
@@ -1116,8 +1116,8 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> t
         static model's. It was never only a capacity problem.
 
       * WITHIN a permutation, a decaying note's tail is worth nothing. On the most distorted
-        Big Muff setting, windows below -40 dB of peak are 8.2% of the DURATION and 0.00% of
-        the GRADIENT. That is the Boss DS-1 bug: as a note fades, the model drops the
+        Large Muffin setting, windows below -40 dB of peak are 8.2% of the DURATION and 0.00% of
+        the GRADIENT. That is the reverse-linear-drive pedal's bug: as a note fades, the model drops the
         distortion, because staying dirty down there earns it nothing.
 
     Dividing by each example's own energy makes every permutation, and every crop, count
@@ -1199,7 +1199,7 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
     per tier over just that tier's own parameters. Joint clipping means a tier
     with much larger gradients can dominate the shared norm and set the *other*
     tier's effective step size almost entirely — measured directly on a live
-    [5,6]-width TS-9 run: the wider tier's mean grad norm was ~5x the narrower
+    [5,6]-width mid-hump-overdrive-pedal run: the wider tier's mean grad norm was ~5x the narrower
     tier's (96% of the combined squared norm from 58% of the combined parameter
     count), and the joint clip triggered on every sampled step. NAM's own
     PackedLightningModule has the identical joint-clip shape (no per-submodel
@@ -1300,7 +1300,7 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
     to be loudest, so the reported number (and therefore best-checkpoint
     selection) could vary by tens of percent from one random crop draw to the
     next, independent of actual model quality -- see param_train.py's own
-    esr_per_example() docstring ("the Boss DS-1 bug") for why training's loss
+    esr_per_example() docstring ("the reverse-linear-drive pedal's bug") for why training's loss
     already avoided this; validate() just never got the same fix.
 
     val_passes repeats the ENTIRE val_loader this many times, averaging every pass
@@ -1570,7 +1570,7 @@ def main():
                          "restart. Every full-LR restart forces a loss spike that costs several "
                          "epochs of the new cycle just re-descending to where the previous cycle "
                          "already was (observed: ~7 epochs avg, up to ~30/49 on some late cycles "
-                         "of an OCD run) before any net-new progress happens. Decaying the "
+                         "of a MOSFET-clipping-pedal run) before any net-new progress happens. Decaying the "
                          "ceiling shrinks that recovery cost at the price of shrinking later-cycle "
                          "exploration too. 1.0 = no decay (default, matches original SGDR paper, "
                          "which flagged per-restart eta_max decay as worth trying but didn't test "
@@ -1580,12 +1580,12 @@ def main():
                     help="Open-ended mode: stop automatically after this many consecutive "
                          "SGDR cycles in which NO tier minted a new best val ESR — the "
                          "stopping rule internal engineering notes specifies, which until now "
-                         "was executed by a human watching the log (the 5150 run burned "
+                         "was executed by a human watching the log (the stiff amp head's run burned "
                          "~2.5h past its plateau waiting for one). Compared at CYCLE "
                          "granularity, i.e. at matched LR phase, so the cosine-tail "
                          "artifact that killed per-epoch patience (a best always lands "
                          "near each trough) cannot fire. Default 3, not the doc's 2: "
-                         "replaying the OD-3 run's metrics.csv showed improvements arrive "
+                         "replaying the mid-boost overdrive pedal's run's metrics.csv showed improvements arrive "
                          "in bursts with 100+-epoch droughts — 2 would have stopped at "
                          "ep 1150 and forfeited a further 16-23%% ESR that landed by 1689. "
                          "Sparse-capture datasets (whose val metric is noisiest) may want "
@@ -1621,7 +1621,7 @@ def main():
                          "land in train and val -- internal engineering notes), so a big split buys "
                          "only noise-reduction on the checkpoint-selection signal, which "
                          "--val-passes already provides: 0.05 x 4 passes scores twice the crops "
-                         "of the old 0.1 x 1. The Dumble production runs used 0.02 without "
+                         "of the old 0.1 x 1. The boutique dual-channel amp's production runs used 0.02 without "
                          "issue; halving the split also returns ~5%% of the step budget to "
                          "actual training.")
     ap.add_argument("--val-passes", type=int, default=4,
@@ -1664,12 +1664,13 @@ def main():
                          "uses GradScaler loss scaling; bf16 needs none (fp32 exponent range) "
                          "but has fewer mantissa bits. "
                          "Made fp16 default 2026-07-28 for the throughput win over fp32 "
-                         "(production-shape training measured COMPUTE-bound on MPS, KoT: "
-                         "~1.7 s/step of conv work, TS-9 w4+w8 measured ~2.9x s/step faster "
+                         "(production-shape training measured COMPUTE-bound on MPS, the "
+                         "dual-drive boutique pedal: ~1.7 s/step of conv work, the mid-hump "
+                         "overdrive pedal w4+w8 measured ~2.9x s/step faster "
                          "than fp32) -- the choice of fp16 specifically (vs bf16) was never "
                          "re-examined at the time, just the more commonly-reached-for half "
-                         "type. Switched default fp16 -> bf16 2026-08-09 after a Guv'nor "
-                         "training run (see internal engineering notes): fp16 was "
+                         "type. Switched default fp16 -> bf16 2026-08-09 after a mid-gain "
+                         "distortion pedal training run (see internal engineering notes): fp16 was "
                          "intermittently overflowing under autocast (hot-gain-knob + "
                          "loud-transient crops pushing activations past its ~65504 ceiling), "
                          "producing nan losses -- GradScaler verified to correctly skip the "
@@ -1679,9 +1680,9 @@ def main():
                          "Switched default bf16 -> off (fp32) 2026-08-09, same day, after the "
                          "bf16 fix turned out to only address the nan/instability issue, NOT "
                          "the separate ESR plateau bf16 was stuck at -- resuming that same "
-                         "Guv'nor run at fp32 broke through it (4 new best-ESR epochs within "
+                         "mid-gain distortion pedal run at fp32 broke through it (4 new best-ESR epochs within "
                          "45 minutes of resuming, after bf16 had been flat since epoch 2998), "
-                         "and a tweed5f6a run on a different machine, also switched to fp32, "
+                         "and a tweed-style-amp run on a different machine, also switched to fp32, "
                          "saw 11 ESR improvements in the following 48 epochs. Both are "
                          "consistent with bf16's reduced mantissa (7 bits) introducing enough "
                          "per-step arithmetic error (previously measured 8e-4-6.5e-3, rivaling "
@@ -1724,7 +1725,7 @@ def main():
                          "separately (each to --clip-norm) instead of one joint call over "
                          "every tier's parameters combined. Default (off) matches NAM's own "
                          "PackedLightningModule, which has no per-submodel clip override "
-                         "either. Motivation: measured on a live [5,6] TS-9 run, the wider "
+                         "either. Motivation: measured on a live [5,6] mid-hump-overdrive-pedal run, the wider "
                          "tier's gradients had ~5x the norm of the narrower tier's (96%% of "
                          "the combined squared norm from 58%% of the combined parameters) and "
                          "the joint clip triggered on every sampled step -- the narrower "
@@ -1790,7 +1791,7 @@ def main():
     # --- LoRA training is disabled (2026-08-27) -------------------------------------------
     # Not a code problem: the mechanism works, the C++ fast path supports it since
     # NeuralAmpModelerCore cc0a4a8, and the numerics are tested. It has not paid off on
-    # SHIPPED ESR -- on the one device where both were tried (JCM800 preamp+power sag), the
+    # SHIPPED ESR -- on the one device where both were tried (the British-stack amp's preamp+power sag), the
     # FiLM-only 5ch+9ch bundle beats the FiLM+LoRA 4ch+8ch one (0.06016/0.02191 vs
     # 0.06186/0.02403) and is the one marked CURRENT. Widening a tier is the same remedy for
     # the same capacity ceiling and costs no schema bump, no rank to choose, and no minimum
@@ -1818,7 +1819,7 @@ def main():
     # --spectral-norm's power-iteration (nn.utils.parametrizations.spectral_norm's
     # _power_method -> F.normalize -> torch.div) hits a real MPS kernel gap under fp16
     # autocast: RuntimeError: Failed to create function state object for:
-    # div_true_strided_float_half. Confirmed 2026-08-04 (JCM800 gain-only pipeline run,
+    # div_true_strided_float_half. Confirmed 2026-08-04 (the British-stack amp's gain-only pipeline run,
     # crashed at the very first training step). This is NOT a general MPS+fp16 problem --
     # --amp fp16 was made the default 2026-07-28 specifically FOR measured MPS throughput
     # gains on ordinary (non-spectral_norm) training, so blanket-forcing --amp off on every
@@ -1848,11 +1849,11 @@ def main():
     train_ds, val_ds = torch.utils.data.random_split(
         dataset, [n_train, n_val],
         generator=torch.Generator().manual_seed(args.seed))
-    # drop_last=True on BOTH loaders: 2026-07-21, King of Tone (train 3554, val 394 --
+    # drop_last=True on BOTH loaders: 2026-07-21, the dual-drive boutique pedal (train 3554, val 394 --
     # neither divides evenly by batch_size=64) hung on MPS within 1-2 epochs, fresh or
-    # resumed, while OD-3 (train 3456, val 384 -- BOTH exact multiples of 64) never did,
+    # resumed, while the mid-boost overdrive pedal (train 3456, val 384 -- BOTH exact multiples of 64) never did,
     # in any test tonight. The real difference: a dataset whose sizes don't divide evenly
-    # forces a smaller last batch every epoch (KoT: 34 then 64 then 10), so MPS has to
+    # forces a smaller last batch every epoch (the dual-drive boutique pedal: 34 then 64 then 10), so MPS has to
     # keep re-specializing MRSTFT's stft() kernels for multiple shapes instead of one --
     # a documented class of MPSGraph deadlock (github.com/jamiepine/voicebox#905). Losing
     # up to batch_size-1 samples/epoch (here: 34 train, 10 val, ~1%/2.5%) is a small,
@@ -1861,7 +1862,7 @@ def main():
     # ... but drop_last must never EMPTY a loader. With fewer samples than one batch, the
     # only batch is a partial one, drop_last discards it, and the loader yields nothing:
     # validate() then divides by n=0 and the run dies with a bare ZeroDivisionError several
-    # minutes in, pointing at arithmetic rather than at the split. Hit on the Joyo -- 675
+    # minutes in, pointing at arithmetic rather than at the split. Hit on the budget clone pedal -- 675
     # permutations split 642/33 against batch_size 64, so the whole validation set vanished.
     # The MPS shape-stability argument above only applies when a full batch survives.
     train_drop = n_train >= args.batch_size

@@ -136,7 +136,7 @@ excitations — `measure_truncation.py` and `grid_adequacy.py` both measure thro
 
 Closes the manual gap `build_excitation.py` above leaves: someone has to read a saturation-onset
 number by hand and pick `--realistic-peak`/`--sweep-peaks` themselves — literally how every
-existing device's excitation was sized before this tool existed (e.g. the Timmy's excitation,
+existing device's excitation was sized before this tool existed (e.g. the non-midpoint-default pedal's excitation,
 peak-sized from a direct output-V-vs-input-V sweep at one hand-picked knob setting).
 
 Runs `find_saturation_point.py` at **every corner** of the knob grid (the same all-min/all-max/
@@ -163,15 +163,15 @@ python prepare_excitation.py --backend livespice \
 
 # ngspice-deck:
 python prepare_excitation.py --backend ngspice-deck \
-    --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \
+    --pedal-dir ~/work/parametric-devices/pedals --module gen_device_ngspice \
     --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \
-    --real-clip ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \
-    --output ~/work/tmp/ocd_excitation.wav
+    --real-clip ~/work/parametric-devices/pedals/device_realistic_clip.wav \
+    --output ~/work/tmp/device_excitation.wav
 ```
 
 **`--peak-max-v`** (default 40, the sweep ceiling `find_saturation_point` hunts within) needs to
 sit well above the true onset or you read a false onset off your own probe's ceiling instead of
-the real plateau — caught directly on the Fulltone OCD: `--peak-max-v 10` reported a suspicious
+the real plateau — caught directly on the MOSFET-clipping pedal: `--peak-max-v 10` reported a suspicious
 9.947V onset (right at its own ceiling); re-measuring at `--peak-max-v 25` gave the real,
 comfortably-interior 7.836V. 40V suits an amp; use something like 3–5V for a small pedal circuit.
 
@@ -186,7 +186,7 @@ Pre-generation gate answering a narrower, more dangerous question than "does the
 enough peak somewhere": does the excitation's **transient-bearing** content (the real-playing
 segment, not just the sweep tail) actually reach saturation at **every** knob-grid corner?
 
-This is not hypothetical — it's the exact failure this tool was built to catch. Tweed 5F6-A's
+This is not hypothetical — it's the exact failure this tool was built to catch. The tweed-style amp's
 `--realistic-peak` had been chosen for input-signal realism, not cross-checked against the
 measured onset, so the real-playing content stayed in the *linear* region at every corner tested
 while only the sweep (a smooth tone, no attack shape) crossed into saturation there. The network
@@ -599,13 +599,13 @@ release) if `render_parametric` itself isn't built.
 Calls `plot_tone_response.py` above automatically to produce the release bundle's
 `tone_response.svg`/`.md`. Its own defaults assume a private archive layout you don't
 have; override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the
-bundled `examples/muff/` one — continuing straight from the
+bundled `examples/large_muffin/` one — continuing straight from the
 [Try it now](../README.md#try-it-now) run:
 
 ```bash
-RUN=/tmp/muff DS=/tmp/muff_ds \
-SCHX=examples/muff/large_muffin.schx \
-CONFIG=examples/muff/config.toml \
+RUN=/tmp/large_muffin DS=/tmp/large_muffin_ds \
+SCHX=examples/large_muffin/large_muffin.schx \
+CONFIG=examples/large_muffin/config.toml \
     ./release_run.sh
 ```
 Packages a finished (or killed) `run_pipeline.py` run into a verified release bundle:

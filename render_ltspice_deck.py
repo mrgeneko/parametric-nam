@@ -3,7 +3,7 @@
 LTspice counterpart of render_ngspice_deck.py, for a device whose ngspice-deck version can't
 converge on real playing content at all (see ltspice_spicelib.py's own docstring: a
 razor-steep tanh-bounded op-amp B-source is a genuine Newton-solver dead end in ngspice,
-independent of timestep -- confirmed on the Fulltone OCD, 70/70 renders across the full knob
+independent of timestep -- confirmed on the MOSFET-clipping pedal, 70/70 renders across the full knob
 grid timing out at every maxstep from 3e-6 down to 3e-8).
 
   Single render at a knob setting:

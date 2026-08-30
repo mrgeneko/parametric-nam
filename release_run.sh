@@ -28,14 +28,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-RUN="${RUN:-$HOME/work/tmp/bigmuff_v4}"                  # <RUN>.best_<tier>.param.nam + <RUN>.log
+RUN="${RUN:-$HOME/work/tmp/large_muffin_v4}"             # <RUN>.best_<tier>.param.nam + <RUN>.log
 CKPT="${CKPT:-${RUN}_ckpt}"                              # best.pt, best_<tier>.pt, metrics.csv
-DS="${DS:-$HOME/work/tmp/bigmuff_v4_ds}"
-SCHX="${SCHX:-$HOME/work/parametric-devices/pedals/Big Muff Pi V1 (66#5).schx}"
+DS="${DS:-$HOME/work/tmp/large_muffin_v4_ds}"
+SCHX="${SCHX:-$HOME/work/parametric-devices/pedals/Large Muffin.schx}"
 MODELS="${MODELS:-$HOME/work/parametric-nam-models}"
 CATEGORY="${CATEGORY:-pedals}"
-CIRCUIT="${CIRCUIT:-big-muff-pi-v1-66-5}"
-PREFIX="${PREFIX:-bigmuff}"
+CIRCUIT="${CIRCUIT:-large-muffin}"
+PREFIX="${PREFIX:-large_muffin}"
 CONFIG="${CONFIG:-$MODELS/$CATEGORY/$CIRCUIT/config.toml}"   # training config, for reproduce.sh -- lives in parametric-nam-models, not here
 PY_BIN="${PY_BIN:-$HERE/.venv/bin/python}"
 STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
@@ -410,7 +410,7 @@ for i in $(seq 0 $LAST_I); do esr_inline="${esr_inline:+$esr_inline · }${TIERS[
 
 # The framing depends on what the CURRENTLY published bundle (if any) was trained as -- and it is
 # DETECTED, not assumed. "Supersedes the residual-head bundles / first correct forward" is only true
-# if the prior bundle was actually residual. Once a circuit has migrated to skip (as Big Muff did on
+# if the prior bundle was actually residual. Once a circuit has migrated to skip (as Large Muffin did on
 # 2026-07-13), a newer run merely fits the SAME forward better and the prior skip run IS a valid
 # baseline; claiming otherwise would be a false provenance claim in a permanent record. So read the
 # prior bundle's head_mode rather than treating "a bundle exists" as "residual".

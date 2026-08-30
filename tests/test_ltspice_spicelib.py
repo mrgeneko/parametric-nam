@@ -48,7 +48,7 @@ class TestLoadInput:
 
     def test_written_wav_never_exceeds_pcm_full_scale_for_a_loud_excitation(self, tmp_path):
         # This is THE reason in_scale exists: a real excitation in this pipeline routinely
-        # peaks well past 1V (OCD's own excitation peaks at 11.75V). Writing that directly as
+        # peaks well past 1V (the MOSFET-clipping pedal's own excitation peaks at 11.75V). Writing that directly as
         # PCM would silently clip at +/-1.0 with no error -- confirmed directly this session.
         wav = tmp_path / "loud.wav"
         write_wav(wav, 1000, [0.0, 11.75, -11.75])
@@ -155,7 +155,7 @@ class TestEnsureSave:
         assert ".save V(ltout)" in out
 
     def test_uses_the_wave_node_not_the_tap_argument(self):
-        """The Joyo deck writes V(ltout) while its tap is 'spk' -- a .save built from the tap
+        """The budget clone pedal's deck writes V(ltout) while its tap is 'spk' -- a .save built from the tap
         would drop the very trace .wave needs, breaking the output this path exists for."""
         out = ensure_save(f"* d\nEoutscale ltout 0 spk 0 0.1\n{self.WAVE}\n.end\n")
         assert ".save V(ltout)" in out

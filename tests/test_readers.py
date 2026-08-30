@@ -381,7 +381,7 @@ def test_load_config_maps_knobs_fixed_and_defaults(tmp_path):
     assert out["knobs"] == "SUSTAIN,TONE"
     assert out["ranges"] == ["SUSTAIN=0.0,0.5,1.0", "TONE=0.0,1.0"]
     assert out["fixed_params"] == "VOLUME=1.0"
-    assert out["defaults"] == "SUSTAIN=0.3"     # the Timmy case: a real default, not midpoint
+    assert out["defaults"] == "SUSTAIN=0.3"     # the non-midpoint-default pedal case: a real default, not midpoint
     assert out["widths"] == "3,4,8"             # list -> the string --widths expects
     assert out["epochs"] == 400
 

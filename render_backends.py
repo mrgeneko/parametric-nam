@@ -147,7 +147,7 @@ class LtspiceBackend:
         # at better than ~20x realtime. That is a per-render WALL figure, so it does not account
         # for parallel_sims renders competing for the same cores: on a slow circuit the default
         # can kill every job and report it as "RENDER FAILED", indistinguishable from a genuine
-        # convergence failure. Measured on the Joyo American Sound, a 10 s probe takes ~129 s
+        # convergence failure. Measured on the budget clone pedal, a 10 s probe takes ~129 s
         # alone (inside the 200 s default) but well past it with 8 running concurrently.
         self.timeout = timeout
 

@@ -21,7 +21,7 @@ def _sig(n, rms, seed=0):
 
 class TestScaleInvariance:
     """THE bug. MSE is an ABSOLUTE error, so an example's pull on the gradient is proportional
-    to its ENERGY. Across the Big Muff's knob grid output RMS spans 0.090..0.755 — a 70x energy
+    to its ENERGY. Across Large Muffin's knob grid output RMS spans 0.090..0.755 — a 70x energy
     ratio — so the loudest 8% of permutations took 28% of the gradient and the quietest half got
     17%. The parametric model neglected the quiet settings, which is why its ESR sat above a
     static model's.
@@ -54,7 +54,7 @@ class TestScaleInvariance:
     def test_quiet_and_loud_permutations_contribute_equally(self):
         """The 70x-energy-ratio case, end to end. Under ESR both examples in the batch must pull
         on the gradient by comparable amounts; under MSE the loud one dominates."""
-        quiet_t = _sig(4096, rms=0.09)                 # quietest Big Muff permutation
+        quiet_t = _sig(4096, rms=0.09)                 # quietest Large Muffin permutation
         loud_t = _sig(4096, rms=0.755, seed=2)         # loudest
         quiet_p = quiet_t + _sig(4096, rms=0.009, seed=3)    # both 10% relative error
         loud_p = loud_t + _sig(4096, rms=0.0755, seed=4)
@@ -267,7 +267,7 @@ class TestValidateReportsPerExampleESR:
 
 class TestParamLossWiring:
     def test_default_is_esr(self):
-        """--loss esr must stay the default. Reverting it restores the DS-1 fade-out AND the
+        """--loss esr must stay the default. Reverting it restores the reverse-linear-drive pedal's fade-out AND the
         quiet-setting under-fit, while making the headline ESR look better. See internal engineering notes."""
         import inspect
         sig = inspect.signature(ParamLoss.__init__)

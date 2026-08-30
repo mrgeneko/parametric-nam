@@ -275,7 +275,7 @@ def test_wet_from_wav_reads_aiff_captures_too(monkeypatch, tmp_path):
 def test_wet_capture_exts_accepts_wav_and_aiff_rejects_everything_else():
     assert gdc.WET_CAPTURE_EXTS == (".wav", ".aif", ".aiff")
     accepted = {".nam", *gdc.WET_CAPTURE_EXTS}
-    assert Path("Klon G5.aiff").suffix.lower() in accepted
-    assert Path("Klon G5.AIF").suffix.lower() in accepted
-    assert Path("Klon G5.wav").suffix.lower() in accepted
-    assert Path("Klon G5.mp3").suffix.lower() not in accepted
+    assert Path("MyPedal G5.aiff").suffix.lower() in accepted
+    assert Path("MyPedal G5.AIF").suffix.lower() in accepted
+    assert Path("MyPedal G5.wav").suffix.lower() in accepted
+    assert Path("MyPedal G5.mp3").suffix.lower() not in accepted

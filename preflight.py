@@ -5,8 +5,8 @@ training dataset. It renders a handful of short probe points through the oracle 
 generation when a knob is dead, moves the WRONG WAY, or the input-level calibration is
 implausible -- the three failure modes that have each cost a full render + train cycle:
 
-  * dead knob      -- Klon Tone, Deluxe Reverb Middle (0.000 effect)
-  * reversed knob  -- Fulltone OCD Tone (treble FELL as the knob rose)
+  * dead knob      -- the transparent-overdrive pedal's Tone, the low-wattage clean combo amp's Middle (0.000 effect)
+  * reversed knob  -- the MOSFET-clipping pedal's Tone (treble FELL as the knob rose)
   * input mis-cal  -- input_level_dbu ~25 dB hot (V0dBFS is a circuit-drive
                       voltage, not an interface reference)
 
@@ -27,7 +27,7 @@ default:
   1. ROLE-AWARE BASELINE (--eq-check-drive-level, cheap, no extra renders): while checking an
      EQ/tone knob, every drive/gain-classified OTHER knob (classify()'s 'drive' kind) is held
      LOW instead of the usual 0.5 center, so the circuit isn't already self-saturating from
-     its own gain control regardless of input level. Confirmed directly on Fulltone OCD's
+     its own gain control regardless of input level. Confirmed directly on the MOSFET-clipping pedal's
      ngspice deck: this alone fixed a false Tone-REVERSED reading that --find-peak's input-
      level scaling (below) barely moved.
   2. INPUT-LEVEL SCALING (--find-peak / --clean-probe-peak): when a saturation ceiling is
@@ -84,8 +84,8 @@ def _band(y, f_lo, f_hi):
     """Energy in [f_lo, f_hi). Hann-windowed -- NOT optional.
 
     An unwindowed (rectangular) FFT has -13dB first sidelobes falling only 6dB/octave, so a
-    loud band leaks into a quiet one and swamps it. That is not hypothetical: on the Joyo
-    American Sound the 40-200Hz band sits ~51dB above 400-4000Hz, and turning Bass up 11x
+    loud band leaks into a quiet one and swamps it. That is not hypothetical: on the budget
+    clone pedal the 40-200Hz band sits ~51dB above 400-4000Hz, and turning Bass up 11x
     raised the *measured* 400-4000 energy 114x (2.23 -> 255.1) -- pure leakage. Both bands
     then scale together, the lo ratio moves a few percent, its sign is noise, and preflight
     called a correctly-wired Bass control REVERSED. Hann-windowed, the same band reads
@@ -265,7 +265,7 @@ def main():
     #                  and therefore the only correct reference for input_level_dbu.
     # --seconds takes a PREFIX, and an excitation built by build_excitation.py puts its
     # loud content LAST (real playing, then amplitude-stepped sweeps, then transient bursts).
-    # Measured on the Joyo's 38 s excitation: the 10 s prefix peaks at 3.940 V against the
+    # Measured on the budget clone pedal's 38 s excitation: the 10 s prefix peaks at 3.940 V against the
     # file's 14.833 V -- 11.5 dB down -- so deriving the exported dBu from the probe slice
     # understated it by exactly that, while labelling it "training input peak".
     probe_peak = float(np.abs(xprobe).max()) + 1e-12
@@ -492,7 +492,7 @@ def main():
         report["input_calibration"] = ic
 
     # A truncated probe can be far quieter than the file it gates: --seconds takes a PREFIX,
-    # and build_excitation.py puts its loud content LAST. Measured on the Joyo's 38 s
+    # and build_excitation.py puts its loud content LAST. Measured on the budget clone pedal's 38 s
     # excitation, the 10 s prefix peaks 11.5 dB below the file. Worth saying out loud, because
     # it cuts both ways -- cleaner direction readings, untested saturation.
     if probe_peak + 1e-9 < native_peak:

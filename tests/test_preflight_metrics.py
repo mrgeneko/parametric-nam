@@ -1,6 +1,6 @@
 """Properties preflight.py's pure per-render metric functions must have. These decide
-"dead"/"reversed"/"OK" for a knob check (see the module docstring's Fulltone OCD Tone/Klon Tone
-war stories) -- a subtle bug in a band ratio or the spike/ESR formula reads as the WRONG KNOB
+"dead"/"reversed"/"OK" for a knob check (see the module docstring's MOSFET-clipping-pedal Tone/
+transparent-overdrive-pedal Tone war stories) -- a subtle bug in a band ratio or the spike/ESR formula reads as the WRONG KNOB
 CONCLUSION on a real circuit, not a crash. Exercised directly against synthetic tones instead
 of a real render, so the metric math is verified independently of any circuit or backend.
 

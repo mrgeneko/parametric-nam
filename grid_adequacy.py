@@ -28,7 +28,7 @@ chasing:
 
 It is cheap: 3 renders per cell probe, and cells are independent so they run concurrently.
 
-WHAT IT FOUND ON THE BIG MUFF (14 x 9 = 126 perms, the shipped grid):
+WHAT IT FOUND ON LARGE MUFFIN (14 x 9 = 126 perms, the shipped grid):
 
     Sustain 0.001-0.70   11 cells, all <= 0.0010     oversampled 10-100x
     Sustain 0.70-0.85                     0.0091     at the limit
@@ -36,7 +36,7 @@ WHAT IT FOUND ON THE BIG MUFF (14 x 9 = 126 perms, the shipped grid):
     Tone    every one of 8 cells          0.0000     all nine values interpolate perfectly
 
 So the grid was simultaneously too dense (almost everywhere) and too coarse (in one place), and the
-one coarse cell is where a Big Muff actually lives. The Sustain axis had been hand-tuned dense at the
+one coarse cell is where Large Muffin actually lives. The Sustain axis had been hand-tuned dense at the
 BOTTOM, on the reasoning that a linear-taper pot puts most of its audible change in the bottom decade.
 That is true of LEVEL, and backwards for WAVEFORM SHAPE, which changes fastest at the top where the
 pedal is deep into clipping -- and waveform shape is what the model has to learn.
@@ -46,7 +46,7 @@ This tool only answers "is the circuit's response sampled densely enough to inte
 property of the circuit and the sampling, with no model in it. It says nothing about whether a
 TRAINED model actually learns to represent every knob proportionally.
 
-WHAT IT MISSED ON THE TS-9.
+WHAT IT MISSED ON THE MID-HUMP OVERDRIVE PEDAL.
 Drive measured <= 0.0008 in every cell (trivially easy to interpolate) while Tone measured up to
 0.1038 at the top of its travel -- by every signal this tool reports, Drive was the "easy" knob and
 shipped with a sparse 4-point grid while Tone earned 8. But a post-training sensitivity sweep (sweep
@@ -69,7 +69,7 @@ call into an error.
 
 FAILED RENDERS DO fail the run (exit 2), because that is the case that silently produces a WRONG
 table rather than a weaker one -- every cell is computed from whatever probes survived, and
-nothing else in the output says so. Measured on the Joyo American Sound: 38 of 48 probes timed
+nothing else in the output says so. Measured on the budget clone pedal: 38 of 48 probes timed
 out, and the table put one cell at 0.6578 (18.8x over) where a clean re-run measured 0.0475
 (1.4x). If the cause is a timeout rather than true non-convergence, raise --ltspice-timeout.
 
@@ -94,7 +94,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_dataset_from_schx import (LIVESPICE_CLI, NGSPICE_CIRCUIT_DEFAULTS, _run_ngspice,
+from gen_dataset_from_schx import (LIVESPICE_CLI, _run_ngspice,
                                     check_oracle, write_probe_clip)
 
 import importlib  # noqa: E402
@@ -161,7 +161,7 @@ class Renderer:
     first probe_s seconds understates everything (our sweeps open quiet). The single highest-slew
     window OVERSTATES it: on the old sweepv5 excitation that window landed inside the chirp section,
     and measured there
-    the Big Muff's Sustain 0.03-0.12 cell reads 0.0079 against a whole-file truth of 0.0008 -- a 10x
+    Large Muffin's Sustain 0.03-0.12 cell reads 0.0079 against a whole-file truth of 0.0008 -- a 10x
     exaggeration that would have bought points the model does not need.
 
     The quantity that matters is the whole-file one, because that is what the model is fitted against
@@ -177,10 +177,10 @@ class Renderer:
     (1) probe clips carry a quiet lead-in (write_probe_clip) so the solver has an
     operating point at t=0 instead of jumping straight into a large-signal mid-chirp
     state; (2) clips must be >= 3s -- ngspice SEGFAULTS (exit -11, no output, which
-    _run_ngspice's caller reads as "diverged") on shorter ones, discovered on the DS-1
+    _run_ngspice's caller reads as "diverged") on shorter ones, discovered on the reverse-linear-drive pedal
     at exactly the 2.00s the old 4-window/8s-probe default produced; (3) a per-circuit
-    netlist dump + NGSPICE_CIRCUIT_DEFAULTS lookup (method/conv/input_upsample), done
-    once up front, same as gen_dataset_from_schx.main() does for the real dataset render.
+    netlist dump, done once up front, same as gen_dataset_from_schx.main() does for the real
+    dataset render.
 
     BACKEND "ngspice-deck": for a device with no .schx at all (a real MOSFET/BJT .schx has no
     model for -- see render_backends.py's NgspiceBackend). Reuses that same backend directly
@@ -250,13 +250,11 @@ class Renderer:
                                capture_output=True, text=True)
             if r.returncode != 0 or not netlist_path.exists():
                 sys.exit(f"netlist dump failed for {schx}: {r.stderr[:300]}")
-            cdef = next((v for k, v in NGSPICE_CIRCUIT_DEFAULTS.items() if k in Path(schx).name), {})
-            conv = dict(kv.split("=", 1) for kv in cdef.get("conv", "").split(",") if "=" in kv)
             self.ng_base = {
                 "netlist": str(netlist_path), "koren": False,
                 "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
-                "conv": conv, "method": cdef.get("method", "trap"),
-                "input_upsample": int(cdef.get("input_upsample", 1) or 1),
+                "conv": {}, "method": "trap",
+                "input_upsample": 1,
             }
 
         x, sr = sf.read(str(inp))
@@ -416,7 +414,7 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
     """Probe every cell in `knobs` with `render`, print the per-axis report, and return
     (worst_by_axis, n_coarse, n_over) -- used standalone and by --apply's iteration loop."""
     # Probe each cell at several positions of the OTHER knobs -- the knobs interact, and a cell
-    # that interpolates cleanly at one Tone can fail at another. (On the Big Muff the Sustain
+    # that interpolates cleanly at one Tone can fail at another. (On Large Muffin the Sustain
     # 0.85-1.0 cell is 0.0044 at Tone=0 and 0.0813 at Tone=1: an 18x spread. Probing one slice
     # would have missed it.)
     jobs = []
@@ -552,7 +550,7 @@ def main() -> None:
     ap.add_argument("--lead-silence-s", type=float, default=None,
                     help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
                          "own settling time is longer (e.g. a slow RC network -- found directly "
-                         "on the Fulltone OCD, whose ~5s C10/RVOL2 time constant left every "
+                         "on the MOSFET-clipping pedal, whose ~5s C10/RVOL2 time constant left every "
                          "probe under-settled at the 1.0s default, producing a maxstep- and "
                          "grid-density-dependent 'stuck DC' artifact that looked like runaway "
                          "non-convergence). Default: use write_probe_clip's own 1.0s.")
@@ -560,7 +558,7 @@ def main() -> None:
                     help="[ngspice-deck] ngspice timestep ceiling -- measure with "
                          "measure_ngspice_timestep.py rather than guessing; the ecosystem "
                          "default is too coarse for at least one circuit found so far (the "
-                         "Fulltone OCD's most extreme Gain/Tone corner needed ~1e-7)")
+                         "MOSFET-clipping pedal's most extreme Gain/Tone corner needed ~1e-7)")
     ap.add_argument("--ltspice-deck-maxstep", type=float, default=3e-6, help="[ltspice-deck]")
     ap.add_argument("--ltspice-timeout", type=float, default=None,
                     help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
@@ -594,7 +592,7 @@ def main() -> None:
         # question from truncation error (discretisation in time) that "auto" answers for
         # the real dataset render. It needs a fixed number to probe at, not a recursive
         # auto-measurement. 4 matches what auto has picked on the one ngspice circuit
-        # measured so far (the DS-1) -- a reasonable default, not a derived one.
+        # measured so far (the reverse-linear-drive pedal) -- a reasonable default, not a derived one.
         print(f"  oversample auto (config) -> using 4 for this probe (interpolation error is "
              f"not what --oversample auto measures)")
         oversample = 4
@@ -679,7 +677,7 @@ def main() -> None:
     #
     # FAILED RENDERS DO fail the run, which is the case that actually burned us. A run that could
     # not render every probe still prints a complete, plausible table -- computed from whatever
-    # survived -- with nothing in the exit status to say so. Measured on the Joyo American Sound:
+    # survived -- with nothing in the exit status to say so. Measured on the budget clone pedal:
     # 38 of 48 probes timed out and the table it printed put one cell at 0.6578 (18.8x over) where
     # the clean re-run measured 0.0475 (1.4x). A 14x error, indistinguishable from a real result.
     # An incomplete measurement is not a weaker measurement, it is a wrong one.

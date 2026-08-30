@@ -33,7 +33,7 @@ WHY IT DOESN'T PICK AN OVERSAMPLE FOR YOU.
 measure_truncation.py's own docs describe a "stall" -- a candidate's error falling much
 less than the trend elsewhere (~1.6x instead of ~4-5x) -- as a FINDING to investigate, not
 a converged signal to act on: it can mean a render-side problem unrelated to true BDF2
-convergence (see its docstring, the JCM800 hot-rod example). Automating past that would
+convergence (see its docstring, the British-stack amp's hot-rod variant example). Automating past that would
 risk silently shipping a bad oversample for exactly the circuits that most need scrutiny.
 So this writes the largest tested candidate (a documented "fleet floor" starting point,
 not a derived one) and prints the full table so you can apply the same judgment call the
@@ -112,7 +112,7 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
     """Default knob-grid VALUES for a classify() kind -- still a placeholder meant to be
     refined by grid_adequacy.py --apply, but an informed one instead of a naive linspace(0,1)
     for every knob regardless of role. Empirical basis (this fleet's own hand-tuned grids,
-    e.g. Timmy/OCD's Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]):
+    e.g. the non-midpoint-default pedal's / the MOSFET-clipping pedal's Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]):
 
       hi/lo/mid (tone/EQ knob): STILL evenly spaced (no observed need for endpoint density
         here), but narrowed to [0.2, 0.8] -- the fully-CCW/CW extremes rarely hold a tone

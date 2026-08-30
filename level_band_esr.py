@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 level_band_esr.py — ESR split by OUTPUT LEVEL BAND. The metric that decides whether the
-Boss DS-1 fade-out bug is actually fixed.
+reverse-linear-drive pedal's fade-out bug is actually fixed.
 
 Why this exists
 ---------------
 Headline ESR is energy-weighted: it is a single ratio of summed error to summed signal, so a
-note's decay tail contributes almost nothing to it. On the most distorted Big Muff setting,
+note's decay tail contributes almost nothing to it. On the most distorted Large Muffin setting,
 windows below -40 dB of peak are 8.2% of the DURATION and 0.00% of the ENERGY. A model can drop
-the distortion entirely as a note fades -- which is the DS-1 complaint -- and the headline ESR
-will barely move.
+the distortion entirely as a note fades -- which is the reverse-linear-drive pedal's complaint --
+and the headline ESR will barely move.
 
 So headline ESR cannot see the bug, and therefore cannot tell you if you fixed it.
 

@@ -5,7 +5,7 @@ saturation at every knob-grid corner, not just the excitation's overall peak?
 Background (internal engineering notes): a device can have a peak level
 (from its synthetic sweep tail) that comfortably clears its saturation onset, while
 the TRANSIENT-bearing (real-playing) segment -- built independently, at its own
-`--realistic-peak` -- never does, at some corners. Tweed 5F6-A is the exact case
+`--realistic-peak` -- never does, at some corners. The tweed-style amp is the exact case
 this happened on: `find-peak @ knobs=0.5` measured onset ~0.51 V, but
 `--realistic-peak` was set to 0.2 V regardless (chosen for input-signal realism,
 not cross-checked against the measured onset) -- so the real-playing content
@@ -64,7 +64,7 @@ def _corners(knob_ranges: dict, full_hypercube: bool = True, max_full_corners: i
     center), PLUS (if full_hypercube) the full binary hypercube -- every knob independently
     at its own min or max, 2**n corners total (all-min/all-max are 2 of them; deduped below).
 
-    The binary hypercube was added after a real miss: Tweed 5F6-A Full's shipped blowup
+    The binary hypercube was added after a real miss: the tweed-style amp's shipped blowup
     corner was NormalVol/BrightVol held at their grid-min SIMULTANEOUSLY with
     Treble/Bass/Middle at their grid-max. The solo set can't represent that -- solo holds
     every OTHER knob at center, never at another extreme -- so a MIXED
@@ -121,7 +121,7 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
         # rather than only the loudest. Reading realistic_peak alone therefore UNDERSTATES what
         # the file actually contains, and fails corners the excitation genuinely covers.
         #
-        # Found on the Joyo: realistic_peak 7.4166 V against an all-min onset of 7.417 V failed
+        # Found on the budget clone pedal: realistic_peak 7.4166 V against an all-min onset of 7.417 V failed
         # by a hair, while the file held 11.125 V and 14.833 V bursts (measured crest 13.6) that
         # clear it outright.
         peaks = [float(args["realistic_peak"])]
