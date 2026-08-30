@@ -344,7 +344,10 @@ def main() -> None:
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} permutations)")
 
-    if args.backend == "livespice" and not args.skip_prepare_excitation:
+    if args.backend == "livespice" and not args.skip_prepare_excitation and not Path(args.input).exists():
+        print(f"  WARNING: --input {args.input} not found -- skipping the calibrated-excitation "
+              f"build, leaving `input` pointed at the raw path as given.")
+    elif args.backend == "livespice" and not args.skip_prepare_excitation:
         excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
         ok = _prepare_excitation(output, Path(args.input), excitation_wav, args.realistic_dur_cap)
         if ok and excitation_wav.exists():

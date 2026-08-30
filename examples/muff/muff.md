@@ -6,7 +6,9 @@ Big Muff Pi analysis** (authoritative); component **values are the V1 66#5**
 heavily nonlinear silicon fuzz/sustain, and an excellent NAM target. Not
 affiliated with / endorsed by EHX; names used descriptively.
 
-`gen_bigmuff.py` → `Big Muff Pi V1 (66#5).schx`. **3 knobs: SUSTAIN, TONE, VOLUME**
+`gen_bigmuff.py` → `Big Muff Pi V1 (66#5).schx`, bundled here as `large_muffin.schx`
+(renamed only to keep the trademarked product name out of this repo's shipped file path;
+same file, unmodified). **3 knobs: SUSTAIN, TONE, VOLUME**
 (all 100 k, **linear taper** — per the 66#5 "Linear taper potentiometers" note and
 ElectroSmash's "100K Lin"). +9 V rail. Reference designators match the schematic.
 

@@ -91,7 +91,7 @@ cd parametric-nam && ./setup.sh && . .venv/bin/activate
 # measures a real starting oversample, rather than hand-typing a config from scratch (shown
 # here against the bundled muff circuit as a concrete example; see "Bring your own circuit"
 # below for the full explanation):
-python scaffold_config.py --schx "examples/muff/Big Muff Pi V1 (66#5).schx" \
+python scaffold_config.py --schx "examples/muff/large_muffin.schx" \
     --output /tmp/muff_scaffold.config.toml
 # scaffold_config.py's own knob grid is a role-aware PLACEHOLDER, not a measured one --
 # review it (and anything else you want to change) by hand, then run
@@ -554,8 +554,7 @@ This toolchain builds on several open-source projects and published models:
   `SlimmableContainer` that this project targets.
 - **[auraloss](https://github.com/csteinmetz1/auraloss)** (Christian Steinmetz, Apache-2.0)
   — not a dependency, but `param_train.py`'s multi-resolution STFT loss is a from-scratch
-  reimplementation ported to match its `MultiResolutionSTFTLoss` formulas and default
-  weights (themselves vendored into the official NAM trainer).
+  reimplementation ported to match its `MultiResolutionSTFTLoss` formulas.
 - **Ideal-transformer technique** — the ngspice output transformer uses the standard
   controlled-source (E+F) ideal-transformer method; the specific center-tapped
   equations are ported from LiveSPICE (above).

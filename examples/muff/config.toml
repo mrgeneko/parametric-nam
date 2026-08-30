@@ -12,7 +12,7 @@
 # Output paths (--dataset-dir/--nam-output/--checkpoint-dir) stay on the CLI so one
 # recipe drives many runs; any value here is overridden by a CLI flag.
 
-schx       = "examples/muff/Big Muff Pi V1 (66#5).schx"
+schx       = "examples/muff/large_muffin.schx"
 
 # INPUT CHANGED 2026-08-28: examples/sweepv5.wav (removed from this repo) -> T3K-sweep-v3.wav,
 # the standard TONE3000 capture sweep. Download it from https://www.tone3000.com/capture.

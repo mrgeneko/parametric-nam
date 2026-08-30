@@ -604,7 +604,7 @@ bundled `examples/muff/` one — continuing straight from the
 
 ```bash
 RUN=/tmp/muff DS=/tmp/muff_ds \
-SCHX=examples/muff/"Big Muff Pi V1 (66#5).schx" \
+SCHX=examples/muff/large_muffin.schx \
 CONFIG=examples/muff/config.toml \
     ./release_run.sh
 ```
