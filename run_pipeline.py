@@ -793,6 +793,22 @@ def main():
                         "check_input_headroom.py.")
     g.add_argument("--headroom-margin", type=float, default=0.8,
                    help="WARN if excitation peak < margin * saturation onset (default 0.8)")
+    g.add_argument("--skip-preflight-check", action="store_true",
+                   help="skip the STEP 0c knob-sanity preflight. Probes a handful of short clips "
+                        "through the oracle and ABORTS (like the grid check, unlike the headroom "
+                        "check) when a knob is dead, moves the wrong way, or the input-level "
+                        "calibration is implausible -- see preflight.py. Only runs for "
+                        "--backend livespice today: preflight.py has no mode for the schx-translated "
+                        "ngspice path or the cpp backend, so this step is a silent no-op for those.")
+    g.add_argument("--film-reference", type=Path, default=None,
+                   help="a real-playing (not synthetic-sweep) reference WAV, used ONLY for the "
+                        "post-training FiLM/LeakyReLU runaway scan (scan_film_runaway.py) run right "
+                        "after training. Optional: with no reference clip, this check is skipped "
+                        "with a note -- it is not derivable from the training excitation, which is "
+                        "exactly the gap that let two published models ship with an 80-260x runaway "
+                        "nobody had checked for.")
+    g.add_argument("--skip-film-runaway-check", action="store_true",
+                   help="skip the post-training FiLM-runaway scan even when --film-reference is set")
     g.add_argument("--seed",           type=int,   default=42)
     g.add_argument("--param-sensitivity", action="store_true")
     g.add_argument("--val-split",      type=float, default=0.05,
@@ -984,6 +1000,39 @@ def main():
             else:
                 log("input-headroom check: OK.", fh)
 
+        # ------------------------------------------------------------------
+        # Step 0c: is every knob sane -- none dead, none reversed, input level plausible?
+        #
+        # preflight.py only has a mode for --backend livespice (plus the separate ngspice-deck/
+        # ltspice-deck hand-deck path this pipeline doesn't drive) -- there is no mode for the
+        # schx-translated "ngspice" backend or for "cpp", so this step is a no-op for those today
+        # rather than a bad approximation of one.
+        #
+        # ABORTS on failure, same as the grid check above: a dead or reversed knob is exactly the
+        # kind of thing that renders and trains "successfully" and produces a plausible-looking but
+        # wrong model, discovered only much later (see preflight.py's own docstring).
+        # ------------------------------------------------------------------
+        if (run_generate and args.config and args.backend == "livespice" and args.schx
+                and args.input and not args.skip_preflight_check):
+            section("STEP 0c / 3 — Preflight", fh)
+            log("Checking that every knob is alive and moves the right direction, and that the "
+                "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
+            cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "livespice",
+                   "--schx", str(args.schx), "--input", str(args.input)]
+            if args.knobs:
+                cmd += ["--knobs", args.knobs]
+            if args.knob_kind:
+                cmd += ["--knob-kind", args.knob_kind]
+            if args.fixed_params:
+                cmd += ["--fixed-params", args.fixed_params]
+            stream_run(cmd, fh, "Preflight")
+
+        # NOTE: the transient/saturation-coverage check (check_transient_coverage.py) is NOT a
+        # separate step here -- it already runs automatically inside gen_dataset_from_schx.py's
+        # own STEP 1 generation (gated by --skip-transient-check/--transient-peak/
+        # --transient-margin, all forwarded below), so adding another call here would just run it
+        # twice. See gen_dataset_from_schx.py's own transient-check block for the real gate.
+
         if run_generate:
             section("STEP 1 / 3 — Dataset Generation", fh)
             gen_cmd = [
@@ -1157,6 +1206,56 @@ def main():
 
             train_cmd = build_train_cmd(args, dataset_dir, epochs, repeats)
             timings["train"] = stream_run(train_cmd, fh, "Training")
+
+        # ------------------------------------------------------------------
+        # Post-training: scan the published .nam for the FiLM/LeakyReLU runaway instability.
+        #
+        # Outside the skip_train gate (same reasoning as the release-folder build below): this
+        # checks whatever is currently at args.nam_output, whether it was just trained or is being
+        # re-released from a prior run. Cannot run any earlier -- it needs the exported model.
+        #
+        # Needs a REAL-PLAYING reference clip, not the synthetic training excitation -- that is
+        # exactly the gap that let two published models ship with an 80-260x runaway nobody had
+        # checked for (see scan_film_runaway.py). Skipped with a note, not a WARN, when no
+        # --film-reference is configured: this is an unconfigured optional check, not a failure.
+        #
+        # WARN, don't abort: training is already finished and the compute already spent, so this
+        # is a loud flag to look before you ship, not something to throw away a completed run over.
+        # ------------------------------------------------------------------
+        if args.nam_output and not args.skip_film_runaway_check:
+            if not args.film_reference:
+                log("Skipping post-training FiLM-runaway scan: no --film-reference configured "
+                    "(a real-playing clip, not the training excitation -- see scan_film_runaway.py).",
+                    fh)
+            elif not Path(args.nam_output).exists():
+                log(f"Skipping post-training FiLM-runaway scan: {args.nam_output} does not exist.",
+                    fh)
+            else:
+                section("Post-training — FiLM Runaway Scan", fh)
+                log("Scanning the exported model for the FiLM/LeakyReLU runaway instability "
+                    "against a real-playing reference. Pass --skip-film-runaway-check to skip.", fh)
+                cmd = [PYTHON, str(HERE / "scan_film_runaway.py"),
+                       "--nam", str(args.nam_output), "--reference", str(args.film_reference)]
+                if args.config:
+                    cmd += ["--config", str(args.config)]
+                log(f"CMD: {' '.join(str(c) for c in cmd)}", fh)
+                fh.write("\n"); fh.flush()
+                proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                        env={**os.environ, "PYTHONUNBUFFERED": "1"})
+                for line in proc.stdout:
+                    out = f"[{ts()}] {line.rstrip(chr(10))}\n"
+                    print(out, end="", flush=True); fh.write(out); fh.flush()
+                proc.wait()
+                if proc.returncode not in (0, 1):
+                    log(f"ERROR: FiLM-runaway scan itself failed (exit {proc.returncode}) — "
+                        f"aborting pipeline.", fh)
+                    sys.exit(proc.returncode)
+                elif proc.returncode == 1:
+                    log("FiLM-runaway scan: FLAGGED windows found (see above) — continuing, this "
+                        "does not block the pipeline, but check before shipping this model.", fh)
+                else:
+                    log("FiLM-runaway scan: clean.", fh)
 
         # ------------------------------------------------------------------
         # Release folder (durable copy of models + provenance)
