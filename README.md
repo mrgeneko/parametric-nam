@@ -103,6 +103,11 @@ python scaffold_config.py --schx "examples/muff/Big Muff Pi V1 (66#5).schx" \
 python run_pipeline.py --config examples/muff/config.toml \
     --dataset-dir /tmp/muff_ds --nam-output /tmp/muff.param.nam \
     --checkpoint-dir /tmp/muff_ckpt
+# The example config's target-steps (25000) is a starting point, not a guarantee -- it may
+# not reach a low ESR by then. Raise --target-steps (or pass --epochs/--repeats directly)
+# for a longer fixed run, or resume the same checkpoint dir past its original end point with:
+#   python run_pipeline.py --config examples/muff/config.toml ... \
+#       --resume /tmp/muff_ckpt/latest.pt --target-steps 50000
 ```
 
 This trains an actual muff model end to end. See `examples/muff/muff.md` for the circuit notes.
