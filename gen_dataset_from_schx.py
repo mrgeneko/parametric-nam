@@ -669,11 +669,20 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         #
         # An under-converged dataset is worse than a failed one. A failed permutation is a hole
         # you can see; an under-converged one is a lie you cannot.
-        return [
-            dict(oversample=os_,     iterations=256),
-            dict(oversample=os_ * 2, iterations=256),    # halve the timestep
-            dict(oversample=os_ * 4, iterations=256),    # last resort
-        ]
+        #
+        # ESCALATION CEILING: 256. Used to stop at os_*4 -- the Mesa Dual Rectifier Orange
+        # channel's Or Master=1.0 corner (max output into the reactive V30 load + sag)
+        # exhausted os=8/16/32 identically as isolated Newton-overshoot spikes (2026-08-30
+        # incident), needing a manual re-run past the old ceiling to find out whether more
+        # oversample would even help. Doubling on to 256 by default makes that escalation
+        # automatic instead of a manual re-run per circuit that hits the same wall.
+        rungs, o = [], os_
+        while True:
+            rungs.append(dict(oversample=o, iterations=256))
+            if o >= 256:
+                break
+            o *= 2
+        return rungs
 
     if backend == "ngspice":
         # ESCALATE BEYOND THE DEFAULTS, and never repeat one.
