@@ -55,6 +55,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from ngspice_spicelib import load_input, render_grid, render_one  # noqa: E402
+from shard import select as shard_select  # noqa: E402
 
 
 def main():
@@ -69,6 +70,16 @@ def main():
     ap.add_argument('infile'); ap.add_argument('outfile', nargs='?')
     ap.add_argument('--knob', action='append', default=[], help='NAME=VAL (single render)')
     ap.add_argument('--grid', nargs='+', default=[], help='NAME=v1,v2,... (sweep)')
+    ap.add_argument('--shard', metavar='LOW-HIGH/TOTAL',
+                     help="Render only permutations whose GLOBAL grid index modulo TOTAL falls "
+                          "in [LOW, HIGH] inclusive, e.g. --shard 0-15/48. For splitting one "
+                          "--grid sweep across machines: each renders a disjoint slice into its "
+                          "OWN --outdir (never share one --outdir across machines), then merge. "
+                          "Merging is filename-safe because cap_NNNN.wav keeps the GLOBAL index "
+                          "-- concatenate the wavs, the manifest.jsonl lines, and the "
+                          "mapping.csv bodies (one header, then every shard's rows) into one "
+                          "directory, and point gen_dataset_from_captures.py at that. Ignored "
+                          "for a single render (no --grid).")
     ap.add_argument('--outdir')
     ap.add_argument('--vin', type=float, default=0.15)
     ap.add_argument('--absolute', action='store_true',
@@ -102,7 +113,16 @@ def main():
         print(f"sweep: {names} -> {len(combos)} captures (parallel_sims={a.parallel_sims})")
         jobs = []
         knobs_by_file = {}
-        for i, combo in enumerate(combos):
+        indexed = list(enumerate(combos))
+        if a.shard:
+            _before = len(indexed)
+            try:
+                indexed, _, _, _ = shard_select(indexed, a.shard)
+            except ValueError as e:
+                ap.error(str(e))
+            print(f"shard {a.shard}: this machine renders {len(indexed)}/{_before} "
+                  f"permutations (global indices kept, so shard outputs merge by filename)")
+        for i, combo in indexed:
             knobs = dict(zip(names, combo))
             outfile = os.path.join(a.outdir, f"cap_{i:04d}.wav")
             jobs.append((knobs, outfile))

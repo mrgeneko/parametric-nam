@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Split ONE gen_dataset_from_schx.py generation across multiple machines over SSH, weighted
+# Split ONE dataset generation across multiple machines over SSH, weighted
 # by each machine's own core count, and merge the results back into one local directory ready
 # for --combine. This is orchestration only -- it does not know or care what circuit/knobs/
 # backend it's rendering, since every gen_dataset_from_schx.py flag after `--` is forwarded
@@ -56,6 +56,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKERS=""
 JOB=""
+RENDERER="gen_dataset_from_schx.py"   # --renderer: which entry point each worker runs.
+# The deck renderers (render_ltspice_deck.py / render_ngspice_deck.py) take the SAME
+# --shard LOW-HIGH/TOTAL contract (shard.py is shared), but name their output dir
+# --outdir, not --output, and merge differently: concatenate cap_NNNN.wav plus the
+# manifest.jsonl lines and mapping.csv bodies, then run gen_dataset_from_captures.py
+# against the merged directory instead of gen_dataset_from_schx.py --combine.
 SYNC_FILES=()
 DRY_RUN=0
 GEN_ARGS=()
@@ -64,6 +70,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --workers)    WORKERS="$2"; shift 2 ;;
     --job)        JOB="$2"; shift 2 ;;
+    --renderer)  RENDERER="$2"; shift 2 ;;
     --sync-file)  SYNC_FILES+=("$2"); shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --)           shift; GEN_ARGS=("$@"); break ;;
@@ -139,6 +146,11 @@ for i in "${!WORKER_ARR[@]}"; do
   REMOTE_OUT+=("${REMOTE_HOME[i]}/work/tmp/${JOB}_shard_${i}")
 done
 
+case "$RENDERER" in
+  *_deck.py) OUTFLAG="--outdir";;
+  *)         OUTFLAG="--output";;
+esac
+
 echo "==> shard plan (TOTAL=$TOTAL_CORES)"
 for i in "${!WORKER_ARR[@]}"; do
   echo "    ${WORKER_ARR[$i]}: ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES  (${CORES[$i]}/$TOTAL_CORES of the grid)"
@@ -147,7 +159,7 @@ done
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "==> --dry-run: not touching any worker. Commands that would run:"
   for i in "${!WORKER_ARR[@]}"; do
-    echo "    ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "    ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
   done
   exit 0
 fi
@@ -171,8 +183,8 @@ echo "==> launching $N worker(s) in parallel (logs: $LOCAL_DIR/logs/<worker>.log
 PIDS=()
 for i in "${!WORKER_ARR[@]}"; do
   w="${WORKER_ARR[$i]}"
-  ssh "${SSH_OPTS[@]}" "$w" "cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q \
-      --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES" \
+  ssh "${SSH_OPTS[@]}" "$w" "cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q \
+      $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES" \
       > "$LOCAL_DIR/logs/$w.log" 2>&1 &
   PIDS+=("$!")
   echo "    $w: pid $!"
@@ -193,7 +205,7 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
   echo "==> ${#FAILED_IDX[@]} worker(s) failed"
   echo "    Re-run just a failed worker's shard once fixed (resume picks up where it left off):"
   for i in "${FAILED_IDX[@]}"; do
-    echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
   done
   echo "    Not merging while any worker is outstanding -- a partial shard would just be reported"
   echo "    as a missing permutation by --combine anyway, so fix the worker and re-run this script"
