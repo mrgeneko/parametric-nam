@@ -90,6 +90,19 @@ REMOTE_DIR="${REMOTE_DIR:-\$HOME/work/parametric-nam}"
 LOCAL_DIR="${LOCAL_DIR:-$HOME/work/tmp/$JOB}"
 PY="${PY:-. .venv/bin/activate && python}"
 
+# A silent network hang (machine sleeps, path black-holes packets -- NOT a clean disconnect,
+# which ssh already detects and exits nonzero for on its own) has no default timeout: an
+# already-established ssh connection that just goes quiet blocks `wait` on that one PID
+# forever, and since workers are checked in order, even a LATER worker that already finished
+# successfully never gets reported until the stuck one ahead of it resolves. ServerAlive*
+# makes the ssh client itself probe the connection and give up after ~90s of silence,
+# turning a silent hang into the same cleanly-detected failure the FAILED_IDX/wait logic
+# below already handles correctly. Applies to both direct ssh calls (SSH_OPTS) and every
+# rsync transfer, which uses ssh as its transport too (RSYNC_RSH, which rsync reads
+# automatically -- no per-call -e flag needed).
+SSH_OPTS=(-o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+export RSYNC_RSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
+
 N=${#WORKER_ARR[@]}
 
 echo "==> probing core count and \$HOME on $N worker(s)"
@@ -102,7 +115,7 @@ for w in "${WORKER_ARR[@]}"; do
   # that's true for ssh command strings (used below for REMOTE_DIR), but is a murkier assumption
   # for rsync's host:path argument specifically, and this script needs the pull-back paths right
   # every time, not "usually."
-  info="$(ssh "$w" 'echo "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1) $HOME"')"
+  info="$(ssh "${SSH_OPTS[@]}" "$w" 'echo "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1) $HOME"')"
   n="${info%% *}"; home="${info#* }"
   n="${n//[!0-9]/}"; [ -n "$n" ] || n=1
   CORES+=("$n")
@@ -134,7 +147,7 @@ done
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "==> --dry-run: not touching any worker. Commands that would run:"
   for i in "${!WORKER_ARR[@]}"; do
-    echo "    ssh ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "    ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
   done
   exit 0
 fi
@@ -148,7 +161,7 @@ if [ "${#SYNC_FILES[@]}" -gt 0 ]; then
       # preserve the relative directory structure under REMOTE_DIR so a --schx/--input path
       # that's relative to the repo root resolves the same way on the worker as it does here.
       dest_dir="$(dirname "$f")"
-      ssh "$w" "mkdir -p $REMOTE_DIR/$dest_dir"
+      ssh "${SSH_OPTS[@]}" "$w" "mkdir -p $REMOTE_DIR/$dest_dir"
       rsync -az "$HERE/$f" "$w:$REMOTE_DIR/$f"
     done
   done
@@ -158,7 +171,7 @@ echo "==> launching $N worker(s) in parallel (logs: $LOCAL_DIR/logs/<worker>.log
 PIDS=()
 for i in "${!WORKER_ARR[@]}"; do
   w="${WORKER_ARR[$i]}"
-  ssh "$w" "cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q \
+  ssh "${SSH_OPTS[@]}" "$w" "cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q \
       --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES" \
       > "$LOCAL_DIR/logs/$w.log" 2>&1 &
   PIDS+=("$!")
@@ -180,7 +193,7 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
   echo "==> ${#FAILED_IDX[@]} worker(s) failed"
   echo "    Re-run just a failed worker's shard once fixed (resume picks up where it left off):"
   for i in "${FAILED_IDX[@]}"; do
-    echo "      ssh ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY gen_dataset_from_schx.py $GEN_ARGS_Q --output ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
   done
   echo "    Not merging while any worker is outstanding -- a partial shard would just be reported"
   echo "    as a missing permutation by --combine anyway, so fix the worker and re-run this script"
@@ -201,7 +214,7 @@ for i in "${!WORKER_ARR[@]}"; do
   # indices (small grid, fine-grained core-weighted split) legitimately renders zero files and
   # never creates sig/ at all -- that's a valid empty shard, not a failure, so check first
   # rather than letting rsync error out on a missing remote directory.
-  if ssh "$w" "[ -d ${REMOTE_OUT[$i]}/sig ]"; then
+  if ssh "${SSH_OPTS[@]}" "$w" "[ -d ${REMOTE_OUT[$i]}/sig ]"; then
     rsync -az "$w:${REMOTE_OUT[$i]}/sig/" "$LOCAL_DIR/sig/"
   else
     echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
