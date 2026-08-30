@@ -1563,8 +1563,27 @@ def main():
                          "(default: %(default)s). Each low-LR trough tends to mint a new best.")
     ap.add_argument("--restart-mult", type=int, default=1,
                     help="Open-ended mode: SGDR period multiplier per restart "
-                         "(1 = equal cycles; 2 = doubling). (default: %(default)s)")
-    ap.add_argument("--restart-decay", type=float, default=1.0,
+                         "(1 = equal cycles; 2 = doubling). (default: %(default)s -- a no-op; "
+                         "--restart-decay defaults to 0.97, not 1.0, but this flag has no safe "
+                         "always-on default of its own since --stale-cycles' patience has to be "
+                         "adjusted alongside it, see CAVEAT below.) Every full-LR restart pays a "
+                         "roughly FIXED recovery cost regardless of cycle length (see "
+                         "--restart-decay's own ~7-epoch-avg / ~30-epoch-worst-case measurement) "
+                         "-- so at mult=1's equal-length cycles that fixed cost stays a constant "
+                         "FRACTION of the whole run no matter how long you train (measured: 23 "
+                         "cycles of 150 epochs = 3,387 epochs total, ~54%% of it re-climbing). "
+                         "mult=2 grows each cycle geometrically (150, 300, 600, 1200, 2400, ...) "
+                         "while the recovery cost per restart stays fixed, so the wasted fraction "
+                         "shrinks toward zero as training continues (same total epoch budget, "
+                         "same measurement basis: ~9%% wasted) -- pair it with --restart-decay for "
+                         "the other half of the same problem (each reset still climbs all the way "
+                         "back to the same eta_max, undoing some of what the low-LR trough just "
+                         "built). CAVEAT: --stale-cycles counts CYCLES, not epochs, so mult=2's "
+                         "geometrically growing cycles make that auto-stop rule geometrically "
+                         "slower to fire at its default patience -- lower --stale-cycles "
+                         "(2-3) or set an explicit epoch/step budget instead of relying on it "
+                         "when using mult > 1.")
+    ap.add_argument("--restart-decay", type=float, default=0.97,
                     help="Open-ended mode: multiply the SGDR restart ceiling (eta_max, for "
                          "every param group incl. the FiLM group) by this factor at every "
                          "restart. Every full-LR restart forces a loss spike that costs several "
@@ -1572,10 +1591,17 @@ def main():
                          "already was (observed: ~7 epochs avg, up to ~30/49 on some late cycles "
                          "of a MOSFET-clipping-pedal run) before any net-new progress happens. Decaying the "
                          "ceiling shrinks that recovery cost at the price of shrinking later-cycle "
-                         "exploration too. 1.0 = no decay (default, matches original SGDR paper, "
-                         "which flagged per-restart eta_max decay as worth trying but didn't test "
-                         "it). Persists correctly across --resume (baked into the optimizer's "
-                         "per-group 'initial_lr', not the scheduler object).")
+                         "exploration too. 1.0 = no decay (matches original SGDR paper, which "
+                         "flagged per-restart eta_max decay as worth trying but didn't test it). "
+                         "Default 0.97, not 1.0: chosen to degrade gracefully across the many "
+                         "restarts a --restart-mult=1 run typically needs (still ~74%% of eta_max "
+                         "after 10 restarts, ~54%% after 20, ~40%% after 30) rather than a more "
+                         "aggressive factor tuned for a short, --restart-mult>1 run (e.g. 0.85 "
+                         "reaches under 1%% by restart 30 -- fine over the ~5-8 restarts mult=2 "
+                         "implies, but that compounds to functionally stopping training partway "
+                         "through a nominally open-ended mult=1 run, not just narrowing later-"
+                         "cycle exploration). Persists correctly across --resume (baked into the "
+                         "optimizer's per-group 'initial_lr', not the scheduler object).")
     ap.add_argument("--stale-cycles", type=int, default=3,
                     help="Open-ended mode: stop automatically after this many consecutive "
                          "SGDR cycles in which NO tier minted a new best val ESR — the "
