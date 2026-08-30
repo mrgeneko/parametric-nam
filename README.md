@@ -286,6 +286,10 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `plot_tone_response.py` | Frequency-response chart for an exported `.nam` |
 | `release_run.sh` | Verify + stage a finished run |
 
+Several of these are validation tools rather than pipeline steps — which ones `run_pipeline.py`
+runs automatically, which are one-time-per-circuit setup, and which are manual/investigative is
+mapped in [`docs/checklist.md`](docs/checklist.md).
+
 ---
 
 ## Backends
