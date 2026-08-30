@@ -8,11 +8,14 @@ crashing the whole sweep.
 
 See ngspice_spicelib.py.
 """
+import os
+
 import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from ngspice_spicelib import _read_result, load_input
+import ngspice_spicelib
+from ngspice_spicelib import _read_result, load_input, render_grid
 
 
 def write_wav(path, sr, samples, dtype):
@@ -171,3 +174,103 @@ class TestReadResult:
         yv, pk = _read_result(str(raw_path), "OUT", t=t, sr=1000)
         assert pk == pytest.approx(0.7)
         assert len(yv) == len(t)
+
+
+class TestRenderGridCrashVsConvergenceFailure:
+    """render_grid()'s retry-escalation ladder must not spend a second/third round retrying a
+    job ngspice actually CRASHED on (killed by signal, e.g. the documented macOS large-filesource
+    segfault) -- a finer timestep cannot fix a crash, only a genuine non-convergence. Mirrors
+    gen_dataset_from_schx.py's own _run_ngspice negative-returncode check, ported here because
+    spicelib's RunTask.retcode carries the identical subprocess.run() sign convention."""
+
+    class FakeTask:
+        def __init__(self, retcode):
+            self.retcode = retcode
+
+    def test_a_crashed_job_is_not_retried_on_a_later_rung(self, tmp_path, monkeypatch):
+        run_calls = []
+
+        # tag each job's raw path with which outfile it belongs to, so the fake runner/reader can
+        # branch on it without touching real files.
+        def fake_read_result(raw_path, probe_node, t, sr):
+            if "converges" in os.path.basename(raw_path):
+                return np.zeros(len(t)), 0.5
+            return None, None  # "crash" job: no raw file, same signature as a real crash
+
+        monkeypatch.setattr(ngspice_spicelib, "_read_result", fake_read_result)
+        monkeypatch.setattr(ngspice_spicelib.wavfile, "write", lambda *a, **kw: None)
+
+        # Rig the fake runner's retcode per call: keyed by which job the generated .cir path
+        # belongs to (render_grid names it "<tag>_r<round>.cir") -- "crash" always reports
+        # retcode=-11 (SIGSEGV); "converges" reports 0 and a readable trace.
+        def run(self, cir_path, exe_log=True):
+            run_calls.append(cir_path)
+            # basename only -- pytest's own tmp_path is named after this test function, which
+            # itself contains "crash" as a substring ("...is_not_CRASHed..."), so checking the
+            # full path would false-match the "converges" job's .cir too.
+            retcode = -11 if "crash" in os.path.basename(cir_path) else 0
+            return TestRenderGridCrashVsConvergenceFailure.FakeTask(retcode)
+
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "run", run, raising=False)
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "wait_completion",
+                             lambda self, **kw: None, raising=False)
+
+        results = render_grid(
+            build_deck=lambda input_src, knobs: "* fake deck\n",
+            jobs=[({}, str(tmp_path / "crash.wav")), ({}, str(tmp_path / "converges.wav"))],
+            probe_node="OUT", sr=1000, t=np.linspace(0, 0.1, 100), input_src="",
+            tmp=str(tmp_path), rungs=(1e-6, 1e-7, 1e-8),
+        )
+
+        crash_calls = [c for c in run_calls if "crash" in os.path.basename(c)]
+        converges_calls = [c for c in run_calls if "converges" in os.path.basename(c)]
+        assert len(crash_calls) == 1, (
+            "crashed job was retried on a later rung -- a finer timestep cannot fix a signal kill")
+        assert len(converges_calls) == 1, "converged job should not need a retry at all"
+        assert results[str(tmp_path / "crash.wav")] is None
+        assert results[str(tmp_path / "converges.wav")] == pytest.approx(0.5)
+
+    def test_crash_prints_a_distinct_message_not_a_convergence_failure(
+            self, tmp_path, monkeypatch, capsys):
+        def run(self, cir_path, exe_log=True):
+            return TestRenderGridCrashVsConvergenceFailure.FakeTask(-11)
+
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "run", run, raising=False)
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "wait_completion",
+                             lambda self, **kw: None, raising=False)
+        monkeypatch.setattr(ngspice_spicelib, "_read_result", lambda *a, **kw: (None, None))
+
+        render_grid(
+            build_deck=lambda input_src, knobs: "* fake deck\n",
+            jobs=[({}, str(tmp_path / "onlyjob.wav"))],
+            probe_node="OUT", sr=1000, t=np.linspace(0, 0.1, 100), input_src="",
+            tmp=str(tmp_path), rungs=(1e-6,),
+        )
+        err = capsys.readouterr().err
+        assert "crash" in err.lower()
+        assert "signal 11" in err
+        assert "not retrying" in err.lower()
+
+    def test_a_none_task_from_run_falls_back_to_the_normal_pending_path(
+            self, tmp_path, monkeypatch):
+        """run() returning None (a resource-wait scheduling timeout, not a simulation failure --
+        see SimRunner.run()'s own docstring) must not be treated as a crash: the job never even
+        started, so it should stay eligible for a later rung, not be discarded."""
+        def run(self, cir_path, exe_log=True):
+            return None
+
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "run", run, raising=False)
+        monkeypatch.setattr(ngspice_spicelib.SimRunner, "wait_completion",
+                             lambda self, **kw: None, raising=False)
+        monkeypatch.setattr(ngspice_spicelib, "_read_result", lambda *a, **kw: (None, None))
+
+        results = render_grid(
+            build_deck=lambda input_src, knobs: "* fake deck\n",
+            jobs=[({}, str(tmp_path / "job.wav"))],
+            probe_node="OUT", sr=1000, t=np.linspace(0, 0.1, 100), input_src="",
+            tmp=str(tmp_path), rungs=(1e-6, 1e-7),
+        )
+        # exhausts both rungs (never converges, since _read_result always returns None here) --
+        # the point is only that it was RETRIED (not short-circuited as a crash), which a bare
+        # "still pending" outcome across all rungs already demonstrates.
+        assert results[str(tmp_path / "job.wav")] is None

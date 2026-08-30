@@ -352,7 +352,7 @@ TONE_SCHX_ARGS=()
 TONE_CHART=0
 if "$PY_BIN" "$HERE/plot_tone_response.py" \
       --model  "$RUN.optimal.param.nam" \
-      --config "$DS/config.json" \
+      --dataset-config "$DS/config.json" \
       ${TONE_SCHX_ARGS[@]+"${TONE_SCHX_ARGS[@]}"} \
       --out    "$STAGE/tone_response.svg" \
       --summary "$STAGE/tone_response.md" && [ -f "$STAGE/tone_response.svg" ]; then

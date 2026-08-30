@@ -26,7 +26,7 @@ answers "does the model's Bass/Mid/Treble magnitude match the schx?".
 Usage:
   python plot_tone_response.py \
       --model  bundle.optimal.param.nam \
-      --config dataset/config.json \
+      --dataset-config dataset/config.json \
       --out    tone_response.svg \
       [--render-bin PATH] [--summary tone_response.md] \
       [--drive-knob Gain] [--drive-value 0.29] [--include-drive] \
@@ -260,7 +260,9 @@ def build_overlay_svg(fpts, effect, tiers, swept, tier_col):
 def main():
     ap = argparse.ArgumentParser(description="Frequency-response chart for a parametric .nam")
     ap.add_argument("--model", required=True, help="exported .param.nam (SlimmableContainer)")
-    ap.add_argument("--config", required=True, help="dataset config.json (knobs + bounds + sr)")
+    ap.add_argument("--dataset-config", required=True, dest="dataset_config",
+                    help="dataset config.json (knobs + bounds + sr) -- NOT the per-circuit "
+                         "training-recipe config.toml every other tool here calls --config")
     ap.add_argument("--out", required=True, help="output .svg")
     ap.add_argument("--summary", help="optional markdown summary table")
     ap.add_argument("--render-bin", help="render_parametric path (else $RENDER_PARAMETRIC / PATH)")
@@ -279,7 +281,7 @@ def main():
               "(set --render-bin or $RENDER_PARAMETRIC) — skipping chart.", file=sys.stderr)
         return 0
 
-    cfg = json.load(open(args.config))
+    cfg = json.load(open(args.dataset_config))
     knobs = cfg["knobs"]
     bounds = cfg.get("bounds", {})
     sr = int(cfg.get("input", {}).get("samplerate", 48000))

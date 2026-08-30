@@ -578,7 +578,7 @@ where embedding the full master in every tone just multiplies size.
 
 ```bash
 python plot_tone_response.py \
-    --model bundle.optimal.param.nam --config dataset/config.json \
+    --model bundle.optimal.param.nam --dataset-config dataset/config.json \
     --out tone_response.svg --summary tone_response.md \
     --schx circuit.schx
 ```

@@ -288,7 +288,10 @@ Full per-script reference (usage, flags, design rationale) lives in
 
 Several of these are validation tools rather than pipeline steps — which ones `run_pipeline.py`
 runs automatically, which are one-time-per-circuit setup, and which are manual/investigative is
-mapped in [`docs/checklist.md`](docs/checklist.md).
+mapped in [`docs/checklist.md`](docs/checklist.md). How `export_checkpoint.py`, `merge_tiers.py`,
+and `bake_nam.py` relate on the way from a checkpoint to a published `.nam` — and how
+`capture_static.py` is a completely separate path, not a variant of it — is mapped in
+[`docs/nam-lifecycle.md`](docs/nam-lifecycle.md).
 
 ---
 

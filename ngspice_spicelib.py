@@ -36,6 +36,7 @@ Usage from a device's render_X.py:
     # results: {outfile: peak_or_None}
 """
 import os
+import sys
 import numpy as np
 from scipy.io import wavfile
 from spicelib import SimRunner, RawRead
@@ -138,7 +139,7 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
     for round_i, step in enumerate(rungs if rungs is not None else (maxstep, maxstep / 3, maxstep / 10)):
         if not pending:
             break
-        raw_paths = {}
+        raw_paths, tasks = {}, {}
         for knobs, outfile in pending:
             tag = os.path.splitext(os.path.basename(outfile))[0]
             raw_out = os.path.join(tmp, f'{tag}_r{round_i}.raw')
@@ -148,12 +149,28 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
                      f".control\ntran {step:.1e} {dur:.6f}\n"
                      f"write {raw_out} v({probe_node})\n.endc\n.end\n")
             open(cir_path, 'w').write(deck)
-            runner.run(cir_path, exe_log=True)
+            tasks[outfile] = runner.run(cir_path, exe_log=True)
             raw_paths[outfile] = raw_out
         runner.wait_completion()
 
         still_pending = []
         for knobs, outfile in pending:
+            # A NEGATIVE retcode is a signal, not a solve: ngspice CRASHED (e.g. the documented
+            # macOS large-filesource segfault -- see gen_dataset_from_schx.py's _run_ngspice,
+            # which hit the identical failure via a direct subprocess.Popen and had to learn this
+            # the hard way). spicelib's RunTask.retcode is subprocess.run()'s own returncode, same
+            # sign convention. A crashed job writes no raw file, which _read_result already reads
+            # as "not converged yet" -- so without this check it gets retried at a finer timestep
+            # on every remaining round for nothing, since a finer timestep cannot fix a crash, and
+            # it is reported back as a bare None with no way to tell it apart from a genuine
+            # non-convergence.
+            task = tasks.get(outfile)
+            if task is not None and task.retcode is not None and task.retcode < 0:
+                print(f"ngspice killed by signal {-task.retcode} on {os.path.basename(outfile)} "
+                      f"(crash, not a solve failure) -- not retrying at a finer timestep.",
+                      file=sys.stderr)
+                results[outfile] = None
+                continue
             yv, pk = _read_result(raw_paths[outfile], probe_node, t, sr)
             if yv is None:
                 still_pending.append((knobs, outfile))
