@@ -52,16 +52,20 @@ from __future__ import annotations
 import argparse
 import os as _os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import parse_schx_controls
 from measure_truncation import measure, probe_clips
 from knob_classify import classify  # noqa: E402
+
+DEFAULT_REALISTIC_DUR_CAP = 150.0
 
 TEMPLATE = Path(__file__).resolve().parent / "examples" / "template.config.toml"
 
@@ -210,6 +214,44 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
     return chosen, comment
 
 
+def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
+                        realistic_dur_cap: float) -> bool:
+    """Build a properly-calibrated excitation via prepare_excitation.py (which measures
+    this circuit's REAL saturation onset across the knob grid's corners, rather than
+    pointing `input` at a raw downloaded sweep with no calibration behind it at all --
+    the gap that made check_transient_coverage.py hard-refuse to run on this scaffold's
+    own output the first time it was tried, 2026-08-29).
+
+    Reads --config (this function's caller has already written it, with schx + the
+    placeholder [knobs] grid), so prepare_excitation.py's own corner-finder has real
+    knob ranges to work from -- best-effort: a failure here degrades to leaving `input`
+    pointed at the raw clip (same "best-effort, don't abort the scaffold" philosophy as
+    _measure_oversample), not an aborted scaffold.
+
+    --realistic-dur is capped at `realistic_dur_cap` -- build_excitation.py's own default
+    is "the whole --input file" (uncapped), which for a typical multi-minute downloaded
+    sweep would make the realistic-content portion LONGER than the excitation needs to be
+    for its stated purpose (sampling dynamics/perceptual variety, not saturation coverage
+    -- the sweeps provide that). Only passed when the source clip actually exceeds the
+    cap; a shorter source is left alone rather than padded or otherwise altered.
+    """
+    info = sf.info(str(real_clip))
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
+           "--backend", "livespice", "--config", str(config_path),
+           "--real-clip", str(real_clip), "--output", str(output_wav),
+           "--no-full-hypercube"]
+    if info.duration > realistic_dur_cap:
+        print(f"  {real_clip.name} is {info.duration:.1f}s, longer than the "
+              f"{realistic_dur_cap:.0f}s realistic-content cap -- truncating to "
+              f"{realistic_dur_cap:.0f}s (--realistic-dur {realistic_dur_cap:.0f}).")
+        cmd += ["--realistic-dur", str(realistic_dur_cap)]
+    print(f"  building a calibrated excitation (measuring saturation onset across the "
+          f"knob grid's corners, then build_excitation.py) -- this renders, budget "
+          f"real time for it ...")
+    r = subprocess.run(cmd)
+    return r.returncode == 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -237,6 +279,23 @@ def main() -> None:
     ap.add_argument("--ref-os", type=int, default=32)
     ap.add_argument("--probe-s", type=float, default=10.0)
     ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2))
+    ap.add_argument("--skip-prepare-excitation", action="store_true",
+                    help="leave `input` pointed at the raw --input clip as-is, instead of "
+                         "the default of building a properly-calibrated excitation from it "
+                         "via prepare_excitation.py (measures this circuit's real "
+                         "saturation onset across the knob grid, sizes the excitation from "
+                         "that instead of a guess). The raw-clip default this flag restores "
+                         "is exactly what made check_transient_coverage.py hard-refuse to "
+                         "run against this scaffold's own output -- only skip this if you "
+                         "specifically want that raw, uncalibrated behavior back (e.g. to "
+                         "avoid the extra render time right now).")
+    ap.add_argument("--realistic-dur-cap", type=float, default=DEFAULT_REALISTIC_DUR_CAP,
+                    help=f"cap (seconds) on the excitation's realistic-content portion "
+                         f"when --input exceeds it (default {DEFAULT_REALISTIC_DUR_CAP:.0f}s) "
+                         f"-- build_excitation.py's own default is the WHOLE --input file, "
+                         f"uncapped, which the realistic segment doesn't need (it only "
+                         f"samples dynamics/perceptual variety; the sweeps provide "
+                         f"saturation coverage). No effect if --skip-prepare-excitation.")
     args = ap.parse_args()
 
     if not args.schx.exists():
@@ -284,6 +343,26 @@ def main() -> None:
     axes = ", ".join(f"{name}={n}" for name, n in counts.items())
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} permutations)")
+
+    if args.backend == "livespice" and not args.skip_prepare_excitation:
+        excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
+        ok = _prepare_excitation(output, Path(args.input), excitation_wav, args.realistic_dur_cap)
+        if ok and excitation_wav.exists():
+            text = output.read_text()
+            text = _replace_line(text, "input",
+                f'input      = "{excitation_wav}"   # built by prepare_excitation.py from '
+                f'{Path(args.input).name} -- see its own recipe.json sidecar for the '
+                f'measured saturation onset this was sized from')
+            output.write_text(text)
+            print(f"  input -> {excitation_wav} (calibrated; run "
+                  f"check_transient_coverage.py against {output} to verify independently)")
+        else:
+            print(f"  WARNING: prepare_excitation.py failed or produced no output -- "
+                  f"leaving `input` pointed at the raw {args.input}. "
+                  f"gen_dataset_from_schx.py will refuse to start generation against this "
+                  f"config unless you pass --transient-peak explicitly or "
+                  f"--skip-transient-check.")
+
     print(f"  next: python grid_adequacy.py --config {output} --apply   "
           f"# refine the placeholder grid")
 
