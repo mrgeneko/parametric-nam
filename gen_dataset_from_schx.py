@@ -733,6 +733,21 @@ def _rung_str(rung: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in sorted(rung.items()) if v not in (None, "", 0))
 
 
+def _parse_shard(spec: str) -> tuple:
+    """Parse a --shard 'LOW-HIGH/TOTAL' spec into (low, high, total), both ends inclusive.
+    Raises ValueError with an actionable message on anything malformed -- this is a distributed-
+    rendering foot-gun (a bad shard spec silently renders the WRONG slice, or the whole grid
+    redundantly on every machine), so fail loudly rather than clamping/guessing."""
+    m = re.match(r"^(\d+)-(\d+)/(\d+)$", spec.strip())
+    if not m:
+        raise ValueError(f"--shard must look like LOW-HIGH/TOTAL, e.g. 0-15/48 (got {spec!r})")
+    low, high, total = (int(g) for g in m.groups())
+    if not (0 <= low <= high < total):
+        raise ValueError(f"--shard {spec!r}: need 0 <= LOW <= HIGH < TOTAL (got low={low}, "
+                         f"high={high}, total={total})")
+    return low, high, total
+
+
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
@@ -1907,6 +1922,26 @@ def main():
     ap.add_argument("--input",   type=Path)
     ap.add_argument("--output",  type=Path, default=HERE / "training_data")
     ap.add_argument("--workers", type=int,  default=os.cpu_count())
+    ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL",
+                    help="Render only permutations whose index modulo TOTAL falls in "
+                         "[LOW, HIGH] (inclusive), e.g. --shard 0-15/48. For splitting one "
+                         "generation across multiple machines: each machine renders a disjoint "
+                         "slice into its OWN --output directory (never point two machines at "
+                         "one shared --output -- see acquire_generation_lock's docstring for "
+                         "why), then merge each shard's sig/ tree (filenames are the GLOBAL "
+                         "index, so merging is filename-safe) and concatenate params.csv bodies "
+                         "(one header, then every shard's rows) into one directory. --combine "
+                         "is a standalone mode needing nothing but that merged directory -- run "
+                         "'gen_dataset_from_schx.py --combine MERGED_DIR', not the original "
+                         "render command again. A single machine's own share of TOTAL is "
+                         "unaffected by --workers, which controls in-process thread-pool "
+                         "concurrency, not which permutations get selected: an even N-way split "
+                         "gives worker i the single remainder LOW=HIGH=i out of TOTAL=N; a "
+                         "capacity-weighted split (e.g. proportional to each machine's core "
+                         "count) gives a faster machine a wider [LOW,HIGH] range out of a "
+                         "larger TOTAL instead. Applied AFTER the existing --output resume "
+                         "skip, so a shard re-run only renders what that shard is still "
+                         "missing, same as any other resume.")
     ap.add_argument("--values",  help="comma-separated sweep values applied to all knobs (default: 0.1,0.3,0.5,0.7)")
     ap.add_argument("--range",        action="append", metavar="KNOB=v1,v2,...",
                                       help="per-knob value override; repeatable (e.g. --range od_master=0.0,0.5,1.0)")
@@ -2396,6 +2431,19 @@ def main():
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
     to_run = [(i, p) for i, p in enumerate(perms) if i not in existing]
     print(f"Resume: {len(existing)} done, {len(to_run)} remaining")
+
+    if args.shard:
+        try:
+            _low, _high, _total = _parse_shard(args.shard)
+        except ValueError as e:
+            ap.error(str(e))
+        _before = len(to_run)
+        to_run = [(i, p) for i, p in to_run if _low <= (i % _total) <= _high]
+        print(f"Shard {args.shard}: this machine renders {len(to_run)}/{_before} of the "
+              f"remaining permutations. Once every shard is done, merge each shard's sig/ "
+              f"tree (filename-safe -- names are the global index) and concatenate "
+              f"params.csv bodies into one directory, then run "
+              f"'gen_dataset_from_schx.py --combine MERGED_DIR' against it.")
 
     # RUNG MEMORY. The winning rung is recorded per row in params.csv because "high gain needed
     # 4x oversampling" is a property of the data -- but nothing ever read it back, so a re-render
