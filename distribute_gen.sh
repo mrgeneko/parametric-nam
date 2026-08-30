@@ -214,35 +214,72 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
 fi
 
 echo "==> merging $N shard(s) into $LOCAL_DIR"
-mkdir -p "$LOCAL_DIR/sig"
-first=1
-for i in "${!WORKER_ARR[@]}"; do
-  w="${WORKER_ARR[$i]}"
-  # sig/ filenames are the GLOBAL permutation index (not shard-relative), so merging every
-  # shard's sig/ tree into one directory is filename-safe by construction -- disjoint shards
-  # never produce the same filename twice.
-  #
-  # A worker whose weighted [LOW,HIGH] range happened to match none of this job's permutation
-  # indices (small grid, fine-grained core-weighted split) legitimately renders zero files and
-  # never creates sig/ at all -- that's a valid empty shard, not a failure, so check first
-  # rather than letting rsync error out on a missing remote directory.
-  if ssh "${SSH_OPTS[@]}" "$w" "[ -d ${REMOTE_OUT[$i]}/sig ]"; then
-    rsync -az "$w:${REMOTE_OUT[$i]}/sig/" "$LOCAL_DIR/sig/"
-  else
-    echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
-  fi
-  if [ "$first" -eq 1 ]; then
-    rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/params.csv"
-    rsync -az "$w:${REMOTE_OUT[$i]}/config.json" "$LOCAL_DIR/config.json"
-    first=0
-  else
-    # params.csv must be CONCATENATED, never overwritten -- every shard has its own file with
-    # the same name and a full header, so appending body rows (skip line 1) is what makes this
-    # a merge instead of a last-writer-wins clobber that silently drops every earlier shard.
-    rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/.shard_params.csv"
-    tail -n +2 "$LOCAL_DIR/.shard_params.csv" >> "$LOCAL_DIR/params.csv"
-    rm -f "$LOCAL_DIR/.shard_params.csv"
-  fi
-done
+mkdir -p "$LOCAL_DIR"
 
-echo "==> done. Next:  python gen_dataset_from_schx.py --combine $LOCAL_DIR"
+if [ "$OUTFLAG" = "--outdir" ]; then
+  # ---- DECK renderers (render_ltspice_deck.py / render_ngspice_deck.py) ----------------
+  # Different artifacts from the schx path: cap_NNNN.wav files plus manifest.jsonl and
+  # mapping.csv, and no config.json. cap_NNNN keeps the GLOBAL grid index (shard.select
+  # filters on it rather than renumbering), so merging the wavs is filename-safe exactly the
+  # way merging sig/ is. manifest.jsonl is headerless -- concatenate every line. mapping.csv
+  # HAS a header, so take it once and append only body rows, or the merged file gets a header
+  # buried mid-table and gen_dataset_from_captures.py reads it as a permutation.
+  first=1
+  for i in "${!WORKER_ARR[@]}"; do
+    w="${WORKER_ARR[$i]}"
+    if ! ssh "${SSH_OPTS[@]}" "$w" "[ -f ${REMOTE_OUT[$i]}/mapping.csv ]"; then
+      echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
+      continue
+    fi
+    rsync -az --include='cap_*.wav' --exclude='*' "$w:${REMOTE_OUT[$i]}/" "$LOCAL_DIR/"
+    rsync -az "$w:${REMOTE_OUT[$i]}/manifest.jsonl" "$LOCAL_DIR/.shard_manifest.jsonl"
+    cat "$LOCAL_DIR/.shard_manifest.jsonl" >> "$LOCAL_DIR/manifest.jsonl"
+    rm -f "$LOCAL_DIR/.shard_manifest.jsonl"
+    rsync -az "$w:${REMOTE_OUT[$i]}/mapping.csv" "$LOCAL_DIR/.shard_mapping.csv"
+    if [ "$first" -eq 1 ]; then
+      cp "$LOCAL_DIR/.shard_mapping.csv" "$LOCAL_DIR/mapping.csv"; first=0
+    else
+      tail -n +2 "$LOCAL_DIR/.shard_mapping.csv" >> "$LOCAL_DIR/mapping.csv"
+    fi
+    rm -f "$LOCAL_DIR/.shard_mapping.csv"
+  done
+  n_wav=$(ls "$LOCAL_DIR"/cap_*.wav 2>/dev/null | wc -l | tr -d ' ')
+  n_man=$(wc -l < "$LOCAL_DIR/manifest.jsonl" 2>/dev/null | tr -d ' ')
+  echo "==> merged: $n_wav capture(s), $n_man manifest row(s) in $LOCAL_DIR"
+  echo "==> done. Next:  python gen_dataset_from_captures.py --captures $LOCAL_DIR/'*.wav' \\"
+  echo "                     --mapping-csv $LOCAL_DIR/mapping.csv --input <excitation.wav> \\"
+  echo "                     --output <dataset-dir> --v0dbfs 1.0"
+else
+  # ---- schx path (gen_dataset_from_schx.py) --------------------------------------------
+  mkdir -p "$LOCAL_DIR/sig"
+  first=1
+  for i in "${!WORKER_ARR[@]}"; do
+    w="${WORKER_ARR[$i]}"
+    # sig/ filenames are the GLOBAL permutation index (not shard-relative), so merging every
+    # shard's sig/ tree into one directory is filename-safe by construction -- disjoint shards
+    # never produce the same filename twice.
+    #
+    # A worker whose weighted [LOW,HIGH] range happened to match none of this job's permutation
+    # indices (small grid, fine-grained core-weighted split) legitimately renders zero files and
+    # never creates sig/ at all -- that's a valid empty shard, not a failure, so check first
+    # rather than letting rsync error out on a missing remote directory.
+    if ssh "${SSH_OPTS[@]}" "$w" "[ -d ${REMOTE_OUT[$i]}/sig ]"; then
+      rsync -az "$w:${REMOTE_OUT[$i]}/sig/" "$LOCAL_DIR/sig/"
+    else
+      echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
+    fi
+    if [ "$first" -eq 1 ]; then
+      rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/params.csv"
+      rsync -az "$w:${REMOTE_OUT[$i]}/config.json" "$LOCAL_DIR/config.json"
+      first=0
+    else
+      # params.csv must be CONCATENATED, never overwritten -- every shard has its own file with
+      # the same name and a full header, so appending body rows (skip line 1) is what makes this
+      # a merge instead of a last-writer-wins clobber that silently drops every earlier shard.
+      rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/.shard_params.csv"
+      tail -n +2 "$LOCAL_DIR/.shard_params.csv" >> "$LOCAL_DIR/params.csv"
+      rm -f "$LOCAL_DIR/.shard_params.csv"
+    fi
+  done
+  echo "==> done. Next:  python gen_dataset_from_schx.py --combine $LOCAL_DIR"
+fi
