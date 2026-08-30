@@ -419,8 +419,8 @@ PRIOR_STATE=none
 if [ -d "$CIRCDIR" ] && [ -n "$(ls -A "$CIRCDIR" 2>/dev/null)" ]; then
   # A variant-keyed circuit's CURRENT pointer is CURRENT.<variant> (models-repo add-run.sh's own
   # convention -- see its "A device with SWITCHES needs a --variant" comment), not the bare
-  # CURRENT -- that file doesn't even exist for such a circuit (confirmed: dumble-ots-183-full has
-  # only CURRENT.rock-2knob on disk). Falling back to bare CURRENT keeps this working for
+  # CURRENT -- that file doesn't even exist for such a circuit (confirmed: a real switched amp's
+  # entry has only CURRENT.rock-2knob on disk, no bare CURRENT). Falling back to bare CURRENT keeps this working for
   # switchless/no-variant circuits, unchanged.
   _cur="$(cat "$CIRCDIR/CURRENT${VARIANT:+.$VARIANT}" 2>/dev/null || cat "$CIRCDIR/CURRENT" 2>/dev/null || true)"
   _pn=""
