@@ -112,6 +112,12 @@ def main():
                                in_scale=in_scale, tmp=tmp, maxstep=a.maxstep,
                                parallel_sims=a.parallel_sims, out_scale=a.out_scale,
                                timeout=a.timeout)
+        # v0dbfs: the reference voltage a digital sample of 1.0 represents for THIS batch --
+        # 1.0 under --absolute (the file's own sample values used directly as volts), else
+        # --vin. Recorded per-line (not just printed) so gen_dataset_from_captures.py's
+        # --v0dbfs flag has an authoritative number to copy later, rather than someone having
+        # to remember or re-derive which mode a given capture batch used.
+        v0dbfs = 1.0 if a.absolute else a.vin
         man = open(os.path.join(a.outdir, 'manifest.jsonl'), 'w')
         for outfile, pk in results.items():
             knobs = knobs_by_file[outfile]
@@ -119,7 +125,7 @@ def main():
             ok = bool(pk is not None and pk < a.ok_max_peak)
             man.write(json.dumps({"file": f, "knobs": knobs,
                                   "peak": None if pk is None else round(float(pk), 3),
-                                  "ok": ok}) + "\n")
+                                  "ok": ok, "v0dbfs": v0dbfs}) + "\n")
             print(f"  {f}: {knobs}  {'peak=%.2f' % pk if pk else 'FAILED'}  {'ok' if ok else 'CHECK'}")
         man.close()
         print(f"wrote {a.outdir}/manifest.jsonl")

@@ -329,6 +329,12 @@ not encoded in the filename). **`--absolute`** renders a file already built at t
 peak-rescaling — necessary because those files intentionally have different segments at
 different absolute drive levels, which a normal `--vin` rescale would flatten.
 
+`manifest.jsonl`'s per-line `v0dbfs` field records the reference voltage this batch actually
+used (`1.0` under `--absolute`, else `--vin`) — copy it into `gen_dataset_from_captures.py
+--v0dbfs` when assembling the dataset, so the exported `.nam`'s `input_level_dbu` gets
+populated the same way a `.schx`'s own `V0dBFS` attribute already does. Omitted from the
+dataset (not guessed) if you don't pass it.
+
 Uses `ngspice_spicelib.py` directly, not `render_backends.py`'s `NgspiceBackend` adapter:
 that adapter returns raw audio arrays for `preflight.py`/`find_saturation_point.py`'s own
 metric computation — a different contract than the capture-files-plus-manifest this tool

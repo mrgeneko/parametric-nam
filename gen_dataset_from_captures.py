@@ -62,6 +62,7 @@ import torch
 
 import gen_dataset_from_schx as bh
 from capture_common import add_knob_parsing_args, check_scale_collisions, parse_all_filenames, resolve_knob_maps
+from param_train import _input_level_dbu
 
 
 def _find_nam_site_packages(work_dir: Path = None):
@@ -280,6 +281,15 @@ def main():
                      help="default: a .nam file's own metadata gear_type (e.g. 'pedal', "
                           "'amp_cab'), falling back to 'amp_cab' if there's none (raw "
                           "captures carry no metadata at all)")
+    ap.add_argument("--v0dbfs", type=float, default=None,
+                     help="reference voltage a digital sample of 1.0 represents in --captures, "
+                          "for computing input_level_dbu (same manual-override field param_train.py's "
+                          "schx path already writes) -- e.g. 1.0 for a render_ltspice_deck.py/"
+                          "render_ngspice_deck.py --grid capture batch run with --absolute (see its "
+                          "manifest.jsonl 'v0dbfs' field), or its --vin value otherwise. Omitted "
+                          "(the field is left out entirely, not guessed) if you don't know it -- "
+                          "e.g. real hardware .nam/.wav captures have no such render-time reference "
+                          "at all.")
     ap.add_argument("--device-name", default=None,
                      help="circuit/device label; default: first .nam file's metadata "
                           "gear_model, falling back to its (per-setting) metadata name, "
@@ -425,6 +435,8 @@ def main():
         "source_files": [str(f) for f in sorted(per_file)],
         "tier": args.tier,
     }
+    if args.v0dbfs is not None:
+        cfg["input_level_dbu"] = _input_level_dbu(args.v0dbfs)
     if args.restricted_input:
         # Local training/a shipped trained model is fine; the raw sweep audio itself is not
         # redistributable (matches sweep-files/README.md's third-party-derived convention). sweep.wav is
