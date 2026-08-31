@@ -25,7 +25,7 @@ What it looks like, concretely (one 5-knob amp model, lite tier): at
 `NormalVol=BrightVol=0.025` (the swept grid's own minimum) combined with `Treble=Bass=
 Middle=0.8`, the model predicted a peak of **100.2 V** against a ground-truth peak of
 **0.64 V** (156×) — RMS stayed normal, so it's a brief spike, not sustained distortion,
-and it's invisible to ESR unless you check per-permutation, not just aggregate. A second,
+and it's invisible to ESR unless you check per-combination, not just aggregate. A second,
 nearby corner (`Bass=0.5` instead of `0.8`) showed the same signature at 41×. Both
 cleared the same distinctive test: moving `NormalVol`/`BrightVol` off the exact trained
 minimum by as little as **0.025** (to 0.05) — not even to the next grid point — dropped
@@ -62,7 +62,7 @@ validation ESR (which averages over everything else).
   whose peak is anomalous relative to that model's own typical output. Scanning the
   affected amp's fp32 model with a **generic** guitar reference came back clean even
   including this exact corner — the spike only showed up against the **actual training
-  excitation** at that permutation, so when investigating a suspected corner, prefer
+  excitation** at that combination, so when investigating a suspected corner, prefer
   `--reference <the training sweep.wav>` over an arbitrary clip; a scan that doesn't
   reproduce the triggering content can give a false sense of safety.
 - **`build_excitation.py --synth-burst-peaks`** (excitation-design fix, added after
@@ -85,8 +85,8 @@ If a corner gets flagged, first check whether it's a *level* problem
 *shape* problem (a real reference clip flags it but the excitation's own peak clears
 onset fine — fixed by `--synth-burst-peaks`, not by more level). Don't just retrain
 longer at the same excitation — the blowup in the Tweed case was a spike lasting well
-under a second inside a single permutation's clip, so it barely moves that permutation's
-own loss, let alone the average across hundreds of permutations; more of the same data
+under a second inside a single combination's clip, so it barely moves that combination's
+own loss, let alone the average across hundreds of combinations; more of the same data
 without closing the actual coverage gap is unlikely to fix it. If neither excitation fix
 applies, narrowing the grid's swept range, adding an explicit loss weight on
 transient/peak error, or excluding that exact corner combination and documenting it as an

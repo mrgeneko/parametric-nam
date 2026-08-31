@@ -52,7 +52,7 @@ These don't produce a new artifact — they inspect or validate one that already
 |---|---|---|
 | `checkpoint_infer.py` | a `.pt` checkpoint | Run inference straight from a checkpoint, no export step — multiple `--params` sets per invocation |
 | `nam_infer.py` | an exported `.param.nam` | Run inference (or `--sweep`) from a published file, no checkpoint needed |
-| `per_perm_esr.py` | a checkpoint + dataset | Which knob-grid regions fit well vs. poorly (also called automatically by `param_train.py` itself — see [`docs/checklist.md`](checklist.md)) |
+| `per_combo_esr.py` | a checkpoint + dataset | Which knob-grid regions fit well vs. poorly (also called automatically by `param_train.py` itself — see [`docs/checklist.md`](checklist.md)) |
 | `level_band_esr.py` | a checkpoint + dataset | Fade-out/quiet-tail accuracy, split by output level band |
 | `scan_film_runaway.py` | a published `.param.nam` | FiLM/LeakyReLU blow-up at rare knob corners — see [`docs/checklist.md`](checklist.md) |
 | `plot_tone_response.py` | a published `.param.nam` | Frequency-response chart, optionally against the real circuit |

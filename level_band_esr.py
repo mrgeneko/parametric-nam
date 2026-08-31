@@ -64,8 +64,8 @@ def main():
                          "files), so a bare invocation now matches current training. Pass this "
                          "explicitly only to evaluate a checkpoint trained under the OLD -18dBFS "
                          "convention.")
-    ap.add_argument("--max-perms", type=int, default=0,
-                    help="Evaluate only the N most distorted permutations (0 = all). "
+    ap.add_argument("--max-combos", type=int, default=0,
+                    help="Evaluate only the N most distorted combinations (0 = all). "
                          "The fade-out bug is worst where the gain is highest.")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("-o", "--output", type=Path, default=None)
@@ -92,13 +92,13 @@ def main():
     outs = np.load(d / "outputs.npy", mmap_mode="r")
     import csv
     rows = list(csv.DictReader(open(d / "params.csv")))
-    if args.max_perms:
-        rows = sorted(rows, key=lambda r: -sum(float(r[k]) for k in knobs))[:args.max_perms]
+    if args.max_combos:
+        rows = sorted(rows, key=lambda r: -sum(float(r[k]) for k in knobs))[:args.max_combos]
 
     w = int(args.window_ms * sr / 1000)
     skip = int(args.warmup_s * sr)
 
-    # accumulate error and signal energy per band, over all permutations
+    # accumulate error and signal energy per band, over all combinations
     num = {b[2]: 0.0 for b in BANDS}
     den = {b[2]: 0.0 for b in BANDS}
     dur = {b[2]: 0 for b in BANDS}
@@ -135,7 +135,7 @@ def main():
     tot_e = sum(den.values()) or 1.0
 
     print(f"\n  {args.checkpoint}")
-    print(f"  tier={args.tier}   {len(rows)} permutation(s)   {args.window_ms:.0f} ms windows\n")
+    print(f"  tier={args.tier}   {len(rows)} combination(s)   {args.window_ms:.0f} ms windows\n")
     print(f"  {'band':<24}{'% duration':>12}{'% energy':>11}{'ESR in band':>14}")
     print(f"  {'-'*24}{'-'*12}{'-'*11}{'-'*14}")
     for _, _, lbl in BANDS:

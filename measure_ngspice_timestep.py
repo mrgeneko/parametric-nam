@@ -8,7 +8,7 @@ output at all), never measured for ACCURACY. Found directly on the MOSFET-clippi
 (via its ngspice-generator script, real 2N7000 MOSFET clipping): re-rendering the IDENTICAL Gain=0.3 probe
 window at maxstep 3e-6 / 1e-6 / 3e-7 gave RMS 1.210 / 1.614 / 1.593 -- a ~33% swing between the
 default and a 10x finer step, and still not settled between the two finer steps.
-grid_adequacy.py --apply was exploding (40 -> 1512+ permutations, ~10-100x over target at
+grid_adequacy.py --apply was exploding (40 -> 1512+ combinations, ~10-100x over target at
 nearly every cell, barely improving as it densified) instead of converging -- exactly the
 signature of an interpolation-error measurement dominated by non-smooth INTEGRATION noise, not
 real circuit curvature.

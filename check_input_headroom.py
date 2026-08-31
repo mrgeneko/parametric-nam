@@ -4,7 +4,7 @@
 THE QUESTION. A knob grid can be perfectly dense (grid_adequacy.py says so) and the dataset can
 still be missing the device's real nonlinear/breakup character, for a completely different reason:
 the excitation itself may never get loud enough to drive the circuit into it. A model can only
-learn what's in the data -- if every rendered permutation stays in the device's linear region, the
+learn what's in the data -- if every rendered combination stays in the device's linear region, the
 trained model has no idea what happens past it, no matter how dense the knob grid is.
 
 This is not hypothetical. On TAD Blackface 85 Reverb (2026-07-31), the default preflight probe

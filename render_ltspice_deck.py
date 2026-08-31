@@ -58,14 +58,14 @@ def main():
     ap.add_argument('--knob', action='append', default=[], help='NAME=VAL (single render)')
     ap.add_argument('--grid', nargs='+', default=[], help='NAME=v1,v2,... (sweep)')
     ap.add_argument('--no-resume', action='store_true',
-                     help="re-render every permutation even if its cap_NNNN.wav already exists. "
+                     help="re-render every combination even if its cap_NNNN.wav already exists. "
                           "By default a --grid run RESUMES: an existing, readable capture is "
                           "skipped and its peak re-read from disk, so a run killed partway "
                           "(worker died, machine slept, network dropped) picks up where it left "
                           "off instead of redoing hours of work. A zero-byte or unreadable file "
                           "is NOT trusted -- it is re-rendered.")
     ap.add_argument('--shard', metavar='LOW-HIGH/TOTAL',
-                     help="Render only permutations whose GLOBAL grid index modulo TOTAL falls "
+                     help="Render only combinations whose GLOBAL grid index modulo TOTAL falls "
                           "in [LOW, HIGH] inclusive, e.g. --shard 0-15/48. For splitting one "
                           "--grid sweep across machines: each renders a disjoint slice into its "
                           "OWN --outdir (never share one --outdir across machines), then merge. "
@@ -129,7 +129,7 @@ def main():
                 indexed, _, _, _ = shard_select(indexed, a.shard)
             except ValueError as e:
                 ap.error(str(e))
-            print(f"shard {a.shard}: this machine renders {len(indexed)}/{_before} permutations "
+            print(f"shard {a.shard}: this machine renders {len(indexed)}/{_before} combinations "
                   f"(global indices kept, so shard outputs merge by filename)")
         jobs = []
         knobs_by_file = {}

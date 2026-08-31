@@ -102,7 +102,7 @@ faster** than the LiveSPICE 32× workaround, and correct.
   keeps *every node's* full transient in RAM until it writes. The translator now
   emits `save v(<out>)` so only the probed node is stored (~150 MB for 120 s @ 2×
   vs ~13 GB for all nodes). Even so, the Python side loads a large ASCII CSV per
-  perm (~400 MB / 15 M rows for 120 s @ 2×, ~2 GB peak/worker), so cap `--workers`
+  combo (~400 MB / 15 M rows for 120 s @ 2×, ~2 GB peak/worker), so cap `--workers`
   to `RAM / ~2 GB` on long + oversampled runs (e.g. 4 on a 30 GB box). 120 s @ 2× ×
   5 workers **without** the `save` fix OOMed a 30 GB machine.
 - **`--input-upsample N`** (bandlimited polyphase resample of the input audio
@@ -164,7 +164,7 @@ Done:
    48 kHz grid; `--oversample N` solves at N×48 kHz and FIR-decimates back (removes
    the ~20% aliasing; default 1× is naive).
 3. ✅ **XSPICE filesource** input — feeds full-length WAVs (no giant inline PWL).
-4. ✅ **`gen_dataset_from_schx --backend ngspice`** — per-perm translate → run → resample
+4. ✅ **`gen_dataset_from_schx --backend ngspice`** — per-combo translate → run → resample
    → `.npy`, with the crest-factor divergence check.
 5. ✅ **Bounded memory** — `save v(<out>)` stores only the probed node, so long +
    oversampled runs don't OOM (see Caveats for the `--workers` guidance).
@@ -173,7 +173,7 @@ Done:
    topology; ngspice handles the full documented 0-26.5dB range with
    `--method gear --conv diode_cjo=100p,bjt_cje=40p,bjt_cjc=20p` plus a fixed
    input file (see finding 5 above — the real blocker was an input-file
-   splice, not the circuit or solver). 121/121 permutations converge, zero
+   splice, not the circuit or solver). 121/121 combinations converge, zero
    failures.
 
 Result: the **stiff amp head's Lead full circuit converges** (Koren mode) where LiveSPICE

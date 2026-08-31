@@ -140,7 +140,7 @@ def main():
                          "realistic clip only needs to sample varied dynamics/perceptual content "
                          "-- it is not what provides saturation coverage (the sweeps do) -- so a "
                          "short prefix is normally enough, and every second of it costs a "
-                         "render-time multiplier across the whole permutation grid.")
+                         "render-time multiplier across the whole combination grid.")
     ap.add_argument("--sweep-peaks", default="0.5,1.0,1.5,2.0",
                     help="comma list of sine-sweep peak amplitudes (V); last = training max drive")
     ap.add_argument("--sweep-f0", type=float, default=40.0)

@@ -153,10 +153,10 @@ One command runs **five** steps:
 
 | step | what it does | why it exists |
 |---|---|---|
-| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full permutation count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). Aborts the pipeline on failure. |
+| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full combination count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). Aborts the pipeline on failure. |
 | 0b — Input headroom | checks the excitation reaches the device's saturation onset at *default* knob settings (`check_input_headroom.py`) | catches an excitation that never gets loud enough to show the device's real nonlinear character, independent of grid density. **WARN only, not a gate** — a low ratio can be a real gap or a genuine high-headroom device; only checks default settings, not the grid's own hottest corner (see `prepare_excitation.py`/`check_transient_coverage.py` above for the real, every-corner check). `--skip-headroom-check` to skip. |
 | 1 — Generate | renders the dataset across the knob grid | |
-| 2 — Combine | per-permutation WAVs → `outputs.npy` | |
+| 2 — Combine | per-combination WAVs → `outputs.npy` | |
 | 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
 
 ### Listen
@@ -180,7 +180,7 @@ just want to try the knob experience before training your own.
 ```
 .schx schematic                             fixed-setting captures (.nam export or raw .wav)
     ↓  gen_dataset_from_schx.py                  ↓  gen_dataset_from_captures.py
-    (simulate: sweep × N permutations)           (align each capture to a shared sweep, 1/file)
+    (simulate: sweep × N combinations)           (align each capture to a shared sweep, 1/file)
                         ╲                        ╱
                          Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
                              ↓  param_train.py  (train A2 Lite 4ch + Full 8ch jointly, FiLM knob conditioning)
@@ -278,7 +278,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `ab_realtime_playback.py` | A/B the Python forward pass against the host app's C++ playback (FiLM parity check) |
 | `coverage_report.py` | Find holes in a sampled dataset |
 | `sweep_report.py` | Visualize a set of WAVs at different knob settings |
-| `per_perm_esr.py` | Per-permutation validation ESR for a trained model — the standard way to judge an A/B |
+| `per_combo_esr.py` | Per-combination validation ESR for a trained model — the standard way to judge an A/B |
 | `level_band_esr.py` | ESR split by output level band — catches fade-out/quiet-tail bugs |
 | `scan_film_runaway.py` | Scan a published `.nam` bundle for the FiLM/LeakyReLU runaway instability |
 | `export_checkpoint.py` | Checkpoint → `.param.nam` |
@@ -328,7 +328,7 @@ A **dataset** directory (`gen_dataset_from_schx --combine` format):
 ```
 config.json   # {"knobs": [...], "bounds": {...}, "param_map": {...}, ...}
 sweep.wav     # the dry input used
-outputs.npy   # [N_perms, N_samples] float32
+outputs.npy   # [N_combos, N_samples] float32
 params.csv    # idx, knob1, ..., rms, peak, ok, error
 ```
 
@@ -348,7 +348,7 @@ all in [`docs/reference.md`](docs/reference.md).
 ## System Requirements
 
 Training parametric NAM models is GPU- and memory-intensive. Real device grids run into
-hundreds or thousands of permutations (e.g. a real 5-knob amp's 1944), and real training
+hundreds or thousands of combinations (e.g. a real 5-knob amp's 1944), and real training
 budgets run into the tens of thousands of gradient steps (see `--target-steps` above) —
 CPU-only training isn't realistically feasible for a real run, not just slow. `--device auto`
 (the default) refuses to start if no GPU/MPS device is detected, rather than silently queuing
@@ -421,7 +421,7 @@ workarounds this repo has needed past that point.
 [**`mrgeneko/livespice-cli`**](https://github.com/mrgeneko/livespice-cli), a small standalone
 public repo, not here. This repo used to carry its own near-copy, and the two drifted, as
 duplicates do: a fix making an unknown `--params` name a hard error (instead of silently
-rendering at the defaults, so every "swept" permutation comes out **identical** and the trainer
+rendering at the defaults, so every "swept" combination comes out **identical** and the trainer
 learns the knob does nothing) landed in one copy and not the other. Two tools built from one
 schematic, disagreeing about what the device's knobs *are*. There is now exactly one. (It was
 originally extracted from `hotspice/oracle/` — same reasoning, promoted to its own repo since it

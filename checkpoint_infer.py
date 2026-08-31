@@ -69,8 +69,8 @@ def run_inference(model, audio: np.ndarray, param_vec: list[float],
     widest tier regardless of which checkpoint was actually loaded (the previous
     behavior here) meant inspecting a best_lite.pt checkpoint via this function
     quietly evaluated the full/w8 submodel instead -- caught this comparing
-    against per_perm_esr.py's own (tier-correct) result for the same checkpoint
-    and permutation: 0.037 here vs. the real 1.30 for that lite-tier corner."""
+    against per_combo_esr.py's own (tier-correct) result for the same checkpoint
+    and combination: 0.037 here vs. the real 1.30 for that lite-tier corner."""
     model.to(device)
     audio_t = torch.from_numpy(audio).float().unsqueeze(0).unsqueeze(0).to(device)  # [1,1,T]
     params_t = torch.tensor([param_vec], dtype=torch.float32).to(device)            # [1,N]

@@ -224,7 +224,7 @@ def _align_wet(y: np.ndarray, delay: int, target_len: int) -> np.ndarray:
     """Shift a wet capture so index i lines up with the shared dry sweep.wav's index i, using
     NAM's own delay-sign convention (positive = wet lags dry; see nam.data.Data's docstring:
     "we get rid of the start of x, end of y"). Unlike NAM's own _apply_delay_int (which
-    shortens BOTH x and y), sweep.wav is shared by every permutation in this dataset and is
+    shortens BOTH x and y), sweep.wav is shared by every combination in this dataset and is
     never trimmed here -- only `y` is shifted, then padded or truncated to exactly `target_len`
     (the dataset's fixed N_samples, from sweep.wav's own length)."""
     if delay > 0:
@@ -239,7 +239,7 @@ def _align_wet(y: np.ndarray, delay: int, target_len: int) -> np.ndarray:
 
 
 def _wet_from_wav(wet_path: Path, dry_path: Path, sr_in: int, target_len: int) -> tuple:
-    """Load a raw audio capture (WAV or AIFF) as this permutation's wet signal: delay-detected against the
+    """Load a raw audio capture (WAV or AIFF) as this combination's wet signal: delay-detected against the
     shared dry reference (native sample rate), then resampled to sr_in if needed -- the
     detected delay is scaled proportionally so it still lines up after resampling -- and
     finally time-aligned via _align_wet. Returns (aligned_signal, delay_used_at_sr_in,
@@ -383,10 +383,10 @@ def main():
     out_dir = args.output.expanduser()
     (out_dir / "sig").mkdir(parents=True, exist_ok=True)
 
-    # 3. Get each permutation's wet render: run a .nam through the shared sweep (inference,
+    # 3. Get each combination's wet render: run a .nam through the shared sweep (inference,
     # exactly phase-aligned by construction), or time-align a raw capture against it
     # (detect_delay -- a real analog signal chain has latency inference doesn't).
-    perms, rows, meta0 = [], [], {}
+    combos, rows, meta0 = [], [], {}
     for idx, f in enumerate(sorted(per_file)):
         params = per_file[f]
         # Announce BEFORE starting, not just the result line after: a .wav/.aif capture's
@@ -419,7 +419,7 @@ def main():
         r = bh._finalize_wav(idx, path, out_wav, expected_frames=len(sig),
                               max_crest=args.max_crest, proc_t=proc_t)
         r.rung, r.settings = rung, tag
-        perms.append(params)
+        combos.append(params)
         rows.append((idx, params, r))
         status = "OK" if r.ok else "FAIL"
         print(f"  {status}  {' '.join(f'{k}={v}' for k, v in params.items())}"
@@ -450,7 +450,7 @@ def main():
         "speaker": None,
         "input_wav": str(in_wav),
         "input": bh.input_provenance(in_wav),
-        "permutation_count": len(files),
+        "combination_count": len(files),
         "values": None,
         "workers": 1,
         "gear_make": args.gear_make or meta0.get("gear_make") or device_name,
@@ -495,7 +495,7 @@ def main():
                         r.rung, r.settings])
 
     bh.combine(out_dir)
-    bh.run_post_generation_checks(out_dir, swept, perms, values_per_knob)
+    bh.run_post_generation_checks(out_dir, swept, combos, values_per_knob)
 
 
 if __name__ == "__main__":

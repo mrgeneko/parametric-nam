@@ -48,30 +48,30 @@ def test_parse_shard_rejects_out_of_range_bounds(spec):
         parse_shard(spec)
 
 
-def test_shard_filter_selects_the_right_permutations_by_index_modulo_total():
+def test_shard_filter_selects_the_right_combinations_by_index_modulo_total():
     """The actual filter render_grid's caller applies -- exercised directly here since it's
     inlined in main() rather than its own function, to pin the exact selection semantics an
     orchestration script sharding across machines depends on."""
     low, high, total = parse_shard("0-1/4")
-    to_run = [(i, f"perm{i}") for i in range(10)]
+    to_run = [(i, f"combo{i}") for i in range(10)]
     selected = [(i, p) for i, p in to_run if low <= (i % total) <= high]
     assert [i for i, _ in selected] == [0, 1, 4, 5, 8, 9]
 
 
 def test_shard_filter_partitions_are_disjoint_and_exhaustive_across_a_full_split():
-    """Every permutation must land in EXACTLY one shard when the [LOW,HIGH] ranges tile
+    """Every combination must land in EXACTLY one shard when the [LOW,HIGH] ranges tile
     [0, TOTAL) with no gaps or overlaps -- the property an equal or capacity-weighted split
     both rely on for merged results to be complete without duplicate renders."""
     total = 12
     shards = ["0-3/12", "4-7/12", "8-11/12"]  # equal 3-way split, weights 4/4/4
-    to_run = [(i, f"perm{i}") for i in range(50)]
+    to_run = [(i, f"combo{i}") for i in range(50)]
     seen = []
     for spec in shards:
         low, high, t = parse_shard(spec)
         assert t == total
         seen += [i for i, _ in to_run if low <= (i % t) <= high]
     assert sorted(seen) == list(range(50))
-    assert len(seen) == len(set(seen))  # no permutation claimed by two shards
+    assert len(seen) == len(set(seen))  # no combination claimed by two shards
 
 
 def test_shard_filter_supports_capacity_weighted_uneven_ranges():
@@ -81,7 +81,7 @@ def test_shard_filter_supports_capacity_weighted_uneven_ranges():
     total = 8
     fast = parse_shard("0-5/8")   # 6/8 of the grid -- the faster machine
     slow = parse_shard("6-7/8")   # 2/8 of the grid -- the slower machine
-    to_run = [(i, f"perm{i}") for i in range(40)]
+    to_run = [(i, f"combo{i}") for i in range(40)]
     fast_n = len([i for i, _ in to_run if fast[0] <= (i % fast[2]) <= fast[1]])
     slow_n = len([i for i, _ in to_run if slow[0] <= (i % slow[2]) <= slow[1]])
     assert fast_n + slow_n == 40
@@ -90,7 +90,7 @@ def test_shard_filter_supports_capacity_weighted_uneven_ranges():
 # --------------------------------------------------------------------------- select()
 
 def test_select_keeps_global_indices_not_renumbered_positions():
-    combos = list(itertools.product([0.2, 0.8], [0.25, 0.75], [0.25, 0.75]))   # 8 perms
+    combos = list(itertools.product([0.2, 0.8], [0.25, 0.75], [0.25, 0.75]))   # 8 combos
     kept, low, high, total = select(list(enumerate(combos)), "1-1/2")
     assert [i for i, _ in kept] == [1, 3, 5, 7]
     assert (low, high, total) == (1, 1, 2)

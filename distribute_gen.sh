@@ -162,7 +162,7 @@ fi
 # Weighted [LOW,HIGH] ranges out of TOTAL_CORES, cumulative -- worker i's share is proportional
 # to its own core count, not an equal split. The whole [0, TOTAL_CORES) range is tiled with no
 # gaps or overlaps by construction (each worker's LOW is the previous worker's HIGH+1), so every
-# permutation index lands in exactly one worker's shard. LOW/HIGH/PIDS/REMOTE_OUT stay in
+# combination index lands in exactly one worker's shard. LOW/HIGH/PIDS/REMOTE_OUT stay in
 # lockstep with WORKER_ARR by POSITION (bash 3.2 has no associative arrays).
 LOW=(); HIGH=(); REMOTE_OUT=(); PSIMS=()
 cum=0
@@ -242,8 +242,8 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
     echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES${PSIMS[$i]}\""
   done
   echo "    Not merging while any worker is outstanding -- a partial shard would just be reported"
-  echo "    as a missing permutation by --combine anyway, so fix the worker and re-run this script"
-  echo "    (already-done permutations resume-skip on every machine, nothing is re-rendered)."
+  echo "    as a missing combination by --combine anyway, so fix the worker and re-run this script"
+  echo "    (already-done combinations resume-skip on every machine, nothing is re-rendered)."
   exit 1
 fi
 
@@ -257,12 +257,12 @@ if [ "$OUTFLAG" = "--outdir" ]; then
   # filters on it rather than renumbering), so merging the wavs is filename-safe exactly the
   # way merging sig/ is. manifest.jsonl is headerless -- concatenate every line. mapping.csv
   # HAS a header, so take it once and append only body rows, or the merged file gets a header
-  # buried mid-table and gen_dataset_from_captures.py reads it as a permutation.
+  # buried mid-table and gen_dataset_from_captures.py reads it as a combination.
   first=1
   for i in "${!WORKER_ARR[@]}"; do
     w="${WORKER_ARR[$i]}"
     if ! ssh "${SSH_OPTS[@]}" "$w" "[ -f ${REMOTE_OUT[$i]}/mapping.csv ]"; then
-      echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
+      echo "    $w: shard was empty (0 combinations in its range) -- nothing to merge"
       continue
     fi
     rsync -az --include='cap_*.wav' --exclude='*' "$w:${REMOTE_OUT[$i]}/" "$LOCAL_DIR/"
@@ -289,18 +289,18 @@ else
   first=1
   for i in "${!WORKER_ARR[@]}"; do
     w="${WORKER_ARR[$i]}"
-    # sig/ filenames are the GLOBAL permutation index (not shard-relative), so merging every
+    # sig/ filenames are the GLOBAL combination index (not shard-relative), so merging every
     # shard's sig/ tree into one directory is filename-safe by construction -- disjoint shards
     # never produce the same filename twice.
     #
-    # A worker whose weighted [LOW,HIGH] range happened to match none of this job's permutation
+    # A worker whose weighted [LOW,HIGH] range happened to match none of this job's combination
     # indices (small grid, fine-grained core-weighted split) legitimately renders zero files and
     # never creates sig/ at all -- that's a valid empty shard, not a failure, so check first
     # rather than letting rsync error out on a missing remote directory.
     if ssh "${SSH_OPTS[@]}" "$w" "[ -d ${REMOTE_OUT[$i]}/sig ]"; then
       rsync -az "$w:${REMOTE_OUT[$i]}/sig/" "$LOCAL_DIR/sig/"
     else
-      echo "    $w: shard was empty (0 permutations in its range) -- nothing to merge"
+      echo "    $w: shard was empty (0 combinations in its range) -- nothing to merge"
     fi
     if [ "$first" -eq 1 ]; then
       rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/params.csv"

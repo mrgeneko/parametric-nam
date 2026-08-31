@@ -72,16 +72,16 @@ crop-len   = 48000
 #
 # What determines how much a model learns is total gradient steps:
 #
-#     steps = epochs * n_perms * repeats * (1 - val_split) / batch_size
+#     steps = epochs * n_combos * repeats * (1 - val_split) / batch_size
 #
-# That depends on n_perms, so hand-setting repeats means THE KNOB GRID SILENTLY SETS THE TRAINING
-# BUDGET. Regridding this pedal from 14x9=126 to 12x5=60 perms halved it (24,300 -> 11,700 steps) with
+# That depends on n_combos, so hand-setting repeats means THE KNOB GRID SILENTLY SETS THE TRAINING
+# BUDGET. Regridding this pedal from 14x9=126 to 12x5=60 combos halved it (24,300 -> 11,700 steps) with
 # repeats and epochs untouched -- the model would have come out worse and THE REGRID WOULD HAVE BEEN
 # BLAMED, exactly inverting the truth.
 #
 # `epochs` stays a knob because it is NOT a budget quantity: it is the LR SCHEDULE LENGTH
 # (CosineAnnealingLR, T_max=epochs, one step per epoch). Deriving IT instead breaks on a large grid --
-# the British-stack amp's hot-rod variant's 1944 perms would give nine epochs, i.e. nine points on
+# the British-stack amp's hot-rod variant's 1944 combos would give nine epochs, i.e. nine points on
 # the cosine curve.
 #
 # DETERMINE IT WITH AN OPEN-ENDED RUN:  --epochs 0 --restart-period 50
@@ -94,7 +94,7 @@ crop-len   = 48000
 target-steps = 25000
 # device intentionally omitted -> --device auto (cuda / mps / cpu)
 
-# --- knob grid (12 x 5 = 60 perms) ---
+# --- knob grid (12 x 5 = 60 combos) ---
 #
 # MEASURED, not auditioned: tools/grid_adequacy.py --config examples/large_muffin/config.toml --target 0.009
 # It renders the circuit's TRUE output at each cell's midpoint and compares it against interpolating
@@ -111,7 +111,7 @@ target-steps = 25000
 #     Tone    all 8 cells                   0.0000      perfectly interpolable
 #
 # So it was simultaneously too dense almost everywhere and too coarse in the one place this pedal
-# actually lives. This grid has HALF the permutations and ZERO cells over target (worst: 0.0051).
+# actually lives. This grid has HALF the combinations and ZERO cells over target (worst: 0.0051).
 # Tone stays at 5 rather than the 3 the measurement permits: its points are nearly free, and 3
 # conditioning points is thin for a shipped model. Its linearity is not luck -- the tone control is a
 # passive blend of two filter paths, so its output really is close to a linear interpolation.
@@ -119,7 +119,7 @@ target-steps = 25000
 # Keys here must match the schx's own pot Names EXACTLY (case included) -- gen_dataset_from_schx.py's
 # --knobs CLI flag resolves case/spacing-insensitively against the schx (see resolve_knobs()), but
 # --fixed-params, measure_truncation.py, and grid_adequacy.py all pass these keys straight through to
-# the oracle unchanged. A mismatched case here fails every render identically, one per permutation
+# the oracle unchanged. A mismatched case here fails every render identically, one per combination
 # (see the render-failure fail-fast/dedup this config exists to be a worked example of NOT hitting).
 [knobs]
 SUSTAIN = [0.001, 0.008, 0.03, 0.12, 0.4, 0.55, 0.7, 0.8, 0.88, 0.94, 0.97, 1.0]

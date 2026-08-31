@@ -23,12 +23,12 @@ chasing:
                              decide the refinement is not worth its render budget, which is a
                              legitimate answer (see EXIT STATUS).
     residual << target ESR   the cell is OVERSAMPLED. Those points cost render time and lengthen
-                             every epoch (dataset items = perms x repeats) and teach the model
+                             every epoch (dataset items = combos x repeats) and teach the model
                              nothing it could not have interpolated.
 
 It is cheap: 3 renders per cell probe, and cells are independent so they run concurrently.
 
-WHAT IT FOUND ON LARGE MUFFIN (14 x 9 = 126 perms, the shipped grid):
+WHAT IT FOUND ON LARGE MUFFIN (14 x 9 = 126 combos, the shipped grid):
 
     Sustain 0.001-0.70   11 cells, all <= 0.0010     oversampled 10-100x
     Sustain 0.70-0.85                     0.0091     at the limit
@@ -63,7 +63,7 @@ balance are separate problems; this tool only measures the first one.
 
 EXIT STATUS.
 An over-target cell does NOT fail the run (exit 0). It is a priced trade-off, not a defect:
-refining costs renders and permutations, and a config may rationally accept a coarse cell,
+refining costs renders and combinations, and a config may rationally accept a coarse cell,
 coarsen an axis, or fix a knob outright instead of paying. Gating on it would turn a judgement
 call into an error.
 
@@ -600,10 +600,10 @@ def main() -> None:
         oversample = int(oversample)
     check_oracle(backend)
 
-    n_perms = int(np.prod([len(v) for v in knobs.values()]))
+    n_combos = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")
     print(f"  backend    {backend}")
-    print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_perms} permutations")
+    print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_combos} combinations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
     probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck", "ltspice-deck") else args.probe_s
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
@@ -633,7 +633,7 @@ def main() -> None:
                 tot = int(np.prod([len(v) for v in knobs_cur.values()]))
                 print(f"  --- iteration {iteration}/{args.max_iterations}: "
                       f"{' x '.join(str(len(v)) for v in knobs_cur.values())} = {tot} "
-                      f"permutations ---\n")
+                      f"combinations ---\n")
             try:
                 worst_by_axis, n_coarse, n_over = measure_grid(render, knobs_cur, args.target,
                                                                 args.workers)
@@ -649,7 +649,7 @@ def main() -> None:
                 print(f"  NOTE: {n_coarse} cell(s) still over target after "
                       f"{args.max_iterations} iteration(s) -- writing anyway. Rerun --apply to "
                       f"keep refining, or accept the cost: each further split multiplies the "
-                      f"permutation count, and a coarse cell may be the cheaper trade.")
+                      f"combination count, and a coarse cell may be the cheaper trade.")
                 break
             knobs_cur = {axis: suggest_axis(vals, worst_by_axis[axis], args.target)
                         for axis, vals in knobs_cur.items()}
@@ -661,17 +661,17 @@ def main() -> None:
             new = suggest_axis(list(vals), worst_by_axis[axis], args.target)
             tot *= len(new)
             print(f"  {axis:<8} = {new}")
-        print(f"\n  -> {tot} permutations (was {n_perms})")
+        print(f"\n  -> {tot} combinations (was {n_combos})")
 
     if args.apply:
         write_knobs(args.config, knobs_cur)
         tot = int(np.prod([len(v) for v in knobs_cur.values()]))
-        print(f"\n  wrote [knobs] ({tot} permutations, was {n_perms}) -> {args.config}")
+        print(f"\n  wrote [knobs] ({tot} combinations, was {n_combos}) -> {args.config}")
 
     # EXIT POLICY, and it is deliberately the opposite of what it looks like it should be.
     #
     # Over-target cells do NOT fail the run. They are a priced trade-off: refining a cell costs
-    # render time and permutations, and a config may rationally accept a coarse cell (or coarsen
+    # render time and combinations, and a config may rationally accept a coarse cell (or coarsen
     # an axis, or fix a knob outright) rather than pay. Gating on it turns a judgement call into
     # an error and trains people to pass --force at a measurement.
     #

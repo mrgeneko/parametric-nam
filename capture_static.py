@@ -137,9 +137,9 @@ def validate_setting_complete(schx: str, setting: dict):
 
 def render(schx: str, setting: dict, input_wav: str, oversample: str,
            trunc_target: float, output_dir: Path) -> dict:
-    """Shell out to gen_dataset_from_schx.py's documented single-permutation workaround:
+    """Shell out to gen_dataset_from_schx.py's documented single-combination workaround:
     pin every control but one via --fixed-params, sweep that one remaining control
-    with a single value via --knobs/--values. Produces exactly 1 permutation through
+    with a single value via --knobs/--values. Produces exactly 1 combination through
     the harness's normal render/retry/spike-detection/normalization path, unmodified."""
     items = list(setting.items())
     sweep_knob, sweep_val = items[0]
@@ -241,7 +241,7 @@ def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_di
 
 def extract_wet_wav(output_dir: Path, out_path: Path) -> Path:
     data = np.load(output_dir / "outputs.npy")
-    assert data.shape[0] == 1, f"expected exactly 1 permutation, got {data.shape[0]}"
+    assert data.shape[0] == 1, f"expected exactly 1 combination, got {data.shape[0]}"
     sf.write(str(out_path), data[0].astype(np.float32), 48000)
     return out_path
 

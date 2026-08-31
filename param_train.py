@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.parametrizations import spectral_norm as apply_spectral_norm
 
-from per_perm_esr import compute_per_perm_esr, summarize as summarize_per_perm_esr, write_csv as write_per_perm_esr_csv
+from per_combo_esr import compute_per_combo_esr, summarize as summarize_per_combo_esr, write_csv as write_per_combo_esr_csv
 
 # ---------------------------------------------------------------------------
 # Hang watchdog. 2026-07-21: MPS training on this fleet has hung silently
@@ -882,7 +882,7 @@ class ParamDataset(torch.utils.data.Dataset):
     Expected directory structure:
         dataset/
             sweep.wav        — input audio used during capture
-            outputs.npy      — float32 [N_perms, N_samples] (run --combine first)
+            outputs.npy      — float32 [N_combos, N_samples] (run --combine first)
             params.csv       — idx, knob1, ..., ok, error columns
             config.json      — must contain a "knobs" list
     """
@@ -941,10 +941,10 @@ class ParamDataset(torch.utils.data.Dataset):
             print(f"  Loading outputs.npy into RAM ...", file=sys.stderr, flush=True)
             self.outputs = np.load(str(out_path))
 
-        # Load params.csv — successful rows only, ordered by permutation idx.
+        # Load params.csv — successful rows only, ordered by combination idx.
         # outputs.npy (built by gen_dataset_from_schx.py --combine) is COMPACTED: row i
         # is the i-th surviving .npy in sorted-filename order, not row `idx`. If
-        # any permutation failed, the raw CSV `idx` has gaps and is no longer a
+        # any combination failed, the raw CSV `idx` has gaps and is no longer a
         # valid row index -- use the post-sort enumeration position instead.
         rows = []
         with open(self.dir / "params.csv", newline="") as f:
@@ -981,10 +981,10 @@ class ParamDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         real_idx = idx % len(self.samples)
-        perm_idx, params = self.samples[real_idx]
+        combo_idx, params = self.samples[real_idx]
 
         inp = self.inp
-        out_row = self.outputs[perm_idx]          # mmap row view — not materialized yet
+        out_row = self.outputs[combo_idx]          # mmap row view — not materialized yet
 
         sig_len = min(len(inp), out_row.shape[0])
         if sig_len > self.crop_len:
@@ -1100,9 +1100,9 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> t
     of an unbounded one, while a genuinely quiet-but-real crop is still counted at full weight.
 
     Why depart from NAM's plain MSE at all -- see below. Short version: NAM is a STATIC modeller.
-    One device, one knob setting, one input level. It has no permutations, so the cross-setting
+    One device, one knob setting, one input level. It has no combinations, so the cross-setting
     energy bias that motivates this simply does not exist for it, and MSE is a perfectly good
-    objective there. Our problem is parametric: 126 permutations spanning a 70x ENERGY range. That
+    objective there. Our problem is parametric: 126 combinations spanning a 70x ENERGY range. That
     is a different optimisation problem and it needs a different objective. The justification is
     our own measurement (internal engineering notes), NOT an appeal to NAM.
 
@@ -1111,16 +1111,16 @@ def esr_per_example(pred: torch.Tensor, target: torch.Tensor, floor: float) -> t
     Large Muffin and both of them are bad:
 
       * ACROSS the knob grid, output RMS spans 0.090 .. 0.755 — a 70x ENERGY ratio. Under MSE
-        the loudest 8% of permutations take 28% of the gradient and the quietest half get 17%.
+        the loudest 8% of combinations take 28% of the gradient and the quietest half get 17%.
         The parametric model neglects the quiet settings, which drags its average ESR above a
         static model's. It was never only a capacity problem.
 
-      * WITHIN a permutation, a decaying note's tail is worth nothing. On the most distorted
+      * WITHIN a combination, a decaying note's tail is worth nothing. On the most distorted
         Large Muffin setting, windows below -40 dB of peak are 8.2% of the DURATION and 0.00% of
         the GRADIENT. That is the reverse-linear-drive pedal's bug: as a note fades, the model drops the
         distortion, because staying dirty down there earns it nothing.
 
-    Dividing by each example's own energy makes every permutation, and every crop, count
+    Dividing by each example's own energy makes every combination, and every crop, count
     equally -- by construction."""
     num = ((pred - target) ** 2).sum(dim=(1, 2))
     den = (target ** 2).sum(dim=(1, 2))
@@ -1310,7 +1310,7 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
     real additional coverage, not a wasted repeat. NAM's own trainer never needed
     this: its Dataset uses fixed, non-random sample windows (checked directly,
     nam/data.py), so its validation is already fully deterministic epoch to epoch.
-    This codebase's parametric extension (many knob permutations, each covered via
+    This codebase's parametric extension (many knob combinations, each covered via
     randomly-cropped repeats) is what introduces the noise val_passes averages
     down -- increasing it trades epoch wall-clock time for a less noisy reading
     (variance falls roughly as 1/val_passes, i.e. std roughly as 1/sqrt(val_passes)
@@ -1476,7 +1476,7 @@ def resolve_device(requested: str) -> str:
     "cpu") passes through unchanged.
 
     CPU training isn't "slow", it's realistically infeasible: a real device grid runs
-    into hundreds/thousands of permutations and tens of thousands of gradient steps
+    into hundreds/thousands of combinations and tens of thousands of gradient steps
     (see README: System Requirements), and letting --device auto silently land on cpu
     just queues a run that will never finish -- a warning that's easy to miss in
     scrollback isn't enough of a guard against that. So auto refuses outright when no
@@ -1665,7 +1665,7 @@ def main():
                     help="Training objective. 'esr' normalises each example by its own energy, so "
                          "quiet knob settings and fading notes count as much as loud ones. 'mse' is "
                          "the old absolute-error loss -- kept only for A/B; it lets the loudest 8%% "
-                         "of permutations take 28%% of the gradient and gives a note's fade-out "
+                         "of combinations take 28%% of the gradient and gives a note's fade-out "
                          "0.00%% of it. (default: esr)")
     ap.add_argument("--pre-emph", type=float, default=0.85,
                     help="Pre-emphasis coefficient for the ESR loss (0 = off). Distortion lives in "
@@ -1717,7 +1717,7 @@ def main():
                          "produced nans the way fp16 did. fp32 pays the ~2.9x/step throughput "
                          "cost domain-wide now, in exchange for that ESR ceiling not existing. "
                          "The per-device quality A/B (judge on level_band_esr.py bands and "
-                         "per_perm_esr.py spread per internal engineering notes, never the "
+                         "per_combo_esr.py spread per internal engineering notes, never the "
                          "headline val ESR) is still worth running per-device if fp16/bf16 are "
                          "used for a quick throughput-bound run. Pass --amp bf16 or --amp fp16 "
                          "explicitly to opt back into mixed precision.")
@@ -1733,7 +1733,7 @@ def main():
                          "mechanism behind the FiLM/LeakyReLU runaway instability -- see "
                          "internal engineering notes ('A2'). Default off: existing "
                          "training runs are unaffected until opted in and validated "
-                         "(measure aggregate + per-perm ESR before/after on a per-model "
+                         "(measure aggregate + per-combo ESR before/after on a per-model "
                          "basis; this is a real capacity constraint, not free).")
     ap.add_argument("--lora-rank", type=int, default=0,
                     help="Add a low-rank ('LoRA-style') knob-conditioned weight update to "
@@ -1763,10 +1763,10 @@ def main():
                          "(default: %(default)s)")
     ap.add_argument("--skip-param-sensitivity", action="store_true",
                     help="Skip the parameter sensitivity check after training (runs by default)")
-    ap.add_argument("--skip-per-perm-esr", action="store_true",
-                    help="Skip the per-permutation ESR check after training (runs by default). "
-                         "Runs full-length inference over every permutation per tier -- can be "
-                         "slow for large grids (e.g. a 1,944-permutation config).")
+    ap.add_argument("--skip-per-combo-esr", action="store_true",
+                    help="Skip the per-combination ESR check after training (runs by default). "
+                         "Runs full-length inference over every combination per tier -- can be "
+                         "slow for large grids (e.g. a 1,944-combination config).")
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
                     help="Directory to save epoch checkpoints and metrics CSV")
     ap.add_argument("--cycle-checkpoints", action="store_true", default=True,
@@ -1794,7 +1794,7 @@ def main():
                          "point, plausibly cutting steps-to-plateau severalfold. Widths and "
                          "knob count must match the checkpoint. Mutually exclusive with "
                          "--resume. CAVEAT (internal engineering notes): checkpoints trained under "
-                         "the old MSE loss carry the loud-perm bias the ESR loss removed -- "
+                         "the old MSE loss carry the loud-combo bias the ESR loss removed -- "
                          "gate acceptance on level_band_esr.py bands, not headline ESR.")
     ap.add_argument("--log-csv", type=Path, default=None,
                     help="Path for metrics CSV (default: --checkpoint-dir/metrics.csv)")
@@ -1889,7 +1889,7 @@ def main():
     # only batch is a partial one, drop_last discards it, and the loader yields nothing:
     # validate() then divides by n=0 and the run dies with a bare ZeroDivisionError several
     # minutes in, pointing at arithmetic rather than at the split. Hit on the budget clone pedal -- 675
-    # permutations split 642/33 against batch_size 64, so the whole validation set vanished.
+    # combinations split 642/33 against batch_size 64, so the whole validation set vanished.
     # The MPS shape-stability argument above only applies when a full batch survives.
     train_drop = n_train >= args.batch_size
     val_drop = n_val >= args.batch_size
@@ -2057,7 +2057,7 @@ def main():
     criterion = ParamLoss(mrstft_weight=args.mrstft_weight, kind=args.loss,
                           pre_emph=args.pre_emph, floor=args.esr_floor)
     print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
-          "  <-- ABSOLUTE error: loud permutations dominate the gradient"), file=sys.stderr)
+          "  <-- ABSOLUTE error: loud combinations dominate the gradient"), file=sys.stderr)
 
     amp_dtype = {"off": None, "fp16": torch.float16, "bf16": torch.bfloat16}[args.amp]
     scaler = None
@@ -2372,20 +2372,20 @@ def main():
                                   f"(max_diff={v:.2e}) — model may be ignoring knobs")
 
     # ------------------------------------------------------------------
-    # Per-permutation ESR -- runs by default; --skip-per-perm-esr to skip.
-    # Full-length inference per permutation (not a training crop), per tier --
+    # Per-combination ESR -- runs by default; --skip-per-combo-esr to skip.
+    # Full-length inference per combination (not a training crop), per tier --
     # shows WHERE in the knob grid the model is weak, not just an average.
     # Reuses the already-loaded dataset in memory; no re-read from disk.
     # ------------------------------------------------------------------
-    if not args.skip_per_perm_esr:
-        print(f"\nPer-permutation ESR check ...", file=sys.stderr)
+    if not args.skip_per_combo_esr:
+        print(f"\nPer-combination ESR check ...", file=sys.stderr)
         for m, lbl in zip(model.submodels, model.tier_labels()):
-            results = compute_per_perm_esr(m, dataset.inp, dataset.outputs, dataset.samples,
+            results = compute_per_combo_esr(m, dataset.inp, dataset.outputs, dataset.samples,
                                            dataset.param_names, device)
-            print(f"\n{summarize_per_perm_esr(results, wlabel[lbl])}", file=sys.stderr)
+            print(f"\n{summarize_per_combo_esr(results, wlabel[lbl])}", file=sys.stderr)
             if ckpt_dir is not None:
-                csv_path = ckpt_dir / f"per_perm_esr_{wlabel[lbl]}.csv"
-                write_per_perm_esr_csv(results, dataset.param_names, csv_path)
+                csv_path = ckpt_dir / f"per_combo_esr_{wlabel[lbl]}.csv"
+                write_per_combo_esr_csv(results, dataset.param_names, csv_path)
                 print(f"  Wrote {csv_path}", file=sys.stderr)
 
     # ------------------------------------------------------------------

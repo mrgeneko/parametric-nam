@@ -135,7 +135,7 @@ emit("WIDTHS_CSV", a.get("widths", ""))
 emit("CIRCUIT_NAME", cfg.get("circuit", "?"))
 emit("OVERSAMPLE", cfg.get("oversample", "?"))
 emit("BACKEND", cfg.get("backend", "?"))
-emit("NPERM", cfg.get("permutation_count", "?"))
+emit("NCOMBO", cfg.get("combination_count", "?"))
 emit("INPUT_WAV", Path(str(cfg.get("input_wav", "?"))).name)
 # Build-recipe surfacing (2026-08-01): if the input excitation was constructed by
 # build_excitation.py, input_provenance() (gen_dataset_from_schx.py) embeds the sidecar recipe
@@ -540,7 +540,7 @@ $PROVENANCE_LINE
 - **Parameters (${#KNOBS[@]}):** \`$KNOB_LIST\`.  **Fixed:** \`$FIXED\`.
 
 ## Dataset
-- **Grid:** $NPERM permutations. Input \`$INPUT_WAV\`$RECIPE_NOTE.
+- **Grid:** $NCOMBO combinations. Input \`$INPUT_WAV\`$RECIPE_NOTE.
   See \`dataset_config.json\` / \`dataset_params.csv\`.
 
 ## Training

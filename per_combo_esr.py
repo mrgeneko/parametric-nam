@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-per_perm_esr.py — Per-permutation validation ESR for a trained parametric NAM.
+per_combo_esr.py — Per-combination validation ESR for a trained parametric NAM.
 
 Training's own reported ESR is a single number per tier, averaged over a
-random ~10% slice of the pooled (permutation x repeat-crop) dataset -- it
+random ~10% slice of the pooled (combination x repeat-crop) dataset -- it
 doesn't say where in the knob grid the model is more or less accurate. This
-runs the trained model over each permutation's FULL ground-truth audio (not
+runs the trained model over each combination's FULL ground-truth audio (not
 a training crop) and reports ESR per (knob...) combination, so you can see
 which regions of the grid fit well and which don't.
 
-compute_per_perm_esr() is the reusable core -- param_train.py calls it directly
+compute_per_combo_esr() is the reusable core -- param_train.py calls it directly
 at the end of training (reusing the already-loaded ParamDataset, no re-reading
 from disk). main() below is a thin standalone-CLI wrapper around the same
 function, for re-running this against an already-saved checkpoint later.
 
 Usage:
-    python per_perm_esr.py --checkpoint best.pt --dataset /path/to/dataset_dir \
-        --tier full --warmup-s 1.0 -o per_perm_esr.csv
+    python per_combo_esr.py --checkpoint best.pt --dataset /path/to/dataset_dir \
+        --tier full --warmup-s 1.0 -o per_combo_esr.csv
 """
 import argparse, csv, json, sys
 from pathlib import Path
@@ -26,16 +26,16 @@ import soundfile as sf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-# Deferred to inside main() (CLI-only, not used by compute_per_perm_esr/summarize/write_csv):
-# checkpoint_infer imports param_train, which imports THIS module for compute_per_perm_esr/
+# Deferred to inside main() (CLI-only, not used by compute_per_combo_esr/summarize/write_csv):
+# checkpoint_infer imports param_train, which imports THIS module for compute_per_combo_esr/
 # summarize/write_csv -- a module-level import here would be circular.
 
 
-def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
+def compute_per_combo_esr(submodel, inp: np.ndarray, outputs, samples: list,
                          param_names: list[str], device: str, scale: float = 1.0,
-                         warmup_s: float = 1.0, batch_perms: int = 12,
+                         warmup_s: float = 1.0, batch_combos: int = 12,
                          chunk_s: float = 10.0, context_n: int = 8192) -> list[dict]:
-    """Per-permutation ESR for `submodel` against full-length ground truth.
+    """Per-combination ESR for `submodel` against full-length ground truth.
 
     `inp` must already be at whatever level the model was trained on (ParamDataset.inp is
     the sweep file's native level, no rescaling -- see param_train.py) -- this does not
@@ -46,11 +46,11 @@ def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
     `samples` is a list of (row_index_into_outputs, {param_name: value}) pairs,
     matching ParamDataset.samples exactly.
 
-    BATCHED over permutations and CHUNKED over time -- this used to be one
-    full-length batch-1 forward per permutation per tier, by far the longest
-    post-training stage on big grids (a 1,944-perm British-stack-amp grid is hours; the
-    288-perm stiff-amp-head one is ~an hour per tier). The input audio is identical across
-    permutations, so `batch_perms` param vectors ride one expanded input chunk;
+    BATCHED over combinations and CHUNKED over time -- this used to be one
+    full-length batch-1 forward per combination per tier, by far the longest
+    post-training stage on big grids (a 1,944-combo British-stack-amp grid is hours; the
+    288-combo stiff-amp-head one is ~an hour per tier). The input audio is identical across
+    combinations, so `batch_combos` param vectors ride one expanded input chunk;
     time is processed in `chunk_s` windows with `context_n` samples of real
     left-context prepended. The model is strictly causal with a 6,347-sample
     receptive field, so with context_n >= RF every output sample outside the
@@ -58,7 +58,7 @@ def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
     chunking is EXACT, not an approximation (verified against the unbatched
     path). Numerator/denominator accumulate in float64 across chunks.
 
-    Returns a list of {**params, "esr": float}, one entry per permutation,
+    Returns a list of {**params, "esr": float}, one entry per combination,
     UNSORTED (caller sorts if it wants best/worst).
     """
     submodel.eval()
@@ -68,8 +68,8 @@ def compute_per_perm_esr(submodel, inp: np.ndarray, outputs, samples: list,
     inp_t = torch.from_numpy(inp[:sig_len]).float().to(device)
     results = []
     with torch.no_grad():
-        for b0 in range(0, len(samples), max(1, batch_perms)):
-            batch = samples[b0:b0 + max(1, batch_perms)]
+        for b0 in range(0, len(samples), max(1, batch_combos)):
+            batch = samples[b0:b0 + max(1, batch_combos)]
             B = len(batch)
             rows = [ri for ri, _ in batch]
             params = torch.tensor([[pd[n] for n in param_names] for _, pd in batch],
@@ -105,7 +105,7 @@ def summarize(results: list[dict], tier_label: str = "") -> str:
     esrs = np.array([d["esr"] for d in ordered])
     prefix = f"{tier_label} tier, " if tier_label else ""
     lines = [
-        f"{prefix}{len(ordered)} permutations",
+        f"{prefix}{len(ordered)} combinations",
         f"  best:   {ordered[0]}",
         f"  worst:  {ordered[-1]}",
         f"  mean={esrs.mean():.6f}  median={np.median(esrs):.6f}  std={esrs.std():.6f}",
@@ -127,7 +127,7 @@ def main():
     ap.add_argument("--dataset", required=True, help="Dataset dir (has outputs.npy, sweep.wav, params.csv)")
     ap.add_argument("--tier", default="full", help="Which tier to evaluate (default: %(default)s)")
     ap.add_argument("--warmup-s", type=float, default=1.0,
-                    help="Seconds to exclude from the start of each permutation before "
+                    help="Seconds to exclude from the start of each combination before "
                          "computing ESR (matches the SPICE-generation warmup convention -- "
                          "avoids a startup transient skewing the number). (default: %(default)s)")
     ap.add_argument("--target-dbfs", type=float, default=None,
@@ -136,7 +136,7 @@ def main():
                          "invocation matches current training. Pass this explicitly only to "
                          "evaluate a checkpoint trained under the OLD -18dBFS convention.")
     ap.add_argument("--device", default="cpu")
-    ap.add_argument("-o", "--output", type=Path, default=None, help="Write per-perm CSV here")
+    ap.add_argument("-o", "--output", type=Path, default=None, help="Write per-combo CSV here")
     args = ap.parse_args()
 
     from checkpoint_infer import load_model
@@ -170,14 +170,14 @@ def main():
     outputs = np.load(str(dataset_dir / "outputs.npy"), mmap_mode="r")
 
     # Same idx-compaction ParamDataset.__init__ does: outputs.npy row i is the
-    # i-th successful permutation in sorted-idx order, NOT row `idx` (see the
-    # param_train commit fixing the IndexError this caused when any perm fails).
+    # i-th successful combination in sorted-idx order, NOT row `idx` (see the
+    # param_train commit fixing the IndexError this caused when any combo fails).
     with open(dataset_dir / "params.csv", newline="") as f:
         rows = [r for r in csv.DictReader(f) if r["ok"] == "1"]
     rows.sort(key=lambda r: int(r["idx"]))
     samples = [(i, {n: float(r[n]) for n in param_names}) for i, r in enumerate(rows)]
 
-    results = compute_per_perm_esr(submodel, inp, outputs, samples, param_names,
+    results = compute_per_combo_esr(submodel, inp, outputs, samples, param_names,
                                    args.device, scale, args.warmup_s)
     for r in sorted(results, key=lambda d: d["esr"]):
         print(f"  {', '.join(f'{n}={r[n]}' for n in param_names)}  ESR={r['esr']:.6f}",

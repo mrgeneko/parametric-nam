@@ -342,7 +342,7 @@ def main() -> None:
     for c in counts.values(): tot *= c
     axes = ", ".join(f"{name}={n}" for name, n in counts.items())
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
-          f"{tot} permutations)")
+          f"{tot} combinations)")
 
     if args.backend == "livespice" and not args.skip_prepare_excitation and not Path(args.input).exists():
         print(f"  WARNING: --input {args.input} not found -- skipping the calibrated-excitation "

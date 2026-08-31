@@ -97,7 +97,7 @@ def test_livespice_rungs_starting_above_ceiling_yields_one_rung():
 def test_ngspice_rungs_never_repeat_a_prior_rung():
     # The exact regression the docstring describes: a caller-supplied base that already has
     # input_upsample/method/diode_cjo set used to make every rung identical, so a failing
-    # permutation was retried with the SAME settings every time.
+    # combination was retried with the SAME settings every time.
     base = {"input_upsample": 4, "method": "gear", "conv": {"diode_cjo": "100p"}}
     rungs = g._rungs("ngspice", oversample=2, ng=base)
     frozen = [_freeze(r) for r in rungs]

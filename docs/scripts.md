@@ -71,7 +71,7 @@ MOSFET, a real BJT) — or, for `ltspice-deck` specifically, a circuit whose ngs
 can't converge on real playing content at all (see [Backends](backends.md)).
 
 **Exit status — an over-target cell is not a failure.** It exits **0** even with cells over
-target, because refining one costs renders and permutations and a config may rationally accept a
+target, because refining one costs renders and combinations and a config may rationally accept a
 coarse cell, coarsen an axis, or fix a knob outright instead of paying. That is a priced
 trade-off, not a defect, and gating on it would turn a judgement call into an error.
 
@@ -248,7 +248,7 @@ automatic tripwire, not a substitute for them.
 
 ## `gen_dataset_from_schx.py` — generate the dataset
 
-Simulates the circuit across knob permutations, one WAV per permutation, then combines
+Simulates the circuit across knob combinations, one WAV per combination, then combines
 them into `outputs.npy`.
 
 ```bash
@@ -258,7 +258,7 @@ python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx"
 # Grid sweep (factorial — fine for 1–3 knobs):
 python gen_dataset_from_schx.py --backend livespice --schx "<circuit>.schx" \
     --knobs drive,tone --range "drive=0,0.5,1" --range "tone=0.2,0.5,0.8" \
-    --input guitar.wav --output <ds> --dry-run   # check perm count + disk first
+    --input guitar.wav --output <ds> --dry-run   # check combo count + disk first
 
 # Random sampling (for high knob counts — grids explode past ~3 knobs):
 python gen_dataset_from_schx.py --backend livespice --schx "<amp>.schx" \
@@ -266,7 +266,7 @@ python gen_dataset_from_schx.py --backend livespice --schx "<amp>.schx" \
     --bounds bass=0.15,0.85 --bounds mid=0.15,0.85 --bounds treble=0.15,0.85 \
     --input guitar.wav --output <ds>
 
-# Combine per-permutation WAVs into outputs.npy:
+# Combine per-combination WAVs into outputs.npy:
 python gen_dataset_from_schx.py --combine <ds>
 ```
 
@@ -277,7 +277,7 @@ python gen_dataset_from_schx.py --combine <ds>
 - **`--bounds KNOB=lo,hi`** restricts a knob's sampled range (e.g. keep a tone pot in
   its usable band, or a hot gain pot out of a divergent regime). Recorded in the
   `.param.nam` so the host maps the knob to the real trained domain.
-- **`--max-crest`** (default 50) fails any permutation whose output crest factor
+- **`--max-crest`** (default 50) fails any combination whose output crest factor
   (peak/RMS) exceeds it — a scale-invariant detector for numerical divergence that
   RMS/length checks miss.
 - **`--fixed-params k=v,...`** pins controls not being swept; **`--speaker`** selects a
@@ -290,10 +290,10 @@ Gain), give both `Circuit.Potentiometer` components the **same `Name`** in the `
 
 **Typical generation time** scales with circuit complexity, `--oversample`, and backend —
 there's no universal number, but two real measured points: a simple pedal-scale circuit
-renders a permutation in low single-digit seconds under the default `livespice` backend,
+renders a combination in low single-digit seconds under the default `livespice` backend,
 while a high-gain amp head — a 6-stage preamp cascade + 4-tube power amp with whole-amp
-sag — took **~75 min for a full permutation-batch** on the same backend. The
-`--timeout-mult` flag's per-permutation timeout ceiling is built around `oversample 8`
+sag — took **~75 min for a full combination-batch** on the same backend. The
+`--timeout-mult` flag's per-combination timeout ceiling is built around `oversample 8`
 costing up to **40x realtime** (100s of audio → 4000s) for the hardest corners, since some
 real operating points (e.g. a very low-gain setting) are a genuine 20-40x slower than that
 circuit's own typical corner without ever actually diverging.
@@ -445,7 +445,7 @@ python gen_dataset_from_captures.py --combine /tmp/myamp_ds   # same --combine f
   set of files won't vary at all.
 - Every file is aligned against a **shared sweep input** (`--input`, same convention as the
   `.schx` pipeline — defaults to `examples/T3K-sweep-v3.wav`), producing exactly one
-  permutation per file.
+  combination per file.
   This is a **scattered point-sample dataset**, not a Cartesian grid — `grid_adequacy.py`'s
   interpolation reasoning doesn't apply; there's nothing systematic to interpolate between a
   handful of arbitrary points.
@@ -542,7 +542,7 @@ python sweep_report.py /tmp/ds/*_gain_*.wav --param-name gain -o report.html
 Self-contained HTML report from any set of WAVs, one per parameter setting (sorted by
 name): overlaid waveforms, frequency spectra, and per-file stats (peak, RMS, RMS
 monotonicity across the sweep, spectral centroid trend). Doesn't care where the WAVs came
-from — point it at a generated dataset's per-permutation renders to eyeball the sweep
+from — point it at a generated dataset's per-combination renders to eyeball the sweep
 before training (`coverage_report.py` checks the *sampling*, this checks the *audio*), or
 at a batch of `checkpoint_infer.py`/`nam_infer.py` outputs to eyeball a trained model's knob
 response.

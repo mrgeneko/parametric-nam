@@ -1,6 +1,6 @@
 """Shared helpers for building a parametric dataset from real captures (not a .schx render) --
 a SET OF EXISTING FILES, each a fixed/captured knob-setting of a real device, where every
-permutation's filename encodes its knob settings as comma-separated tokens (see
+combination's filename encodes its knob settings as comma-separated tokens (see
 parse_filename_tokens). Used by gen_dataset_from_captures.py for both its source kinds (.nam
 exports and raw .wav captures) -- they share the same filename convention and the same collision
 hazard, so this module holds ONLY what's genuinely source-agnostic -- filename parsing, the

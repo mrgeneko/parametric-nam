@@ -31,13 +31,13 @@ lr         = 3e-4
 crop-len   = 48000    # must EXCEED the receptive field (2483 samples / 52 ms @ 48 kHz
                         # for the standard A2 stack) -- 48000 (1 s) is comfortable.
 
-# `repeats` (how many random crops-per-permutation each epoch draws) is DERIVED from
+# `repeats` (how many random crops-per-combination each epoch draws) is DERIVED from
 # target-steps, not set directly -- see run_pipeline.py's own comment on why `repeats`
 # is the free variable, not `epochs`. WITHOUT this set, repeats stays at param_train.py's
-# CLI default (1): for a small grid (a few dozen-to-hundred permutations) that is only
+# CLI default (1): for a small grid (a few dozen-to-hundred combinations) that is only
 # 1-2 gradient steps per epoch, so an "open-ended" run can rack up hundreds of epochs and
 # thousands of SGDR cycles while barely training at all -- exactly what happened to a
-# high-gain rectifier-style amp's config (72 perms, repeats defaulted to 1):
+# high-gain rectifier-style amp's config (72 combos, repeats defaulted to 1):
 # 1200 epochs, 30 minutes, self-stopped on a false plateau, best ESR never below 0.5
 # (2026-08-30). 25000 is every OTHER device in this fleet's own starting point, open-ended
 # run included -- not a value chosen after the fact, so start with it here too, then adjust

@@ -32,7 +32,7 @@ Usage:
 
   # full trained grid instead of the reduced corner set (see internal engineering notes
   # for measured cost: the default reduced set is ~2 min for 13 corners on a 190s reference;
-  # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 permutations at the
+  # --config scans the FULL grid batched, e.g. ~2-3 min for Tweed's 972 combinations at the
   # default --batch-size, vs. hours if it re-used the old one-forward-call-per-corner loop):
   python scan_film_runaway.py --nam PATH/TO/model.param.nam \
       --config ~/work/parametric-nam-models/amps/myamp-full-sag/config.toml
@@ -53,7 +53,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from param_train import ParametricA2
 from run_pipeline import load_config
-from gen_dataset_from_schx import grid_permutations
+from gen_dataset_from_schx import grid_combinations
 
 SR = 48000
 
@@ -124,7 +124,7 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
 
 
 def full_grid_corners(config_path, param_names):
-    """The FULL Cartesian product of --config's own [knobs] grid -- the exact permutations
+    """The FULL Cartesian product of --config's own [knobs] grid -- the exact combinations
     gen_dataset_from_schx.py rendered for training (e.g. 972 for Tweed), not a reduced sample.
     Needs --config because a .nam's own metadata only carries min/max/default per knob
     (config.parametric.parameters), not the discrete grid VALUES actually trained on --
@@ -139,9 +139,9 @@ def full_grid_corners(config_path, param_names):
     if missing:
         raise SystemExit(f"--config's [knobs] is missing {missing} (has: {list(knob_ranges)}) "
                          f"-- the .nam's own parameters are {param_names}")
-    perms = grid_permutations(param_names, knob_ranges)  # dicts keyed by param_names already
+    combos = grid_combinations(param_names, knob_ranges)  # dicts keyed by param_names already
     return [(",".join(f"{n}={p[n]:g}" for n in param_names), [p[n] for n in param_names])
-            for p in perms]
+            for p in combos]
 
 
 def _batched(seq, n):
@@ -163,7 +163,7 @@ def main():
                     help="...AND exceeds this absolute volts floor (avoids flagging near-silent models)")
     ap.add_argument("--config", default=None,
                     help="per-circuit TOML -- if given, scan the FULL trained grid (exact "
-                         "permutations gen_dataset_from_schx.py rendered, e.g. 972 for Tweed) instead "
+                         "combinations gen_dataset_from_schx.py rendered, e.g. 972 for Tweed) instead "
                          "of the reduced hypercube corner set. Needs --batch-size's batching "
                          "to stay fast at that scale -- see the module docstring for measured cost.")
     ap.add_argument("--batch-size", type=int, default=8,

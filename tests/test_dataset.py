@@ -13,7 +13,7 @@ import torch
 
 @pytest.fixture
 def fake_dataset(tmp_path):
-    """A minimal but STRUCTURALLY REAL dataset: 6 permutations, 2 knobs."""
+    """A minimal but STRUCTURALLY REAL dataset: 6 combinations, 2 knobs."""
     import soundfile as sf
 
     sr, n = 48000, 48000
@@ -23,18 +23,18 @@ def fake_dataset(tmp_path):
     x = (np.random.default_rng(0).standard_normal(n) * 0.1).astype(np.float32)
     sf.write(d / "sweep.wav", x, sr)
 
-    perms = [(a, b) for a in (0.0, 0.5, 1.0) for b in (0.0, 1.0)]
-    outs = np.stack([x * (0.2 + a) for a, b in perms]).astype(np.float32)
+    combos = [(a, b) for a in (0.0, 0.5, 1.0) for b in (0.0, 1.0)]
+    outs = np.stack([x * (0.2 + a) for a, b in combos]).astype(np.float32)
     np.save(d / "outputs.npy", outs)
 
     with open(d / "params.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["idx", "A", "B", "ok", "error"])
-        for i, (a, b) in enumerate(perms):
+        for i, (a, b) in enumerate(combos):
             w.writerow([i, a, b, 1, ""])
 
     json.dump({"knobs": ["A", "B"], "backend": "test"}, open(d / "config.json", "w"))
-    return d, len(perms)
+    return d, len(combos)
 
 
 class TestIntegrity:
@@ -50,14 +50,14 @@ class TestIntegrity:
     def test_no_nonfinite(self, fake_dataset):
         d, _ = fake_dataset
         outs = np.load(d / "outputs.npy")
-        assert np.isfinite(outs).all(), "a diverged SPICE permutation must not reach training"
+        assert np.isfinite(outs).all(), "a diverged SPICE combination must not reach training"
 
-    def test_no_dead_permutation(self, fake_dataset):
+    def test_no_dead_combination(self, fake_dataset):
         d, _ = fake_dataset
         outs = np.load(d / "outputs.npy")
         rms = np.sqrt((outs.astype(np.float64) ** 2).mean(axis=1))
         assert (rms > 1e-9).all(), (
-            "an all-silent permutation is a failed render, not a data point. Under a per-example "
+            "an all-silent combination is a failed render, not a data point. Under a per-example "
             "ESR loss it is also a gradient hazard — see tests/test_loss.py."
         )
 
@@ -72,8 +72,8 @@ class TestIntegrity:
 class TestValSplitIsNotInterpolation:
     """PINNED KNOWN LIMITATION — do not "fix" this test, fix the splitter.
 
-    ParamDataset.__len__ is n_perms * repeats and __getitem__ does `real_idx = idx % n_perms`,
-    so torch.utils.data.random_split shuffles CROPS, not knob settings. The same permutation
+    ParamDataset.__len__ is n_combos * repeats and __getitem__ does `real_idx = idx % n_combos`,
+    so torch.utils.data.random_split shuffles CROPS, not knob settings. The same combination
     therefore appears in BOTH train and val.
 
     Consequence: every val ESR we have ever published measures RECONSTRUCTION of knob settings the
@@ -85,21 +85,21 @@ class TestValSplitIsNotInterpolation:
     question and a model could memorise all nine, be garbage between them, and report a great ESR.
     """
 
-    def test_the_same_permutation_lands_in_both_splits(self, fake_dataset):
-        d, n_perms = fake_dataset
+    def test_the_same_combination_lands_in_both_splits(self, fake_dataset):
+        d, n_combos = fake_dataset
         from param_train import ParamDataset
 
         ds = ParamDataset(str(d), crop_len=4096, repeats=8, mmap=False)
-        assert len(ds) == n_perms * 8, "items are (permutation x repeat), not permutations"
+        assert len(ds) == n_combos * 8, "items are (combination x repeat), not combinations"
 
         n_val = max(1, int(len(ds) * 0.1))
         train, val = torch.utils.data.random_split(
             ds, [len(ds) - n_val, n_val], generator=torch.Generator().manual_seed(0)
         )
-        train_perms = {i % n_perms for i in train.indices}
-        val_perms = {i % n_perms for i in val.indices}
+        train_combos = {i % n_combos for i in train.indices}
+        val_combos = {i % n_combos for i in val.indices}
 
-        assert val_perms & train_perms, (
+        assert val_combos & train_combos, (
             "If this ever passes cleanly, someone has made the split knob-disjoint — good! "
             "Update internal engineering notes and delete this test."
         )

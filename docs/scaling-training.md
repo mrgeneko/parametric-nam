@@ -12,7 +12,7 @@ Everything below was measured on 2026-08-31 against real datasets, not estimated
 
 ## Measurement 1 — a training step is GPU compute, not data loading
 
-Profiled with `--widths 5,9`, batch 38, a 200-permutation dataset, `num_workers=0`
+Profiled with `--widths 5,9`, batch 38, a 200-combination dataset, `num_workers=0`
 (the trainer's setting), MPS, 60 steps after 10 warmup, every phase bracketed with
 `torch.mps.synchronize()` — MPS is asynchronous, so without that every phase but the last
 reads as ~0. Measured independently on two machines:
@@ -66,7 +66,7 @@ budget, and compare. The runs are independent — no communication at all — so
 embarrassingly parallel in a way data parallelism is not.
 
 Why it is the higher-value lever: it attacks **how many steps convergence needs**, which is
-what makes these runs long. The 143 h run had **9 permutations** — it was not slow because the
+what makes these runs long. The 143 h run had **9 combinations** — it was not slow because the
 data was big, it was slow because it took 4,800 epochs to settle.
 
 The one comparison already run (`--restart-mult 2 --restart-decay 0.85` vs equal cycles)
@@ -81,7 +81,7 @@ What makes a comparison valid:
 * **Same `--seed`** — the val split uses its own `torch.Generator().manual_seed(args.seed)`,
   independent of global RNG, so the split is identical across arms regardless of what else
   changes.
-* **Judge on `per_perm_esr_wN.csv`, not the val split** — val is 1-34 permutations here and
+* **Judge on `per_combo_esr_wN.csv`, not the val split** — val is 1-34 combinations here and
   noisy enough to pick noise.
 
 Suggested arms, chosen to separate the confound:
@@ -138,7 +138,7 @@ for p in model.parameters():
 ```
 
 That mechanic is ~10 lines. **The work is making `param_train.py` rank-aware**: `best_state`
-tracking, checkpoint writes, the SGDR plateau detector, per-permutation ESR and export all
+tracking, checkpoint writes, the SGDR plateau detector, per-combination ESR and export all
 assume one process and must run on rank 0 with the stop decision broadcast, plus
 `DistributedSampler` in place of `shuffle=True`.
 

@@ -22,7 +22,7 @@ def _sig(n, rms, seed=0):
 class TestScaleInvariance:
     """THE bug. MSE is an ABSOLUTE error, so an example's pull on the gradient is proportional
     to its ENERGY. Across Large Muffin's knob grid output RMS spans 0.090..0.755 — a 70x energy
-    ratio — so the loudest 8% of permutations took 28% of the gradient and the quietest half got
+    ratio — so the loudest 8% of combinations took 28% of the gradient and the quietest half got
     17%. The parametric model neglected the quiet settings, which is why its ESR sat above a
     static model's.
 
@@ -51,10 +51,10 @@ class TestScaleInvariance:
         # 20 dB louder → 100x the loss, for identical relative error.
         assert loud / quiet == pytest.approx(100.0, rel=0.02)
 
-    def test_quiet_and_loud_permutations_contribute_equally(self):
+    def test_quiet_and_loud_combinations_contribute_equally(self):
         """The 70x-energy-ratio case, end to end. Under ESR both examples in the batch must pull
         on the gradient by comparable amounts; under MSE the loud one dominates."""
-        quiet_t = _sig(4096, rms=0.09)                 # quietest Large Muffin permutation
+        quiet_t = _sig(4096, rms=0.09)                 # quietest Large Muffin combination
         loud_t = _sig(4096, rms=0.755, seed=2)         # loudest
         quiet_p = quiet_t + _sig(4096, rms=0.009, seed=3)    # both 10% relative error
         loud_p = loud_t + _sig(4096, rms=0.0755, seed=4)
@@ -71,7 +71,7 @@ class TestScaleInvariance:
         ratio_mse = (mse_each[1] / mse_each[0]).item()
 
         assert ratio_esr == pytest.approx(1.0, rel=0.1), "ESR: equal pull"
-        assert ratio_mse > 50, "MSE: the loud permutation dominates (this is the bug)"
+        assert ratio_mse > 50, "MSE: the loud combination dominates (this is the bug)"
 
 
 class TestSilentCropDoesNotExplode:

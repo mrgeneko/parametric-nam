@@ -77,9 +77,9 @@ def main():
     print(f"\nCoverage report — {args.dataset}")
     print(f"  knobs ({d}): {', '.join(knobs)}")
     print(f"  bounds: " + ", ".join(f"{k}[{lo[i]:.2f},{hi[i]:.2f}]" for i, k in enumerate(knobs)))
-    print(f"  permutations: {n_total} total, {n_ok} ok, {n_total - n_ok} failed")
+    print(f"  combinations: {n_total} total, {n_ok} ok, {n_total - n_ok} failed")
     if n_ok == 0:
-        print("  no successful perms yet — nothing to analyse."); return
+        print("  no successful combos yet — nothing to analyse."); return
 
     # --- failures ---
     if n_total - n_ok:
@@ -164,7 +164,7 @@ def main():
             for _, pt in chosen:
                 w.writerow([f"{v:.4f}" for v in pt])
         print(f"\nWrote {len(chosen)} suggested fill points -> {args.emit_fill}")
-        print("  (feeding these back needs a --perms-csv ingest in gen_dataset_from_schx; "
+        print("  (feeding these back needs a --combos-csv ingest in gen_dataset_from_schx; "
               "or just widen --random and re-run, the sampler is seed-extensible.)")
 
 

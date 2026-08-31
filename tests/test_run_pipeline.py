@@ -1,7 +1,7 @@
 """Tests for run_pipeline.py's pure, already-extracted-for-testability logic: the
 reproducible-path rewriter (portable()), the training-command flag-forwarding
 (build_train_cmd()), the per-circuit TOML config loader (load_config()), and the
-missing-permutations fail-fast gate (check_missing_permutations()).
+missing-combinations fail-fast gate (check_missing_combinations()).
 
 None of these invoke gen_dataset_from_schx.py/param_train.py as subprocesses -- they test
 the command/decision construction directly.
@@ -203,10 +203,10 @@ def test_load_config_absent_tables_are_simply_not_present(tmp_path):
         assert key not in out
 
 
-# --------------------------------------------------------------------------- check_missing_permutations()
+# --------------------------------------------------------------------------- check_missing_combinations()
 
 def _write_dataset(tmp_path, expected, rows):
-    (tmp_path / "config.json").write_text(json.dumps({"permutation_count": expected}))
+    (tmp_path / "config.json").write_text(json.dumps({"combination_count": expected}))
     fieldnames = sorted({k for r in rows for k in r})
     import csv
     with open(tmp_path / "params.csv", "w", newline="") as f:
@@ -216,44 +216,44 @@ def _write_dataset(tmp_path, expected, rows):
             w.writerow(r)
 
 
-def test_check_missing_permutations_noop_when_nothing_generated_yet(tmp_path):
+def test_check_missing_combinations_noop_when_nothing_generated_yet(tmp_path):
     fh = io.StringIO()
-    rp.check_missing_permutations(tmp_path, fh, allow_missing=False)  # no config.json/params.csv
+    rp.check_missing_combinations(tmp_path, fh, allow_missing=False)  # no config.json/params.csv
     assert fh.getvalue() == ""
 
 
-def test_check_missing_permutations_noop_when_all_succeeded(tmp_path):
+def test_check_missing_combinations_noop_when_all_succeeded(tmp_path):
     _write_dataset(tmp_path, expected=2,
                     rows=[{"idx": 0, "ok": "1", "gain": 0.1},
                           {"idx": 1, "ok": "1", "gain": 0.5}])
     fh = io.StringIO()
-    rp.check_missing_permutations(tmp_path, fh, allow_missing=False)
+    rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
     assert fh.getvalue() == ""
 
 
-def test_check_missing_permutations_exits_by_default_when_some_failed(tmp_path):
+def test_check_missing_combinations_exits_by_default_when_some_failed(tmp_path):
     _write_dataset(tmp_path, expected=2,
                     rows=[{"idx": 0, "ok": "1", "gain": 0.1},
                           {"idx": 1, "ok": "0", "gain": 0.5, "error": "diverged"}])
     fh = io.StringIO()
     with pytest.raises(SystemExit):
-        rp.check_missing_permutations(tmp_path, fh, allow_missing=False)
-    assert "1 of 2 permutations failed" in fh.getvalue()
+        rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
+    assert "1 of 2 combinations failed" in fh.getvalue()
     assert "diverged" in fh.getvalue()
 
 
-def test_check_missing_permutations_warns_but_proceeds_with_allow_missing(tmp_path):
+def test_check_missing_combinations_warns_but_proceeds_with_allow_missing(tmp_path):
     _write_dataset(tmp_path, expected=2,
                     rows=[{"idx": 0, "ok": "1", "gain": 0.1},
                           {"idx": 1, "ok": "0", "gain": 0.5, "error": "diverged"}])
     fh = io.StringIO()
-    rp.check_missing_permutations(tmp_path, fh, allow_missing=True)  # must not raise
+    rp.check_missing_combinations(tmp_path, fh, allow_missing=True)  # must not raise
     assert "WARNING" in fh.getvalue()
 
 
-def test_check_missing_permutations_noop_when_permutation_count_is_absent(tmp_path):
+def test_check_missing_combinations_noop_when_combination_count_is_absent(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({}))
     (tmp_path / "params.csv").write_text("idx,ok\n0,1\n")
     fh = io.StringIO()
-    rp.check_missing_permutations(tmp_path, fh, allow_missing=False)
+    rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
     assert fh.getvalue() == ""

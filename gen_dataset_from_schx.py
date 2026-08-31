@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Build a parametric training dataset by simulating a .schx circuit across a knob-permutation
-grid, one WAV per permutation (parallel batch processor for LiveSPICE/ngspice/cpp harnesses).
+Build a parametric training dataset by simulating a .schx circuit across a knob-combination
+grid, one WAV per combination (parallel batch processor for LiveSPICE/ngspice/cpp harnesses).
 
 livespice backend (no code changes needed for new circuits):
     python gen_dataset_from_schx.py --backend livespice \\
@@ -28,7 +28,7 @@ Output (sharded by 2-digit prefix — ~100 files per dir):
 
 Post-processing:
     python gen_dataset_from_schx.py --combine training_data/
-        → training_data/outputs.npy   (float32, shape [N_perms, N_samples])
+        → training_data/outputs.npy   (float32, shape [N_combos, N_samples])
 """
 
 import atexit, argparse, csv, fcntl, json, os, re, shutil, signal, subprocess, sys, threading, time
@@ -52,7 +52,7 @@ def _find_livespice_cli() -> Path:
 
     This repo used to carry its own livespice_cli, a near-copy of hotspice's. The two
     drifted, as duplicates do: a fix that makes an unknown --params name a hard error (rather than
-    silently rendering at the defaults, so that every "swept" permutation comes out IDENTICAL and
+    silently rendering at the defaults, so that every "swept" combination comes out IDENTICAL and
     the trainer learns the knob does nothing) landed in one copy and not the other. Two tools built
     from one schematic, disagreeing about what the device's knobs ARE -- the same failure the
     emitter's ParamExtractor had.
@@ -170,11 +170,11 @@ def check_backend(schx: Path, backend: str, ap) -> None:
 
     Two kinds of failure, and they deserve different treatment:
 
-      LOUD    the backend throws or refuses. Harmless -- you find out at once, and the permutation is
+      LOUD    the backend throws or refuses. Harmless -- you find out at once, and the combination is
               recorded as failed. The metal-distortion pedal on livespice is this: Circuit.SimulationDiverged near
               t=2.65s, exit 134, no output (its ~250x-gain distortion core is unstable under a fixed
               timestep, and oversample 2 -> 32 does not help). Declared anyway so you learn in two
-              seconds instead of after every permutation has crashed in turn, and so you are pointed
+              seconds instead of after every combination has crashed in turn, and so you are pointed
               at the backend that works.
 
       SILENT  the backend renders the circuit WRONGLY and says nothing. THIS is what makes the file
@@ -238,7 +238,7 @@ def parse_schx_controls(schx_path: str) -> dict:
         transparent-overdrive pedal its dual-gang Gain is two 100k sections, now Group "Gain".
                      Sweeping them independently means a 2-D grid where the device has ONE axis.
 
-    Permutations are therefore over CONTROLS: one column per knob, written to every section.
+    Combinations are therefore over CONTROLS: one column per knob, written to every section.
     """
     tree = ET.parse(schx_path)
     controls = {}
@@ -299,14 +299,14 @@ def fmt_params(params: dict, param_map: dict = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# permutation generators
+# combination generators
 # ---------------------------------------------------------------------------
 
-def grid_permutations(knobs: List[str], values_per_knob: dict) -> List[dict]:
+def grid_combinations(knobs: List[str], values_per_knob: dict) -> List[dict]:
     return [dict(zip(knobs, vs)) for vs in product(*[values_per_knob[k] for k in knobs])]
 
 
-def random_permutations(knobs: List[str], n: int, seed: int = 0,
+def random_combinations(knobs: List[str], n: int, seed: int = 0,
                         bounds: dict = None, anchors: bool = True) -> List[dict]:
     """N points in the knob hypercube.
 
@@ -325,18 +325,18 @@ def random_permutations(knobs: List[str], n: int, seed: int = 0,
     lo = {k: float(bounds.get(k, (0.0, 1.0))[0]) for k in knobs}
     hi = {k: float(bounds.get(k, (0.0, 1.0))[1]) for k in knobs}
 
-    perms: List[dict] = []
+    combos: List[dict] = []
     if anchors:
-        perms.append({k: lo[k] for k in knobs})            # all-min corner
-        perms.append({k: hi[k] for k in knobs})            # all-max corner
+        combos.append({k: lo[k] for k in knobs})            # all-min corner
+        combos.append({k: hi[k] for k in knobs})            # all-max corner
         for k in knobs:                                    # each knob solo at its extremes
             mid = {kk: (lo[kk] + hi[kk]) / 2 for kk in knobs}
-            p_lo = dict(mid); p_lo[k] = lo[k]; perms.append(p_lo)
-            p_hi = dict(mid); p_hi[k] = hi[k]; perms.append(p_hi)
+            p_lo = dict(mid); p_lo[k] = lo[k]; combos.append(p_lo)
+            p_hi = dict(mid); p_hi[k] = hi[k]; combos.append(p_hi)
 
-    while len(perms) < n:                                  # uniform-random fill within bounds
-        perms.append({k: lo[k] + (hi[k] - lo[k]) * rng.random() for k in knobs})
-    return perms[:n]
+    while len(combos) < n:                                  # uniform-random fill within bounds
+        combos.append({k: lo[k] + (hi[k] - lo[k]) * rng.random() for k in knobs})
+    return combos[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ class Result:
     error: str = ""
     rms: float = 0.0
     peak: float = 0.0
-    # What it actually took to make this permutation converge. Recorded per row, because
+    # What it actually took to make this combination converge. Recorded per row, because
     # "this dataset needed 4x oversampling at high gain" is a property OF THE DATA and the
     # next person deserves to know it without re-deriving it.
     rung: int = 0
@@ -361,10 +361,10 @@ class Result:
 
 # Single-sample solver-overshoot spike detector (see _finalize_wav). A sample is flagged as a spike
 # when it exceeds SPIKE_NEIGHBOR_RATIO x its louder immediate neighbor AND SPIKE_BULK_RATIO x the
-# perm's own 99th-percentile |amplitude| (its "normal" ceiling, e.g. the clip rail). Both together:
+# combo's own 99th-percentile |amplitude| (its "normal" ceiling, e.g. the clip rail). Both together:
 # the neighbor ratio catches single-sample-ness (real transients span many samples); the bulk ratio
-# keeps legitimate transients that ride near the perm's own peak from tripping it. Validated on the
-# British-stack amp's sag set: 0 false positives across 1284 clean perms, every clear overshoot
+# keeps legitimate transients that ride near the combo's own peak from tripping it. Validated on the
+# British-stack amp's sag set: 0 false positives across 1284 clean combos, every clear overshoot
 # (>2x the rail) caught. A band-limited waveform physically cannot satisfy both at once, so this is
 # a safe hard gate.
 SPIKE_NEIGHBOR_RATIO = 3.0
@@ -375,7 +375,7 @@ SPIKE_BULK_RATIO = 2.0
 # only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
 # and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
 # convergence) peaks at ~0.3-0.38 -- comparable to or below this SAME circuit's own normal
-# full-dataset peak range (0.06-1.0 across the 48-perm dataset built on the old sweepv5.wav
+# full-dataset peak range (0.06-1.0 across the 48-combo dataset built on the old sweepv5.wav
 # excitation, removed from this repo 2026-08-28 -- see README, "The sweep file"). The ratio checks
 # above still flagged it: p99 ("bulk") is a whole-file statistic, and a brief energetic burst in
 # an otherwise-quiet 190s sweep doesn't move it much, so 2x bulk is a low bar to clear during
@@ -407,7 +407,7 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
         return Result(idx, error=f"truncated: {len(sig)} of {expected_frames} samples")
     # Skip the DC-solver startup transient (~0.5-1s ring before settling, see circuit
     # docs' "Known artifacts") when computing divergence-detection stats, so it doesn't
-    # trip a false positive on otherwise-clean, quiet (e.g. low-gain) permutations. The
+    # trip a false positive on otherwise-clean, quiet (e.g. low-gain) combinations. The
     # full untrimmed signal is still saved — sample position must stay aligned with
     # sweep.wav, which param_train.py's ParamDataset crops using the same offset.
     warmup_n = int(warmup_s * sr)
@@ -433,7 +433,7 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
     # check above misses these because one sample barely moves the RMS.
     asig = np.abs(stats_sig)
     neigh = np.maximum(np.concatenate(([0.0], asig[:-1])), np.concatenate((asig[1:], [0.0])))
-    bulk = float(np.percentile(asig, 99.0))   # the perm's own "normal" ceiling (e.g. the clip rail)
+    bulk = float(np.percentile(asig, 99.0))   # the combo's own "normal" ceiling (e.g. the clip rail)
     spikes = ((asig > SPIKE_NEIGHBOR_RATIO * neigh) & (asig > SPIKE_BULK_RATIO * bulk)
               & (asig > SPIKE_ABS_FLOOR))
     n_spikes = int(spikes.sum())
@@ -607,7 +607,7 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
 # solve can actually fix") explicitly covers this exact failure mode, and the British-stack amp's
 # sag precedent (internal engineering notes #12) confirms oversample *can* clear these. Found on
 # the high-headroom clean amp (sag): the real dataset generation run hard-failed ~87% of its first
-# 107 permutations, nearly all on spike errors that had never been given a single retry.
+# 107 combinations, nearly all on spike errors that had never been given a single retry.
 _CONVERGENCE_FAILURE = re.compile(
     r"diverg|NaN|Inf|timestep too small|singular|convergence|no convergence|"
     r"unstable|crest|truncated|timeout|iteration|spike|overshoot",
@@ -624,7 +624,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
     We ALREADY KNEW how to fix these -- the reverse-linear-drive pedal needed input_upsample=4,
     the metal-distortion pedal needed diode_cjo damping -- but that knowledge lived only in a
     caller's memory of which flags to pass, and was NEVER REACHED FOR when a render actually
-    failed. A failed permutation just recorded its error and the run carried on with a hole in
+    failed. A failed combination just recorded its error and the run carried on with a hole in
     the dataset.
 
     So: escalate on failure, and record which rung won.
@@ -650,7 +650,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # high ceiling costs nothing where it is not needed. Measured render time, the mid-hump
         # overdrive pedal and Large Muffin, --iterations 8 vs 128: identical to 0.01 s.
         #
-        # An under-converged dataset is worse than a failed one. A failed permutation is a hole
+        # An under-converged dataset is worse than a failed one. A failed combination is a hole
         # you can see; an under-converged one is a lie you cannot.
         #
         # ESCALATION CEILING: 256. Used to stop at os_*4 -- the modern high-gain rectifier-style
@@ -673,13 +673,13 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # The ladder used to be written as `max(up, 2), max(up, 4)` etc., which silently COLLAPSES for
         # any circuit whose caller already passes fixed --conv/--method/--input-upsample flags. The
         # reverse-linear-drive pedal, run with input_upsample=4, method=gear AND diode_cjo already
-        # set -- every rung came out IDENTICAL, and a failing permutation was retried five times with
+        # set -- every rung came out IDENTICAL, and a failing combination was retried five times with
         # exactly the same settings. A retry ladder that does not escalate is just a slower failure.
         #
         # NOTE `conv` is a DICT here ({"diode_cjo": "100p", ...}), parsed from the k=v,k=v CLI string
         # long before this point -- it is NOT the string it looks like. Treating it as one raised
         # TypeError and took the WHOLE ngspice BACKEND down: every run died building the ladder,
-        # before a single permutation was rendered.
+        # before a single combination was rendered.
         base = dict(ng or {})
         out = [dict(base)]
 
@@ -696,7 +696,7 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # elsewhere: it densifies the filesource, it does not change the solver's internal step
         # ceiling). Forcing finer internal steps directly is what fixed it -- 4x (5u) alone
         # already stopped the crash; 8x (2.6u) tried as a second rung for margin. Halving further
-        # from here would just keep slowing every permutation for one already-fixed corner, so
+        # from here would just keep slowing every combination for one already-fixed corner, so
         # the ladder stops at 8x rather than continuing to escalate blindly.
         c0 = dict(base.get("conv") or {})
         tmax0_s = str(c0.get("tmax") or "20.8333u")
@@ -742,9 +742,9 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 max_crest: float = 0.0, ng: dict = None,
                 warmup_s: float = 1.0, no_retry: bool = False,
                 start_rung: int = 0) -> Result:
-    """Render one permutation, ESCALATING THE SOLVER when it fails to converge.
+    """Render one combination, ESCALATING THE SOLVER when it fails to converge.
 
-    A failed permutation used to record its error and be forgotten -- leaving a hole in the
+    A failed combination used to record its error and be forgotten -- leaving a hole in the
     dataset that only surfaced later as "WARNING: N .npy files but M OK rows". We already knew
     how to fix these (the reverse-linear-drive pedal needed input_upsample=4, the metal-distortion
     pedal needed diode_cjo damping); that
@@ -785,7 +785,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # A TIMEOUT is a convergence failure the ladder cannot outrun on backends whose
         # escalation is a finer timestep: rung N+1 renders the same audio at 2x the solver
         # cost against the SAME timeout_s, so if rung N ran out of clock, rung N+1 is
-        # guaranteed to -- and a hopeless permutation used to burn timeout_s x n_rungs
+        # guaranteed to -- and a hopeless combination used to burn timeout_s x n_rungs
         # (hours) before failing. ngspice is exempt: its rungs change method/damping at
         # roughly equal solver cost, so a retry there can genuinely win.
         if "timeout" in r.error.lower() and backend in ("livespice", "cpp"):
@@ -868,7 +868,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
 # combine → single outputs.npy
 # ---------------------------------------------------------------------------
 
-DEFAULT_OUTPUT_PEAK = 0.9  # normalize the loudest permutation to this peak (~-1 dBFS headroom)
+DEFAULT_OUTPUT_PEAK = 0.9  # normalize the loudest combination to this peak (~-1 dBFS headroom)
 
 
 def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: bool = True):
@@ -883,14 +883,14 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
         sys.exit(1)
 
     sample = np.load(str(npy_paths[0]))
-    n_perms, n_samples = len(npy_paths), len(sample)
+    n_combos, n_samples = len(npy_paths), len(sample)
 
     # Cross-check .npy count against params.csv OK rows, and read the peak column: a full amp's
     # output node swings to its rail (tens of volts), so the raw render is NOT a sane audio level.
-    # Normalize the WHOLE dataset by ONE constant (loudest perm -> output_peak) BEFORE writing
+    # Normalize the WHOLE dataset by ONE constant (loudest combo -> output_peak) BEFORE writing
     # outputs.npy, so the model trains toward sane levels instead of raw voltage. One constant, not
-    # per-perm: per-perm normalization would flatten the inter-knob loudness (Master/Gain getting
-    # louder) that the model must learn. Uses the post-warmup peak from params.csv; glitchy perms
+    # per-combo: per-combo normalization would flatten the inter-knob loudness (Master/Gain getting
+    # louder) that the model must learn. Uses the post-warmup peak from params.csv; glitchy combos
     # have already hard-failed (see _finalize_wav), so they don't inflate the global peak.
     total_rows = 0
     ok_rows = 0
@@ -907,17 +907,17 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
                     pass
             else:
                 failed.append((r.get("idx"), r.get("error")))
-    # HARD FAIL, not a warning: any permutation that didn't succeed (whether it's
+    # HARD FAIL, not a warning: any combination that didn't succeed (whether it's
     # missing from params.csv entirely, marked ok!=1, or its .npy just isn't there)
     # means the dataset is silently incomplete. This used to warn and write
     # outputs.npy anyway -- a hole in the grid that only surfaces much later, if at
-    # all, as an unexplained gap in per-perm ESR results.
-    if failed or total_rows != n_perms or ok_rows != n_perms:
+    # all, as an unexplained gap in per-combo ESR results.
+    if failed or total_rows != n_combos or ok_rows != n_combos:
         for idx, err in failed:
-            print(f"FAILED permutation idx={idx}: {err}", file=sys.stderr)
+            print(f"FAILED combination idx={idx}: {err}", file=sys.stderr)
         sys.exit(f"FATAL: dataset generation incomplete -- {total_rows} rows in "
-                 f"params.csv ({ok_rows} ok, {len(failed)} failed), {n_perms} .npy files "
-                 f"under sig/. Every permutation must succeed; re-run the failed ones "
+                 f"params.csv ({ok_rows} ok, {len(failed)} failed), {n_combos} .npy files "
+                 f"under sig/. Every combination must succeed; re-run the failed ones "
                  f"(or the whole grid) before combining.")
 
     scale = 1.0
@@ -928,34 +928,34 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
             print("WARNING: could not read a positive peak from params.csv — writing RAW output "
                   "(not normalized)", file=sys.stderr)
 
-    # Check lengths BEFORE writing anything: a mismatch here means that permutation's render
-    # is corrupt (truncated/extended audio), which is exactly the kind of per-permutation
+    # Check lengths BEFORE writing anything: a mismatch here means that combination's render
+    # is corrupt (truncated/extended audio), which is exactly the kind of per-combination
     # failure that must hard-stop the pipeline rather than get silently written into
     # outputs.npy (or crash mid-write with a confusing shape-mismatch traceback).
     #
-    # Time-gated (not every-N-files) heartbeat: a big grid (the British-stack amp's hot-rod variant's 1944 perms)
+    # Time-gated (not every-N-files) heartbeat: a big grid (the British-stack amp's hot-rod variant's 1944 combos)
     # spends real, silent seconds here, indistinguishable from a hang; a small one shouldn't
     # print anything at all.
-    print(f"loading {n_perms} .npy file(s) ...", flush=True)
+    print(f"loading {n_combos} .npy file(s) ...", flush=True)
     _t_load, _last_print = time.monotonic(), 0.0
     sigs = []
     for i, p in enumerate(npy_paths, 1):
         sigs.append(np.load(str(p)))
         now = time.monotonic()
         if now - _last_print >= 2.0:
-            print(f"  {i}/{n_perms} loaded ({now - _t_load:.0f}s)", flush=True)
+            print(f"  {i}/{n_combos} loaded ({now - _t_load:.0f}s)", flush=True)
             _last_print = now
     bad_lengths = [(str(p), len(s)) for p, s in zip(npy_paths, sigs) if len(s) != n_samples]
     if bad_lengths:
         for path, count in bad_lengths[:10]:
             print(f"BAD LENGTH: {path}: {count} samples (expected {n_samples})", file=sys.stderr)
         sys.exit(f"FATAL: {len(bad_lengths)} .npy file(s) have the wrong length -- "
-                 f"corrupt render(s). Re-run those permutations before combining.")
+                 f"corrupt render(s). Re-run those combinations before combining.")
 
     out_path = out_dir / "outputs.npy"
     arr = np.lib.format.open_memmap(str(out_path), mode="w+",
                                     dtype=np.float32,
-                                    shape=(n_perms, n_samples))
+                                    shape=(n_combos, n_samples))
     for i, (p, sig) in enumerate(zip(npy_paths, sigs)):
         arr[i] = sig * scale if scale != 1.0 else sig
         p.unlink()
@@ -979,8 +979,8 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
         except Exception as e:
             print(f"WARNING: could not record output_scale in config.json: {e}", file=sys.stderr)
 
-    print(f"Wrote {n_perms} × {n_samples} = {n_perms * n_samples // 1_000_000:.0f}M samples → {out_path}")
-    print(f"Shape: ({n_perms}, {n_samples}) — OK")
+    print(f"Wrote {n_combos} × {n_samples} = {n_combos * n_samples // 1_000_000:.0f}M samples → {out_path}")
+    print(f"Shape: ({n_combos}, {n_samples}) — OK")
     if normalize and scale != 1.0:
         print(f"Output normalized: raw global peak {global_peak:.2f} → {output_peak} "
               f"(scale ×{scale:.6f}); recorded as output_scale in config.json")
@@ -1177,7 +1177,7 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
     return res
 
 
-def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
+def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                       param_map: dict, fixed_params: str, speaker: str,
                       target: float, probe_s: float = 8.0, n_windows: int = 4,
                       iterations: int = 256, ref_os: int = 32,
@@ -1240,11 +1240,11 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
 
     picks = []
     for k in knobs:
-        lo, hi = min(p[k] for p in perms), max(p[k] for p in perms)
+        lo, hi = min(p[k] for p in combos), max(p[k] for p in combos)
         for v in (lo, hi):
-            picks.append(next(p for p in perms if p[k] == v))
-    picks.append(max(perms, key=lambda p: sum(p.values())))
-    picks.append(min(perms, key=lambda p: sum(p.values())))
+            picks.append(next(p for p in combos if p[k] == v))
+    picks.append(max(combos, key=lambda p: sum(p.values())))
+    picks.append(min(combos, key=lambda p: sum(p.values())))
     seen, uniq = set(), []
     for p in picks:
         key = tuple(sorted(p.items()))
@@ -1363,7 +1363,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
 
         # PRE-WARM THE CACHE IN PARALLEL. The measurement loop below reads renders
         # one at a time; rendered serially they use one core while the reference
-        # renders alone cost ref_os/2 x a candidate each. All (clip, perm, os)
+        # renders alone cost ref_os/2 x a candidate each. All (clip, combo, os)
         # renders at a given rung are independent, so fill the cache first and let
         # the (unchanged) measurement math read it back. Keys are deduped before
         # submission, and each batch completes before the serial loop runs, so the
@@ -1472,7 +1472,7 @@ def choose_oversample(schx: str, knobs: list, perms: list, input_wav: Path,
     return ref_os
 
 
-def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
+def audit_convergence(out_dir: Path, knobs: list, combos: list, backend: str,
                       input_wav: Path, schx: str, param_map: dict, fixed_params: str,
                       speaker: str, oversample: int, iterations: int,
                       n_probe: int = 8, workers: int = None,
@@ -1519,7 +1519,7 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
     a cold start), numerator and denominator POOLED across windows. All (setting, variant, window)
     renders are independent and go through one thread pool.
     """
-    if backend != "livespice" or not perms:
+    if backend != "livespice" or not combos:
         return
     import tempfile
 
@@ -1529,12 +1529,12 @@ def audit_convergence(out_dir: Path, knobs: list, perms: list, backend: str,
     # direction we would not have looked. Probe both ends and let the measurement decide.
     picks = []
     for k in knobs:
-        lo, hi = min(p[k] for p in perms), max(p[k] for p in perms)
+        lo, hi = min(p[k] for p in combos), max(p[k] for p in combos)
         for v in (lo, hi):
-            picks.append(min((p for p in perms if p[k] == v),
-                             key=lambda p: abs(sum(p.values()) - sum(perms[0].values()))))
-    picks.append(max(perms, key=lambda p: sum(p.values())))   # all-max corner
-    picks.append(min(perms, key=lambda p: sum(p.values())))   # all-min corner
+            picks.append(min((p for p in combos if p[k] == v),
+                             key=lambda p: abs(sum(p.values()) - sum(combos[0].values()))))
+    picks.append(max(combos, key=lambda p: sum(p.values())))   # all-max corner
+    picks.append(min(combos, key=lambda p: sum(p.values())))   # all-min corner
     seen, uniq = set(), []
     for p in picks:
         key = tuple(sorted(p.items()))
@@ -1664,7 +1664,7 @@ def _band_powers(y: np.ndarray, sr: int = 48000, bands=_TONE_BANDS) -> list:
 
 
 def run_post_generation_checks(out_dir: Path, knobs: List[str],
-                                perms: List[dict], values_per_knob: dict,
+                                combos: List[dict], values_per_knob: dict,
                                 knob_kind: dict = None):
     knob_kind = knob_kind or {}
     csv_path = out_dir / "params.csv"
@@ -1755,7 +1755,7 @@ def run_post_generation_checks(out_dir: Path, knobs: List[str],
                 v = round(float(r[k]), 4)
                 by_val_band.setdefault(v, []).append(band_power_cache[idx])
             if len(by_val_band) < 2:
-                print(f"    {k} (tone): SKIPPED — no per-permutation audio found "
+                print(f"    {k} (tone): SKIPPED — no per-combination audio found "
                       f"(sig/ already cleaned up?)")
                 continue
             n_bands = len(next(iter(by_val_band.values()))[0])
@@ -1839,24 +1839,24 @@ def main():
     ap.add_argument("--list",    action="store_true", help="list cpp circuits")
     ap.add_argument("--combine", type=Path,           help="combine sharded .npy files")
     ap.add_argument("--output-peak", type=float, default=DEFAULT_OUTPUT_PEAK,
-                    help=f"--combine: normalize the loudest permutation to this peak (default "
+                    help=f"--combine: normalize the loudest combination to this peak (default "
                          f"{DEFAULT_OUTPUT_PEAK}). ONE constant for the whole dataset, so inter-knob "
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
     ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice"], default="cpp")
     ap.add_argument("--no-retry", action="store_true",
-                    help="Do NOT escalate solver settings when a permutation fails to converge. "
+                    help="Do NOT escalate solver settings when a combination fails to converge. "
                          "By default a failed render is retried with a stiffer solve (more Newton "
                          "iterations, finer timestep, ngspice damping) and the rung that won is "
                          "recorded per row in params.csv. Use this only to see the raw failure.")
     ap.add_argument("--start-rung", type=int, default=0,
-                    help="Skip straight to this rung for every permutation instead of always "
-                         "starting at rung 0. Per-permutation rung MEMORY (winning rung read back "
+                    help="Skip straight to this rung for every combination instead of always "
+                         "starting at rung 0. Per-combination rung MEMORY (winning rung read back "
                          "from a previous run's params.csv) already skips ahead automatically; "
-                         "this is a GLOBAL floor for permutations with no memory yet -- e.g. a "
+                         "this is a GLOBAL floor for combinations with no memory yet -- e.g. a "
                          "high-drive excitation where rung 0/1 almost never converge, so paying for "
-                         "them first on every permutation is close to pure waste (checked directly "
+                         "them first on every combination is close to pure waste (checked directly "
                          "for the Tweed v5 excitation: 3.6%% converge at rung 0, 76%% need rung 2 -- "
                          "starting at rung 2 measured ~27%% faster overall than escalating from 0).")
     # ngspice backend (offline adaptive-timestep SPICE for stiff/high-gain amps)
@@ -1909,7 +1909,7 @@ def main():
     ap.add_argument("--output",  type=Path, default=HERE / "training_data")
     ap.add_argument("--workers", type=int,  default=os.cpu_count())
     ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL",
-                    help="Render only permutations whose index modulo TOTAL falls in "
+                    help="Render only combinations whose index modulo TOTAL falls in "
                          "[LOW, HIGH] (inclusive), e.g. --shard 0-15/48. For splitting one "
                          "generation across multiple machines: each machine renders a disjoint "
                          "slice into its OWN --output directory (never point two machines at "
@@ -1921,7 +1921,7 @@ def main():
                          "'gen_dataset_from_schx.py --combine MERGED_DIR', not the original "
                          "render command again. A single machine's own share of TOTAL is "
                          "unaffected by --workers, which controls in-process thread-pool "
-                         "concurrency, not which permutations get selected: an even N-way split "
+                         "concurrency, not which combinations get selected: an even N-way split "
                          "gives worker i the single remainder LOW=HIGH=i out of TOTAL=N; a "
                          "capacity-weighted split (e.g. proportional to each machine's core "
                          "count) gives a faster machine a wider [LOW,HIGH] range out of a "
@@ -1993,16 +1993,16 @@ def main():
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
                          "not the limiting factor. A model cannot be more right than its target.")
     ap.add_argument("--timeout-mult", type=float, default=1.0,
-                    help="Scale the auto-computed per-permutation timeout (default 1.0 = unscaled, "
+                    help="Scale the auto-computed per-combination timeout (default 1.0 = unscaled, "
                          "e.g. 100s audio at oversample 8 -> 4000s). The timeout is not there because "
                          "a stuck render is expected to hang forever -- it's a circuit-breaker so one "
                          "slow-converging operating point can't stall the whole batch indefinitely; "
                          "some real corners (e.g. a very low-gain amp setting) can be a genuine "
                          "20-40x slower than typical without ever actually diverging. Raise this "
-                         "(e.g. 2.0-3.0) to retry permutations that timed out but were plausibly just "
+                         "(e.g. 2.0-3.0) to retry combinations that timed out but were plausibly just "
                          "slow, not stuck -- confirm with a direct timed re-render first.")
     ap.add_argument("--speaker",      help="speaker name to capture (e.g. S1, S2); default: sum all speakers")
-    ap.add_argument("--random",  type=int,  help="N random permutations instead of grid")
+    ap.add_argument("--random",  type=int,  help="N random combinations instead of grid")
     ap.add_argument("--bounds",  action="append", metavar="KNOB=lo,hi",
                     help="per-knob sample range under --random (repeatable; default 0,1). "
                          "e.g. --bounds Lead Pre=0,0.9 to keep a hot gain pot out of a "
@@ -2011,7 +2011,7 @@ def main():
                     help="under --random, skip the deterministic boundary/corner anchor "
                          "points (by default they are prepended so knob extremes are covered)")
     ap.add_argument("--max-crest", type=float, default=50.0,
-                    help="fail (exclude) any permutation whose output crest factor "
+                    help="fail (exclude) any combination whose output crest factor "
                          "(peak/RMS) exceeds this — catches numerical divergence that "
                          "RMS/length checks miss. Clean audio is <~10; high-gain solver "
                          "runaway is tens–thousands. 0 disables. (default: %(default)s)")
@@ -2019,7 +2019,7 @@ def main():
                     help="seconds of DC-solver startup transient to exclude from the "
                          "rms/peak/crest divergence-detection stats (the transient can "
                          "otherwise false-positive --max-crest, especially on quiet/"
-                         "low-gain permutations). The saved .npy is NOT trimmed — sample "
+                         "low-gain combinations). The saved .npy is NOT trimmed — sample "
                          "position must stay aligned with sweep.wav. 0 disables. "
                          "(default: %(default)s)")
     ap.add_argument("--seed",    type=int,  default=0)
@@ -2102,7 +2102,7 @@ def main():
         ap.error(f"input WAV not found: {in_wav}")
 
     # ------------------------------------------------------------------
-    # Generate permutations
+    # Generate combinations
     # ------------------------------------------------------------------
     if args.random:
         bounds = {}
@@ -2117,7 +2117,7 @@ def main():
             if len(parts) != 2:
                 ap.error(f"--bounds must be KNOB=lo,hi (got: {b!r})")
             bounds[kname] = (float(parts[0]), float(parts[1]))
-        perms = random_permutations(knobs, args.random, args.seed,
+        combos = random_combinations(knobs, args.random, args.seed,
                                     bounds=bounds, anchors=not args.no_anchors)
     else:
         global_vals = [float(v) for v in args.values.split(",")] if args.values else [0.1, 0.3, 0.5, 0.7]
@@ -2131,7 +2131,7 @@ def main():
                 if kname not in values_per_knob:
                     ap.error(f"--range knob '{kname}' not in --knobs list: {knobs}")
                 values_per_knob[kname] = [float(v) for v in vstr.split(",")]
-        perms = grid_permutations(knobs, values_per_knob)
+        combos = grid_combinations(knobs, values_per_knob)
 
     # Parse --steps: mark knobs as discrete N-position switches (metadata for exporter/host).
     steps_map = {}
@@ -2164,7 +2164,7 @@ def main():
                      "livespice/ngspice backend and rebuild.")
         if args.backend == "livespice":
             args.oversample = choose_oversample(
-                schx, knobs, perms, in_wav, param_map, args.fixed_params,
+                schx, knobs, combos, in_wav, param_map, args.fixed_params,
                 args.speaker, args.trunc_target, backend="livespice",
                 workers=args.workers)
             _auto_os = False
@@ -2183,11 +2183,11 @@ def main():
     timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2) * args.timeout_mult))
     if args.backend == "ngspice":
         # ngspice adaptive sim can run ~5-50x realtime on stiff amps; be generous
-        # (a divergent perm aborts near t=0 anyway, so this mainly guards hangs).
+        # (a divergent combo aborts near t=0 anyway, so this mainly guards hangs).
         timeout_s = max(600, int(audio_frames / sr * 120 * args.timeout_mult))
 
-    bytes_per_perm = audio_frames * 4  # float32
-    total_bytes = bytes_per_perm * len(perms) + in_wav.stat().st_size  # npy + sweep.wav copy
+    bytes_per_combo = audio_frames * 4  # float32
+    total_bytes = bytes_per_combo * len(combos) + in_wav.stat().st_size  # npy + sweep.wav copy
     avail_bytes = shutil.disk_usage(args.output.parent if not args.output.exists() else args.output).free
 
     def fmt_bytes(n):
@@ -2209,7 +2209,7 @@ def main():
         print(f"Fixed params: {args.fixed_params}")
     if args.speaker:
         print(f"Speaker:      {args.speaker}")
-    print(f"Permutations: {len(perms)}")
+    print(f"Combinations: {len(combos)}")
     if not args.random:
         for k in knobs:
             vals = values_per_knob[k]
@@ -2219,15 +2219,15 @@ def main():
     # the netlist and filesource exist (they need out_dir, which a dry run must not create), so it is
     # measured at run time -- unlike livespice, which resolves before this line.
     _os_disp = "auto (measured after the netlist dump)" if _auto_os else args.oversample
-    print(f"Timeout:      {timeout_s}s per permutation ({audio_frames/sr:.0f}s audio × 10 × os/2, oversample={_os_disp})")
+    print(f"Timeout:      {timeout_s}s per combination ({audio_frames/sr:.0f}s audio × 10 × os/2, oversample={_os_disp})")
     print(f"Disk est:     {fmt_bytes(total_bytes)} needed  ({fmt_bytes(avail_bytes)} free on target)")
     print()
 
     if args.dry_run:
-        for i, p in enumerate(perms[:5]):
+        for i, p in enumerate(combos[:5]):
             print(f"  [{i:06d}] {p}")
-        if len(perms) > 5:
-            print(f"  ... and {len(perms) - 5} more")
+        if len(combos) > 5:
+            print(f"  ... and {len(combos) - 5} more")
         return
 
     # ------------------------------------------------------------------
@@ -2320,7 +2320,7 @@ def main():
               "fsrc_dir": str(out_dir / "fsrc")}
         if _auto_os:
             args.oversample = choose_oversample(
-                schx, knobs, perms, in_wav, param_map, args.fixed_params,
+                schx, knobs, combos, in_wav, param_map, args.fixed_params,
                 args.speaker, args.trunc_target, backend="ngspice", ng=ng,
                 workers=args.workers)
             ng["oversample"] = args.oversample
@@ -2331,11 +2331,11 @@ def main():
               f"{', input_upsample='+str(_input_up)+'x' if _input_up > 1 else ''}"
               f"{', conv='+_conv_str if _conv_str else ''})", file=sys.stderr)
 
-    # Effective per-knob sampled range (min/max actually seen across perms).
+    # Effective per-knob sampled range (min/max actually seen across combos).
     # Recorded so the exported .nam declares the true trained domain per knob
     # — e.g. a tone pot swept only 0.15..0.85 must not advertise 0..1 to the
     # host, or it would send out-of-domain values the model never saw.
-    knob_bounds = {k: [min(p[k] for p in perms), max(p[k] for p in perms)]
+    knob_bounds = {k: [min(p[k] for p in combos), max(p[k] for p in combos)]
                    for k in knobs}
 
     # Per-knob declared default (optional). Keyed by knob name, in trained units;
@@ -2368,7 +2368,7 @@ def main():
         "speaker": args.speaker,
         "input_wav": str(in_wav),
         "input": input_provenance(in_wav),
-        "permutation_count": len(perms),
+        "combination_count": len(combos),
         "values": args.values or "0.1,0.3,0.5,0.7",
         "workers": args.workers,
         "gear_make": args.gear_make or circuit_label,
@@ -2383,7 +2383,7 @@ def main():
     # earlier run (different excitation/config, or killed before writing a single row) already
     # sat in this dataset dir, existence alone was true and the header got silently skipped
     # forever. Every later row then landed in a file with NO header, and any downstream
-    # csv.DictReader (e.g. run_pipeline.py's check_missing_permutations) silently misreads the
+    # csv.DictReader (e.g. run_pipeline.py's check_missing_combinations) silently misreads the
     # first DATA row as the header -- every dict key becomes garbage, no error until something
     # tries r['idx'] and KeyErrors. (2026-08-02: hit exactly this on the stiff amp head's v30 dataset --
     # a killed first attempt left a headerless params.csv the resumed run appended onto.)
@@ -2408,14 +2408,14 @@ def main():
     csv_fh = open(csv_path, "a", newline="")
     csv_w = csv.writer(csv_fh)
     if fresh:
-        # `rung` / `solver` say WHAT IT TOOK to converge this permutation. That is a property of
+        # `rung` / `solver` say WHAT IT TOOK to converge this combination. That is a property of
         # the DATA, not of the run: "high gain needed 4x oversampling" is exactly what the next
         # person needs and would otherwise have to rediscover.
         csv_w.writerow(["idx"] + knobs +
                        ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver"])
 
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
-    to_run = [(i, p) for i, p in enumerate(perms) if i not in existing]
+    to_run = [(i, p) for i, p in enumerate(combos) if i not in existing]
     print(f"Resume: {len(existing)} done, {len(to_run)} remaining")
 
     if args.shard:
@@ -2426,7 +2426,7 @@ def main():
         _before = len(to_run)
         to_run = [(i, p) for i, p in to_run if _low <= (i % _total) <= _high]
         print(f"Shard {args.shard}: this machine renders {len(to_run)}/{_before} of the "
-              f"remaining permutations. Once every shard is done, merge each shard's sig/ "
+              f"remaining combinations. Once every shard is done, merge each shard's sig/ "
               f"tree (filename-safe -- names are the global index) and concatenate "
               f"params.csv bodies into one directory, then run "
               f"'gen_dataset_from_schx.py --combine MERGED_DIR' against it.")
@@ -2434,7 +2434,7 @@ def main():
     # RUNG MEMORY. The winning rung is recorded per row in params.csv because "high gain needed
     # 4x oversampling" is a property of the data -- but nothing ever read it back, so a re-render
     # (shards deleted after --combine, a --no-retry run redone, a regeneration) started every
-    # permutation at rung 0 and paid the full failed-rung ladder again. If a permutation that
+    # combination at rung 0 and paid the full failed-rung ladder again. If a combination that
     # still needs rendering has an ok row with rung > 0, start its ladder there. (Appended
     # duplicate rows are read in order, so the latest row for an idx wins.)
     prev_rungs = {}
@@ -2450,17 +2450,17 @@ def main():
     prev_rungs = {i: r for i, r in prev_rungs.items() if r > 0}
     _remembered = prev_rungs.keys() & {i for i, _ in to_run}
     if _remembered:
-        print(f"Rung memory: {len(_remembered)} permutations start at their previously-winning rung")
+        print(f"Rung memory: {len(_remembered)} combinations start at their previously-winning rung")
     print()
 
     # FAIL-FAST on a SYSTEMIC error. A real convergence failure varies with the knob
-    # setting (different permutations stress the solver differently) -- the retry ladder
-    # in process_one already chews through it per-permutation. If the first several
-    # completions ALL fail with the IDENTICAL error text, that is not per-permutation
+    # setting (different combinations stress the solver differently) -- the retry ladder
+    # in process_one already chews through it per-combination. If the first several
+    # completions ALL fail with the IDENTICAL error text, that is not per-combination
     # noise; it is a config problem (bad --fixed-params/--knobs name, wrong --circuit,
-    # wrong --backend...) that will fail every remaining permutation the same way. Found
+    # wrong --backend...) that will fail every remaining combination the same way. Found
     # the hard way: a wrong-case fixed-param name ran an entire batch to its cryptic
-    # per-permutation error, one line at a time, before anyone noticed it was the same
+    # per-combination error, one line at a time, before anyone noticed it was the same
     # line every time.
     FAIL_FAST_N = min(10, len(to_run))
     t0 = time.time()
@@ -2485,7 +2485,7 @@ def main():
             elapsed = time.time() - t0
             eta = (len(to_run) - done) * elapsed / done
             finish = time.strftime("%H:%M", time.localtime(time.time() + eta))
-            p = perms[idx]
+            p = combos[idx]
             row = ([idx] + [p[k] for k in knobs] +
                    [r.dsp_load, r.proc_time, f"{r.rms:.6f}", f"{r.peak:.6f}", int(r.ok), r.error,
                     r.rung, r.settings])
@@ -2494,7 +2494,7 @@ def main():
             status = "OK" if r.ok else "FAIL"
             extra = f"  [{r.error}]" if r.error else ""
             print(f"[{done:>4}/{len(to_run)}] {done/len(to_run)*100:>5.1f}%  "
-                  f"perm_{idx:06d}  {status}  "
+                  f"combo_{idx:06d}  {status}  "
                   f"DSP={r.dsp_load:.1f}%  elapsed={elapsed:.0f}s  ETA ~{finish}{extra}")
 
             if r.ok:
@@ -2508,11 +2508,11 @@ def main():
                     fut.cancel()
                 print(
                     "\n" + "#" * 72 + "\n"
-                    f"# ABORTING: the first {len(fail_errors)} permutations all failed with the\n"
+                    f"# ABORTING: the first {len(fail_errors)} combinations all failed with the\n"
                     "# IDENTICAL error below. A real convergence problem varies with the knob\n"
                     "# setting; this looks SYSTEMIC instead -- a bad knob/fixed-param name, the\n"
                     "# wrong --circuit/--schx, or the wrong --backend -- and would fail the\n"
-                    f"# remaining {len(to_run) - done} permutation(s) the exact same way. Fix the\n"
+                    f"# remaining {len(to_run) - done} combination(s) the exact same way. Fix the\n"
                     "# config and re-run rather than grinding through the rest for this.\n"
                     "#\n"
                     f"# error: {fail_errors[0]}\n"
@@ -2524,8 +2524,8 @@ def main():
         sys.exit(1)
     total = time.time() - t0
     ok = len(list((out_dir / "sig").rglob("*.npy"))) if (out_dir / "sig").exists() else 0
-    print(f"\nDone: {ok}/{len(perms)} files in {total:.0f}s "
-          f"({total / max(len(perms), 1) * 1000:.0f} ms/perm)")
+    print(f"\nDone: {ok}/{len(combos)} files in {total:.0f}s "
+          f"({total / max(len(combos), 1) * 1000:.0f} ms/combo)")
 
     knob_kind = {}
     if args.knob_kind:
@@ -2533,7 +2533,7 @@ def main():
             if "=" in kv:
                 name, kind = kv.split("=", 1)
                 knob_kind[name.strip()] = kind.strip()
-    run_post_generation_checks(out_dir, knobs, perms, values_per_knob if not args.random else {},
+    run_post_generation_checks(out_dir, knobs, combos, values_per_knob if not args.random else {},
                                 knob_kind=knob_kind)
 
     # Is the DATASET converged? Every other check detects DIVERGENCE (the solver blew up and said
@@ -2544,7 +2544,7 @@ def main():
     # auditing nothing: it happily passed a dataset rendered at 8 iterations because it was
     # probing at 256.
     _rung0 = _rungs(args.backend, args.oversample, ng)[0]
-    audit_convergence(out_dir, knobs, perms, args.backend, in_wav, schx, param_map,
+    audit_convergence(out_dir, knobs, combos, args.backend, in_wav, schx, param_map,
                       args.fixed_params, args.speaker,
                       _rung0.get("oversample", args.oversample),
                       _rung0.get("iterations", 8), workers=args.workers)

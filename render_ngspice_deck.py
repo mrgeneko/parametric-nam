@@ -71,7 +71,7 @@ def main():
     ap.add_argument('--knob', action='append', default=[], help='NAME=VAL (single render)')
     ap.add_argument('--grid', nargs='+', default=[], help='NAME=v1,v2,... (sweep)')
     ap.add_argument('--shard', metavar='LOW-HIGH/TOTAL',
-                     help="Render only permutations whose GLOBAL grid index modulo TOTAL falls "
+                     help="Render only combinations whose GLOBAL grid index modulo TOTAL falls "
                           "in [LOW, HIGH] inclusive, e.g. --shard 0-15/48. For splitting one "
                           "--grid sweep across machines: each renders a disjoint slice into its "
                           "OWN --outdir (never share one --outdir across machines), then merge. "
@@ -121,7 +121,7 @@ def main():
             except ValueError as e:
                 ap.error(str(e))
             print(f"shard {a.shard}: this machine renders {len(indexed)}/{_before} "
-                  f"permutations (global indices kept, so shard outputs merge by filename)")
+                  f"combinations (global indices kept, so shard outputs merge by filename)")
         for i, combo in indexed:
             knobs = dict(zip(names, combo))
             outfile = os.path.join(a.outdir, f"cap_{i:04d}.wav")

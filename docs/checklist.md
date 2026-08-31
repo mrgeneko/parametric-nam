@@ -47,7 +47,7 @@ Manual — investigate a specific concern, not a blanket gate.
 
 | Tool | Answers | Auto? |
 |---|---|---|
-| `per_perm_esr.py` | Which knob-grid regions fit well vs. poorly? | `compute_per_perm_esr()` is called automatically by `param_train.py` at the end of training. The standalone CLI re-runs it against an already-saved checkpoint later. |
+| `per_combo_esr.py` | Which knob-grid regions fit well vs. poorly? | `compute_per_combo_esr()` is called automatically by `param_train.py` at the end of training. The standalone CLI re-runs it against an already-saved checkpoint later. |
 | `level_band_esr.py` | Is the model dropping distortion/detail as a note decays (headline ESR can't see this — it's energy-weighted, and a quiet tail is nearly all duration, none of the energy)? | Manual. Run when a model sounds wrong in a way the headline ESR doesn't reflect, or as a matter of course before shipping anything with a decay/sustain-sensitive circuit. |
 | `scan_film_runaway.py` | Does the model blow up 10s-100s of times normal peak at a narrow (knob-corner × real-transient) combination the training excitation under-covered? | Runs automatically as a post-training WARN step in `run_pipeline.py` **if `--film-reference` is set** (a real-playing clip — not derivable from the training excitation, which is exactly the gap that let two published models ship with this bug unnoticed). Skipped with a note if unconfigured. Skip flag: `--skip-film-runaway-check`. |
 
@@ -64,5 +64,5 @@ plus `release_run.sh`'s own validation, before publishing anywhere.
 | Random-sampled dataset feels sparse in some region | `coverage_report.py` |
 | Model sounds fine on sustained notes but wrong as they decay | `level_band_esr.py` |
 | Model spikes/blows up only at specific, rare knob settings | `scan_film_runaway.py` |
-| Model is good on average but bad in one part of the knob grid | `per_perm_esr.py` |
+| Model is good on average but bad in one part of the knob grid | `per_combo_esr.py` |
 | ngspice/livespice render is slow or won't converge | `measure_truncation.py`, `measure_ngspice_timestep.py`, [`docs/backends.md`](backends.md) |

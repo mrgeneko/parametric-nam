@@ -530,11 +530,11 @@ cd "$REPO"
 
 
 # ---------------------------------------------------------------------------
-# missing-permutation gate
+# missing-combination gate
 # ---------------------------------------------------------------------------
 
-def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> None:
-    """Stop the pipeline if any requested permutation failed to generate.
+def check_missing_combinations(dataset_dir: Path, fh, allow_missing: bool) -> None:
+    """Stop the pipeline if any requested combination failed to generate.
 
     A SPICE convergence failure isn't just "one fewer training example" -- it can
     indicate a real problem with the circuit or with how well the solver's
@@ -543,12 +543,12 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
     the ngspice BJT model, not incidental flakiness). It's also load-bearing for
     correctness: ParamDataset indexes outputs.npy by each sample's position in the
     sorted list of successes, so a gap changes what every later index refers to.
-    Default is to stop and require a human to look, via --allow-missing-perms.
+    Default is to stop and require a human to look, via --allow-missing-combos.
     """
     config_path, params_path = dataset_dir / "config.json", dataset_dir / "params.csv"
     if not config_path.exists() or not params_path.exists():
         return  # nothing generated yet under this path (e.g. fresh --skip-generate)
-    expected = json.loads(config_path.read_text()).get("permutation_count")
+    expected = json.loads(config_path.read_text()).get("combination_count")
     if expected is None:
         return
     with open(params_path, newline="") as f:
@@ -557,7 +557,7 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
     if len(rows) - len(failed) >= expected and not failed:
         return
     skip_cols = {"idx", "dsp_load", "proc_time", "rms", "peak", "ok", "error"}
-    lines = [f"{len(failed)} of {expected} permutations failed to generate "
+    lines = [f"{len(failed)} of {expected} combinations failed to generate "
              f"(only {len(rows) - len(failed)} succeeded):"]
     for r in failed:
         knobs = ", ".join(f"{k}={v}" for k, v in r.items() if k not in skip_cols)
@@ -567,11 +567,11 @@ def check_missing_permutations(dataset_dir: Path, fh, allow_missing: bool) -> No
         lines.append(f"  idx={r.get('idx', '?')}  {knobs}  -> {r.get('error', '?')}")
     body = "\n".join(lines)
     if allow_missing:
-        log(f"WARNING: proceeding with missing permutations (--allow-missing-perms):\n{body}", fh)
+        log(f"WARNING: proceeding with missing combinations (--allow-missing-combos):\n{body}", fh)
     else:
         log(f"ERROR: {body}\n"
             "A SPICE convergence failure can indicate a real circuit/solver issue -- "
-            "investigate before training on an incomplete grid. Pass --allow-missing-perms "
+            "investigate before training on an incomplete grid. Pass --allow-missing-combos "
             "to proceed anyway once you've confirmed it's expected.", fh)
         sys.exit(1)
 
@@ -694,31 +694,31 @@ def main():
     g.add_argument("--trunc-target", type=float, default=1e-3,
                    help="with --oversample auto: the truncation ESR to get under (default 1e-3)")
     g.add_argument("--random",       type=int, metavar="N",
-                   help="N random permutations instead of a grid (for high knob counts)")
+                   help="N random combinations instead of a grid (for high knob counts)")
     g.add_argument("--bounds",       action="append", metavar="KNOB=lo,hi",
                    dest="bounds", help="Per-knob sample range under --random (repeatable)")
     g.add_argument("--no-anchors",   action="store_true",
                    help="Under --random, skip the boundary/corner anchor points")
     g.add_argument("--max-crest",    type=float, default=50.0,
-                   help="Fail perms whose output crest factor exceeds this "
+                   help="Fail combos whose output crest factor exceeds this "
                         "(catches numerical divergence; 0 disables)")
     g.add_argument("--start-rung",   type=int, default=0,
-                   help="Skip straight to this solver-retry rung for every permutation with no "
+                   help="Skip straight to this solver-retry rung for every combination with no "
                         "rung memory yet, instead of always starting at rung 0. See "
                         "gen_dataset_from_schx.py --start-rung's help for when this is worth it.")
-    g.add_argument("--allow-missing-perms", action="store_true",
-                   help="Proceed to combine/train even if some permutations failed to "
+    g.add_argument("--allow-missing-combos", action="store_true",
+                   help="Proceed to combine/train even if some combinations failed to "
                         "generate. Default is to stop -- a convergence failure can "
                         "indicate a real circuit/solver issue, not just bad luck.")
     g.add_argument("--gang",         action="append", metavar="KNOB=Name1,Name2,...")
     g.add_argument("--steps",        action="append", metavar="KNOB=N")
-    g.add_argument("--fixed-params", help="Fixed k=v,... for every permutation")
+    g.add_argument("--fixed-params", help="Fixed k=v,... for every combination")
     g.add_argument("--knob-kind", default=None,
                    help="NAME=kind,... (kind: 'tone' or 'level') -- which metric the "
                         "post-generation knob-sensitivity check uses. From [knob-kind] in "
                         "--config; see load_config()'s own docstring.")
     g.add_argument("--timeout-mult", type=float, default=1.0,
-                   help="Scale gen_dataset_from_schx.py's auto-computed per-permutation timeout "
+                   help="Scale gen_dataset_from_schx.py's auto-computed per-combination timeout "
                         "(default: %(default)s). Some circuits have a genuine, reproducible "
                         "solver slowdown at specific corners (e.g. the stiff amp head's family at low "
                         "Lead Pre, ~20-40x slower without ever actually diverging) -- set this "
@@ -765,16 +765,16 @@ def main():
     g.add_argument("--device",         default="auto")
     g.add_argument("--target-steps",   type=int, default=0,
                    help="Ask for a TRAINING BUDGET directly and let repeats be derived from it, "
-                        "instead of backing into one. total steps = epochs × n_perms × repeats × "
-                        "(1-val_split) / batch. Because that depends on n_perms, changing the knob "
+                        "instead of backing into one. total steps = epochs × n_combos × repeats × "
+                        "(1-val_split) / batch. Because that depends on n_combos, changing the knob "
                         "grid otherwise changes how long the model trains — regridding Large Muffin "
-                        "126→60 perms silently HALVED its budget. 0 = off (use --repeats).")
+                        "126→60 combos silently HALVED its budget. 0 = off (use --repeats).")
     g.add_argument("--skip-grid-check", action="store_true",
                    help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
                         "cell that fails puts a floor under the model that NO training can lift. "
                         "Cheap relative to generation+training regardless (renders scale with knob-"
-                        "axis count, not permutation count -- ~15-200 across the real fleet), but "
+                        "axis count, not combination count -- ~15-200 across the real fleet), but "
                         "not a fixed constant: cost per render follows --oversample (4-16 across "
                         "real configs) and backend (ngspice is markedly slower than livespice). "
                         "See internal engineering notes.")
@@ -939,7 +939,7 @@ def main():
         # the pedal actually lives, and no training run could ever have told us.
         #
         # So measure it BEFORE spending the renders and the epochs. Cheap relative to that either
-        # way (render count scales with knob-axis count, not permutation count), but cost per
+        # way (render count scales with knob-axis count, not combination count), but cost per
         # render follows --oversample and backend, so "cheap" isn't a fixed number across devices.
         # See internal engineering notes.
         # ------------------------------------------------------------------
@@ -961,7 +961,7 @@ def main():
         # Step 0b: does the excitation actually reach this device's own saturation ceiling?
         #
         # A dense knob grid is not the same question as an excitation that gets loud enough. A
-        # model can only learn what's in the data -- if every rendered permutation stays in the
+        # model can only learn what's in the data -- if every rendered combination stays in the
         # device's linear region, dataset and grid can both be perfect and the trained model still
         # has no idea what the device's breakup/saturation character is. See
         # check_input_headroom.py's docstring for the TAD Blackface 85 Reverb case that
@@ -1075,7 +1075,7 @@ def main():
                 gen_cmd += ["--steps", s]
             timings["generate"] = stream_run(gen_cmd, fh, "Generation")
 
-        check_missing_permutations(dataset_dir, fh, args.allow_missing_perms)
+        check_missing_combinations(dataset_dir, fh, args.allow_missing_combos)
 
         # ------------------------------------------------------------------
         # Step 2: Combine
@@ -1103,11 +1103,11 @@ def main():
             # ------------------------------------------------------------------
             # THE TRAINING BUDGET IS A DERIVED QUANTITY, AND IT WAS INVISIBLE.
             #
-            # ParamDataset has len() = n_perms * repeats, and every item is a fresh random crop. So:
+            # ParamDataset has len() = n_combos * repeats, and every item is a fresh random crop. So:
             #
-            #     total gradient steps = epochs * n_perms * repeats * (1 - val_split) / batch_size
+            #     total gradient steps = epochs * n_combos * repeats * (1 - val_split) / batch_size
             #
-            # It depends on n_perms. Which means CHANGING THE KNOB GRID SILENTLY CHANGES HOW LONG THE
+            # It depends on n_combos. Which means CHANGING THE KNOB GRID SILENTLY CHANGES HOW LONG THE
             # MODEL TRAINS, and nobody was watching. Two ways that already bit:
             #
             #   - Regridding Large Muffin from 14x9=126 to 12x5=60 HALVED its budget (24,300 steps ->
@@ -1115,15 +1115,15 @@ def main():
             #     blamed, inverting the truth.
             #   - repeats=30 was copied into every config, so the budget is a side-effect of how many
             #     knobs a circuit happens to have: Large Muffin got ~11.7k steps and the British-stack
-            #     amp's hot-rod variant (9x6x6x6 = 1944 perms) got ~369k. A 30x spread, chosen by nobody.
+            #     amp's hot-rod variant (9x6x6x6 = 1944 combos) got ~369k. A 30x spread, chosen by nobody.
             #
             # So: derive it, print it, and let a config ask for a budget directly (target-steps)
             # rather than back into one via repeats.
             # ------------------------------------------------------------------
-            n_perms, audio_s, sr = 0, 0.0, 48000
+            n_combos, audio_s, sr = 0, 0.0, 48000
             try:
                 with open(Path(dataset_dir) / "params.csv") as f:
-                    n_perms = sum(1 for _ in csv.DictReader(f))
+                    n_combos = sum(1 for _ in csv.DictReader(f))
                 dcfg = json.loads((Path(dataset_dir) / "config.json").read_text())
                 audio_s = float(dcfg.get("input", {}).get("duration_s") or 0.0)
                 sr = int(dcfg.get("input", {}).get("samplerate") or 48000)
@@ -1141,10 +1141,10 @@ def main():
             # a nominal 450-epoch schedule, which keeps steps/epoch (and therefore the length of an
             # SGDR cycle) the same across grids of wildly different sizes.
             nominal_epochs = epochs if epochs > 0 else 450
-            if epochs == 0 and args.target_steps and n_perms and not args.repeats_explicit:
+            if epochs == 0 and args.target_steps and n_combos and not args.repeats_explicit:
                 repeats = max(1, round(args.target_steps * args.batch_size
-                                       / max(1, nominal_epochs * n_perms * (1 - args.val_split))))
-                spe = math.ceil(n_perms * repeats * (1 - args.val_split) / args.batch_size)
+                                       / max(1, nominal_epochs * n_combos * (1 - args.val_split))))
+                spe = math.ceil(n_combos * repeats * (1 - args.val_split) / args.batch_size)
                 log(f"OPEN-ENDED (epochs=0): no step budget — SGDR runs until you stop it. "
                     f"repeats {repeats} → {spe} steps/epoch, restart every "
                     f"{args.restart_period} epochs ({spe * args.restart_period:,} steps/cycle).", fh)
@@ -1152,13 +1152,13 @@ def main():
                     f"improve it, that is the budget — measured under the loss you are ACTUALLY "
                     f"training with. Stop with: touch {args.checkpoint_dir}/STOP", fh)
 
-            if args.target_steps and n_perms and epochs > 0:
+            if args.target_steps and n_combos and epochs > 0:
                 # WHICH VARIABLE IS DERIVED MATTERS, and the obvious choice is wrong.
                 #
                 # `epochs` is NOT a budget quantity -- it is the LR SCHEDULE LENGTH. CosineAnnealingLR
                 # uses T_max=epochs and steps once per epoch, so epochs decides how finely the LR
                 # anneals and how many validation/checkpoint opportunities there are. Derive it from
-                # the budget and a big grid destroys it: the British-stack amp's hot-rod variant has 1944 permutations, so
+                # the budget and a big grid destroys it: the British-stack amp's hot-rod variant has 1944 combinations, so
                 # a data-derived repeats=94 gives 2569 steps/epoch and epochs = 24300/2569 = NINE.
                 # Nine points on the cosine curve, nine chances to checkpoint a best model.
                 #
@@ -1166,16 +1166,16 @@ def main():
                 # the right free variable anyway: it is a pure virtual multiplier with no meaning of
                 # its own, whereas epochs and batch_size both mean something.
                 repeats_f = (args.target_steps * args.batch_size
-                             / max(1, epochs * n_perms * (1 - args.val_split)))
+                             / max(1, epochs * n_combos * (1 - args.val_split)))
                 if not args.repeats_explicit:
                     repeats = max(1, round(repeats_f))
 
                 if repeats_f < 1 and not args.epochs_explicit:
                     # The grid alone already exceeds the budget at repeats=1. Shorten the schedule
                     # rather than silently overspend -- and say so.
-                    steps_ep = math.ceil(n_perms * 1 * (1 - args.val_split) / args.batch_size)
+                    steps_ep = math.ceil(n_combos * 1 * (1 - args.val_split) / args.batch_size)
                     epochs = max(1, math.ceil(args.target_steps / max(1, steps_ep)))
-                    log(f"  NOTE: {n_perms} perms exceed the budget at repeats=1 — holding repeats=1 "
+                    log(f"  NOTE: {n_combos} combos exceed the budget at repeats=1 — holding repeats=1 "
                         f"and shortening the schedule to {epochs} epochs.", fh)
 
                 log(f"--target-steps {args.target_steps:,} → repeats {repeats} "
@@ -1185,15 +1185,15 @@ def main():
                     crop_s = args.crop_len / sr
                     per_ep = 1.0 - (1.0 - min(1.0, crop_s / audio_s)) ** repeats
                     total_crops = epochs * repeats
-                    log(f"  audio coverage: {repeats} crops/perm/epoch → ~{per_ep:.0%} of each "
-                        f"permutation's {audio_s:.0f}s per epoch; {total_crops:,} crops/perm over the "
+                    log(f"  audio coverage: {repeats} crops/combo/epoch → ~{per_ep:.0%} of each "
+                        f"combination's {audio_s:.0f}s per epoch; {total_crops:,} crops/combo over the "
                         f"run ({total_crops / max(1, audio_s / crop_s):.0f}× its length)", fh)
 
-            if n_perms and epochs > 0:
-                items = n_perms * repeats
+            if n_combos and epochs > 0:
+                items = n_combos * repeats
                 steps_ep = math.ceil(items * (1 - args.val_split) / args.batch_size)
                 total = steps_ep * epochs
-                log(f"TRAINING BUDGET: {n_perms} perms × {repeats} repeats = {items:,} items/epoch  →  "
+                log(f"TRAINING BUDGET: {n_combos} combos × {repeats} repeats = {items:,} items/epoch  →  "
                     f"{steps_ep} steps/epoch × {epochs} epochs = {total:,} GRADIENT STEPS", fh)
                 # RF = sum((k-1)*d over the 23 layers) + (head 16-tap - 1) + 1 = 6,347 samples.
                 # The long-quoted 2,483 figure matched no version of the kernel/dilation lists.
@@ -1201,7 +1201,7 @@ def main():
                     f"(132 ms) receptive field — {args.crop_len/6347:.1f}× it, so the model can see "
                     f"its own context (the crop's first RF samples have zero left-context)", fh)
                 if not args.target_steps:
-                    log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_perms). Change the knob "
+                    log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_combos). Change the knob "
                         f"grid and this number moves silently. Prefer target-steps.", fh)
 
             train_cmd = build_train_cmd(args, dataset_dir, epochs, repeats)
