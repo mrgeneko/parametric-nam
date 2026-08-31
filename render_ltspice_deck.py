@@ -36,6 +36,9 @@ import json
 import os
 import sys
 
+import numpy as np
+import soundfile as sf
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from ltspice_spicelib import load_input, render_grid, render_one  # noqa: E402
@@ -54,6 +57,13 @@ def main():
     ap.add_argument('infile'); ap.add_argument('outfile', nargs='?')
     ap.add_argument('--knob', action='append', default=[], help='NAME=VAL (single render)')
     ap.add_argument('--grid', nargs='+', default=[], help='NAME=v1,v2,... (sweep)')
+    ap.add_argument('--no-resume', action='store_true',
+                     help="re-render every permutation even if its cap_NNNN.wav already exists. "
+                          "By default a --grid run RESUMES: an existing, readable capture is "
+                          "skipped and its peak re-read from disk, so a run killed partway "
+                          "(worker died, machine slept, network dropped) picks up where it left "
+                          "off instead of redoing hours of work. A zero-byte or unreadable file "
+                          "is NOT trusted -- it is re-rendered.")
     ap.add_argument('--shard', metavar='LOW-HIGH/TOTAL',
                      help="Render only permutations whose GLOBAL grid index modulo TOTAL falls "
                           "in [LOW, HIGH] inclusive, e.g. --shard 0-15/48. For splitting one "
@@ -123,15 +133,31 @@ def main():
                   f"(global indices kept, so shard outputs merge by filename)")
         jobs = []
         knobs_by_file = {}
+        resumed = {}
         for i, combo in indexed:
             knobs = dict(zip(names, combo))
             outfile = os.path.join(a.outdir, f"cap_{i:04d}.wav")
-            jobs.append((knobs, outfile))
             knobs_by_file[outfile] = knobs
+            # RESUME: an existing capture is reused rather than re-rendered. Its peak is re-read
+            # from the file because manifest.jsonl/mapping.csv are written from `results` below --
+            # a skipped capture that never lands in `results` would silently vanish from BOTH,
+            # and gen_dataset_from_captures.py would then see a wav with no mapping row. A file
+            # that will not read (truncated by a kill mid-write, zero bytes) is not trusted.
+            if not a.no_resume and os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+                try:
+                    _y, _ = sf.read(outfile)
+                    resumed[outfile] = float(np.abs(_y).max()) if len(_y) else None
+                    continue
+                except Exception:
+                    pass          # unreadable -> fall through and re-render it
+            jobs.append((knobs, outfile))
+        if resumed:
+            print(f"resume: {len(resumed)} existing capture(s) reused, {len(jobs)} to render")
         results = render_grid(build_deck, jobs, tap=a.tap, sr=sr, dur_s=dur_s, wav_path=wav_path,
                                in_scale=in_scale, tmp=tmp, maxstep=a.maxstep,
                                parallel_sims=a.parallel_sims, out_scale=a.out_scale,
                                timeout=a.timeout)
+        results = {**resumed, **results}     # resumed first: a re-render of the same file wins
         # v0dbfs: the reference voltage a digital sample of 1.0 represents for THIS batch --
         # 1.0 under --absolute (the file's own sample values used directly as volts), else
         # --vin. Recorded per-line (not just printed) so gen_dataset_from_captures.py's

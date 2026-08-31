@@ -56,6 +56,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKERS=""
 JOB=""
+RESERVE_CORES=0   # --reserve-cores N: give each worker (its cores - N) --parallel-sims instead
+# of one uniform value chosen for the smallest machine. CAVEAT: --parallel-sims caps concurrent
+# PROCESSES, not cores -- LTspice threads internally (measured: 10 sims on a 12-core M4 Pro ran
+# at load 18.9), so "reserve N" eases pressure, it does not idle N cores.
+WEIGHTS=""        # --weights a,b,c: split the grid by THESE numbers instead of probed core
+# counts. Core count is a poor proxy for throughput on a heterogeneous fleet -- measured on this
+# one, a 10-core fanless MacBook Air rendered 9.0 caps/h against 17.9 for a 12-core M4 Pro mini
+# and 17.9 for a 14-core M3 Pro, i.e. HALF the rate its core count implied. Weighting by cores
+# gave it a share it needed 20.1 h to finish while the others idled from 11.6 h. Render a small
+# grid first, read caps/h per worker, then pass those numbers here.
 RENDERER="gen_dataset_from_schx.py"   # --renderer: which entry point each worker runs.
 # The deck renderers (render_ltspice_deck.py / render_ngspice_deck.py) take the SAME
 # --shard LOW-HIGH/TOTAL contract (shard.py is shared), but name their output dir
@@ -71,6 +81,8 @@ while [ $# -gt 0 ]; do
     --workers)    WORKERS="$2"; shift 2 ;;
     --job)        JOB="$2"; shift 2 ;;
     --renderer)  RENDERER="$2"; shift 2 ;;
+    --reserve-cores) RESERVE_CORES="$2"; shift 2 ;;
+    --weights)   WEIGHTS="$2"; shift 2 ;;
     --sync-file)  SYNC_FILES+=("$2"); shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --)           shift; GEN_ARGS=("$@"); break ;;
@@ -131,19 +143,41 @@ for w in "${WORKER_ARR[@]}"; do
   echo "    $w: $n cores, \$HOME=$home"
 done
 
+# --weights overrides the probed core counts for SPLITTING only. CORES[] is left alone so
+# --reserve-cores still sizes --parallel-sims from what the machine actually has.
+SPLIT=("${CORES[@]}")
+if [ -n "$WEIGHTS" ]; then
+  IFS=',' read -r -a SPLIT <<< "$WEIGHTS"
+  [ "${#SPLIT[@]}" -eq "${#WORKER_ARR[@]}" ] || {
+    echo "ERROR: --weights has ${#SPLIT[@]} value(s) but there are ${#WORKER_ARR[@]} worker(s)" >&2; exit 2; }
+  TOTAL_CORES=0
+  for _w in "${SPLIT[@]}"; do
+    case "$_w" in ''|*[!0-9]*) echo "ERROR: --weights must be positive integers (got '$_w')" >&2; exit 2;; esac
+    [ "$_w" -ge 1 ] || { echo "ERROR: --weights values must be >= 1 (got '$_w')" >&2; exit 2; }
+    TOTAL_CORES=$((TOTAL_CORES + _w))
+  done
+  echo "==> --weights: splitting by $WEIGHTS (total $TOTAL_CORES) instead of probed core counts"
+fi
+
 # Weighted [LOW,HIGH] ranges out of TOTAL_CORES, cumulative -- worker i's share is proportional
 # to its own core count, not an equal split. The whole [0, TOTAL_CORES) range is tiled with no
 # gaps or overlaps by construction (each worker's LOW is the previous worker's HIGH+1), so every
 # permutation index lands in exactly one worker's shard. LOW/HIGH/PIDS/REMOTE_OUT stay in
 # lockstep with WORKER_ARR by POSITION (bash 3.2 has no associative arrays).
-LOW=(); HIGH=(); REMOTE_OUT=()
+LOW=(); HIGH=(); REMOTE_OUT=(); PSIMS=()
 cum=0
 for i in "${!WORKER_ARR[@]}"; do
   LOW+=("$cum")
-  cum=$((cum + CORES[i] - 1))
+  cum=$((cum + SPLIT[i] - 1))
   HIGH+=("$cum")
   cum=$((cum + 1))
   REMOTE_OUT+=("${REMOTE_HOME[i]}/work/tmp/${JOB}_shard_${i}")
+  if [ "$RESERVE_CORES" -gt 0 ]; then
+    _n=$(( CORES[i] - RESERVE_CORES )); [ "$_n" -lt 1 ] && _n=1
+    PSIMS+=(" --parallel-sims $_n")
+  else
+    PSIMS+=("")
+  fi
 done
 
 case "$RENDERER" in
@@ -153,13 +187,13 @@ esac
 
 echo "==> shard plan (TOTAL=$TOTAL_CORES)"
 for i in "${!WORKER_ARR[@]}"; do
-  echo "    ${WORKER_ARR[$i]}: ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES  (${CORES[$i]}/$TOTAL_CORES of the grid)"
+  echo "    ${WORKER_ARR[$i]}: ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES  (${SPLIT[$i]}/$TOTAL_CORES of the grid)"
 done
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "==> --dry-run: not touching any worker. Commands that would run:"
   for i in "${!WORKER_ARR[@]}"; do
-    echo "    ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "    ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES${PSIMS[$i]}\""
   done
   exit 0
 fi
@@ -184,7 +218,7 @@ PIDS=()
 for i in "${!WORKER_ARR[@]}"; do
   w="${WORKER_ARR[$i]}"
   ssh "${SSH_OPTS[@]}" "$w" "cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q \
-      $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES" \
+      $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES${PSIMS[$i]}" \
       > "$LOCAL_DIR/logs/$w.log" 2>&1 &
   PIDS+=("$!")
   echo "    $w: pid $!"
@@ -205,7 +239,7 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
   echo "==> ${#FAILED_IDX[@]} worker(s) failed"
   echo "    Re-run just a failed worker's shard once fixed (resume picks up where it left off):"
   for i in "${FAILED_IDX[@]}"; do
-    echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES\""
+    echo "      ssh ${SSH_OPTS[*]} ${WORKER_ARR[$i]} \"cd $REMOTE_DIR && $PY $RENDERER $GEN_ARGS_Q $OUTFLAG ${REMOTE_OUT[$i]} --shard ${LOW[$i]}-${HIGH[$i]}/$TOTAL_CORES${PSIMS[$i]}\""
   done
   echo "    Not merging while any worker is outstanding -- a partial shard would just be reported"
   echo "    as a missing permutation by --combine anyway, so fix the worker and re-run this script"
