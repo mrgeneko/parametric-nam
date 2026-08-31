@@ -340,7 +340,31 @@ def main():
     # 2. Auto-detect fixed vs swept: a knob with exactly one distinct value across the batch is
     # fixed, not trained -- per the source instruction, a batch this small routinely has several
     # knobs that never move at all.
-    all_knob_names = sorted({k for p in per_file.values() for k in p})
+    # KNOB ORDER IS THE CONDITIONING-VECTOR INDEX ORDER, so it is not cosmetic: it becomes
+    # config.json["knobs"], which ParamDataset reads as param_names, which sets the order of
+    # every params tensor and of the exported .nam's `parameters` list.
+    #
+    # This used to be `sorted(...)` unconditionally, which silently ALPHABETISED it. A
+    # --mapping-csv carries the author's stated order in its header -- for a deck render that is
+    # exactly the order of render_*_deck.py's own --grid flags -- and throwing it away meant
+    # every capture-sourced device shipped alphabetical no matter what its config or --grid said.
+    # (Found on the Joyo: --grid gave Drive,Level,Bass,Mids,Treble, mapping.csv preserved it, and
+    # the model still exported Bass,Drive,Level,Mids,Treble.)
+    #
+    # Filename-parsed captures have no column order to inherit -- token order can differ per file
+    # -- so `sorted` remains the fallback there, and any knob absent from the header is appended
+    # sorted so a partial mapping cannot drop one.
+    knob_set = {k for p in per_file.values() for k in p}
+    mapping_order = []
+    if args.mapping_csv:
+        with open(Path(args.mapping_csv).expanduser(), newline="") as _fh:
+            mapping_order = [c for c in (next(csv.reader(_fh), []) or []) if c != "filename"]
+    if mapping_order:
+        all_knob_names = ([k for k in mapping_order if k in knob_set]
+                          + sorted(knob_set - set(mapping_order)))
+        print(f"Knob order from --mapping-csv header: {all_knob_names}")
+    else:
+        all_knob_names = sorted(knob_set)
     values_per_knob = {k: {round(p[k], 6) for p in per_file.values() if k in p} for k in all_knob_names}
     swept = [k for k in all_knob_names if len(values_per_knob[k]) >= 2]
     fixed = {k: sorted(v)[0] for k, v in values_per_knob.items() if len(v) == 1}

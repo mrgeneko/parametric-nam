@@ -12,6 +12,7 @@ so they pass whether or not a real neural-amp-modeler install exists in the envi
 running the tests, and without spawning a real subprocess.
 """
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -279,3 +280,53 @@ def test_wet_capture_exts_accepts_wav_and_aiff_rejects_everything_else():
     assert Path("MyPedal G5.AIF").suffix.lower() in accepted
     assert Path("MyPedal G5.wav").suffix.lower() in accepted
     assert Path("MyPedal G5.mp3").suffix.lower() not in accepted
+
+
+# --------------------------------------------------------------------------- knob ORDER
+
+# Knob order is the CONDITIONING-VECTOR INDEX ORDER: it becomes config.json["knobs"], which
+# ParamDataset reads as param_names, which orders every params tensor and the exported .nam's
+# `parameters` list. It used to be sorted() unconditionally, silently alphabetising it -- so a
+# deck render whose --grid said Drive,Level,Bass,Mids,Treble still shipped Bass,Drive,Level,...
+
+def _order(mapping_header, rows, extra=None):
+    """The ordering rule gen_dataset_from_captures applies, exercised through the real
+    load_mapping_csv so column-order preservation is part of what's under test."""
+    import csv as _csv
+    from capture_common import load_mapping_csv
+    with tempfile.TemporaryDirectory() as td:
+        m = Path(td) / "mapping.csv"
+        with open(m, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(mapping_header)
+            for r in rows:
+                w.writerow(r)
+        per_file = load_mapping_csv(m)
+        for fname, kv in (extra or {}).items():
+            per_file[fname].update(kv)
+        knob_set = {k for p in per_file.values() for k in p}
+        with open(m, newline="") as fh:
+            mo = [c for c in (next(_csv.reader(fh), []) or []) if c != "filename"]
+    if mo:
+        return [k for k in mo if k in knob_set] + sorted(knob_set - set(mo))
+    return sorted(knob_set)
+
+
+def test_mapping_csv_header_order_is_preserved_not_alphabetised():
+    got = _order(["filename", "Drive", "Level", "Bass", "Mids", "Treble"],
+                 [["a.wav", 0.2, 0.2, 0.25, 0.25, 0.25],
+                  ["b.wav", 0.8, 0.8, 0.75, 0.75, 0.75]])
+    assert got == ["Drive", "Level", "Bass", "Mids", "Treble"]
+    assert got != sorted(got)          # the whole point -- this order is NOT alphabetical
+
+
+def test_a_knob_absent_from_the_mapping_header_is_appended_sorted_never_dropped():
+    got = _order(["filename", "Drive", "Level"],
+                 [["a.wav", 0.2, 0.2], ["b.wav", 0.8, 0.8]],
+                 extra={"a.wav": {"Aux": 0.1}, "b.wav": {"Aux": 0.9}})
+    assert got == ["Drive", "Level", "Aux"]
+
+
+def test_without_a_mapping_csv_the_fallback_is_still_sorted():
+    # filename-parsed captures have no column order to inherit -- token order can vary per file
+    assert sorted({"Treble", "Bass", "Drive"}) == ["Bass", "Drive", "Treble"]
