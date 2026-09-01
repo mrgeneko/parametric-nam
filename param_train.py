@@ -1858,6 +1858,15 @@ def main():
               "for this run. Pass --amp off explicitly to silence this message.", file=sys.stderr)
         args.amp = "off"
 
+    if device == "cuda" and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+        # ROCm/MIOpen on RDNA 4 (RX 9070) has no pre-tuned kernel cache. With
+        # cudnn.benchmark=True MIOpen runs an exhaustive solver search for every
+        # new conv shape, which can take minutes per shape and stall the first
+        # epoch indefinitely. Default solver selection (benchmark=False) picks a
+        # fast path upfront without search.
+        torch.backends.cudnn.benchmark = False
+        print("ROCm: cudnn.benchmark=False (default solver, no exhaustive search)", file=sys.stderr)
+
     # ------------------------------------------------------------------
     # Load dataset
     # ------------------------------------------------------------------
