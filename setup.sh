@@ -73,7 +73,20 @@ fi
 say "2/2  Python venv + deps"
 [ -d "$REPO/.venv" ] || python3 -m venv "$REPO/.venv"
 "$REPO/.venv/bin/python" -m pip install --quiet --upgrade pip
-"$REPO/.venv/bin/pip" install --quiet -r "$REPO/requirements.txt"
+
+# An accelerator-specific torch build (ROCm/CUDA, installed per the instructions atop
+# requirements.txt) carries a local version segment, e.g. 2.12.1+rocm7.2. pip's resolver does
+# NOT treat that as satisfying a bare `torch==2.12.1` pin: a plain `pip install -r
+# requirements.txt` silently uninstalls it and reinstalls the generic PyPI build in its place
+# (confirmed -- this clobbered a hand-installed ROCm build on a render-fleet box that also does
+# local GPU training). If torch already imports in this venv, leave it exactly as it is and
+# install everything else from requirements.txt around it.
+if EXISTING_TORCH="$("$REPO/.venv/bin/python" -c 'import torch; print(torch.__version__)' 2>/dev/null)"; then
+  echo "    torch $EXISTING_TORCH already installed -- leaving it as-is (pip would otherwise silently swap an accelerator-specific build for the generic PyPI one)"
+  grep -vE '^torch==' "$REPO/requirements.txt" | "$REPO/.venv/bin/pip" install --quiet -r /dev/stdin
+else
+  "$REPO/.venv/bin/pip" install --quiet -r "$REPO/requirements.txt"
+fi
 echo "    installed into .venv:"
 "$REPO/.venv/bin/python" -c "import torch,numpy,scipy,soundfile as sf; print(f'      torch {torch.__version__}, numpy {numpy.__version__}, scipy {scipy.__version__}, soundfile {sf.__version__}')"
 
