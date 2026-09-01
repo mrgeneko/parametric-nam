@@ -1953,6 +1953,14 @@ def main():
                          "spectral power spread instead -- RMS is the wrong metric for EQ knobs "
                          "(Treble/Bass/Middle) once the signal is saturated, see the check's own "
                          "comment. From a config's [knob-kind] table.")
+    ap.add_argument("--gate-only", action="store_true",
+                    help="run the transient/saturation coverage gate and EXIT (0 pass, 1 fail) "
+                         "without rendering anything. For distributed runs: the gate's answer "
+                         "depends only on (schx, excitation, knob ranges, oversample), so every "
+                         "worker computing it independently is pure duplication -- measured at "
+                         "~2.7 h EACH on a 43-corner Mesa grid, ~11 machine-hours across a "
+                         "4-worker fleet, before any worker rendered a single combination. Run "
+                         "this once, then pass --skip-transient-check to the workers.")
     ap.add_argument("--skip-transient-check", action="store_true",
                     help="skip the pre-generation transient/saturation coverage gate (livespice "
                          "backend only). See internal engineering notes: this refuses to "
@@ -2259,6 +2267,14 @@ def main():
             print("Transient check FAILED -- refusing to start generation (--skip-transient-check "
                   "to override). See the per-corner report above.", file=sys.stderr)
             sys.exit(1)
+        if args.gate_only:
+            print("Transient check PASSED (--gate-only: not rendering). Workers can now run with "
+                  "--skip-transient-check.")
+            sys.exit(0)
+    elif args.gate_only:
+        print("--gate-only needs the gate to actually run, but it was skipped "
+              "(--skip-transient-check, --random, or a non-livespice backend).", file=sys.stderr)
+        sys.exit(2)
 
     check_oracle(args.backend)
 
