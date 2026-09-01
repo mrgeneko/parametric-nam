@@ -83,6 +83,47 @@ re-run measured 0.0475 (1.4×) — a 14× error, indistinguishable from a real r
 is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) or lower
 `--workers`; the same plumbing gap existed in `preflight.py`, now `--render-timeout` there.
 
+## `holdout_esr.py` — did the model LEARN the knob space, or memorise it?
+
+```bash
+# preferred: derive the trained cells from the training dataset itself
+./holdout_esr.py --checkpoint ckpt/best.pt --dataset full_27cell_ds \
+    --trained-dataset corners_8cell_ds
+
+# or classify by value: a cell is "trained" when EVERY knob sits on one of these
+./holdout_esr.py --checkpoint ckpt/best.pt --dataset full_27cell_ds \
+    --trained-values 0.25,0.75  -o holdout.csv
+```
+
+Training's own val ESR is a random slice of the **same** combinations the model trained on, so a
+model that fits its training settings and interpolates badly still scores well.
+`per_combo_esr.py` shares the blind spot — per-cell, but only over trained cells. The only way to
+measure interpolation is to score cells the model has never seen: render a denser grid than you
+train on, train on a subset, score the remainder.
+
+Complements [`grid_adequacy.py`](#grid_adequacypy--measure-whether-a-knob-grid-is-dense-enough),
+which asks the same question **before** training with no model in the loop (circuit truth at a
+cell midpoint vs interpolating its neighbours). This asks it **after**, with the model, so the
+answer includes the network's own capacity limits and not just the grid's. Use `grid_adequacy` to
+choose a grid; use this to check the choice was right.
+
+Measured on the Joyo American Sound (2026-08-30) — full 3³ EQ grid rendered, trained on the 8
+corners of `[0.25, 0.75]³`, scored on the 19 interior cells:
+
+| w9 | mean ESR |
+|---|---:|
+| TRAINED corners | 0.00817 |
+| HELD-OUT interior | 0.02547 (3.1× worse) |
+| dead-centre (0.5,0.5,0.5) | 0.04002 (4.9× worse) |
+
+Two points per axis gave accurate end stops and a mushy middle — and the middle is where tone
+controls get set. That run's training val ESR was **0.00299**, which shows none of it.
+
+**A large ratio is not automatically audible.** Decompose before acting: on that run 54% of the
+dead-centre error was a static level/tone offset (+0.79 dB), the kind a player dials out with a
+small knob nudge. ESR scores a benign 0.8 dB tilt the same as 0.8 dB of wrong harmonics.
+
+
 ## `measure_truncation.py` — measure BDF2 truncation error, pick `oversample`
 
 ```bash
