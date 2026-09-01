@@ -108,6 +108,11 @@ def _replace_table(text: str, header: str, body_lines: list) -> str:
     return text[:start] + "".join(l + "\n" for l in body_lines) + text[end:]
 
 
+DEFAULT_GRID_POINTS = 3  # this module's own --grid-points default, named so _grid_for_kind
+                          # can tell "caller didn't ask for more than the default" apart from
+                          # an explicit override -- see the drive/rms branch below.
+
+
 def _grid_for_kind(kind: "str | None", n_points: int) -> list:
     """Default knob-grid VALUES for a classify() kind -- still a placeholder meant to be
     refined by grid_adequacy.py --apply, but an informed one instead of a naive linspace(0,1)
@@ -118,14 +123,21 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
         here), but narrowed to [0.2, 0.8] -- the fully-CCW/CW extremes rarely hold a tone
         stack's interesting behavior, so a naive [0,1] grid wastes render budget there.
 
-      drive/rms (gain/volume knob): NOT evenly spaced. A gain-type knob's audible character
-        changes fastest near the bottom of its range, so 0.1 (not 0.0 -- a knob truly at
-        zero is often a degenerate/dead corner anyway) gets two extra points just above it
-        (+0.05, +0.15); the top gets one extra point just below max (-0.05) to "stabilize"
-        the max grid point, a pattern already used by hand on several devices. --grid-points
-        still spreads that many points evenly across the full range as a baseline (so a
-        larger --grid-points adds real middle-of-range coverage, not just these 5 anchors),
-        deduped/sorted together with the anchors.
+      drive/rms (gain/volume knob): NOT evenly spaced, and denser than the 6-point default
+        this used to be -- now [0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0], 7 fixed anchor
+        points. A gain-type knob's audible character changes fastest near the bottom of its
+        range, so 0.1 (not 0.0 -- a knob truly at zero is often a degenerate/dead corner
+        anyway) gets two extra points just above it (+0.05, +0.15); the top gets one extra
+        point just below max (-0.05) to "stabilize" the max grid point; 0.50 and 0.75 fill
+        the middle instead of leaving it to a single linspace-derived point. Raised from 5
+        anchors (+1 incidental baseline midpoint) to these 7 fixed points now that
+        gen_dataset_from_schx.py's --shard makes a denser default grid affordable -- dataset
+        generation no longer has to render the whole knob-grid product in one pass. At or
+        below DEFAULT_GRID_POINTS this returns exactly these 7 anchors, nothing added or
+        deduped away; --grid-points still spreads that many points evenly across the full
+        range as a baseline ONLY when explicitly raised above the default (so a larger
+        --grid-points adds real middle-of-range coverage on top of the anchors, not just
+        these 7), deduped/sorted together with them.
 
       unclassified (no keyword match): legacy behavior, evenly spaced [0, 1] -- see
       knob_classify.classify()'s own docstring for why an unclassified knob gets the LEAST
@@ -136,8 +148,10 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
         return [round(float(v), 4) for v in np.linspace(lo, hi, max(2, n_points))]
     if kind in ("drive", "rms"):
         lo, hi = 0.1, 1.0
-        baseline = list(np.linspace(lo, hi, max(2, n_points)))
-        anchors = [lo, lo + 0.05, lo + 0.15, hi - 0.05, hi]
+        anchors = [0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0]
+        if n_points <= DEFAULT_GRID_POINTS:
+            return anchors
+        baseline = list(np.linspace(lo, hi, n_points))
         return sorted(set(round(float(v), 4) for v in baseline + anchors))
     return [round(float(v), 4) for v in np.linspace(0.0, 1.0, max(2, n_points))]
 
@@ -268,12 +282,12 @@ def main() -> None:
                     help="oversample auto-measurement only runs for livespice -- ngspice's "
                          "adaptive timestepping isn't tuned the same way (see "
                          "ngspice/README.md)")
-    ap.add_argument("--grid-points", type=int, default=3,
-                    help="placeholder points per knob (default 3), spread evenly across "
-                         "that knob's role-aware range as a BASELINE (see _grid_for_kind) -- "
-                         "a drive/rms knob adds fixed low/high-density anchor points on top, "
-                         "so its actual point count is usually higher than this. Refine with "
-                         "grid_adequacy.py --apply afterward")
+    ap.add_argument("--grid-points", type=int, default=DEFAULT_GRID_POINTS,
+                    help=f"placeholder points per knob (default {DEFAULT_GRID_POINTS}), spread "
+                         "evenly across that knob's role-aware range as a BASELINE (see "
+                         "_grid_for_kind) -- a drive/rms knob uses its own fixed 7-point anchor "
+                         "set instead at or below this default, only adding baseline points on "
+                         "top when raised above it. Refine with grid_adequacy.py --apply afterward")
     ap.add_argument("--candidates", default="2,4,8",
                     help="oversamples to measure (default 2,4,8, same as measure_truncation.py)")
     ap.add_argument("--ref-os", type=int, default=32)
