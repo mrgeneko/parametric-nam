@@ -183,7 +183,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                 ok = transient_peak >= onset * margin
                 status = "OK" if ok else "FAIL -- transient never reaches saturation here"
             if not quiet:
-                print(f"  {clabel:16} onset={onset if onset is None else f'{onset:.3f} V':>10}  {status}")
+                onset_str = "NONE" if onset is None else f"{onset:.3f} V"
+                print(f"  {clabel:16} onset={onset_str:>10}  {status}")
             rows.append({"corner": clabel, "params": params, "onset_v": onset, "ok": ok})
 
     failed = [r for r in rows if r["ok"] is False]
