@@ -34,6 +34,7 @@ import importlib
 import itertools
 import json
 import os
+import shutil
 import sys
 
 import numpy as np
@@ -85,6 +86,10 @@ def main():
                           "down by this factor before writing, and render_grid divides it back "
                           "out. Raise it (toward 1.0) only if you know the tap never exceeds "
                           "1/out_scale volts; lower it for a device with a higher native swing.")
+    ap.add_argument('--keep-tmp', action='store_true',
+                     help="don't delete the scratch tree after a successful run "
+                          "(it is deleted by default; a FAILED run always keeps it "
+                          "so the decks can be inspected)")
     ap.add_argument('--tmp', default=None, help='default: /tmp/render_ltspice_deck_<module>')
     ap.add_argument('--parallel-sims', type=int, default=8, help='concurrent LTspice processes for --grid')
     ap.add_argument('--timeout', type=float, default=None,
@@ -110,6 +115,15 @@ def main():
         return k, v
 
     tmp = a.tmp or f"/tmp/render_ltspice_deck_{a.module}"
+    # The scratch tree is per-job SPICE decks and raw output -- pure intermediates,
+    # regenerable from the same command. It used to survive the run: a completed
+    # 675-combination render left 18-19 GB PER MACHINE behind, and across a 4-worker
+    # fleet that was 46 GB of dead weight nobody was tracking (it did not even show up
+    # as a disk-space problem until a worker got down to 25 GB free). Cleaned on
+    # SUCCESS only -- a crashed or timed-out render's decks are exactly what you want
+    # to inspect, so failures deliberately leave the tree in place. --keep-tmp opts
+    # out entirely.
+
     os.makedirs(tmp, exist_ok=True)
     sr, dur_s, wav_path, in_scale = load_input(a.infile, None if a.absolute else a.vin, tmp,
                                                 src_name='input.wav')
@@ -186,6 +200,17 @@ def main():
                 row.update(knobs_by_file[outfile])
                 w.writerow(row)
         print(f"wrote {csv_path}")
+        # Clean the scratch tree -- only when every job produced a usable render. `results`
+        # holds None for a job that never converged, and those decks are the ones worth
+        # keeping, so a partial failure keeps the whole tree rather than trying to prune it
+        # per-job (the failed deck's siblings are the comparison you want).
+        n_failed = sum(1 for pk in results.values() if pk is None)
+        if a.keep_tmp:
+            print(f"  scratch kept at {tmp} (--keep-tmp)")
+        elif n_failed:
+            print(f"  scratch kept at {tmp} -- {n_failed} render(s) failed, decks left for inspection")
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
     else:
         assert a.outfile, "single render needs an outfile"
         knobs = {k: float(v) for k, v in (parse_knob(k) for k in a.knob)}
