@@ -74,7 +74,8 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                 cpath.write_text(json.dumps(sat))
         onset = sat.get("onset_99pct_input_v") if sat else None
         if not quiet:
-            print(f"  {label:16} onset={onset if onset is None else f'{onset:.3f} V':>10}")
+            onset_str = "NONE (not reached)" if onset is None else f"{onset:.3f} V"
+            print(f"  {label:16} onset={onset_str:>10}")
         rows.append({"corner": label, "params": params, "onset_v": onset})
     missing = [r for r in rows if r["onset_v"] is None]
     if missing:
