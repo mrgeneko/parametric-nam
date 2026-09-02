@@ -1544,6 +1544,67 @@ def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
 # Main
 # ---------------------------------------------------------------------------
 
+def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler):
+    """Reconstruct `scheduler` to match a resumed checkpoint's true position.
+
+    CosineAnnealingLR (fixed --epochs > 0) -- unchanged from before this fix. Direct
+    last_epoch construction is exact for THIS scheduler (no T_cur/T_i concept to get out
+    of sync); confirmed reconstructing via -1 + explicit .step(epoch) instead is NOT
+    numerically identical here (~0.06% LR difference -- torch's own "closed form vs
+    chainable form" distinction, see its step() deprecation warning), so deliberately not
+    touched here.
+
+    CosineAnnealingWarmRestarts (open-ended, --epochs 0) -- ITS constructor does NOT
+    replay restart history when given a raw last_epoch: torch's source sets
+    self.T_cur = last_epoch and self.T_i = T_0 directly, with no attempt to re-derive
+    which cycle that absolute epoch actually falls in. That is fine at last_epoch < T_0
+    (a fresh-ish run) but nonsensical once training has passed its first cycle (T_cur ends
+    up far bigger than T_i). Left uncorrected, this "heals" itself only by accident: since
+    param_train.py always calls the bare scheduler.step() (no epoch arg -- the ONLY call
+    site that has the correct closed-form re-derivation is the explicit-epoch step(epoch)
+    branch, never reached in the training loop), the naive T_cur/T_i increment-and-wrap
+    logic needs several epochs of spurious wrap-arounds before T_cur < T_i again --
+    confirmed empirically 2026-09-01 on a real resume at epoch 2499: 5 bogus wraps in 5
+    epochs, LR bouncing 0.5/0.86/0.32/0.91/0.35x eta_max before settling into an arbitrary
+    ~1600-epoch cycle nobody asked for. Every --resume past the first cycle hit this, not
+    just one that also changes --restart-mult; it was just never visible enough to notice
+    before.
+
+    New-format checkpoints (scheduler_T_cur/T_i present, saved by this fixed version)
+    restore the exact position directly, no re-derivation needed -- this also gives the
+    sensible behavior when --restart-mult is CHANGED on resume: keep the current cycle's
+    position/length exactly as it was, apply the new mult only once this cycle completes,
+    not retroactively. Old checkpoints (saved before this fix existed) fall back to
+    torch's OWN correct closed-form formula (the explicit-epoch step(epoch) branch,
+    confirmed numerically exact for CosineAnnealingWarmRestarts -- unlike CosineAnnealingLR
+    above, its custom step() has no separate "closed form" path to diverge from) -- exact
+    for any run that never changed --restart-mult mid-training, which covers every
+    checkpoint from before this fix existed to change it. Not exact for a checkpoint
+    produced mid-transient by the bug itself (arbitrary T_cur/T_i at that moment,
+    unrecoverable) -- a one-time, already-incurred imprecision on the first upgrade.
+
+    Returns the scheduler to use (may be a new instance).
+    """
+    if not (ckpt is not None and "scheduler_last_epoch" in ckpt):
+        return scheduler
+    if not open_ended:
+        return make_scheduler(ckpt["scheduler_last_epoch"])
+    if ckpt.get("scheduler_T_cur") is not None and ckpt.get("scheduler_T_i") is not None:
+        scheduler.T_cur = ckpt["scheduler_T_cur"]
+        scheduler.T_i = ckpt["scheduler_T_i"]
+        scheduler.last_epoch = ckpt["scheduler_last_epoch"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")   # get_lr() outside step() is intentional here
+            lrs = scheduler.get_lr()
+        for group, lr in zip(optimizer.param_groups, lrs):
+            group["lr"] = lr
+        scheduler._last_lr = lrs
+        return scheduler
+    scheduler = make_scheduler(-1)
+    scheduler.step(ckpt["scheduler_last_epoch"])
+    return scheduler
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Train parametric A2 + FiLM NAM model",
@@ -2084,8 +2145,8 @@ def main():
             optimizer, args.epochs, last_epoch=last_epoch)
 
     scheduler = make_scheduler(start_epoch - 2)
-    if args.resume and "scheduler_last_epoch" in ckpt:
-        scheduler = make_scheduler(ckpt["scheduler_last_epoch"])
+    if args.resume:
+        scheduler = restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler)
     criterion = ParamLoss(mrstft_weight=args.mrstft_weight, kind=args.loss,
                           pre_emph=args.pre_emph, floor=args.esr_floor)
     print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
@@ -2194,6 +2255,8 @@ def main():
                         "model": best_state[lbl],
                         "optimizer": optimizer.state_dict(),
                         "scheduler_last_epoch": scheduler.last_epoch,
+                        "scheduler_T_cur": getattr(scheduler, "T_cur", None),
+                        "scheduler_T_i": getattr(scheduler, "T_i", None),
                         "best_esr": best_esr["full"],          # back-compat scalar (full)
                         "best_esr_by_tier": dict(best_esr),
                         "args_dict": dict(vars(args)),
@@ -2251,6 +2314,8 @@ def main():
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler_last_epoch": scheduler.last_epoch,
+                "scheduler_T_cur": getattr(scheduler, "T_cur", None),
+                "scheduler_T_i": getattr(scheduler, "T_i", None),
                 # per-tier best tracking (new format)
                 "best_esr_by_tier": dict(best_esr),
                 "best_state_by_tier": dict(best_state),
@@ -2301,6 +2366,8 @@ def main():
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler_last_epoch": scheduler.last_epoch,
+                "scheduler_T_cur": getattr(scheduler, "T_cur", None),
+                "scheduler_T_i": getattr(scheduler, "T_i", None),
                 "best_esr_by_tier": dict(best_esr),
                 "best_state_by_tier": dict(best_state),
                 "best_esr": best_esr["full"],
@@ -2392,6 +2459,8 @@ def main():
                 "model": best_state[lbl],
                 "optimizer": optimizer.state_dict(),
                 "scheduler_last_epoch": scheduler.last_epoch,
+                "scheduler_T_cur": getattr(scheduler, "T_cur", None),
+                "scheduler_T_i": getattr(scheduler, "T_i", None),
                 "best_esr": best_esr["full"],
                 "best_esr_by_tier": dict(best_esr),
                 "args_dict": dict(vars(args)),
