@@ -792,7 +792,14 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
             r.error = f"{r.error} [not escalating: higher rungs are strictly slower]"
             return r
         if i + 1 < len(rungs):
-            print(f"  [{idx}] {r.error[:80]} — escalating to rung {i+1}: "
+            # NEVER truncate mid-number. [:80] used to cut the spike error's sample index in
+            # half -- "at sample 5072724" logged as "at sample 50727" -- producing a PLAUSIBLE
+            # WRONG NUMBER that reads as a valid early-time index. A whole investigation was run
+            # against those phantom indices ("the spikes cluster in the silent gap") before the
+            # truncation was spotted. Keep the limit generous and make any cut VISIBLE with an
+            # ellipsis, so a mangled value can never masquerade as a real one.
+            _err = r.error if len(r.error) <= 200 else r.error[:197] + "..."
+            print(f"  [{idx}] {_err} — escalating to rung {i+1}: "
                   f"{_rung_str(rungs[i+1])}", file=sys.stderr)
 
     if last is not None:
