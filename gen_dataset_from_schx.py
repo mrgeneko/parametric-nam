@@ -800,6 +800,67 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
     return last or Result(idx, error="no rungs")
 
 
+class _StallTimeout(Exception):
+    """Raised when a render stops reporting progress -- distinct from running long."""
+
+
+# No progress for this long means hung, not slow. A chunk is 4096 samples and livespice_cli
+# throttles PROGRESS to ~1/s, so anything past a couple of minutes without a line is a hang
+# rather than a slow chunk, even on a badly conditioned operating point.
+STALL_S = 180.0
+# Backstop for a live-lock that keeps emitting progress forever. Deliberately generous: it is
+# not the primary mechanism any more, just a last resort.
+TOTAL_CEILING_MULT = 20.0
+
+
+def _run_with_stall_detect(proc, base_timeout_s: float):
+    """Read a subprocess to completion, failing on a STALL rather than on total elapsed time.
+
+    Returns (stdout, stderr) like communicate(). Raises _StallTimeout if no PROGRESS line
+    arrives for STALL_S, or if the whole render exceeds base_timeout_s * TOTAL_CEILING_MULT.
+    Both streams are drained by threads -- reading one at a time deadlocks as soon as the
+    other's pipe buffer fills, which for a chatty render happens quickly."""
+    import threading
+    out_buf, err_buf = [], []
+    last_progress = [time.time()]
+
+    def _drain(stream, buf, watch):
+        for line in iter(stream.readline, ""):
+            buf.append(line)
+            if watch and line.startswith("PROGRESS "):
+                last_progress[0] = time.time()
+        stream.close()
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf, False), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_buf, True), daemon=True)
+    t_out.start(); t_err.start()
+    started = time.time()
+    ceiling = base_timeout_s * TOTAL_CEILING_MULT
+    def _abort(msg):
+        # Kill HERE, not in the caller. The drain threads own both pipes, so a caller doing
+        # proc.communicate() after the raise reads a closed fd and dies with
+        # "OSError: [Errno 9] Bad file descriptor" -- which turns a clean stall report into a
+        # crash. Found by testing the failure path, not the happy one.
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        raise _StallTimeout(msg)
+
+    while proc.poll() is None:
+        now = time.time()
+        if now - last_progress[0] > STALL_S:
+            _abort(f"stalled: no progress for {STALL_S:.0f}s (ran {now - started:.0f}s)")
+        if now - started > ceiling:
+            _abort(f"exceeded total ceiling {ceiling:.0f}s "
+                   f"({TOTAL_CEILING_MULT:g}x the per-rung budget) while still reporting "
+                   f"progress -- suspect a live-lock")
+        time.sleep(1.0)
+    t_out.join(timeout=10); t_err.join(timeout=10)
+    return "".join(out_buf), "".join(err_buf)
+
+
 def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                  backend: str, circuit: str = None, schx: str = None,
                  param_map: dict = None, fixed_params: str = None,
@@ -824,7 +885,12 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             swept = fmt_params(params, param_map)
             all_params = f"{fixed_params},{swept}" if fixed_params else swept
             args = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(out_wav),
-                    "--circuit", schx, "--params", all_params]
+                    "--circuit", schx, "--params", all_params,
+                    # --progress turns the wall-clock timeout into a STALL detector: see
+                    # _run_with_stall_detect. Harmless if an older livespice_cli ignores it --
+                    # use_stall only engages when the flag is present AND lines arrive, and a
+                    # binary that emits none simply falls back to the total-timeout path.
+                    "--progress"]
             if speaker:
                 args += ["--speaker", speaker]
             if oversample and oversample != 2:
@@ -837,12 +903,31 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 
+        # STALL DETECTION rather than a total wall-clock budget, when the backend can report
+        # progress. A total timeout has to be GUESSED from oversample, and it gets the guess
+        # wrong in both directions: it kills a legitimately slow operating point (the Dual
+        # Rectifier's Master=1.0 corner needs far more than the 10x-realtime budget its
+        # oversample implies -- 55 of 448 combinations were unrenderable purely because of
+        # this), while a genuinely hung render still burns the entire budget before dying.
+        # "No progress for STALL_S seconds" needs no knowledge of how long the render SHOULD
+        # take, kills a real hang in seconds rather than hours, and removes the reason the
+        # retry ladder had to refuse escalation after a timeout (higher rungs are slower, so
+        # against a FIXED budget they were guaranteed to fail -- against a stall detector they
+        # are not). TOTAL_CEILING stays as a backstop for the one case a stall detector cannot
+        # see: a live-lock that keeps emitting chunks forever.
+        use_stall = (backend in ("livespice", "cpp")) and "--progress" in args
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with _procs_lock:
             _active_procs.add(proc)
         try:
             try:
-                stdout, stderr = proc.communicate(timeout=timeout_s)
+                if use_stall:
+                    stdout, stderr = _run_with_stall_detect(proc, timeout_s)
+                else:
+                    stdout, stderr = proc.communicate(timeout=timeout_s)
+            except _StallTimeout as e:
+                # already killed and reaped inside the helper
+                return Result(idx, error=str(e))
             except subprocess.TimeoutExpired:
                 proc.kill(); proc.communicate()
                 return Result(idx, error=f"timeout after {timeout_s}s")
