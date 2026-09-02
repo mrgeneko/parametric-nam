@@ -804,10 +804,23 @@ class _StallTimeout(Exception):
     """Raised when a render stops reporting progress -- distinct from running long."""
 
 
-# No progress for this long means hung, not slow. A chunk is 4096 samples and livespice_cli
-# throttles PROGRESS to ~1/s, so anything past a couple of minutes without a line is a hang
-# rather than a slow chunk, even on a badly conditioned operating point.
-STALL_S = 180.0
+# STALL_S is a FLOOR, not the whole rule -- the real threshold adapts to what this render is
+# actually doing (see _run_with_stall_detect). A fixed constant would put us back where we
+# started: a number that has to be right for every machine, circuit and oversample.
+#
+# Worst case for a FIXED threshold, computed from the measured 18x-realtime Mesa render:
+# a 4096-sample chunk is 0.0853 s of audio, so at the ladder ceiling (oversample 256) on the
+# slowest machine in this fleet (2.6x the M4 Pro) one chunk takes ~128 s -- and that is the
+# AVERAGE chunk, on operating points that are slow precisely because Newton is thrashing.
+# 180 s would have had 1.4x margin. Hence the adaptive rule.
+#
+# The floor covers the window before any progress arrives: circuit parse, simulation build and
+# JIT all happen before the first chunk completes.
+STALL_S = 600.0
+# Once chunks are landing, allow this multiple of the SLOWEST gap seen so far. Self-tuning: a
+# machine or oversample that makes chunks 100x slower raises its own threshold 100x, with no
+# per-circuit constant to maintain.
+STALL_GAP_MULT = 20.0
 # Backstop for a live-lock that keeps emitting progress forever. Deliberately generous: it is
 # not the primary mechanism any more, just a last resort.
 TOTAL_CEILING_MULT = 20.0
@@ -824,11 +837,15 @@ def _run_with_stall_detect(proc, base_timeout_s: float):
     out_buf, err_buf = [], []
     last_progress = [time.time()]
 
+    max_gap = [0.0]
+
     def _drain(stream, buf, watch):
         for line in iter(stream.readline, ""):
             buf.append(line)
             if watch and line.startswith("PROGRESS "):
-                last_progress[0] = time.time()
+                now = time.time()
+                max_gap[0] = max(max_gap[0], now - last_progress[0])
+                last_progress[0] = now
         stream.close()
 
     t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf, False), daemon=True)
@@ -850,8 +867,10 @@ def _run_with_stall_detect(proc, base_timeout_s: float):
 
     while proc.poll() is None:
         now = time.time()
-        if now - last_progress[0] > STALL_S:
-            _abort(f"stalled: no progress for {STALL_S:.0f}s (ran {now - started:.0f}s)")
+        allowed = max(STALL_S, STALL_GAP_MULT * max_gap[0])
+        if now - last_progress[0] > allowed:
+            _abort(f"stalled: no progress for {allowed:.0f}s "
+                   f"(slowest chunk so far {max_gap[0]:.1f}s, ran {now - started:.0f}s)")
         if now - started > ceiling:
             _abort(f"exceeded total ceiling {ceiling:.0f}s "
                    f"({TOTAL_CEILING_MULT:g}x the per-rung budget) while still reporting "

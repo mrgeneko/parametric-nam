@@ -67,3 +67,31 @@ def test_total_ceiling_catches_a_livelock(monkeypatch):
     verdict, elapsed, msg = _run(live, base_timeout=1.5, stall_s=30, monkeypatch=monkeypatch)
     assert verdict == "stall"
     assert "live-lock" in msg
+
+
+def test_threshold_adapts_to_slow_chunks(monkeypatch):
+    """A render whose chunks are slower than the floor must raise its OWN threshold.
+
+    This is the property a fixed constant cannot have: at the ladder's oversample ceiling on
+    the slowest machine in this fleet a single chunk takes ~128 s, and the pathological
+    operating points are slower still. Anything fixed is either too tight there or uselessly
+    loose everywhere else.
+    """
+    monkeypatch.setattr(g, "STALL_S", 2.0)          # tiny floor, so the ADAPTIVE part is what's tested
+    monkeypatch.setattr(g, "STALL_GAP_MULT", 5.0)
+    # gaps of ~1.5 s -- well over the 2 s floor once multiplied, so the run must survive
+    slow_chunks = ("import sys,time\n"
+                   "for i in range(4):\n"
+                   "    time.sleep(1.5); sys.stderr.write(f'PROGRESS {i+1}/4\\n'); sys.stderr.flush()\n")
+    verdict, elapsed, n = _run(slow_chunks, base_timeout=100, stall_s=2.0, monkeypatch=monkeypatch)
+    assert verdict == "ok", "chunks slower than the floor should widen the threshold, not fail"
+    assert n == 4
+
+
+def test_floor_applies_before_any_progress_arrives(monkeypatch):
+    """Before the first PROGRESS line there is no gap to learn from -- circuit parse,
+    simulation build and JIT all happen there -- so the floor is what protects that window."""
+    monkeypatch.setattr(g, "STALL_GAP_MULT", 5.0)
+    verdict, elapsed, msg = _run(HUNG, base_timeout=100, stall_s=2.0, monkeypatch=monkeypatch)
+    assert verdict == "stall"
+    assert elapsed < 6
