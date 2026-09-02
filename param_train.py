@@ -1581,8 +1581,9 @@ def main():
                          "built). CAVEAT: --stale-cycles counts CYCLES, not epochs, so mult=2's "
                          "geometrically growing cycles make that auto-stop rule geometrically "
                          "slower to fire at its default patience -- lower --stale-cycles "
-                         "(2-3) or set an explicit epoch/step budget instead of relying on it "
-                         "when using mult > 1.")
+                         "(2-3), pair it with --stale-epochs as an epoch-counted backstop, or "
+                         "set an explicit epoch/step budget instead of relying on --stale-cycles "
+                         "alone when using mult > 1.")
     ap.add_argument("--restart-decay", type=float, default=0.97,
                     help="Open-ended mode: multiply the SGDR restart ceiling (eta_max, for "
                          "every param group incl. the FiLM group) by this factor at every "
@@ -1617,6 +1618,28 @@ def main():
                          "Sparse-capture datasets (whose val metric is noisiest) may want "
                          "4+, or 0 to disable (the old manual behavior). The counter "
                          "resets on --resume. (default: %(default)s)")
+    ap.add_argument("--stale-epochs", type=int, default=0,
+                    help="Open-ended mode: stop automatically after this many CONSECUTIVE "
+                         "epochs (not cycles) with NO tier minting a new best val ESR, "
+                         "checked every epoch independent of cycle boundaries -- a coarse "
+                         "backstop for --restart-mult>1, whose --stale-cycles patience "
+                         "grows unbounded in epoch terms (see --restart-mult's own CAVEAT): "
+                         "cycles double each restart (150, 300, 600, 1200, 2400, ...), so "
+                         "by cycle 6 --stale-cycles needs ~9,600 epochs of no improvement to "
+                         "fire at all. Measured real cost of not having this: a mult=2 run "
+                         "plateaued 1,665 epochs before its cycle-based patience would have "
+                         "triggered and had to be stopped by hand; left alone it would have "
+                         "ground ~8 further hours (docs/scaling-training.md). Unlike "
+                         "--stale-cycles, this is NOT immune to the cosine-tail artifact "
+                         "(a best tends to land near each trough, so this can fire mid-cycle "
+                         "during a noisy high-LR stretch that would have found a new best at "
+                         "the next trough) -- it is a blunt ceiling, not a precise plateau "
+                         "detector, so set it well above a few cycles' worth of epochs (e.g. "
+                         "several times --restart-period) rather than tight. Whichever of "
+                         "--stale-cycles/--stale-epochs fires first stops the run; either or "
+                         "both may be 0 (disabled). Counter resets on --resume, same as "
+                         "--stale-cycles. 0 = disabled (default, matches historical "
+                         "behavior).")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -2121,6 +2144,9 @@ def main():
     # SGDR cycle-aware auto-stop bookkeeping (open-ended mode, --stale-cycles).
     cycle_improved = False
     stale_cycles = 0
+    # Epoch-counted backstop (open-ended mode, --stale-epochs) -- independent of cycle
+    # boundaries, see --stale-epochs' own help for why this exists alongside --stale-cycles.
+    stale_epochs = 0
     auto_stop = False
     while True:
         epoch += 1
@@ -2177,6 +2203,7 @@ def main():
                 _watchdog_disarm()
         if new_best:
             cycle_improved = True
+            stale_epochs = 0
             # Composite "optimal" export: whenever ANY tier improves, splice every
             # tier's own best-epoch weights into one container and export it too --
             # the artifact release_run.sh's compose step / export_checkpoint.py
@@ -2190,6 +2217,8 @@ def main():
                 export_composite_nam(model, best_state, dataset,
                                      nam_variant(args.output, "optimal"), device)
                 _watchdog_disarm()
+        else:
+            stale_epochs += 1
 
         elapsed = time.time() - t0
         lr_now = scheduler.get_last_lr()[0]
@@ -2300,6 +2329,16 @@ def main():
                       f"on any tier — plateau reached, stopping (disable with --stale-cycles 0).",
                       file=sys.stderr, flush=True)
                 auto_stop = True
+
+        # Epoch-counted backstop (--stale-epochs), independent of cycle_ended -- see its own
+        # help for why this exists alongside --stale-cycles: at --restart-mult>1, cycles grow
+        # geometrically but this ceiling does not, so it still fires in bounded epoch terms
+        # deep into a long, oversized late cycle where --stale-cycles' own patience wouldn't.
+        if open_ended and args.stale_epochs > 0 and not auto_stop and stale_epochs >= args.stale_epochs:
+            print(f"[stop] {args.stale_epochs} consecutive epochs without a new best on any "
+                  f"tier — plateau reached, stopping (disable with --stale-epochs 0).",
+                  file=sys.stderr, flush=True)
+            auto_stop = True
 
         # Open-ended: stop gracefully on plateau, STOP file, or SIGINT/SIGTERM.
         if open_ended and (auto_stop or should_stop(ckpt_dir)):
