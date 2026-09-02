@@ -83,6 +83,40 @@ re-run measured 0.0475 (1.4×) — a 14× error, indistinguishable from a real r
 is a timeout rather than true non-convergence, raise `--ltspice-timeout` (new) or lower
 `--workers`; the same plumbing gap existed in `preflight.py`, now `--render-timeout` there.
 
+## `stability_sweep.py` — which knob combinations does the SOLVER fail on?
+
+```bash
+./stability_sweep.py --config device.toml --probe-s 3 --oversample 8,16,32
+./stability_sweep.py --config device.toml --shard 0-11/48      # one worker's slice
+```
+
+Four tools already gate a dataset and none checks solver stability across the grid:
+`preflight.py` (knob dead/reversed/level), `check_transient_coverage.py` (does the excitation
+reach saturation), [`grid_adequacy.py`](#grid_adequacypy--measure-whether-a-knob-grid-is-dense-enough)
+(per-cell interpolation error), `measure_truncation.py` (BDF2 truncation vs oversample). Newton
+stability was only ever discovered DURING a render, hours in, by the solver-spike detector.
+
+Always uses `--no-retry`: the question is whether the CONFIGURED oversample is stable, not
+whether the ladder can rescue it — a rescued render still cost you the failed attempt. Reports
+the unstable COMBINATIONS, not just a count, so a region is visible; exit status is nonzero when
+nothing is stable.
+
+**A short probe is enough, which is what makes it affordable.** On the Mesa Dual Rectifier the
+observed spikes clustered at 0.93–1.05 s against a 120.5 s clip — the first transient after the
+excitation's 1 s lead silence, where the solver settles to quiescence and is then hit with
+signal. A 3 s probe provokes the same failure at 1/40th the cost:
+
+| | 448 combinations |
+|---|---|
+| 3 s probe, 4 machines | ~0.2 h |
+| 8 s probe, 4 machines | ~0.4 h |
+| the real render, 120.5 s | ~7 h |
+
+Worked result — 36 of 448 combinations tripped the retry ladder mid-render, 12 all the way to
+oversample 64. Every one had the same signature: `RD Gain <= 0.25` with `Red Master = 1.0`. The
+device's own note said "converges at --oversample 8", true of the 4 corners it had tested. See
+[`docs/backend-comparison-mesa.md`](backend-comparison-mesa.md) for what that turned into.
+
 ## `holdout_esr.py` — did the model LEARN the knob space, or memorise it?
 
 ```bash
