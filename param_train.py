@@ -1003,6 +1003,54 @@ class ParamDataset(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
+# Train/val split
+# ---------------------------------------------------------------------------
+
+def grouped_random_split(n_samples: int, n_groups: int, val_split: float, seed: int):
+    """Splits a repeats-expanded dataset into train/val indices, guaranteeing every real
+    knob combo keeps at least one training example, and (once it has 2+ repeats) at least
+    one val example too.
+
+    A plain `torch.utils.data.random_split` over the full repeats-expanded index range
+    treats every (combo, repeat) pair as independent, so at low `--repeats` (worst case,
+    `--repeats 1`) it can send a combo's ONLY example entirely to val -- that combo then
+    trains on nothing while every other combo trains fine, and nothing reports it. Grouping
+    by combo (index % n_groups, matching ParamDataset.__getitem__'s `real_idx = idx %
+    len(self.samples)`) and splitting each group independently makes that impossible.
+
+    Uses `ceil`, not `round`, for each group's val count: `round` needs
+    `count * val_split >= 0.5` before it contributes anything to val at all (and Python's
+    round-half-to-even makes that threshold itself unreliable right at .5), so a group
+    could sit at 0 val examples for a wide range of `count`. `ceil(count * val_split)` is
+    >= 1 for ANY count >= 1 and val_split > 0, so every group with room (count >= 2)
+    reliably gets both sides represented -- at the cost of overshooting the requested
+    val_split at low --repeats (e.g. count=2 forces a 50% split for that group, not 5%).
+    See main()'s min_repeats_for_split for keeping that overshoot small.
+
+    A group of size 1 has no room: giving it any val share would empty its train side, so
+    it is kept entirely in train. If EVERY group is size 1 (--repeats 1), n_val degrades to
+    0 for the whole dataset -- validation disappears rather than silently starving specific
+    combos.
+    """
+    if n_groups <= 0 or n_samples == 0 or val_split <= 0:
+        return list(range(n_samples)), []
+    g = torch.Generator().manual_seed(seed)
+    train_idx: list[int] = []
+    val_idx: list[int] = []
+    for group in range(n_groups):
+        members = list(range(group, n_samples, n_groups))
+        count = len(members)
+        n_val_g = min(math.ceil(count * val_split), max(0, count - 1))
+        if n_val_g == 0:
+            train_idx.extend(members)
+            continue
+        perm = torch.randperm(count, generator=g).tolist()
+        val_idx.extend(members[i] for i in perm[:n_val_g])
+        train_idx.extend(members[i] for i in perm[n_val_g:])
+    return train_idx, val_idx
+
+
+# ---------------------------------------------------------------------------
 # Loss functions
 # ---------------------------------------------------------------------------
 
@@ -1954,6 +2002,31 @@ def main():
     # ------------------------------------------------------------------
     # Load dataset
     # ------------------------------------------------------------------
+    # grouped_random_split (below) uses ceil() per combo, so ANY --repeats >= 2 already
+    # guarantees both a train and a val example for every combo -- this floor is not what
+    # makes that safe. What it's for: at low --repeats each combo's actual val share
+    # (ceil(repeats*val_split)/repeats) can overshoot the requested --val-split by a lot
+    # -- --repeats 1 (the default, and the case that actually motivated this: e.g. the
+    # Joyo American Sound run trained with the OLD flat random_split had 33/675 combos
+    # trained on nothing at all) degrades to val EMPTY (every combo size-1, no room to
+    # spare -- see main()'s pop() fallback below), and --repeats 2 forces a 50% split, not
+    # --val-split's 5%. Raising --repeats to ~1/val_split is the point the overshoot stays
+    # small (exact at repeats == 1/val_split); it also happens to be what turns --repeats 1's
+    # "val empty" case into a properly populated split, since the bump runs before
+    # ParamDataset is constructed below.
+    if args.val_split > 0:
+        min_repeats_for_split = math.ceil(1 / args.val_split)
+        if args.repeats < min_repeats_for_split:
+            print(f"  NOTE: --repeats {args.repeats} is below the {min_repeats_for_split} "
+                  f"that keeps each combo's actual val share close to the requested "
+                  f"--val-split {args.val_split} (grouped_random_split's per-combo rounding "
+                  f"overshoots it otherwise, and at --repeats 1 specifically there is no "
+                  f"room to hold out anything per combo at all) -- raising --repeats to "
+                  f"{min_repeats_for_split}. This lengthens every epoch/SGDR cycle "
+                  f"proportionally; pass --repeats {min_repeats_for_split} explicitly to "
+                  f"silence this note.", file=sys.stderr)
+            args.repeats = min_repeats_for_split
+
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
     dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats,
                            mmap=args.mmap)
@@ -1963,11 +2036,18 @@ def main():
         # they all read this same dict, not a copy taken at dataset-load time.
         dataset.config["modeled_by"] = args.modeled_by
     n_total = len(dataset)
-    n_val = max(1, int(n_total * args.val_split))
-    n_train = n_total - n_val
-    train_ds, val_ds = torch.utils.data.random_split(
-        dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed))
+    n_combos = len(dataset.samples)
+    train_indices, val_indices = grouped_random_split(
+        n_total, n_combos, args.val_split, args.seed)
+    if not val_indices and train_indices:
+        # Matches the historical `max(1, ...)` floor this replaces: never let val collapse
+        # to fully empty (possible here with --val-split 0, or a degenerate all-groups-
+        # size-1 split) -- validate() divides by the val batch count and dies with a bare
+        # ZeroDivisionError otherwise (see the drop_last comment below).
+        val_indices = [train_indices.pop()]
+    n_train, n_val = len(train_indices), len(val_indices)
+    train_ds = torch.utils.data.Subset(dataset, train_indices)
+    val_ds = torch.utils.data.Subset(dataset, val_indices)
     # drop_last=True on BOTH loaders: 2026-07-21, the dual-drive boutique pedal (train 3554, val 394 --
     # neither divides evenly by batch_size=64) hung on MPS within 1-2 epochs, fresh or
     # resumed, while the mid-boost overdrive pedal (train 3456, val 384 -- BOTH exact multiples of 64) never did,

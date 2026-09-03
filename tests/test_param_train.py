@@ -136,3 +136,65 @@ def test_no_checkpoint_data_returns_scheduler_unchanged():
     scheduler = make_scheduler(-1)
     result = pt.restore_scheduler_on_resume(scheduler, opt, {}, True, make_scheduler)
     assert result is scheduler
+
+
+# --------------------------------------------------------- grouped_random_split()
+#
+# Tests for the fix to a real bug found 2026-09-02: `--repeats 1` (the default) combined
+# with the old flat `torch.utils.data.random_split` over the repeats-expanded index range
+# could -- and, on the Joyo American Sound v3 run (675 combos, seed 42), DID -- send a
+# combo's only rendered example entirely to val, so 33/675 combos trained on nothing at
+# all while every other combo trained fine, with nothing reporting it. See param_train.py.
+
+def _combo_of(indices, n_groups):
+    """Maps dataset indices back to their real combo id, matching
+    ParamDataset.__getitem__'s `real_idx = idx % len(self.samples)`."""
+    return {i % n_groups for i in indices}
+
+
+def test_grouped_split_partitions_exhaustively_and_disjointly():
+    n_groups, repeats = 37, 5
+    train_idx, val_idx = pt.grouped_random_split(n_groups * repeats, n_groups, 0.05, seed=1)
+    assert sorted(train_idx + val_idx) == list(range(n_groups * repeats))
+    assert set(train_idx).isdisjoint(val_idx)
+
+
+def test_grouped_split_never_fully_excludes_a_combo_from_train():
+    """The actual bug: at repeats=1 a flat random_split could zero out a combo's only
+    training example. Grouped splitting must make that impossible at ANY repeats."""
+    for repeats in (1, 2, 3, 8, 32):
+        n_groups = 675
+        train_idx, _ = pt.grouped_random_split(n_groups * repeats, n_groups, 0.05, seed=42)
+        assert _combo_of(train_idx, n_groups) == set(range(n_groups)), f"repeats={repeats}"
+
+
+def test_grouped_split_gives_every_combo_a_val_example_once_it_has_room():
+    """count >= 2 is the minimum for a combo to have both sides represented (ceil() of
+    any positive fraction is >= 1) -- verify that guarantee actually holds."""
+    n_groups, repeats = 40, 2
+    train_idx, val_idx = pt.grouped_random_split(n_groups * repeats, n_groups, 0.05, seed=7)
+    assert _combo_of(train_idx, n_groups) == set(range(n_groups))
+    assert _combo_of(val_idx, n_groups) == set(range(n_groups))
+
+
+def test_grouped_split_repeats_1_degrades_val_to_fully_empty():
+    """Documents the one case grouped splitting cannot rescue on its own: with exactly one
+    example per combo, giving any of it to val would zero out that combo's training --
+    kept in train instead, so val collapses to empty rather than starving anyone. This is
+    why main() enforces a --repeats floor before constructing the dataset."""
+    n_groups = 675
+    train_idx, val_idx = pt.grouped_random_split(n_groups, n_groups, 0.05, seed=42)
+    assert val_idx == []
+    assert len(train_idx) == n_groups
+
+
+def test_grouped_split_val_split_zero_disables_val():
+    train_idx, val_idx = pt.grouped_random_split(40 * 8, 40, 0.0, seed=42)
+    assert val_idx == []
+    assert len(train_idx) == 40 * 8
+
+
+def test_grouped_split_is_reproducible_for_a_fixed_seed():
+    a = pt.grouped_random_split(40 * 8, 40, 0.05, seed=42)
+    b = pt.grouped_random_split(40 * 8, 40, 0.05, seed=42)
+    assert a == b
