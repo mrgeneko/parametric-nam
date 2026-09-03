@@ -88,6 +88,52 @@ def make_probe(src: Path, probe_s: float, out: Path) -> float:
     return float(np.abs(x[:n]).max())
 
 
+def _recommend(oss, summary, cheapest, n_total, is_sharded):
+    """Compare UNIFORM escalation against the RETRY LADDER and recommend the cheaper one.
+
+    THE BUG THIS FIXES. This tool used to recommend raising the configured oversample the
+    moment it saw ANY instability, with no arithmetic behind it. That is wrong most of the
+    time, and it was wrong on the run that prompted this fix: it measured 17/48 unstable
+    (35%) on a deliberately-chosen worst-corner subset and said "raise 8 -> 16". The grid
+    was then rendered at oversample 8 with the ladder, and only 8 of 648 combinations
+    (1.2%) ever escalated. Uniform 16 would have doubled 648 renders to avoid 8.
+
+    THE COST MODEL, in units of one render at the base oversample. A combination that only
+    succeeds at rung k has paid for every rung below it too, so it costs
+    1 + 2 + 4 + ... + 2^k = 2^(k+1) - 1:
+
+        uniform at the cheapest stable oversample U:  n_total * (U / base)
+        retry ladder from base, failing fraction f:   n_total * (1 + 2f)
+
+    Setting those equal gives f = 0.5: THE LADDER WINS WHENEVER FEWER THAN HALF THE
+    COMBINATIONS FAIL. Escalation has to be the common case, not the exception, before
+    paying for it up front is worth it.
+
+    WHY f IS EASY TO OVERESTIMATE. f is measured on whatever grid the config describes.
+    Probe the hard corners deliberately -- the sensible thing to do -- and f describes the
+    corners, not the grid. Say so, rather than letting a corner rate be read as a grid rate.
+    """
+    base = oss[0]
+    n_ok, n_tot, _ = summary[base]
+    f = (n_tot - n_ok) / n_tot if n_tot else 0.0
+    ladder_cost = n_total * (1 + 2 * f)
+    uniform_cost = n_total * (cheapest / base)
+    print(f"  failure rate at oversample {base}: {f*100:.1f}%  ({n_tot - n_ok}/{n_tot})")
+    print(f"    uniform oversample {cheapest}:  {uniform_cost:6.0f} render-units")
+    print(f"    retry ladder from {base}:       {ladder_cost:6.0f} render-units")
+    if ladder_cost <= uniform_cost:
+        print(f"  -> KEEP oversample {base}; let the retry ladder escalate the failures. "
+              f"Cheaper here, and it stays cheaper until the failure rate exceeds 50%.")
+    else:
+        print(f"  -> RAISE the config from {base} to {cheapest}: at {f*100:.0f}% failures, "
+              f"paying {cheapest//base}x up front beats the ladder's wasted attempts.")
+    if is_sharded or n_total < 100:
+        print(f"  CAVEAT: that rate is for the {n_total} combination(s) THIS config sweeps. "
+              f"If it is a corner subset or a shard it is NOT the grid-wide rate, which is "
+              f"usually far lower -- and the ladder correspondingly better. Sample the full "
+              f"grid (e.g. --shard 0-0/8 against the real config) before trusting it.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -177,9 +223,7 @@ def main():
     if stable:
         print(f"  cheapest STABLE oversample: {min(stable)}")
         if min(stable) != oss[0]:
-            print(f"  -> raise the config from {oss[0]} to {min(stable)}: every render costs "
-                  f"{min(stable)/oss[0]:.0f}x ONCE, instead of some costing far more after a "
-                  f"wasted attempt")
+            _recommend(oss, summary, min(stable), len(indexed), bool(args.shard))
     else:
         print("  NO candidate was fully stable. Either widen --oversample, or the instability "
               "is not a timestep problem -- check the unstable region below for a pattern.")
