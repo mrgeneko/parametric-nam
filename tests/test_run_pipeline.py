@@ -73,7 +73,7 @@ def test_portable_accepts_a_path_object_or_a_string_identically():
 def _base_args(**overrides):
     defaults = dict(
         nam_output=Path("/tmp/out.param.nam"), checkpoint_dir=Path("/tmp/ckpt"),
-        restart_period=2000, restart_mult=2, stale_cycles=3, batch_size=32, lr=1e-3,
+        restart_period=2000, restart_mult=2, restart_decay=0.97, stale_cycles=3, batch_size=32, lr=1e-3,
         crop_len=48000, mrstft_weight=0.5, val_split=0.1, val_passes=1, device="cpu",
         seed=0, widths=None, mmap=True, resume=None, amp="fp16", init_from=None,
         param_sensitivity=False, knob_boost=None, per_tier_clip=False, clip_norm=1.0,

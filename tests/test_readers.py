@@ -203,6 +203,7 @@ def _minimal_train_cmd_args(**overrides):
     import argparse
     defaults = dict(
         nam_output="out.param.nam", checkpoint_dir="ckpt", restart_period=50, restart_mult=1,
+        restart_decay=0.97,
         stale_cycles=3, batch_size=16, lr=3e-4, crop_len=48000, mrstft_weight=0.0,
         val_split=0.05, val_passes=1, device="cpu", seed=42, widths=None, mmap=True,
         resume=None, amp="off", init_from=None, param_sensitivity=False, knob_boost=None,
