@@ -1,7 +1,8 @@
 # From a new `.schx` to a trained `.param.nam`
 
-The end-to-end path for a circuit this repo has never seen. Six commands, three of which
-you review the output of rather than just run.
+The end-to-end path for a circuit this repo has never seen: **six steps, five commands**.
+Step 2 is pure review — no command, and the one step whose omission the pipeline's own
+gates cannot catch for you.
 
 For what each script does in detail see [scripts.md](scripts.md); for the gates the pipeline
 applies and what each one aborts on, [checklist.md](checklist.md).
