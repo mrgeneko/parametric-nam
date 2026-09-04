@@ -186,3 +186,37 @@ class TestReplaceLine:
     def test_missing_key_raises(self):
         with pytest.raises(ValueError):
             _replace_line(self.TEMPLATE, "nonexistent", "x = 1")
+
+
+# --------------------------------------------------------- interior sampling budget
+#
+# Corners are a heuristic. Mesa Dual Rectifier ORANGE's true worst saturation onset
+# (23.177 V, at Bass=min with every OTHER knob at its CENTRE grid value) is 1.27x the
+# highest of all 32 hypercube vertices, because onset is not monotonic in the knobs. The
+# scaffold now asks prepare_excitation.py to probe the grid interior too, rather than
+# relying on --realistic-peak-frac's headroom to cover a gap it never measures.
+
+from scaffold_config import _interior_sample_budget
+
+
+def test_budget_scales_with_the_corner_set_it_supplements():
+    # ~1.5x the corner count: meaningfully better coverage for roughly 1.5x the probe time
+    # sizing already pays, not an open-ended bill.
+    for n in (2, 3, 4):
+        corners = 2 * n + 3 + 2 ** n
+        assert _interior_sample_budget(n) == int(corners * 1.5)
+
+
+def test_budget_is_capped_so_a_many_knob_device_does_not_balloon():
+    # 2**n grows without bound; a full amp's onset sweep is ~50s, so an uncapped budget
+    # would quietly turn one device's sizing into an hour-plus.
+    assert _interior_sample_budget(8) == 64
+    assert _interior_sample_budget(12) == 64
+
+
+def test_four_knob_pedal_gets_the_budget_duke_was_rechecked_with():
+    assert _interior_sample_budget(4) == 40
+
+
+def test_zero_knobs_asks_for_nothing():
+    assert _interior_sample_budget(0) == 0

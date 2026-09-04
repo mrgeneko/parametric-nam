@@ -228,8 +228,32 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
     return chosen, comment
 
 
+def _interior_sample_budget(n_knobs: int) -> int:
+    """How many FULL-GRID points to probe on top of the corner set, from the knob count.
+
+    Corners are a heuristic and Mesa Dual Rectifier ORANGE showed they are not sufficient in
+    principle: its highest saturation onset (23.177 V, at Bass=min with every OTHER knob at
+    its CENTRE grid value) is 1.27x the highest of all 32 hypercube vertices. Onset is not
+    monotonic in the knobs, so its maximum over the grid need not sit at a vertex.
+    --realistic-peak-frac's 1.3 buys headroom against that; only probing the interior
+    actually MEASURES it.
+
+    Scaled at ~1.5x the corner count (2*n+3 structural + 2**n hypercube), because that is
+    what the corner set already costs -- so sizing gets meaningfully better coverage for
+    roughly 1.5x the probe time it was already paying, not an open-ended bill. Capped at 64:
+    beyond that the marginal point buys little and a full amp's onset sweep is ~50s, so the
+    cap is what keeps a 6-knob device's sizing from quietly turning into an hour.
+    Probing every grid point WOULD guarantee it and is not worth it -- 648 points at a
+    measured ~1.2/min is ~9h per channel, before every render, to choose one scalar.
+    """
+    if n_knobs <= 0:
+        return 0          # no grid to sample; also the default when a caller omits n_knobs
+    corners = 2 * n_knobs + 3 + 2 ** n_knobs
+    return min(64, int(corners * 1.5))
+
+
 def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
-                        realistic_dur_cap: float) -> bool:
+                        realistic_dur_cap: float, n_knobs: int = 0) -> bool:
     """Build a properly-calibrated excitation via prepare_excitation.py (which measures
     this circuit's REAL saturation onset across the knob grid's corners, rather than
     pointing `input` at a raw downloaded sweep with no calibration behind it at all --
@@ -262,6 +286,13 @@ def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
            "--backend", "livespice", "--config", str(config_path),
            "--real-clip", str(real_clip), "--output", str(output_wav)]
+    # Probe the grid INTERIOR too, not just corners -- see _interior_sample_budget.
+    budget = _interior_sample_budget(n_knobs)
+    if budget:
+        cmd += ["--sample-grid", str(budget)]
+        print(f"  probing {budget} interior grid point(s) on top of the corner set -- corners "
+              f"alone cannot see a non-monotonic onset maximum (Mesa Orange's was 1.27x every "
+              f"vertex)")
     if info.duration > realistic_dur_cap:
         print(f"  {real_clip.name} is {info.duration:.1f}s, longer than the "
               f"{realistic_dur_cap:.0f}s realistic-content cap -- truncating to "
@@ -371,7 +402,8 @@ def main() -> None:
               f"build, leaving `input` pointed at the raw path as given.")
     elif args.backend == "livespice" and not args.skip_prepare_excitation:
         excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
-        ok = _prepare_excitation(output, Path(args.input), excitation_wav, args.realistic_dur_cap)
+        ok = _prepare_excitation(output, Path(args.input), excitation_wav,
+                                 args.realistic_dur_cap, n_knobs=len(names))
         if ok and excitation_wav.exists():
             text = output.read_text()
             text = _replace_line(text, "input",
