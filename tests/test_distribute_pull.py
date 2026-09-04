@@ -87,3 +87,70 @@ def test_worker_spec_still_parses_with_and_without_env():
 def test_worker_spec_rejects_a_short_spec():
     with pytest.raises(ValueError, match="host:dir:parallel"):
         dp.Worker("h:/d")
+
+
+# --------------------------------------------------------------------- params.csv merge
+#
+# distribute_pull SCHEDULED renders but never GATHERED them, so collection was left to the
+# operator -- and the obvious move, rsyncing each worker's output dir onto one local path,
+# is wrong. sig/ merges cleanly because its filenames are the global grid index, but
+# params.csv is a whole file per worker containing only that worker's rows, so each rsync
+# overwrites the last. On the Duke of Tone run (2026-09-04) that left 204 of 252 rows; a
+# worker running on localhost made it worse, because its output dir WAS the merge target,
+# so the other workers clobbered its params.csv in place.
+
+import csv
+
+
+def _shard_csv(tmp_path, name, idxs, gain="0.5"):
+    p = tmp_path / name
+    with open(p, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["idx", "Gain", "ok"])
+        w.writeheader()
+        for i in idxs:
+            w.writerow({"idx": i, "Gain": gain, "ok": "1"})
+    return p
+
+
+def test_merge_keeps_every_shards_rows(tmp_path):
+    a = _shard_csv(tmp_path, "a.csv", [0, 3, 6])
+    b = _shard_csv(tmp_path, "b.csv", [1, 4, 7])
+    c = _shard_csv(tmp_path, "c.csv", [2, 5, 8])
+    out = tmp_path / "params.csv"
+    assert dp.merge_params([a, b, c], out) == 9
+    got = [int(r["idx"]) for r in csv.DictReader(open(out))]
+    assert got == list(range(9)), "rows must be complete and in grid order"
+
+
+def test_merge_writes_exactly_one_header(tmp_path):
+    # A header appended mid-table is read downstream as a combination -- the specific
+    # failure distribute_gen.sh's own comment warns about.
+    a = _shard_csv(tmp_path, "a.csv", [0])
+    b = _shard_csv(tmp_path, "b.csv", [1])
+    out = tmp_path / "params.csv"
+    dp.merge_params([a, b], out)
+    assert [l for l in open(out) if l.startswith("idx,")] == ["idx,Gain,ok\n"]
+
+
+def test_merge_dedupes_a_chunk_rendered_by_two_workers(tmp_path):
+    # A re-dispatched chunk, or one left over from an aborted run, is rendered twice under
+    # the same global index. Duke had 264 files for 252 combinations for exactly this reason.
+    a = _shard_csv(tmp_path, "a.csv", [0, 1, 2])
+    b = _shard_csv(tmp_path, "b.csv", [2, 3])
+    out = tmp_path / "params.csv"
+    assert dp.merge_params([a, b], out) == 4
+    assert [int(r["idx"]) for r in csv.DictReader(open(out))] == [0, 1, 2, 3]
+
+
+def test_merge_of_nothing_reports_zero_rather_than_writing_a_bad_file(tmp_path):
+    out = tmp_path / "params.csv"
+    assert dp.merge_params([], out) == 0
+    assert not out.exists()
+
+
+def test_merge_tolerates_an_empty_shard(tmp_path):
+    # A shard whose modulo range caught no combinations still writes a header-only file.
+    a = _shard_csv(tmp_path, "a.csv", [0, 1])
+    empty = _shard_csv(tmp_path, "empty.csv", [])
+    out = tmp_path / "params.csv"
+    assert dp.merge_params([a, empty], out) == 2

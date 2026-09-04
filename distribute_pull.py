@@ -35,9 +35,10 @@ where startup is a few percent of chunk runtime.
 NOT A REPLACEMENT for distribute_gen.sh's setup work (repo sync, --sync-file, gate). Run
 those first; this only schedules the rendering.
 """
-import argparse, subprocess, sys, threading, time
+import argparse, csv, subprocess, sys, threading, time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 
 def log(msg):
@@ -138,6 +139,93 @@ def _warn_chunk_aliasing(gen_args, chunks):
             break
 
 
+def merge_params(shard_csvs, out_path):
+    """Merge per-shard params.csv files into one, keyed on the GLOBAL grid index.
+
+    Header once, body rows appended -- the same rule distribute_gen.sh follows, and for the
+    same reason: a header buried mid-table is read downstream as a combination. Deduped on
+    idx because a chunk re-dispatched after a failure, or left over from an aborted run, is
+    rendered by two workers under the same global index and the rows are equivalent. Sorted
+    so the file is diffable and reads in grid order. Returns the row count.
+    """
+    rows, hdr = {}, None
+    for f in shard_csvs:
+        with open(f, newline="") as fh:
+            rdr = csv.DictReader(fh)
+            if rdr.fieldnames:
+                hdr = hdr or rdr.fieldnames
+            for r in rdr:
+                rows[int(r["idx"])] = r
+    if not hdr:
+        return 0
+    with open(out_path, "w", newline="") as fh:
+        wtr = csv.DictWriter(fh, fieldnames=hdr)
+        wtr.writeheader()
+        for i in sorted(rows):
+            wtr.writerow(rows[i])
+    return len(rows)
+
+
+def _collect(workers, remote_out, local_dir):
+    """Pull every worker's shard into one local directory, merging params.csv correctly.
+
+    THE HALF THIS MODULE USED TO LEAVE OUT. distribute_pull schedules renders; it never
+    gathered them, so collection was left to whoever ran it -- and the obvious move,
+    rsyncing each worker's output dir onto the same local path, is WRONG. sig/ merges
+    cleanly because its filenames are the GLOBAL grid index, but params.csv is a whole
+    file per worker containing only that worker's rows, so each rsync OVERWRITES the last
+    and you end up with one shard's metadata claiming to describe the entire grid.
+    distribute_gen.sh has always merged it properly (header once, append body rows); this
+    is that logic, for the pull scheduler.
+
+    Worse when a worker is localhost, which is easy to arrange and easy to miss: its output
+    dir IS the merge target, so the other workers' rsyncs clobber its params.csv in place.
+    That is not a hypothetical -- it happened on the Duke of Tone run (2026-09-04) and cost
+    48 of 252 metadata rows while all 252 .npy files sat there looking complete.
+
+    Ordering is the fix, not detection: every worker's params.csv is copied to its own
+    scratch name BEFORE any sig/ transfer, and the merged file is written LAST. That is
+    correct even when a worker's remote dir and local_dir are the same directory.
+    """
+    local_dir = Path(local_dir).expanduser()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    scratch = local_dir / ".shard_params"
+    scratch.mkdir(exist_ok=True)
+    for f in scratch.glob("*.csv"):
+        f.unlink()
+
+    # 1. params.csv FIRST, to per-worker names -- before anything can overwrite them.
+    got = []
+    for w, out in zip(workers, remote_out):
+        dst = scratch / f"{w.host}.csv"
+        r = subprocess.run(["rsync", "-a", f"{w.host}:{out}/params.csv", str(dst)],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and dst.exists():
+            got.append((w.host, dst))
+        else:
+            log(f"  collect: {w.host} has no params.csv (empty shard?) -- skipped")
+
+    # 2. sig/ trees and the once-only artifacts. Safe in any order: global-index filenames.
+    for w, out in zip(workers, remote_out):
+        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+                       capture_output=True, text=True)
+
+    # 3. merged params.csv LAST, so step 2 cannot clobber it.
+    n_rows = merge_params([f for _, f in got], local_dir / "params.csv")
+    if n_rows == 0:
+        log("  collect: no params.csv found on any worker -- nothing merged")
+        return
+    rows = range(n_rows)
+    n_npy = sum(1 for _ in local_dir.glob("sig/**/*.npy"))
+    log(f"  collect: {len(rows)} params rows, {n_npy} .npy files -> {local_dir}")
+    if len(rows) != n_npy:
+        log(f"  collect: WARNING rows != .npy ({len(rows)} vs {n_npy}) -- "
+            f"gen_dataset_from_schx.py --combine will refuse this, correctly.")
+    for f in scratch.glob("*.csv"):
+        f.unlink()
+    scratch.rmdir()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -154,6 +242,12 @@ def main():
                          "possible -- a chunk that fails on one machine and succeeds on another "
                          "is a machine problem, not a data problem, and the resume-skip means "
                          "the retry only renders what is still missing (default 1)")
+    ap.add_argument("--collect", metavar="LOCAL_DIR", default=None,
+                    help="after rendering, pull every worker's shard into LOCAL_DIR and merge "
+                         "params.csv properly. Do NOT hand-roll this with rsync: sig/ merges "
+                         "cleanly (global-index filenames) but params.csv is one file per worker "
+                         "holding only that worker's rows, so a naive rsync leaves you the LAST "
+                         "worker's metadata describing the whole grid.")
     ap.add_argument("--quarantine-after", type=int, default=3,
                     help="bench a worker after this many CONSECUTIVE failures with no successes "
                          "(default 3). A fast-failing worker drains the queue faster than healthy "
@@ -243,6 +337,25 @@ def main():
 
     elapsed = (time.time() - t_start) / 3600
     log(f"done in {elapsed:.2f} h -- {completed} chunk(s) ok, {failed_final} failed")
+
+    if args.collect:
+        log(f"collecting shards into {args.collect} ...")
+        remote_out = []
+        for w in workers:
+            # resolve the output path ON THE WORKER: --output is commonly '~/dir', and a tilde
+            # inside an rsync host:path argument is NOT expanded (that silently transferred
+            # nothing on an earlier run), so ask the remote shell what it means.
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
+                                f"cd ~ && echo {args.output}"], capture_output=True, text=True)
+            remote_out.append(r.stdout.strip() or args.output)
+        _collect(workers, remote_out, args.collect)
+    else:
+        log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
+            "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "
+            "worker's rows, so rsyncing each output dir onto one path leaves the LAST worker's "
+            "metadata describing the whole grid. Use --collect DIR, or merge params.csv bodies "
+            "yourself. gen_dataset_from_schx.py --combine refuses a row/.npy mismatch, so a "
+            "botched merge fails loudly rather than silently training on a hole.")
     log("MEASURED throughput (use these for any future static weighting):")
     for w in sorted(workers, key=lambda x: -x.rate):
         log(f"  {w.host:<12} {w.done:3d} chunks  {w.rate:6.2f} chunks/h"
