@@ -65,7 +65,20 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
     corners = _sample_interior(knob_ranges, corners, sample_grid)
     if not quiet:
-        print(f"  {len(corners)} corners ({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)")
+        # full_hypercube is now TRI-STATE (None = default/full, False = the deprecated
+        # structural-only set, True = legacy callers), so a bare truthiness test mislabels the
+        # default path: passing None printed "reduced hypercube set" for a run that had just
+        # probed the full 32-vertex cube plus 64 interior points. Caught on the RED re-size,
+        # 2026-09-04 -- harmless to the numbers, actively misleading to whoever reads the log.
+        if full_hypercube is False:
+            kind = "structural-only, DEPRECATED"
+        elif sample_grid:
+            kind = f"full binary hypercube + {sample_grid} interior grid point(s)"
+        elif max_corners is not None:
+            kind = f"budgeted, max {max_corners}"
+        else:
+            kind = "full binary hypercube"
+        print(f"  {len(corners)} corners ({kind} set)")
     rows = []
     for label, vals in corners:
         params = dict(vals); params.update(fixed)
