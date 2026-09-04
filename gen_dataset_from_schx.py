@@ -204,6 +204,26 @@ def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
     # protected gets identical output to someone who is. A device that genuinely cannot be
     # rendered on the chosen backend (the metal-distortion pedal's transistor gyrators under
     # livespice) would then render "successfully" into a wrong dataset.
+    # SIDECAR FIRST: <stem>.backends.toml beside the .schx. Same pattern as the excitation's
+    # <stem>.recipe.json -- found by deriving the path from the file we were handed, so there is
+    # no registry to locate, no env var to know about, and no device SLUG or filename to match.
+    # A registry couples on a name: the old path went slug -> devices.toml entry -> .schx
+    # filename, two indirections that a user with their own circuit could never satisfy, and a
+    # rename silently broke. A sidecar travels WITH the schematic when it is copied, and works
+    # identically for a circuit this project has never seen -- write one next to your own .schx
+    # and the gate fires.
+    sidecar = schx.with_suffix(".backends.toml")
+    if sidecar.exists():
+        try:
+            import tomllib
+            spec_all = tomllib.loads(sidecar.read_text())
+        except Exception as e:
+            print(f"note: backend-validity gate INACTIVE -- {sidecar.name} exists but failed to "
+                  f"parse ({e}). Nothing is checking whether {backend!r} suits this circuit.",
+                  file=sys.stderr)
+            return
+        return _apply_backend_verdict(spec_all, backend, schx.stem, sidecar.name, ap)
+
     reg, from_env = _resolve_registry() if registry is None else (Path(registry), True)
     if not reg.exists():
         if from_env:
@@ -239,9 +259,14 @@ def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
               f"registered (a renamed .schx will do this).", file=sys.stderr)
         return
 
-    spec = (dev.get("backend") or {}).get(backend)
+    return _apply_backend_verdict(dev.get("backend") or {}, backend, dev["name"], reg.name, ap)
+
+
+def _apply_backend_verdict(specs: dict, backend: str, label: str, source: str, ap) -> None:
+    """Shared by the sidecar and the (deprecated) registry path, so the two cannot diverge."""
+    spec = specs.get(backend)
     if not spec:
-        print(f"note: {dev['name']} records no verdict for --backend {backend} -- assumed valid "
+        print(f"note: {label} records no verdict for --backend {backend} -- assumed valid "
               f"(absence of evidence, not a claim).", file=sys.stderr)
         return
     # THREE states, not two. The registry already uses a third -- ampeg-svt-power-amp declares
@@ -258,28 +283,28 @@ def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
     # limits, and let the operator decide. Anything else truthy is treated as valid, as before.
     verdict = spec.get("valid", True)
     if isinstance(verdict, str) and verdict.strip().lower() == "partial":
-        print(f"WARNING: {dev['name']} on {backend} is declared PARTIAL, not valid -- usable "
+        print(f"WARNING: {label} on {backend} is declared PARTIAL, not valid -- usable "
               f"with known limits, and nothing here can judge whether they matter for your "
               f"grid or excitation. Read this before trusting the dataset:\n"
               f"  {spec.get('reason', '(no reason recorded)')}", file=sys.stderr)
         return
     if verdict:
         if spec.get("reason"):
-            print(f"note: {dev['name']} on {backend}: {spec['reason']}", file=sys.stderr)
+            print(f"note: {label} on {backend}: {spec['reason']}", file=sys.stderr)
         return
 
     def _usable(s):
         v = s.get("valid", True)
         return bool(v) and not (isinstance(v, str) and v.strip().lower() == "partial")
-    ok = [b for b, s in (dev.get("backend") or {}).items() if _usable(s)]
-    partial = [b for b, s in (dev.get("backend") or {}).items()
+    ok = [b for b, s in specs.items() if _usable(s)]
+    partial = [b for b, s in specs.items()
                if isinstance(s.get("valid"), str) and s["valid"].strip().lower() == "partial"]
     ap.error(
-        f"\n\n  {dev['name']} CANNOT be rendered faithfully with --backend {backend}.\n\n"
+        f"\n\n  {label} CANNOT be rendered faithfully with --backend {backend}.\n\n"
         f"  {spec.get('reason', '(no reason recorded)')}\n\n"
         f"  Valid backend(s) for this device: {', '.join(ok) if ok else 'NONE RECORDED'}"
         + (f" (plus {', '.join(partial)}: PARTIAL, usable with limits)" if partial else "") + ".\n"
-        f"  Declared in parametric-devices/backends.toml — fix it there, not here, if this is wrong.\n")
+        f"  Declared in {source} — fix it there, not here, if this is wrong.\n")
 
 
 def parse_schx_controls(schx_path: str) -> dict:

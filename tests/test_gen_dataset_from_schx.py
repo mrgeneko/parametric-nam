@@ -593,3 +593,59 @@ def test_partial_recognised_regardless_of_case_or_whitespace(tmp_path, spelling)
     reg = _reg(tmp_path, f'[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
                          f'[amp.backend.ngspice]\nvalid = "{spelling}"\nreason = "limits"\n')
     assert "PARTIAL" in _gate(reg, schx="Amp.schx", backend="ngspice")
+
+
+# ------------------------------------------------------------------- sidecar backend verdicts
+#
+# The registry coupled on a NAME: slug -> devices.toml entry -> .schx filename, two
+# indirections a user with their own circuit could never satisfy and a rename broke
+# silently. A sidecar is found by deriving the path from the .schx itself -- the same
+# pattern an excitation's <stem>.recipe.json already uses -- so it needs no registry, no
+# PARAMETRIC_DEVICES, and works for a circuit this project has never seen.
+
+def _schx_with_sidecar(tmp_path, toml_text, name="My Own Pedal.schx"):
+    schx = tmp_path / name
+    schx.write_text("<Schematic/>")
+    schx.with_suffix(".backends.toml").write_text(toml_text)
+    return schx
+
+
+def test_sidecar_blocks_an_invalid_backend_with_no_registry_anywhere(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARAMETRIC_DEVICES", raising=False)
+    monkeypatch.delenv("SPICE_CIRCUITS", raising=False)
+    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = false, reason = "diverges" }\n')
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        g.check_backend(schx, "livespice", ap)
+    assert "diverges" in ap.errors[0]
+
+
+def test_sidecar_error_names_the_sidecar_not_a_registry(tmp_path):
+    # Telling someone to "fix it in parametric-devices/backends.toml" is useless if they do
+    # not have that repo -- and after this change they should not need it.
+    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = false, reason = "no" }\n')
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        g.check_backend(schx, "livespice", ap)
+    assert "My Own Pedal.backends.toml" in ap.errors[0]
+
+
+def test_sidecar_takes_precedence_over_the_registry(tmp_path):
+    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = true, reason = "sidecar says fine" }\n')
+    reg = tmp_path / "devices.toml"
+    reg.write_text('[mine]\nname = "Mine"\nschx = "My Own Pedal.schx"\n'
+                   '[mine.backend.livespice]\nvalid = false\nreason = "registry says no"\n')
+    err = io.StringIO()
+    ap = _FakeAp()
+    with contextlib.redirect_stderr(err):
+        g.check_backend(schx, "livespice", ap, registry=reg)
+    assert ap.errors == [], "the sidecar beside the .schx is authoritative"
+    assert "sidecar says fine" in err.getvalue()
+
+
+def test_an_unparseable_sidecar_says_so_rather_than_silently_passing(tmp_path):
+    schx = _schx_with_sidecar(tmp_path, "not valid toml {{{")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        g.check_backend(schx, "livespice", _FakeAp())
+    assert "INACTIVE" in err.getvalue()
