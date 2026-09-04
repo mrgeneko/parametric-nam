@@ -403,3 +403,71 @@ def test_process_one_start_rung_resumes_past_previously_failed_rungs(tmp_path, m
     assert r.ok
     assert r.rung == 3
     assert len(attempts) == 1  # jumped straight to rung 3, did not retry rungs 0-2
+
+
+# ------------------------------------------------------- input_provenance build-recipe status
+#
+# The recipe sidecar rides into dataset_config.json -> the published model dir. It used to be
+# embedded when present and SILENTLY omitted otherwise, which made two very different states
+# indistinguishable after the fact: a legitimately raw source (no recipe should exist) versus a
+# built excitation whose sidecar was left behind when the wav moved. Worse, nothing checked that
+# the sidecar described THIS wav -- a stale one attached confidently wrong provenance, and
+# check_transient_coverage._transient_peak_from_recipe reads that same sidecar to decide whether
+# the coverage gate passes, so a stale --realistic-peak silently mis-gates the run too.
+
+import json
+import numpy as np
+import soundfile as sf
+
+
+def _wav(tmp_path, name="x.wav", freq=440.0, n=4800):
+    p = tmp_path / name
+    sf.write(str(p), (0.3 * np.sin(2 * np.pi * freq * np.arange(n) / 48000)).astype("float32"), 48000)
+    return p
+
+
+def test_provenance_records_absent_status_instead_of_omitting_silently(tmp_path):
+    prov = g.input_provenance(_wav(tmp_path))
+    assert "build_recipe" not in prov
+    assert prov["build_recipe_status"].startswith("absent")
+    assert "x.recipe.json" in prov["build_recipe_status"]
+
+
+def test_provenance_embeds_and_marks_verified_when_sidecar_hash_matches(tmp_path):
+    w = _wav(tmp_path)
+    real_sha = g.input_provenance(w)["audio_sha1"]
+    (tmp_path / "x.recipe.json").write_text(json.dumps(
+        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9},
+         "output": {"audio_sha1": real_sha}}))
+    prov = g.input_provenance(w)
+    assert prov["build_recipe"]["args"]["realistic_peak"] == 9.9
+    assert prov["build_recipe_status"].startswith("verified")
+
+
+def test_provenance_refuses_a_stale_sidecar_rather_than_attaching_wrong_provenance(tmp_path):
+    w = _wav(tmp_path)
+    (tmp_path / "x.recipe.json").write_text(json.dumps(
+        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9},
+         "output": {"audio_sha1": "deadbeef" * 5}}))
+    prov = g.input_provenance(w)
+    assert "build_recipe" not in prov, "a recipe for a DIFFERENT wav must not be embedded"
+    assert prov["build_recipe_status"].startswith("STALE")
+    assert prov["build_recipe_error"] == prov["build_recipe_status"]
+
+
+def test_provenance_embeds_but_flags_a_sidecar_with_no_hash_to_verify_against(tmp_path):
+    w = _wav(tmp_path)
+    (tmp_path / "x.recipe.json").write_text(json.dumps(
+        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9}, "output": {}}))
+    prov = g.input_provenance(w)
+    assert prov["build_recipe"]["args"]["realistic_peak"] == 9.9
+    assert prov["build_recipe_status"].startswith("embedded")
+
+
+def test_provenance_records_parse_error_status_for_a_corrupt_sidecar(tmp_path):
+    w = _wav(tmp_path)
+    (tmp_path / "x.recipe.json").write_text("{not valid json")
+    prov = g.input_provenance(w)
+    assert "build_recipe" not in prov
+    assert prov["build_recipe_status"].startswith("parse_error")
+    assert "build_recipe_error" in prov

@@ -1143,14 +1143,54 @@ def input_provenance(wav: Path) -> dict:
     # <stem>.recipe.json next to the WAV recording exactly how (source file + hash, tool git rev,
     # every CLI arg). Embed it here so it rides along automatically into every dataset's
     # config.json -> parametric-nam-models' dataset_config.json, with no per-device wiring.
-    # Absent for a raw/undevired source (e.g. sweep-v3.wav used directly) -- correctly, since
+    # Absent for a raw/underived source (e.g. sweep-v3.wav used directly) -- correctly, since
     # there is no recipe for something that wasn't built.
+    #
+    # ALWAYS records build_recipe_status, never silently omits. The missing-sidecar case is
+    # already hard-gated for the common path (see the transient-coverage gate in main(): no
+    # --transient-peak and no sidecar exits 1), but that gate does NOT cover
+    # --skip-transient-check, an explicit --transient-peak, --random, or the ngspice/ltspice
+    # backends. On those paths a lost sidecar used to leave dataset_config.json with no
+    # build_recipe key at all and nothing anywhere saying why -- indistinguishable, after the
+    # fact, from a legitimately raw source. A status string costs nothing and makes the two
+    # cases tellable apart in the published model dir, months later, with the wav long gone.
+    #
+    # AND verifies the sidecar actually describes THIS wav. A stale sidecar (excitation
+    # rebuilt, old recipe left behind) is strictly worse than a missing one: absence is
+    # visible, wrong provenance is invisible and actively misleading -- it would send someone
+    # rebuilding from the wrong --realistic-peak, and _transient_peak_from_recipe() reads that
+    # same sidecar to decide whether the coverage gate passes. build_excitation.py already
+    # records output.audio_sha1 over the same float32 samples hashed above, so this is a free
+    # equality check, not new machinery.
     recipe_path = wav.with_suffix(".recipe.json")
-    if recipe_path.exists():
+    if not recipe_path.exists():
+        prov["build_recipe_status"] = (
+            f"absent -- no {recipe_path.name} next to the input wav. Correct for a raw/underived "
+            f"source; a BUG if this excitation was built by build_excitation.py and its sidecar "
+            f"was left behind when the wav moved.")
+    else:
         try:
-            prov["build_recipe"] = json.loads(recipe_path.read_text())
+            recipe = json.loads(recipe_path.read_text())
         except Exception as e:
+            prov["build_recipe_status"] = f"parse_error -- {recipe_path.name}: {e}"
             prov["build_recipe_error"] = f"{recipe_path.name} exists but failed to parse: {e}"
+        else:
+            claimed = (recipe.get("output") or {}).get("audio_sha1")
+            if claimed and claimed != prov["audio_sha1"]:
+                prov["build_recipe_status"] = (
+                    f"STALE -- {recipe_path.name} describes audio_sha1 {claimed[:12]}, this wav is "
+                    f"{prov['audio_sha1'][:12]}. Recipe NOT embedded; it documents a different "
+                    f"build. Rebuild the excitation or delete the stale sidecar.")
+                prov["build_recipe_error"] = prov["build_recipe_status"]
+                print(f"WARNING: {prov['build_recipe_status']}", file=sys.stderr)
+            else:
+                prov["build_recipe"] = recipe
+                prov["build_recipe_status"] = (
+                    "verified -- sidecar output.audio_sha1 matches this wav" if claimed
+                    else "embedded -- sidecar has no output.audio_sha1 to verify against")
+    if not prov.get("build_recipe"):
+        print(f"NOTE: no build recipe embedded for {wav.name} -- {prov['build_recipe_status']}",
+              file=sys.stderr)
     return prov
 
 
