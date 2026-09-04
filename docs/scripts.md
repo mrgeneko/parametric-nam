@@ -63,6 +63,28 @@ writing the converged grid straight into `--config`'s `[knobs]` table — one co
 instead of suggest → hand-copy → rerun → repeat. It doesn't touch anything else in the
 file, comments included.
 
+**Probe renders are cached on disk** (`~/.cache/parametric-nam/gridadq`), so the second run
+of this tool on a device is near-instant instead of re-rendering everything the first one
+already rendered. That second run is not hypothetical: `--apply` refines the grid, and
+`run_pipeline.py`'s STEP 0 then re-verifies it, so the normal path runs `grid_adequacy`
+twice on the same circuit (see [checklist](checklist.md)).
+
+The cache is keyed on everything that changes a probe's **answer** — the `.schx`'s own
+bytes, the knob values, `[fixed]`, oversample/iterations, and the **audio** of the probe
+clips. Editing a resistor or rebuilding the excitation therefore invalidates it even though
+both keep the same file path, which is the case a path-keyed or mtime-keyed cache would get
+wrong (`prepare_excitation.py` overwrites the wav in place). Copying a circuit to a new path
+correctly *hits*.
+
+The knob grid is deliberately **not** in the key, and needs no change detection: the cache
+is per probe point, so editing an axis simply asks for different keys — surviving points
+hit, newly-inserted ones render. Adding one value to a 4-knob pedal's Gain axis costs ~7 s
+rather than the full ~28 s.
+
+Failed renders are never cached, so one transient non-convergence can't become permanent.
+The directory is LRU-pruned to 8 GB (`GRIDADQ_CACHE_MAX_BYTES`); `--no-disk-cache` bypasses
+it entirely.
+
 `backend = "ngspice-deck"` (or `"ltspice-deck"`) in the config renders through a
 hand-written ngspice/LTspice deck (`pedal-dir`/`module`/`probe-node` in the TOML, same
 convention as `preflight.py`/`prepare_excitation.py` — see [Backends](backends.md)) instead of a

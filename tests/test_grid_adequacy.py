@@ -6,6 +6,9 @@ cell-error/suggest/write-back logic is tested independently of ngspice/livespice
 
 See grid_adequacy.py.
 """
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -440,3 +443,134 @@ class TestRendererLtspiceDeck:
                 module="gen_fake_ltspice", probe_node="OUT", ltspice_deck_maxstep=1e-7,
                 ltspice_out_scale=0.02, ltspice_timeout=1800.0)
         assert seen == [(1e-7, 0.02, 1800.0)]
+
+
+class TestRendererDiskCache:
+    """The on-disk probe cache must be keyed on everything that changes a render's ANSWER,
+    and on nothing that doesn't.
+
+    grid_adequacy is run twice on every device -- once by `--apply` to refine the grid, then
+    again by run_pipeline's STEP 0 to verify it -- so without a cache that survives the
+    process, the second run re-renders every probe the first one just rendered. The risk of
+    a cache is the opposite failure: serving a stale render after the circuit or the
+    excitation changed. These tests pin both directions.
+    """
+
+    def _schx(self, tmp_path, r="47 k"):
+        p = tmp_path / "c.schx"
+        p.write_text(f'<Schematic><R Resistance="{r}"/></Schematic>', encoding="utf-8")
+        return p
+
+    def _input(self, tmp_path, sr=1000, dur_s=20, seed=0):
+        inp = tmp_path / f"in{seed}.wav"
+        rng = np.random.default_rng(seed)
+        sf.write(str(inp), rng.standard_normal(sr * dur_s).astype(np.float32), sr,
+                 subtype="FLOAT")
+        return inp
+
+    def _renderer(self, tmp_path, cache_dir, schx, inp, monkeypatch, calls, **kw):
+        """A livespice Renderer whose CLI is a counter that writes a params-dependent wav."""
+        def fake_run(argv, **_):
+            a = {argv[i]: argv[i + 1] for i in range(0, len(argv) - 1)}
+            calls.append(a["--params"])
+            val = float(dict(p.split("=") for p in a["--params"].split(","))["Gain"])
+            n = int(sf.info(a["--input"]).frames)
+            sf.write(a["--output"], np.full(n, val, dtype=np.float32),
+                     int(sf.info(a["--input"]).samplerate), subtype="FLOAT")
+            return type("R", (), {"returncode": 0, "stderr": ""})()
+
+        monkeypatch.setattr("grid_adequacy.subprocess.run", fake_run)
+        monkeypatch.setattr("grid_adequacy.LIVESPICE_CLI", "fake-cli")
+        monkeypatch.setattr("grid_adequacy.Path.home", staticmethod(lambda: cache_dir))
+        td = Path(tempfile.mkdtemp(dir=tmp_path))   # each Renderer needs its own scratch
+        return Renderer(schx=str(schx), inp=inp, oversample=2, iterations=256,
+                        fixed=kw.pop("fixed", ""), td=td, probe_s=4.0,
+                        backend="livespice", **kw)
+
+    def test_a_second_process_reuses_the_first_processs_renders(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        c1 = []
+        assert np.allclose(self._renderer(tmp_path, cache, schx, inp, monkeypatch, c1)
+                           ({"Gain": 0.7})[0], 0.7)
+        assert c1, "first Renderer should have actually rendered"
+
+        c2 = []   # a FRESH Renderer, i.e. what run_pipeline's STEP 0 is
+        out = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2)({"Gain": 0.7})
+        assert c2 == [], "second Renderer re-rendered a probe the first one cached"
+        assert np.allclose(out[0], 0.7), "cached render must round-trip its values"
+
+    def test_an_edited_circuit_is_not_served_from_cache(self, tmp_path, monkeypatch):
+        cache, inp = tmp_path / "home", self._input(tmp_path)
+        c1 = []
+        self._renderer(tmp_path, cache, self._schx(tmp_path, "47 k"), inp,
+                       monkeypatch, c1)({"Gain": 0.7})
+        c2 = []
+        self._renderer(tmp_path, cache, self._schx(tmp_path, "12 k"), inp,
+                       monkeypatch, c2)({"Gain": 0.7})
+        assert c2, "a changed .schx must invalidate -- the cache is keyed on its BYTES"
+
+    def test_a_rebuilt_excitation_is_not_served_from_cache(self, tmp_path, monkeypatch):
+        """The excitation keeps its PATH when rebuilt (prepare_excitation.py overwrites in
+        place), so a path-keyed cache would serve renders of the old one forever."""
+        cache, schx = tmp_path / "home", self._schx(tmp_path)
+        c1 = []
+        self._renderer(tmp_path, cache, schx, self._input(tmp_path, seed=1),
+                       monkeypatch, c1)({"Gain": 0.7})
+        c2 = []
+        self._renderer(tmp_path, cache, schx, self._input(tmp_path, seed=2),
+                       monkeypatch, c2)({"Gain": 0.7})
+        assert c2, "different excitation audio must invalidate"
+
+    def test_changing_the_grid_needs_no_detection(self, tmp_path, monkeypatch):
+        """The grid is deliberately NOT in the key. The cache is per PROBE POINT, so editing
+        an axis just asks for different keys: surviving points hit, new ones render."""
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        c1 = []
+        r1 = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c1)
+        for g in (0.2, 0.8):
+            r1({"Gain": g})
+        c2 = []
+        r2 = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2)
+        for g in (0.2, 0.5, 0.8):        # 0.5 inserted into the axis
+            r2({"Gain": g})
+        assert set(c2) == {"Gain=0.5"}, \
+            "only the newly-added grid point should have re-rendered"   # once per window
+
+    def test_the_fixed_params_are_part_of_the_key(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        c1 = []
+        self._renderer(tmp_path, cache, schx, inp, monkeypatch, c1,
+                       fixed="Tone=0.3")({"Gain": 0.7})
+        c2 = []
+        self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2,
+                       fixed="Tone=0.9")({"Gain": 0.7})
+        assert c2, "a config that pins a knob to a different value is a different circuit"
+
+    def test_a_failed_render_is_never_cached(self, tmp_path, monkeypatch):
+        """Caching a None would make one transient non-convergence permanent."""
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        calls = []
+
+        def failing_run(argv, **_):
+            calls.append(argv)
+            return type("R", (), {"returncode": 1, "stderr": "diverged"})()
+
+        monkeypatch.setattr("grid_adequacy.subprocess.run", failing_run)
+        monkeypatch.setattr("grid_adequacy.LIVESPICE_CLI", "fake-cli")
+        monkeypatch.setattr("grid_adequacy.Path.home", staticmethod(lambda: cache))
+        td = tmp_path / "s_fail"; td.mkdir()
+        r = Renderer(schx=str(schx), inp=inp, oversample=2, iterations=256, fixed="",
+                     td=td, probe_s=4.0, backend="livespice")
+        assert r({"Gain": 0.7})[0] is None
+        assert not list((cache / ".cache" / "parametric-nam" / "gridadq").glob("*.npz")), \
+            "a failed render must not be persisted"
+
+    def test_no_disk_cache_disables_it(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        c1 = []
+        self._renderer(tmp_path, cache, schx, inp, monkeypatch, c1,
+                       no_disk_cache=True)({"Gain": 0.7})
+        c2 = []
+        self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2,
+                       no_disk_cache=True)({"Gain": 0.7})
+        assert c2, "--no-disk-cache must force a real render"

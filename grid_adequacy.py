@@ -80,6 +80,7 @@ out, and the table put one cell at 0.6578 (18.8x over) where a clean re-run meas
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os as _os
 import re
 import subprocess
@@ -154,6 +155,9 @@ def write_knobs(config_path: Path, knobs: dict) -> None:
     config_path.write_text(text[:body_start] + "".join(lines) + text[body_end:])
 
 
+CACHE_MAX_BYTES = int(_os.environ.get("GRIDADQ_CACHE_MAX_BYTES", 8 * 1024**3))
+
+
 class Renderer:
     """Renders a knob setting on STRATIFIED WINDOWS spanning the input, not on one clip.
 
@@ -194,12 +198,32 @@ class Renderer:
 
     def __init__(self, schx, inp, oversample, iterations, fixed, td, probe_s, n_windows=4,
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
-                lead_silence_s=None, ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
+                lead_silence_s=None, no_disk_cache=False,
+                ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
                 ltspice_out_scale=0.05, ltspice_timeout=None):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
         self.cache: dict = {}
+        # ON-DISK cache, so a re-run does not re-render probes that have not changed. The
+        # in-process dict above only ever helped WITHIN one invocation, which meant
+        # run_pipeline's STEP 0 verification re-rendered everything grid_adequacy.py --apply
+        # had just rendered -- 48 probes on a 4-knob pedal, and on a full amp at ~1.2
+        # probes/min that is real time paid twice for the same answer.
+        #
+        # WHAT IS IN THE KEY is the whole design. Everything that changes a probe's ANSWER:
+        # the circuit's own bytes, the knob values, the fixed params, oversample, iterations,
+        # backend -- and the probe CLIP's audio hash, which is the subtle one. Rebuilding an
+        # excitation leaves its path identical while changing every sample in it, so keying on
+        # the filename would serve renders of the OLD excitation back forever. That is the
+        # exact staleness this project has been bitten by elsewhere.
+        #
+        # WHAT IS NOT IN THE KEY, and does not need to be: the grid. The cache is per PROBE
+        # POINT, so editing the grid simply changes which keys get asked for -- points that
+        # survive hit, new points miss and render. Nothing has to detect the edit.
+        self._disk_cache = None if no_disk_cache else (
+            Path.home() / ".cache" / "parametric-nam" / "gridadq")
+        self._identity = None
         self.ng_base = None
         self.ngd_backend = None
         self.ltd_backend = None
@@ -282,6 +306,23 @@ class Renderer:
             self.clips.append(c)
         self.win_s = win / sr
 
+        # Identity for the disk cache: circuit bytes + solver settings + backend + the exact
+        # audio of every probe clip. Only for the .schx-based backends -- a deck backend's
+        # answer depends on generator module state this cannot summarise, and a cache that is
+        # wrong is worse than no cache.
+        if self._disk_cache is not None and backend in ("livespice", "ngspice") and self.schx:
+            try:
+                h = hashlib.sha256()
+                h.update(Path(self.schx).read_bytes())
+                h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|".encode())
+                for c in self.clips:
+                    d, _ = sf.read(str(c), dtype="float32")
+                    h.update(np.ascontiguousarray(d).tobytes())
+                self._identity = h.hexdigest()[:16]
+                self._disk_cache.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                self._identity = None      # unreadable circuit/clip: degrade to no cache
+
         if backend == "ngspice-deck":
             self.ngd_handles = [load_input(str(c), None, str(td), src_name=f"gridadq_{i}.src")
                                 for i, c in enumerate(self.clips)]
@@ -309,7 +350,69 @@ class Renderer:
             with self._cache_lock:
                 if key in self.cache:      # another thread finished while we waited
                     return self.cache[key]
-            return self._render(params, key)
+            hit = self._disk_load(key)
+            if hit is not None:
+                with self._cache_lock:
+                    self.cache[key] = hit
+                return hit
+            out = self._render(params, key)
+            self._disk_store(key, out)
+            return out
+
+    def _disk_path(self, key) -> "Path | None":
+        if not self._identity:
+            return None
+        h = hashlib.sha256(repr(key).encode()).hexdigest()[:16]
+        return self._disk_cache / f"{self._identity}_{h}.npz"
+
+    def _disk_load(self, key):
+        p = self._disk_path(key)
+        if p is None or not p.exists():
+            return None
+        try:
+            with np.load(p, allow_pickle=False) as z:
+                out = [np.asarray(z[f"a{i}"], dtype=np.float64)
+                       for i in range(int(z["n"]))]
+            self._disk_path(key).touch()    # LRU: mark as recently used
+            return out
+        except Exception:
+            return None                     # corrupt/partial: just re-render
+
+    def _disk_store(self, key, out) -> None:
+        p = self._disk_path(key)
+        if p is None or any(a is None for a in out):
+            return                          # never cache a failed render
+        try:
+            tmp = p.with_suffix(".tmp.npz")
+            # float32, not float64. The backends write FLOAT (32-bit) wavs and sf.read merely
+            # widens them, so this is bit-exact -- and it halves a cache that ran to 356 MB for
+            # a single 4-knob pedal.
+            np.savez(tmp, n=len(out),
+                     **{f"a{i}": np.asarray(a, dtype=np.float32) for i, a in enumerate(out)})
+            tmp.replace(p)                  # atomic: a reader never sees a partial file
+            self._prune()
+        except Exception:
+            pass
+
+    def _prune(self) -> None:
+        """Keep the cache under CACHE_MAX_BYTES, evicting least-recently-used first.
+
+        Probe renders are large and every new circuit revision writes a fresh generation of
+        them (the .schx bytes are in the key), so without this the directory only ever grows.
+        """
+        try:
+            files = [(f.stat().st_mtime, f.stat().st_size, f)
+                     for f in self._disk_cache.glob("*.npz")]
+            total = sum(sz for _, sz, _ in files)
+            if total <= CACHE_MAX_BYTES:
+                return
+            for _, sz, f in sorted(files):          # oldest first
+                f.unlink(missing_ok=True)
+                total -= sz
+                if total <= CACHE_MAX_BYTES * 0.8:  # drop to 80%, so we are not pruning
+                    break                           # again on the very next store
+        except Exception:
+            pass
 
     def _render(self, params: dict, key):
         if self.backend == "ngspice-deck":
@@ -547,6 +650,12 @@ def main() -> None:
                          "hand-copy, rerun, repeat.")
     ap.add_argument("--max-iterations", type=int, default=5,
                     help="cap on --apply's suggest/reverify loop (default 5)")
+    ap.add_argument("--no-disk-cache", action="store_true",
+                    help="do not reuse probe renders cached under ~/.cache/parametric-nam/gridadq. "
+                         "The cache is keyed on the circuit's own bytes, the knob values, "
+                         "oversample/iterations and the probe clips' AUDIO -- so an edited circuit "
+                         "or a rebuilt excitation invalidates it automatically, and an edited GRID "
+                         "needs no detection at all (it simply asks for different points).")
     ap.add_argument("--lead-silence-s", type=float, default=None,
                     help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
                          "own settling time is longer (e.g. a slow RC network -- found directly "
@@ -619,7 +728,7 @@ def main() -> None:
         td = Path(tds)
         render = Renderer(schx, inp, oversample, args.iterations, fixed, td, args.probe_s,
                           backend=backend, pedal_dir=pedal_dir, module=module,
-                          probe_node=probe_node, lead_silence_s=args.lead_silence_s,
+                          probe_node=probe_node, lead_silence_s=args.lead_silence_s, no_disk_cache=args.no_disk_cache,
                           ngspice_deck_maxstep=args.ngspice_deck_maxstep,
                           ltspice_deck_maxstep=args.ltspice_deck_maxstep,
                           ltspice_out_scale=args.ltspice_out_scale,

@@ -27,7 +27,7 @@ Run automatically by `run_pipeline.py` for every generation unless skipped. All 
 
 | Step | Tool | Backend scope | On failure |
 |---|---|---|---|
-| STEP 0 | `grid_adequacy.py` | any | **Aborts.** A cell whose interpolation error exceeds the target ESR puts a floor under the model no training can lift. |
+| STEP 0 | `grid_adequacy.py` | any | **Aborts.** A cell whose interpolation error exceeds the target ESR puts a floor under the model no training can lift. This re-verifies a grid you have normally already refined with `--apply`; it is not redundant (the config can be hand-edited in between, as Duke of Tone's Tone/Presence midpoints were) and it is not slow, because probe renders are cached on disk between processes — see [scripts](scripts.md#grid_adequacypy--measure-whether-a-knob-grid-is-dense-enough). |
 | STEP 0b | `check_input_headroom.py` | any | **Warns, continues.** A low ratio can be a real gap or a genuine high-headroom device — this is a prompt to check the grid's own hottest corner, not a verdict. |
 | STEP 0c | `preflight.py` | **livespice only** — no mode exists for the schx-translated `ngspice` backend or `cpp` | **Aborts.** A dead or reversed knob renders and trains "successfully" and produces a plausible but wrong model. |
 | *(inside STEP 1)* | `check_transient_coverage.py` | livespice only | **Aborts.** Called directly by `gen_dataset_from_schx.py` itself, not a separate `run_pipeline.py` step — see its own transient-check block. Forwarded flags: `--skip-transient-check`/`--transient-peak`/`--transient-margin`. |
