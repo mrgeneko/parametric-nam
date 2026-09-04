@@ -214,17 +214,31 @@ number by hand and pick `--realistic-peak`/`--sweep-peaks` themselves — litera
 existing device's excitation was sized before this tool existed (e.g. the non-midpoint-default pedal's excitation,
 peak-sized from a direct output-V-vs-input-V sweep at one hand-picked knob setting).
 
-Runs `find_saturation_point.py` at **every corner** of the knob grid (the same all-min/all-max/
-center/solo-extreme/full-hypercube set `check_transient_coverage.py` below checks against, not
-just one setting), takes the **worst-case (highest) onset** across them, and derives both levels
-from it:
+Runs `find_saturation_point.py` at every corner of the knob grid — all-min/all-max/center/
+solo-extreme/full-hypercube, the same set `check_transient_coverage.py` below checks against —
+**plus `--sample-grid N` points drawn from the full grid product**, takes the **worst-case
+(highest) onset** across them, and derives both levels from it.
+
+Corners alone are not sufficient *in principle*: onset is **not monotonic** in the knobs, so its
+maximum over the grid need not sit at a vertex. Measured on a five-knob amp channel — its true
+worst onset (23.177 V, at Bass=min with every *other* knob at its **centre** grid value) is
+**1.27x** the highest of all 32 hypercube vertices. Probing the whole grid would guarantee it and
+is not worth it: 648 points at a measured ~1.2/min is ~9 h per channel, before every render, to
+choose one scalar. `scaffold_config.py` passes a knob-count-scaled budget (~1.5x the corner
+count, capped at 64) so the default path measures the interior rather than assuming headroom
+covers it.
 
 - `--sweep-peaks` max = `--margin × worst-case onset` (default margin **2.0x** — past the onset,
   not just at it), staged as fractions of that (`--sweep-peak-fracs`, default `0.25,0.5,0.75,1.0`).
-- `--realistic-peak` = `--realistic-peak-frac × worst-case onset` (default frac **1.0**, not
-  lower — `check_transient_coverage.py`'s default margin requires the transient content to reach
-  the worst corner's own onset, and the worst corner's onset *is* worst-case onset by definition;
-  any fraction below 1.0 guarantees that check fails there).
+- `--realistic-peak` = `--realistic-peak-frac × worst-case onset` (default frac **1.3**). Never
+  go *below* 1.0: `check_transient_coverage.py`'s default margin requires the transient content
+  to reach the worst corner's own onset, and the worst corner's onset *is* worst-case onset by
+  definition, so any fraction below 1.0 guarantees that check fails there. It is 1.3 rather than
+  a bare 1.0 because the hazard is not sitting *on* the boundary but the **measured** worst being
+  below the **true** worst (see the non-monotonicity note above); 1.3 covers the observed
+  vertex-to-true-worst ratio from vertex data alone, at no extra probing cost. It is insurance,
+  not a substitute for `--sample-grid` — a hotter excitation drives every already-covered corner
+  further into saturation, so do not inflate it past what the non-monotonicity demands.
 
 Then invokes `build_excitation.py` with the derived levels. Refuses to build if any corner's
 onset can't be determined, rather than silently building against a partial result (same
@@ -252,8 +266,10 @@ comfortably-interior 7.836V. 40V suits an amp; use something like 3–5V for a s
 
 Running `check_transient_coverage.py` afterward is still worth doing as an independent gate — a
 clean result is *expected* (this tool derives its levels from the same onset numbers that check
-verifies against) but not guaranteed, and this is only true at `--realistic-peak-frac`'s default
-of 1.0.
+verifies against) but **not guaranteed**: both are sampling a non-monotonic function, so the
+grid's true worst corner need not be one either of them probed. Two real amp channels failed such
+a check (6/43 and 4/43 corners) against an excitation whose peak had been hand-picked rather than
+measured at all.
 
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 
@@ -268,9 +284,17 @@ while only the sweep (a smooth tone, no attack shape) crossed into saturation th
 never saw a transient and saturation together at that corner, and ran open-loop when a real one
 eventually arrived.
 
-For every corner (same set `prepare_excitation.py` uses above), finds that corner's own
-saturation onset (`find_saturation_point.py`) and compares it against the excitation's transient
-peak. Exit status is nonzero if any corner fails, so a generation script can gate on it:
+For every corner (same set `prepare_excitation.py` uses above) **and the same `--sample-grid`
+interior points**, finds that corner's own saturation onset (`find_saturation_point.py`) and
+compares it against the excitation's transient peak. Exit status is nonzero if any corner fails,
+so a generation script can gate on it.
+
+The interior budget defaults to the one `scaffold_config.py` hands `prepare_excitation.py`, from
+a single shared definition, so **the gate is never weaker than the sizing that produced the
+excitation it is checking**. It probed corners only until 2026-09-04, which meant an excitation
+sized against 104 points was re-checked against 40 — a verifier weaker than its own input reads
+as confirmation while checking less. `gen_dataset_from_schx.py` runs this same gate before
+generating (`--transient-sample-grid` overrides the budget, `0` restores corners-only).
 
 ```bash
 python check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
@@ -320,6 +344,48 @@ as "go check the grid's hot corner directly," not an automatic verdict. `run_pip
 For the full, every-corner, hard-gate version of this same question, use
 `prepare_excitation.py`/`check_transient_coverage.py` above instead — this script is a cheap
 automatic tripwire, not a substitute for them.
+
+## `distribute_pull.py` — hand rendering chunks out as workers free up
+
+`distribute_gen.sh` splits the grid **once**, up front, by core count or `--weights`, and each
+worker keeps its slice. That only works when every worker's throughput is known in advance *and
+stays constant*. On a 648-combination run neither held: one Linux box managed 43.8 combos/hr and
+finished early then idled, while a laptop sharing the machine with an unrelated training run
+managed 7.6 and still had 8.9 h left — a thing no core count could have predicted. Static
+sharding turned a 1.6 h job into an 8.9 h one.
+
+This cuts the grid into chunks expressed as ordinary `--shard i-i/N` specs and dispatches one at
+a time to whichever worker is free, so a fast worker simply takes more. No throughput estimate is
+needed anywhere: the schedule *is* the measurement.
+
+```bash
+python distribute_pull.py \
+    --worker host0:/path/to/parametric-nam:8 \
+    --worker host1:/path/to/parametric-nam:10:DOTNET_ROOT=$HOME/.dotnet \
+    --chunks 31 --collect ~/my_dataset \
+    -- --backend livespice --schx "..." --input "..." --range "Gain=..." ...
+```
+
+Three things that are easy to get wrong:
+
+- **`--collect LOCAL_DIR` — use it.** The scheduler renders; gathering is the other half. `sig/`
+  merges cleanly because its filenames are the **global** grid index, but `params.csv` is one
+  file *per worker* holding only that worker's rows, so rsyncing each output dir onto one path
+  leaves you the last worker's metadata describing the whole grid. `--collect` copies every
+  worker's `params.csv` to a private name *before* any `sig/` transfer and writes the merged file
+  *last*, which is correct even when a worker is localhost and its output dir **is** the merge
+  target. (`gen_dataset_from_schx.py --combine` hard-fails on a row/`.npy` mismatch, so a botched
+  merge fails loudly rather than training on a hole — but it is a backstop, not a plan.)
+- **Pick `--chunks` coprime with your knob-axis sizes.** Modulo sharding steps by `chunks`, so an
+  axis of cardinality `c` is *constant* inside every shard whenever `c` divides `chunks`. The
+  dataset is unaffected — the union of shards is still the whole grid — but
+  `gen_dataset_from_schx.py`'s own per-shard knob-sensitivity check goes blind and reports the
+  frozen knob as `RMS varies only 0.00% — knob may have no effect`, which reads exactly like a
+  dead knob or a `param_map` typo. A prime is the easy answer; the tool warns and suggests one.
+- **A fast-failing worker is worse than a slow one.** It drains the queue faster than healthy
+  machines can take work — one that could not import a dependency killed 27 of 31 chunks in ~70 s.
+  `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
+  successes, and a chunk is not handed back to a host that already failed it.
 
 ## `gen_dataset_from_schx.py` — generate the dataset
 

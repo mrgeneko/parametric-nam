@@ -31,8 +31,12 @@ is op-amp clipping renders happily and wrongly. Measured on one real pedal: **22
 scale** at ordinary knob settings, converging cleanly, passing preflight, with every knob
 responding in the correct direction. `measure_truncation.py` reported *textbook* convergence for
 it — truncation error tells you how well you solved the equations you wrote, never whether they
-were the right equations. See `parametric-devices/backends.toml`, which exists to record exactly
-these cases.
+were the right equations. Each device records its own verdicts in a **`<stem>.backends.toml`
+sidecar beside its `.schx`** — found by deriving the path from the schematic, so there is no
+registry to locate and no environment variable to know about, and it works for a circuit this
+project has never seen. `gen_dataset_from_schx.py` enforces it and refuses a backend declared
+invalid. `valid` is `true`, `false`, or `"partial"` (usable with known limits: warns, does not
+block).
 
 **ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
 adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. a
