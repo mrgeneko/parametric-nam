@@ -349,3 +349,69 @@ class TestGuardWorkspaceReuse:
         assert (tmp_path / "ws" / "config.toml").read_text() == "schx = 'mesa.schx'\n"
         with pytest.raises(SystemExit):        # a THIRD, different config still blocked
             rp.guard_workspace_reuse(a, "schx = 'other.schx'\n", force=False)
+
+
+class TestSetInputLine:
+    """Pointing a config's `input` at a newly-built excitation.
+
+    Shared by scaffold_config.py (first-pass excitation, placeholder grid) and
+    prepare_excitation.py (re-size once grid_adequacy settled the real grid). Before this
+    was shared, only the scaffold did it, so re-sizing left `input` naming the excitation it
+    had just superseded -- and Mesa ORANGE/RED trained against that stale pointer.
+    """
+
+    def test_it_replaces_an_existing_input_line(self):
+        t = 'schx = "a.schx"\ninput      = "/old/exc.wav"\nbackend = "livespice"\n'
+        out = rp.set_input_line(t, "/new/exc.wav")
+        assert '"/new/exc.wav"' in out and "/old/exc.wav" not in out
+        assert 'backend = "livespice"' in out          # nothing else disturbed
+
+    def test_it_takes_the_stale_comment_with_it(self):
+        """A multi-line explanation of the PREVIOUS excitation must not outlive the value it
+        explains -- that comment is how a reader decides whether to trust the file."""
+        t = ('schx = "a.schx"\n'
+             'input      = "/old/exc.wav"\n'
+             '   # built from a hand-picked 15.4369 V peak\n'
+             '   # never measured against any corner set\n'
+             'backend = "livespice"\n')
+        out = rp.set_input_line(t, "/new/exc.wav", "measured: 20.8276 V")
+        assert "hand-picked" not in out and "never measured" not in out
+        assert "measured: 20.8276 V" in out
+        assert 'backend = "livespice"' in out
+
+    def test_an_absent_input_key_is_inserted_after_schx(self):
+        """scaffold's _replace_line RAISED here. A config whose excitation has not been built
+        yet legitimately has no `input` line -- and that is the config this is most often
+        called on. Mesa RED's was exactly this shape."""
+        t = 'schx       = "/a/b.schx"\nbackend    = "livespice"\n'
+        out = rp.set_input_line(t, "/w/exc.wav")
+        lines = [l for l in out.splitlines() if l.strip()]
+        assert lines[0].startswith("schx") and lines[1].startswith("input")
+        assert lines[2].startswith("backend")
+
+    def test_it_still_works_with_no_schx_line_at_all(self):
+        out = rp.set_input_line('backend = "livespice"\n', "/w/exc.wav")
+        assert out.splitlines()[0].startswith("input")
+
+    def test_the_hand_written_commentary_survives(self):
+        """These configs are mostly prose explaining WHY each value is what it is. A TOML
+        round-trip would delete all of it, which is why this is a line splice."""
+        t = ('# WHY THIS FILE EXISTS AT ALL. The 2026-09-02 run predates the config\n'
+             '# convention and was driven by hand-assembled CLI arguments.\n'
+             'schx       = "/a/b.schx"\n'
+             'input      = "/old.wav"\n'
+             '\n'
+             '# MEASURED, not guessed -- see measure_truncation.py\n'
+             'oversample = 8\n')
+        out = rp.set_input_line(t, "/new.wav")
+        assert "WHY THIS FILE EXISTS AT ALL" in out
+        assert "MEASURED, not guessed" in out
+        assert "oversample = 8" in out
+
+    def test_the_result_is_still_valid_toml_naming_the_new_wav(self, tmp_path):
+        import tomllib
+        t = 'schx       = "/a/b.schx"\nbackend    = "livespice"\noversample = 8\n'
+        out = rp.set_input_line(t, "/w/exc.wav", "worst-case onset 20.8276 V")
+        d = tomllib.loads(out)
+        assert d["input"] == "/w/exc.wav"
+        assert d["schx"] == "/a/b.schx" and d["oversample"] == 8

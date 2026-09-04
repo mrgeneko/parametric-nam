@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import parse_schx_controls, _is_convergence_failure
 from measure_truncation import measure, probe_clips
 from knob_classify import classify  # noqa: E402
+from run_pipeline import set_input_line  # noqa: E402
 # ONE definition, shared with gen_dataset_from_schx.py's transient gate. If the sizer and
 # the gate computed this separately they could drift, and a gate weaker than the sizing
 # that fed it is worse than no gate: it reads as confirmation while checking less.
@@ -460,12 +461,11 @@ def main() -> None:
         ok = _prepare_excitation(output, Path(args.input), excitation_wav,
                                  args.realistic_dur_cap, n_knobs=len(names))
         if ok and excitation_wav.exists():
-            text = output.read_text()
-            text = _replace_line(text, "input",
-                f'input      = "{excitation_wav}"   # built by prepare_excitation.py from '
-                f'{Path(args.input).name} -- see its own recipe.json sidecar for the '
-                f'measured saturation onset this was sized from')
-            output.write_text(text)
+            output.write_text(set_input_line(
+                output.read_text(), excitation_wav,
+                f"built by prepare_excitation.py from {Path(args.input).name} -- see its "
+                f"own recipe.json sidecar for the measured saturation onset this was "
+                f"sized from"))
             print(f"  input -> {excitation_wav} (calibrated; run "
                   f"check_transient_coverage.py against {output} to verify independently)")
         else:

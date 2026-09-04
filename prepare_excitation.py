@@ -46,7 +46,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from run_pipeline import load_config  # noqa: E402
+from run_pipeline import load_config, set_input_line  # noqa: E402
 from check_transient_coverage import _corners, _sample_interior  # noqa: E402
 from find_saturation_point import find_saturation_point, findpeak_cache_key, scratch_dir  # noqa: E402
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -239,6 +239,11 @@ def main():
                          "beside it -- every consumer finds the sidecar by deriving it from "
                          "the wav's own path, so they must stay together). Required unless "
                          "--workspace is given.")
+    ap.add_argument("--no-update-config", action="store_true",
+                    help="do not point --config's `input` at the excitation just built. Off "
+                         "by default: leaving a config naming a superseded excitation is how "
+                         "Mesa ORANGE and RED trained against transient content that never "
+                         "reached saturation at 6/43 and 4/43 of their corners.")
     ap.add_argument("--workspace", type=Path,
                     help="write the excitation to <workspace>/excitation/excitation.wav, the "
                          "same layout run_pipeline.py --workspace uses. This argument exists "
@@ -379,6 +384,23 @@ def main():
     else:
         print(f"WARNING: {recipe_path.name} not found after build_excitation.py -- sizing "
               f"provenance NOT recorded", file=sys.stderr)
+
+    # Point the config at what we just built. Only scaffold_config.py used to do this, so
+    # re-sizing an excitation after grid_adequacy.py settled the real grid left `input` still
+    # naming the superseded file -- silently, because both are valid wavs, and the whole
+    # reason to re-size is that the old one no longer covers the grid. Mesa ORANGE and RED
+    # trained against exactly that stale pointer and failed 6/43 and 4/43 corners.
+    if args.config and not args.no_update_config:
+        cfg = Path(args.config)
+        try:
+            cfg.write_text(set_input_line(
+                cfg.read_text(), args.output,
+                f"sized by prepare_excitation.py against this config's grid -- worst-case "
+                f"onset {worst:.4f} V across {len(rows)} corners; see the recipe.json sidecar"))
+            print(f"updated {cfg.name}: input -> {args.output}")
+        except Exception as e:
+            print(f"WARNING: could not update {cfg.name}'s `input` -- point it at "
+                  f"{args.output} by hand: {e}", file=sys.stderr)
 
     print(f"wrote {args.output} -- built from a measured onset (worst-case {worst:.4f} V "
           f"across {len(rows)} corners), not a guess. For ngspice, render with your "

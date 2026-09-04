@@ -43,6 +43,10 @@ with `--grid-points`' own evenly-spaced baseline across the full range, matching
 grids already used on this fleet (e.g. `Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]`). An
 unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
 
+> For the end-to-end path from a new `.schx` to a trained model, see
+> [new-circuit-walkthrough.md](new-circuit-walkthrough.md). This page is the per-script
+> reference.
+
 ## `--workspace` — one directory per run
 
 ```bash

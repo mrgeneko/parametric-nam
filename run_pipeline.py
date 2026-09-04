@@ -28,7 +28,7 @@ Example — full boutique dual-channel amp clean pipeline:
         --mmap --epochs 200
 """
 
-import argparse, csv, json, math, os, platform, shutil, subprocess, sys, time, tomllib
+import argparse, csv, json, math, os, platform, re, shutil, subprocess, sys, time, tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -112,6 +112,41 @@ def guard_workspace_reuse(args, config_text: "str | None", force: bool) -> None:
     # guard from that point on.
     ws.mkdir(parents=True, exist_ok=True)
     stamp.write_text(config_text)
+
+
+def set_input_line(text: str, wav: "Path | str", note: str = "") -> str:
+    """Point a config's top-level `input` at `wav`, returning the new config TEXT.
+
+    Shared by scaffold_config.py (which builds a first excitation from the PLACEHOLDER grid)
+    and prepare_excitation.py (which re-sizes it once grid_adequacy.py has settled the real
+    grid). Only the scaffold used to do this, so the re-size step left the config still
+    pointing at the excitation it had just superseded -- silently, since both are valid wavs.
+    That is how the Mesa RED config came to carry the comment "`input` is deliberately UNSET
+    below. prepare_excitation.py writes it", describing something no code did.
+
+    In-place line splice, not a TOML round-trip: these configs are mostly hand-written
+    commentary explaining WHY each value is what it is (see any device config), and
+    parse -> dict -> re-serialize would delete all of it. Same reasoning as
+    grid_adequacy.write_knobs.
+
+    Handles the key being ABSENT, which scaffold's _replace_line did not -- a config whose
+    excitation has not been built yet legitimately has no `input` line at all, and that is
+    exactly the config this function is most often called on. It is inserted after `schx`,
+    keeping the two paths that define a render adjacent.
+    """
+    line = f'input      = "{wav}"'
+    if note:
+        line += f"   # {note}"
+    # Replace the key AND any indented comment-continuation lines belonging to it, so a stale
+    # multi-line explanation of the previous excitation does not outlive the value.
+    pat = re.compile(r"^input[ \t]*=.*\n(?:[ \t]+#.*\n?)*", re.MULTILINE)
+    if pat.search(text):
+        return pat.sub(lambda _m: line + "\n", text, count=1)
+    schx = re.compile(r"^schx[ \t]*=.*\n(?:[ \t]+#.*\n?)*", re.MULTILINE)
+    m = schx.search(text)
+    if m:
+        return text[:m.end()] + line + "\n" + text[m.end():]
+    return line + "\n" + text
 
 
 def load_config(path: Path) -> dict:

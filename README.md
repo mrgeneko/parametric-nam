@@ -124,6 +124,12 @@ by hand (see **Per-circuit configs** below for the format). Then finish with
 `grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
 measured one. No other repos are required.
 
+**[`docs/new-circuit-walkthrough.md`](docs/new-circuit-walkthrough.md) is the full
+six-command path** from a `.schx` you have never trained to a finished `.param.nam`,
+including the two steps that are easy to skip and expensive to skip: reviewing the
+scaffold's knob order and kinds, and re-sizing the excitation *after* the grid is
+settled rather than before.
+
 **Before training on it for real** (the bundled Large Muffin example's own config cuts this corner —
 see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
 with `check_transient_coverage.py`. That verify step is **not** your only protection — the same
