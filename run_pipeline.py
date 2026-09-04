@@ -589,6 +589,7 @@ def build_train_cmd(args, dataset_dir, epochs, repeats):
         "--epochs",          epochs,    # derived from target-steps unless explicit
         "--restart-period",  args.restart_period,
         "--restart-mult",    args.restart_mult,
+        "--restart-decay",   args.restart_decay,
         "--stale-cycles",    args.stale_cycles,
         "--batch-size",      args.batch_size,
         "--lr",              args.lr,
@@ -745,6 +746,14 @@ def main():
                    help="Open-ended SGDR restart period in epochs")
     g.add_argument("--restart-mult",   type=int,   default=1,
                    help="Open-ended SGDR period multiplier per restart")
+    g.add_argument("--restart-decay", type=float, default=0.97,
+                   help="Open-ended SGDR restart-ceiling decay, forwarded to param_train.py "
+                        "(whose own default this mirrors). Was NOT forwarded at all before "
+                        "2026-09-04, so a pipeline run silently took param_train's default and "
+                        "there was no way to express a different one short of calling "
+                        "param_train.py directly -- which loses this script's post-training "
+                        "FiLM-runaway scan and release packaging. See param_train.py --help for "
+                        "why the default is 0.97 rather than 1.0.")
     g.add_argument("--stale-cycles",   type=int,   default=3,
                    help="Open-ended auto-stop: stop after this many consecutive SGDR cycles "
                         "with no new best on any tier (0 = manual STOP-file only; see "
