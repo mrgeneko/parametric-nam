@@ -161,104 +161,19 @@ class _FakeAp:
         raise SystemExit(2)  # mirror argparse's own ArgumentParser.error() behavior
 
 
-def test_check_backend_noops_when_registry_file_is_absent(tmp_path, monkeypatch):
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path / "does-not-exist"))
+def test_check_backend_announces_when_no_sidecar_exists(tmp_path):
+    # Was: "noops when registry file is absent". A gate that says nothing when it is doing
+    # nothing is worse than no gate -- see the module comment in check_backend.
+    schx = tmp_path / "Some Circuit.schx"
+    schx.write_text("<Schematic/>")
+    err = io.StringIO()
     ap = _FakeAp()
-    g.check_backend(tmp_path / "Some Circuit.schx", "livespice", ap)
+    with contextlib.redirect_stderr(err):
+        g.check_backend(schx, "livespice", ap)
     assert ap.errors == []
+    assert "nothing is checking" in err.getvalue().lower()
 
 
-def test_check_backend_noops_when_registry_is_malformed_toml(tmp_path, monkeypatch):
-    reg = tmp_path / "devices.toml"
-    reg.write_text("this is not [valid toml")
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    g.check_backend(tmp_path / "Some Circuit.schx", "livespice", ap)
-    assert ap.errors == []
-
-
-def test_check_backend_noops_when_device_not_in_registry(tmp_path, monkeypatch):
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[some-device]\nname = "Some Device"\nschx = "pedals/Some Device.schx"\n')
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    g.check_backend(tmp_path / "A Totally Different Circuit.schx", "livespice", ap)
-    assert ap.errors == []
-
-
-def test_check_backend_noops_when_backend_has_no_entry_for_this_device(tmp_path, monkeypatch):
-    reg = tmp_path / "devices.toml"
-    reg.write_text(
-        '[some-device]\n'
-        'name = "Some Device"\n'
-        'schx = "pedals/Some Device.schx"\n'
-    )
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    # no [some-device.backend] table at all -> absence of evidence, not a claim
-    g.check_backend(tmp_path / "Some Device.schx", "ngspice", ap)
-    assert ap.errors == []
-
-
-def test_check_backend_prints_a_note_and_does_not_error_when_backend_is_valid(tmp_path, monkeypatch, capsys):
-    reg = tmp_path / "devices.toml"
-    reg.write_text(
-        '[some-device]\n'
-        'name = "Some Device"\n'
-        'schx = "pedals/Some Device.schx"\n'
-        '[some-device.backend.ngspice]\n'
-        'valid = true\n'
-        'reason = "converges cleanly"\n'
-    )
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    g.check_backend(tmp_path / "Some Device.schx", "ngspice", ap)
-    assert ap.errors == []
-    assert "converges cleanly" in capsys.readouterr().err
-
-
-def test_check_backend_errors_when_backend_is_declared_invalid(tmp_path, monkeypatch):
-    reg = tmp_path / "devices.toml"
-    reg.write_text(
-        '[some-device]\n'
-        'name = "Some Device"\n'
-        'schx = "pedals/Some Device.schx"\n'
-        '[some-device.backend.livespice]\n'
-        'valid = false\n'
-        'reason = "collapses transistor gyrators to a flat response"\n'
-        '[some-device.backend.ngspice]\n'
-        'valid = true\n'
-    )
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    with pytest.raises(SystemExit):
-        g.check_backend(tmp_path / "Some Device.schx", "livespice", ap)
-    assert len(ap.errors) == 1
-    msg = ap.errors[0]
-    assert "CANNOT be rendered faithfully" in msg
-    assert "collapses transistor gyrators" in msg
-    assert "ngspice" in msg  # the valid alternative must be surfaced
-
-
-def test_check_backend_matches_by_schx_basename_not_full_path(tmp_path, monkeypatch):
-    # The registry's own schx field is a repo-relative path ("pedals/Some Device.schx"); the
-    # match is against the caller's schx basename, so an arbitrary caller-side directory must
-    # still resolve correctly.
-    reg = tmp_path / "devices.toml"
-    reg.write_text(
-        '[some-device]\n'
-        'name = "Some Device"\n'
-        'schx = "pedals/Some Device.schx"\n'
-        '[some-device.backend.livespice]\n'
-        'valid = false\n'
-        'reason = "nope"\n'
-    )
-    monkeypatch.setenv("PARAMETRIC_DEVICES", str(tmp_path))
-    ap = _FakeAp()
-    with pytest.raises(SystemExit):
-        g.check_backend(tmp_path / "some" / "unrelated" / "dir" / "Some Device.schx",
-                        "livespice", ap)
-    assert ap.errors
 
 
 # --------------------------------------------------------------------------- process_one escalation
@@ -472,180 +387,116 @@ def test_provenance_records_parse_error_status_for_a_corrupt_sidecar(tmp_path):
     assert prov["build_recipe_status"].startswith("parse_error")
     assert "build_recipe_error" in prov
 
-
-# ------------------------------------------------------ backend-validity gate visibility
+# ============================================================ backend-validity gate, sidecar
 #
-# check_backend used to `return` silently in FOUR situations -- registry missing, registry
-# unparseable, device absent, backend unlisted. That is the worst behaviour a safety check
-# can have: someone who believes they are protected gets output identical to someone who
-# is not. A device that genuinely cannot be rendered on the chosen backend (the
-# metal-distortion pedal's transistor gyrators under livespice) would render
-# "successfully" into a wrong dataset. Every inactive path now says so.
+# Verdicts live in <stem>.backends.toml beside the .schx, found by deriving the path from the
+# schematic itself. The devices.toml fallback was removed 2026-09-04: it reached a verdict
+# through two name indirections (slug -> registry entry -> .schx filename) that a
+# bring-your-own-circuit user could never satisfy and a rename broke silently, and it needed
+# PARAMETRIC_DEVICES set, which nobody would.
+#
+# The recurring theme in these tests: a safety check that says nothing while doing nothing is
+# worse than no check, because someone who believes they are protected gets output identical
+# to someone who is not.
 
-import argparse
 import io
 import contextlib
+import argparse
 from pathlib import Path
 
 
-def _gate(tmp_registry, schx="Mine.schx", backend="livespice"):
-    err = io.StringIO()
-    ap = argparse.ArgumentParser()
-    with contextlib.redirect_stderr(err):
-        g.check_backend(Path(schx), backend, ap, registry=tmp_registry)
-    return err.getvalue()
-
-
-def test_env_pointing_at_a_missing_registry_warns_loudly_but_does_not_abort(tmp_path):
-    # The loudest inactive case -- this user configured the gate, so they believe it ran.
-    # WARNING not error: the gate is advisory (an unlisted device is already assumed valid),
-    # and someone with PARAMETRIC_DEVICES set in a shell profile on a machine where that repo
-    # is not cloned should not be blocked from rendering by an informational check. See
-    # test_check_backend_noops_when_registry_file_is_absent, which pins the no-abort contract.
-    out = _gate(tmp_path / "nope" / "devices.toml")
-    assert "DID NOT RUN" in out
-
-
-def test_unparseable_registry_says_so(tmp_path):
-    reg = tmp_path / "devices.toml"
-    reg.write_text("this is not valid toml {{{")
-    assert "INACTIVE" in _gate(reg) and "parse" in _gate(reg)
-
-
-def test_device_absent_from_the_registry_says_so(tmp_path):
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[some-other]\nname = "Other"\nschx = "amps/Other.schx"\n')
-    out = _gate(reg, schx="Mine.schx")
-    assert "not in devices.toml" in out
-
-
-def test_registered_device_with_no_verdict_for_this_backend_says_so(tmp_path):
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n')
-    assert "no verdict" in _gate(reg, schx="Mine.schx")
-
-
-def test_an_invalid_backend_still_hard_fails(tmp_path):
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n'
-                   '[mine.backend.livespice]\nvalid = false\nreason = "gyrators"\n'
-                   '[mine.backend.ngspice]\nvalid = true\n')
-    with pytest.raises(SystemExit):
-        _gate(reg, schx="Mine.schx", backend="livespice")
-
-
-def test_a_valid_backend_passes_without_noise(tmp_path):
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n'
-                   '[mine.backend.livespice]\nvalid = true\n')
-    assert _gate(reg, schx="Mine.schx") == ""
-
-
-# ---------------------------------------------------- the third verdict state: "partial"
-#
-# backends.toml already used three states -- ampeg-svt-power-amp declares
-# ngspice = { valid = "partial" } -- but check_backend only ever did a truthiness test, so
-# "partial" passed exactly like `true`, printing its own reason as an ordinary note. That
-# reason reads "BUT NOT YET USABLE: below ~100 Hz the output is UNPHYSICAL ... 2297 W at
-# 40 Hz ... That is ringing, not output." Worse, when the OTHER backend was invalid, the
-# refusal message listed the partial one under "Valid backend(s) for this device" -- so the
-# gate blocked you and then recommended a backend the registry says is unusable.
-
-_PARTIAL_REG = ('[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
-                '[amp.backend.livespice]\nvalid = false\nreason = "diverges above 400 Hz"\n'
-                '[amp.backend.ngspice]\nvalid = "partial"\nreason = "NOT YET USABLE below 100 Hz"\n')
-
-
-def _reg(tmp_path, text):
-    p = tmp_path / "devices.toml"
-    p.write_text(text)
+def _sidecar(tmp_path, toml_text, schx="Mine.schx"):
+    p = tmp_path / schx
+    p.write_text("<Schematic/>")
+    p.with_suffix(".backends.toml").write_text(toml_text)
     return p
 
 
-def test_partial_warns_but_does_not_block(tmp_path):
-    # "partial" means usable WITH KNOWN LIMITS. Whether those limits matter depends on the
-    # grid and the excitation, which this gate cannot judge -- so warn and let the operator
-    # decide, rather than either blocking or staying quiet.
-    out = _gate(_reg(tmp_path, _PARTIAL_REG), schx="Amp.schx", backend="ngspice")
-    assert "PARTIAL" in out and "NOT YET USABLE" in out
+def _run(schx, backend="livespice", ap=None):
+    err = io.StringIO()
+    ap = ap or argparse.ArgumentParser()
+    with contextlib.redirect_stderr(err):
+        g.check_backend(schx, backend, ap)
+    return err.getvalue()
 
 
-def test_partial_is_louder_than_an_ordinary_valid_note(tmp_path):
-    partial = _gate(_reg(tmp_path, _PARTIAL_REG), schx="Amp.schx", backend="ngspice")
-    ok = _gate(_reg(tmp_path, '[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
-                              '[amp.backend.ngspice]\nvalid = true\nreason = "fine"\n'),
-               schx="Amp.schx", backend="ngspice")
-    assert partial.startswith("WARNING") and ok.startswith("note")
+# ---- inactive paths all announce themselves -------------------------------------------------
+
+def test_no_sidecar_says_nothing_is_checking(tmp_path):
+    schx = tmp_path / "Unknown.schx"
+    schx.write_text("<Schematic/>")
+    assert "nothing is checking" in _run(schx).lower()
 
 
-def test_a_partial_backend_is_not_recommended_as_valid_when_blocking(tmp_path):
+def test_unparseable_sidecar_says_inactive(tmp_path):
+    assert "INACTIVE" in _run(_sidecar(tmp_path, "not [valid toml"))
+
+
+def test_backend_with_no_entry_is_assumed_valid_but_says_so(tmp_path):
+    out = _run(_sidecar(tmp_path, 'ngspice = { valid = true }\n'), backend="livespice")
+    assert "no verdict" in out and "absence of evidence" in out
+
+
+# ---- the three verdict states ---------------------------------------------------------------
+
+def test_valid_passes_with_a_note(tmp_path):
+    out = _run(_sidecar(tmp_path, 'livespice = { valid = true, reason = "converges" }\n'))
+    assert out.startswith("note") and "converges" in out
+
+
+def test_invalid_blocks(tmp_path):
     ap = _FakeAp()
     with pytest.raises(SystemExit):
-        g.check_backend(Path("Amp.schx"), "livespice", ap,
-                        registry=_reg(tmp_path, _PARTIAL_REG))
-    msg = ap.errors[0]
-    assert "NONE RECORDED" in msg, "a partial backend must not be listed as plainly valid"
-    assert "PARTIAL" in msg, "...but it should still be mentioned, with its status"
+        _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "diverges" }\n'), ap=ap)
+    assert "diverges" in ap.errors[0]
+
+
+def test_partial_warns_but_proceeds(tmp_path):
+    # "partial" means usable WITH KNOWN LIMITS. Which limits matter depends on the grid and
+    # the excitation, which this gate cannot judge -- so quote them and let the operator
+    # decide. It passed as plain `true` until 2026-09-04 because the check was a truthiness
+    # test and "partial" is a truthy string.
+    out = _run(_sidecar(tmp_path, 'livespice = { valid = "partial", reason = "unphysical <100Hz" }\n'))
+    assert out.startswith("WARNING") and "PARTIAL" in out and "unphysical" in out
 
 
 @pytest.mark.parametrize("spelling", ["partial", "PARTIAL", " Partial "])
 def test_partial_recognised_regardless_of_case_or_whitespace(tmp_path, spelling):
-    reg = _reg(tmp_path, f'[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
-                         f'[amp.backend.ngspice]\nvalid = "{spelling}"\nreason = "limits"\n')
-    assert "PARTIAL" in _gate(reg, schx="Amp.schx", backend="ngspice")
+    out = _run(_sidecar(tmp_path, f'livespice = {{ valid = "{spelling}", reason = "x" }}\n'))
+    assert "PARTIAL" in out
 
 
-# ------------------------------------------------------------------- sidecar backend verdicts
-#
-# The registry coupled on a NAME: slug -> devices.toml entry -> .schx filename, two
-# indirections a user with their own circuit could never satisfy and a rename broke
-# silently. A sidecar is found by deriving the path from the .schx itself -- the same
-# pattern an excitation's <stem>.recipe.json already uses -- so it needs no registry, no
-# PARAMETRIC_DEVICES, and works for a circuit this project has never seen.
+def test_partial_is_not_recommended_as_valid_when_another_backend_blocks(tmp_path):
+    # The real ampeg-svt case: livespice invalid, ngspice partial. The refusal used to list
+    # ngspice under "Valid backend(s)", steering the operator onto the backend its own reason
+    # describes as returning 2297 W at 40 Hz.
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        _run(_sidecar(tmp_path,
+                      'livespice = { valid = false, reason = "diverges above 400 Hz" }\n'
+                      'ngspice = { valid = "partial", reason = "NOT YET USABLE below 100 Hz" }\n'),
+             ap=ap)
+    assert "NONE RECORDED" in ap.errors[0]
+    assert "PARTIAL" in ap.errors[0]
 
-def _schx_with_sidecar(tmp_path, toml_text, name="My Own Pedal.schx"):
-    schx = tmp_path / name
-    schx.write_text("<Schematic/>")
-    schx.with_suffix(".backends.toml").write_text(toml_text)
-    return schx
 
+# ---- the sidecar's whole point --------------------------------------------------------------
 
-def test_sidecar_blocks_an_invalid_backend_with_no_registry_anywhere(tmp_path, monkeypatch):
+def test_works_with_no_registry_and_a_circuit_nobody_has_seen(tmp_path, monkeypatch):
     monkeypatch.delenv("PARAMETRIC_DEVICES", raising=False)
     monkeypatch.delenv("SPICE_CIRCUITS", raising=False)
-    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = false, reason = "diverges" }\n')
     ap = _FakeAp()
     with pytest.raises(SystemExit):
-        g.check_backend(schx, "livespice", ap)
-    assert "diverges" in ap.errors[0]
+        _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "my own pedal" }\n',
+                      schx="Nobody Has Ever Seen This.schx"), ap=ap)
+    assert "my own pedal" in ap.errors[0]
 
 
-def test_sidecar_error_names_the_sidecar_not_a_registry(tmp_path):
-    # Telling someone to "fix it in parametric-devices/backends.toml" is useless if they do
-    # not have that repo -- and after this change they should not need it.
-    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = false, reason = "no" }\n')
+def test_refusal_names_the_sidecar_not_a_private_repo(tmp_path):
+    # "fix it in parametric-devices/backends.toml" is useless advice to someone who does not
+    # have that repo -- and after the migration they should not need it.
     ap = _FakeAp()
     with pytest.raises(SystemExit):
-        g.check_backend(schx, "livespice", ap)
-    assert "My Own Pedal.backends.toml" in ap.errors[0]
-
-
-def test_sidecar_takes_precedence_over_the_registry(tmp_path):
-    schx = _schx_with_sidecar(tmp_path, 'livespice = { valid = true, reason = "sidecar says fine" }\n')
-    reg = tmp_path / "devices.toml"
-    reg.write_text('[mine]\nname = "Mine"\nschx = "My Own Pedal.schx"\n'
-                   '[mine.backend.livespice]\nvalid = false\nreason = "registry says no"\n')
-    err = io.StringIO()
-    ap = _FakeAp()
-    with contextlib.redirect_stderr(err):
-        g.check_backend(schx, "livespice", ap, registry=reg)
-    assert ap.errors == [], "the sidecar beside the .schx is authoritative"
-    assert "sidecar says fine" in err.getvalue()
-
-
-def test_an_unparseable_sidecar_says_so_rather_than_silently_passing(tmp_path):
-    schx = _schx_with_sidecar(tmp_path, "not valid toml {{{")
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        g.check_backend(schx, "livespice", _FakeAp())
-    assert "INACTIVE" in err.getvalue()
+        _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "no" }\n'), ap=ap)
+    assert "Mine.backends.toml" in ap.errors[0]
+    assert "parametric-devices" not in ap.errors[0]

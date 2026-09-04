@@ -161,19 +161,7 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 # schx discovery (livespice backend)
 # ---------------------------------------------------------------------------
 
-def _resolve_registry() -> "tuple[Path, bool]":
-    """Where devices.toml lives, and whether an env var asked for it.
-
-    Split out so the not-configured branch is testable: a checkout that HAS parametric-devices
-    as a sibling can never otherwise exercise the path a public-tool user takes, and that is
-    the path where the backend gate is silently inactive.
-    """
-    env = os.environ.get("PARAMETRIC_DEVICES") or os.environ.get("SPICE_CIRCUITS")
-    base = Path(env) if env else Path(__file__).resolve().parent.parent / "parametric-devices"
-    return base / "devices.toml", bool(env)
-
-
-def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
+def check_backend(schx: Path, backend: str, ap) -> None:
     """Refuse a backend that cannot faithfully render this device.
 
     Which backends work is a fact about the SIMULATOR, not the circuit, so it cannot be derived from
@@ -198,68 +186,38 @@ def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
               APPROXIMATION of the pedal on every backend, and why the schematic itself is worth
               distrusting.)
     """
-    # EVERY inactive path says so. This gate used to return silently in four different
-    # situations -- registry missing, registry unparseable, device absent, backend unlisted --
-    # which is the worst possible behaviour for a safety check: someone who believes they are
-    # protected gets identical output to someone who is. A device that genuinely cannot be
-    # rendered on the chosen backend (the metal-distortion pedal's transistor gyrators under
-    # livespice) would then render "successfully" into a wrong dataset.
-    # SIDECAR FIRST: <stem>.backends.toml beside the .schx. Same pattern as the excitation's
-    # <stem>.recipe.json -- found by deriving the path from the file we were handed, so there is
-    # no registry to locate, no env var to know about, and no device SLUG or filename to match.
-    # A registry couples on a name: the old path went slug -> devices.toml entry -> .schx
-    # filename, two indirections that a user with their own circuit could never satisfy, and a
-    # rename silently broke. A sidecar travels WITH the schematic when it is copied, and works
-    # identically for a circuit this project has never seen -- write one next to your own .schx
-    # and the gate fires.
+    # SIDECAR ONLY: <stem>.backends.toml beside the .schx. Same pattern as the excitation's
+    # <stem>.recipe.json -- found by deriving the path from the file we were handed, so there
+    # is no registry to locate, no env var to know about, and no device slug or filename to
+    # match. A sidecar travels WITH the schematic when it is copied, and works identically for
+    # a circuit this project has never seen: write one next to your own .schx and this fires.
+    #
+    # The devices.toml fallback is GONE (2026-09-04). It reached a verdict through two name
+    # indirections -- slug -> registry entry -> .schx filename -- which a bring-your-own-circuit
+    # user could never satisfy and a rename broke silently, and it required knowing to set
+    # PARAMETRIC_DEVICES, which nobody would. Every verdict it used to serve now lives in a
+    # sidecar; keeping a second lookup path would only let the two drift.
+    #
+    # ABSENCE IS ANNOUNCED, not silent. A safety check that says nothing when it is doing
+    # nothing is worse than no check: someone who believes they are protected gets output
+    # identical to someone who is not, and a device that genuinely cannot be rendered on the
+    # chosen backend renders "successfully" into a wrong dataset.
     sidecar = schx.with_suffix(".backends.toml")
-    if sidecar.exists():
-        try:
-            import tomllib
-            spec_all = tomllib.loads(sidecar.read_text())
-        except Exception as e:
-            print(f"note: backend-validity gate INACTIVE -- {sidecar.name} exists but failed to "
-                  f"parse ({e}). Nothing is checking whether {backend!r} suits this circuit.",
-                  file=sys.stderr)
-            return
-        return _apply_backend_verdict(spec_all, backend, schx.stem, sidecar.name, ap)
-
-    reg, from_env = _resolve_registry() if registry is None else (Path(registry), True)
-    if not reg.exists():
-        if from_env:
-            # Explicitly configured and pointing at nothing: a misconfiguration, and the
-            # loudest of the inactive cases because this user believes the gate is running.
-            # WARNING, not a hard error: this gate is ADVISORY (a device with no entry is
-            # already assumed valid), and someone with PARAMETRIC_DEVICES set in a shell
-            # profile on a machine where that repo is not cloned should not be blocked from
-            # rendering at all by an informational check.
-            print(f"WARNING: backend-validity gate DID NOT RUN. "
-                  f"PARAMETRIC_DEVICES/SPICE_CIRCUITS points at {reg.parent}, which has no "
-                  f"devices.toml. You configured this gate, so it is presumably meant to be "
-                  f"active -- nothing checked whether {backend!r} can faithfully render "
-                  f"{schx.name}.", file=sys.stderr)
-        else:
-            print(f"note: backend-validity gate inactive -- no devices.toml at {reg}. Nothing "
-                  f"is checking whether {backend!r} can faithfully render this circuit. Set "
-                  f"PARAMETRIC_DEVICES to a device registry to enable it.", file=sys.stderr)
+    if not sidecar.exists():
+        print(f"note: no {sidecar.name} beside this .schx -- nothing is checking whether "
+              f"{backend!r} can faithfully render it. Write one (see a device repo's "
+              f"docs/backend-validity.md) if you have characterised a backend for this "
+              f"circuit.", file=sys.stderr)
         return
     try:
         import tomllib
-        devs = tomllib.loads(reg.read_text())
+        spec_all = tomllib.loads(sidecar.read_text())
     except Exception as e:
-        print(f"note: backend-validity gate INACTIVE -- {reg} exists but failed to parse ({e}). "
-              f"Nothing is checking whether {backend!r} suits this circuit.", file=sys.stderr)
+        print(f"note: backend-validity gate INACTIVE -- {sidecar.name} exists but failed to "
+              f"parse ({e}). Nothing is checking whether {backend!r} suits this circuit.",
+              file=sys.stderr)
         return
-
-    dev = next((d for d in devs.values()
-                if isinstance(d, dict) and Path(d.get("schx", "")).name == schx.name), None)
-    if not dev:
-        print(f"note: {schx.name} is not in {reg.name} -- backend-validity not checked for it. "
-              f"Expected for a bring-your-own circuit; a surprise if you thought it was "
-              f"registered (a renamed .schx will do this).", file=sys.stderr)
-        return
-
-    return _apply_backend_verdict(dev.get("backend") or {}, backend, dev["name"], reg.name, ap)
+    return _apply_backend_verdict(spec_all, backend, schx.stem, sidecar.name, ap)
 
 
 def _apply_backend_verdict(specs: dict, backend: str, label: str, source: str, ap) -> None:
