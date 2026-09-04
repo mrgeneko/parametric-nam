@@ -161,7 +161,19 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 # schx discovery (livespice backend)
 # ---------------------------------------------------------------------------
 
-def check_backend(schx: Path, backend: str, ap) -> None:
+def _resolve_registry() -> "tuple[Path, bool]":
+    """Where devices.toml lives, and whether an env var asked for it.
+
+    Split out so the not-configured branch is testable: a checkout that HAS parametric-devices
+    as a sibling can never otherwise exercise the path a public-tool user takes, and that is
+    the path where the backend gate is silently inactive.
+    """
+    env = os.environ.get("PARAMETRIC_DEVICES") or os.environ.get("SPICE_CIRCUITS")
+    base = Path(env) if env else Path(__file__).resolve().parent.parent / "parametric-devices"
+    return base / "devices.toml", bool(env)
+
+
+def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
     """Refuse a backend that cannot faithfully render this device.
 
     Which backends work is a fact about the SIMULATOR, not the circuit, so it cannot be derived from
@@ -186,23 +198,51 @@ def check_backend(schx: Path, backend: str, ap) -> None:
               APPROXIMATION of the pedal on every backend, and why the schematic itself is worth
               distrusting.)
     """
-    reg = Path(os.environ.get("PARAMETRIC_DEVICES") or os.environ.get("SPICE_CIRCUITS")
-               or Path(__file__).resolve().parent.parent / "parametric-devices") / "devices.toml"
+    # EVERY inactive path says so. This gate used to return silently in four different
+    # situations -- registry missing, registry unparseable, device absent, backend unlisted --
+    # which is the worst possible behaviour for a safety check: someone who believes they are
+    # protected gets identical output to someone who is. A device that genuinely cannot be
+    # rendered on the chosen backend (the metal-distortion pedal's transistor gyrators under
+    # livespice) would then render "successfully" into a wrong dataset.
+    reg, from_env = _resolve_registry() if registry is None else (Path(registry), True)
     if not reg.exists():
-        return                                    # no registry reachable: nothing to check against
+        if from_env:
+            # Explicitly configured and pointing at nothing: a misconfiguration, and the
+            # loudest of the inactive cases because this user believes the gate is running.
+            # WARNING, not a hard error: this gate is ADVISORY (a device with no entry is
+            # already assumed valid), and someone with PARAMETRIC_DEVICES set in a shell
+            # profile on a machine where that repo is not cloned should not be blocked from
+            # rendering at all by an informational check.
+            print(f"WARNING: backend-validity gate DID NOT RUN. "
+                  f"PARAMETRIC_DEVICES/SPICE_CIRCUITS points at {reg.parent}, which has no "
+                  f"devices.toml. You configured this gate, so it is presumably meant to be "
+                  f"active -- nothing checked whether {backend!r} can faithfully render "
+                  f"{schx.name}.", file=sys.stderr)
+        else:
+            print(f"note: backend-validity gate inactive -- no devices.toml at {reg}. Nothing "
+                  f"is checking whether {backend!r} can faithfully render this circuit. Set "
+                  f"PARAMETRIC_DEVICES to a device registry to enable it.", file=sys.stderr)
+        return
     try:
         import tomllib
         devs = tomllib.loads(reg.read_text())
-    except Exception:
+    except Exception as e:
+        print(f"note: backend-validity gate INACTIVE -- {reg} exists but failed to parse ({e}). "
+              f"Nothing is checking whether {backend!r} suits this circuit.", file=sys.stderr)
         return
 
     dev = next((d for d in devs.values()
                 if isinstance(d, dict) and Path(d.get("schx", "")).name == schx.name), None)
     if not dev:
+        print(f"note: {schx.name} is not in {reg.name} -- backend-validity not checked for it. "
+              f"Expected for a bring-your-own circuit; a surprise if you thought it was "
+              f"registered (a renamed .schx will do this).", file=sys.stderr)
         return
 
     spec = (dev.get("backend") or {}).get(backend)
     if not spec:
+        print(f"note: {dev['name']} records no verdict for --backend {backend} -- assumed valid "
+              f"(absence of evidence, not a claim).", file=sys.stderr)
         return
     if spec.get("valid", True):
         if spec.get("reason"):

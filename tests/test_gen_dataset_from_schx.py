@@ -471,3 +471,71 @@ def test_provenance_records_parse_error_status_for_a_corrupt_sidecar(tmp_path):
     assert "build_recipe" not in prov
     assert prov["build_recipe_status"].startswith("parse_error")
     assert "build_recipe_error" in prov
+
+
+# ------------------------------------------------------ backend-validity gate visibility
+#
+# check_backend used to `return` silently in FOUR situations -- registry missing, registry
+# unparseable, device absent, backend unlisted. That is the worst behaviour a safety check
+# can have: someone who believes they are protected gets output identical to someone who
+# is not. A device that genuinely cannot be rendered on the chosen backend (the
+# metal-distortion pedal's transistor gyrators under livespice) would render
+# "successfully" into a wrong dataset. Every inactive path now says so.
+
+import argparse
+import io
+import contextlib
+from pathlib import Path
+
+
+def _gate(tmp_registry, schx="Mine.schx", backend="livespice"):
+    err = io.StringIO()
+    ap = argparse.ArgumentParser()
+    with contextlib.redirect_stderr(err):
+        g.check_backend(Path(schx), backend, ap, registry=tmp_registry)
+    return err.getvalue()
+
+
+def test_env_pointing_at_a_missing_registry_warns_loudly_but_does_not_abort(tmp_path):
+    # The loudest inactive case -- this user configured the gate, so they believe it ran.
+    # WARNING not error: the gate is advisory (an unlisted device is already assumed valid),
+    # and someone with PARAMETRIC_DEVICES set in a shell profile on a machine where that repo
+    # is not cloned should not be blocked from rendering by an informational check. See
+    # test_check_backend_noops_when_registry_file_is_absent, which pins the no-abort contract.
+    out = _gate(tmp_path / "nope" / "devices.toml")
+    assert "DID NOT RUN" in out
+
+
+def test_unparseable_registry_says_so(tmp_path):
+    reg = tmp_path / "devices.toml"
+    reg.write_text("this is not valid toml {{{")
+    assert "INACTIVE" in _gate(reg) and "parse" in _gate(reg)
+
+
+def test_device_absent_from_the_registry_says_so(tmp_path):
+    reg = tmp_path / "devices.toml"
+    reg.write_text('[some-other]\nname = "Other"\nschx = "amps/Other.schx"\n')
+    out = _gate(reg, schx="Mine.schx")
+    assert "not in devices.toml" in out
+
+
+def test_registered_device_with_no_verdict_for_this_backend_says_so(tmp_path):
+    reg = tmp_path / "devices.toml"
+    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n')
+    assert "no verdict" in _gate(reg, schx="Mine.schx")
+
+
+def test_an_invalid_backend_still_hard_fails(tmp_path):
+    reg = tmp_path / "devices.toml"
+    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n'
+                   '[mine.backend.livespice]\nvalid = false\nreason = "gyrators"\n'
+                   '[mine.backend.ngspice]\nvalid = true\n')
+    with pytest.raises(SystemExit):
+        _gate(reg, schx="Mine.schx", backend="livespice")
+
+
+def test_a_valid_backend_passes_without_noise(tmp_path):
+    reg = tmp_path / "devices.toml"
+    reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n'
+                   '[mine.backend.livespice]\nvalid = true\n')
+    assert _gate(reg, schx="Mine.schx") == ""
