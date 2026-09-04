@@ -539,3 +539,57 @@ def test_a_valid_backend_passes_without_noise(tmp_path):
     reg.write_text('[mine]\nname = "Mine"\nschx = "pedals/Mine.schx"\n'
                    '[mine.backend.livespice]\nvalid = true\n')
     assert _gate(reg, schx="Mine.schx") == ""
+
+
+# ---------------------------------------------------- the third verdict state: "partial"
+#
+# backends.toml already used three states -- ampeg-svt-power-amp declares
+# ngspice = { valid = "partial" } -- but check_backend only ever did a truthiness test, so
+# "partial" passed exactly like `true`, printing its own reason as an ordinary note. That
+# reason reads "BUT NOT YET USABLE: below ~100 Hz the output is UNPHYSICAL ... 2297 W at
+# 40 Hz ... That is ringing, not output." Worse, when the OTHER backend was invalid, the
+# refusal message listed the partial one under "Valid backend(s) for this device" -- so the
+# gate blocked you and then recommended a backend the registry says is unusable.
+
+_PARTIAL_REG = ('[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
+                '[amp.backend.livespice]\nvalid = false\nreason = "diverges above 400 Hz"\n'
+                '[amp.backend.ngspice]\nvalid = "partial"\nreason = "NOT YET USABLE below 100 Hz"\n')
+
+
+def _reg(tmp_path, text):
+    p = tmp_path / "devices.toml"
+    p.write_text(text)
+    return p
+
+
+def test_partial_warns_but_does_not_block(tmp_path):
+    # "partial" means usable WITH KNOWN LIMITS. Whether those limits matter depends on the
+    # grid and the excitation, which this gate cannot judge -- so warn and let the operator
+    # decide, rather than either blocking or staying quiet.
+    out = _gate(_reg(tmp_path, _PARTIAL_REG), schx="Amp.schx", backend="ngspice")
+    assert "PARTIAL" in out and "NOT YET USABLE" in out
+
+
+def test_partial_is_louder_than_an_ordinary_valid_note(tmp_path):
+    partial = _gate(_reg(tmp_path, _PARTIAL_REG), schx="Amp.schx", backend="ngspice")
+    ok = _gate(_reg(tmp_path, '[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
+                              '[amp.backend.ngspice]\nvalid = true\nreason = "fine"\n'),
+               schx="Amp.schx", backend="ngspice")
+    assert partial.startswith("WARNING") and ok.startswith("note")
+
+
+def test_a_partial_backend_is_not_recommended_as_valid_when_blocking(tmp_path):
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        g.check_backend(Path("Amp.schx"), "livespice", ap,
+                        registry=_reg(tmp_path, _PARTIAL_REG))
+    msg = ap.errors[0]
+    assert "NONE RECORDED" in msg, "a partial backend must not be listed as plainly valid"
+    assert "PARTIAL" in msg, "...but it should still be mentioned, with its status"
+
+
+@pytest.mark.parametrize("spelling", ["partial", "PARTIAL", " Partial "])
+def test_partial_recognised_regardless_of_case_or_whitespace(tmp_path, spelling):
+    reg = _reg(tmp_path, f'[amp]\nname = "Amp"\nschx = "amps/Amp.schx"\n'
+                         f'[amp.backend.ngspice]\nvalid = "{spelling}"\nreason = "limits"\n')
+    assert "PARTIAL" in _gate(reg, schx="Amp.schx", backend="ngspice")

@@ -244,16 +244,41 @@ def check_backend(schx: Path, backend: str, ap, registry=None) -> None:
         print(f"note: {dev['name']} records no verdict for --backend {backend} -- assumed valid "
               f"(absence of evidence, not a claim).", file=sys.stderr)
         return
-    if spec.get("valid", True):
+    # THREE states, not two. The registry already uses a third -- ampeg-svt-power-amp declares
+    # ngspice = { valid = "partial" } -- but this code only ever did a truthiness test, so
+    # "partial" passed as though it were `true`, printing its own reason as an ordinary note.
+    # That reason reads "BUT NOT YET USABLE: below ~100 Hz the output is UNPHYSICAL ... 2297 W
+    # at 40 Hz ... That is ringing, not output." A backend the registry says is unusable in
+    # part of the audio band should not be indistinguishable from one that is simply fine: this
+    # file's own header exists to separate LOUD failures from SILENT ones, and a partial
+    # backend is the silent kind wearing a note.
+    #
+    # Still not fatal -- "partial" means usable WITH KNOWN LIMITS, and which limits matter
+    # depends on the grid and the excitation, which this gate cannot judge. So: warn, quote the
+    # limits, and let the operator decide. Anything else truthy is treated as valid, as before.
+    verdict = spec.get("valid", True)
+    if isinstance(verdict, str) and verdict.strip().lower() == "partial":
+        print(f"WARNING: {dev['name']} on {backend} is declared PARTIAL, not valid -- usable "
+              f"with known limits, and nothing here can judge whether they matter for your "
+              f"grid or excitation. Read this before trusting the dataset:\n"
+              f"  {spec.get('reason', '(no reason recorded)')}", file=sys.stderr)
+        return
+    if verdict:
         if spec.get("reason"):
             print(f"note: {dev['name']} on {backend}: {spec['reason']}", file=sys.stderr)
         return
 
-    ok = [b for b, s in (dev.get("backend") or {}).items() if s.get("valid", True)]
+    def _usable(s):
+        v = s.get("valid", True)
+        return bool(v) and not (isinstance(v, str) and v.strip().lower() == "partial")
+    ok = [b for b, s in (dev.get("backend") or {}).items() if _usable(s)]
+    partial = [b for b, s in (dev.get("backend") or {}).items()
+               if isinstance(s.get("valid"), str) and s["valid"].strip().lower() == "partial"]
     ap.error(
         f"\n\n  {dev['name']} CANNOT be rendered faithfully with --backend {backend}.\n\n"
         f"  {spec.get('reason', '(no reason recorded)')}\n\n"
-        f"  Valid backend(s) for this device: {', '.join(ok) if ok else 'NONE RECORDED'}.\n"
+        f"  Valid backend(s) for this device: {', '.join(ok) if ok else 'NONE RECORDED'}"
+        + (f" (plus {', '.join(partial)}: PARTIAL, usable with limits)" if partial else "") + ".\n"
         f"  Declared in parametric-devices/backends.toml — fix it there, not here, if this is wrong.\n")
 
 
