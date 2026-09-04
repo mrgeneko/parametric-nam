@@ -43,6 +43,55 @@ with `--grid-points`' own evenly-spaced baseline across the full range, matching
 grids already used on this fleet (e.g. `Gain=[0.1,0.15,0.25,...,0.9-0.95,1.0]`). An
 unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
 
+## `--workspace` — one directory per run
+
+```bash
+./prepare_excitation.py --config <device>.config.toml --workspace ~/runs/duke_run1 ...
+./run_pipeline.py       --config <device>.config.toml --workspace ~/runs/duke_run1
+```
+
+A single training run produces files from four scripts, and before `--workspace` each needed
+its own path flag with nothing checking that the five agreed:
+
+```
+~/runs/duke_run1/
+├── config.toml                 the config this run was built from (stamped on first use)
+├── pipeline.log                --log
+├── excitation/
+│   ├── excitation.wav          --output of prepare_excitation.py
+│   └── excitation.recipe.json  sidecar; consumers derive it from the wav's own path
+├── dataset/                    --dataset-dir
+│   ├── outputs.npy  params.csv  config.json  sweep.wav
+│   └── NOTICE_RESTRICTED_INPUT.md
+├── checkpoints/                --checkpoint-dir
+│   ├── best.pt  best_lite.pt  latest.pt  cycle_*.pt
+│   └── metrics.csv  watchdog.log  per_combo_esr_w*.csv
+├── duke_run1.param.nam         --nam-output (named after the workspace, not "model")
+└── release/                    --release-dir
+    ├── *.param.nam  <device>.schx  metrics.csv
+    ├── dataset_config.json  dataset_params.csv
+    └── ESR_RECORD.md  MANIFEST.md  reproduce.sh
+```
+
+**Any individual flag still wins.** `--workspace` only fills paths left unset, so
+`--dataset-dir /Volumes/SSD1/duke_ds` still parks the big file elsewhere (Duke's `outputs.npy`
+is 7.99 GB). A path set in the config counts as explicit too.
+
+**A workspace is per RUN, not per circuit** — so a second run goes in a second directory and
+the first survives intact. To keep that true, `run_pipeline.py` stamps `config.toml` into the
+workspace on first use and **refuses** to run a *different* config into it, pointing you at a
+new `--workspace` (`--force-workspace` overwrites in place, and re-stamps, so the guard stays
+armed). Re-running the *same* config is not blocked: that is a resume after a crash, and
+generation already skips when `outputs.npy` exists.
+
+**Not in the workspace, deliberately:**
+
+| | where | why |
+|---|---|---|
+| content-keyed caches | `~/.cache/parametric-nam/{findpeak,gridadq}` | keyed on circuit bytes and clip audio, not paths — so they stay valid across runs and workspaces. Per-workspace caches would re-render every probe for a re-run of the same circuit. Safe to delete at any time. |
+| scratch | `$TMPDIR/parametric-nam-*` | deleted on exit; `--keep-scratch` keeps it |
+| the device config + recipe | `parametric-devices/…` | the committed record — input to a run, not output of one |
+
 ## `grid_adequacy.py` — measure whether a knob grid is dense enough
 
 ```bash

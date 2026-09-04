@@ -42,7 +42,76 @@ from gen_dataset_from_schx import check_oracle
 # argparse dests whose config values are filesystem paths (argparse's type=Path is
 # only applied to CLI strings, not to set_defaults values, so we convert here).
 _CONFIG_PATH_DESTS = {"dataset_dir", "nam_output", "checkpoint_dir", "release_dir",
-                      "log", "schx", "input", "resume"}
+                      "log", "schx", "input", "resume", "workspace"}
+
+
+# Where each artifact lands under --workspace. A run produces files from four different
+# scripts (gen_dataset_from_schx, param_train, export_checkpoint, the release step); before
+# this, each needed its own path flag and NOTHING checked that the five agreed with each
+# other. The excitation is here too: it has no default output path at all, which is how a
+# measured Mesa RED excitation -- the only copy of its 104-corner sizing measurement -- came
+# to be sitting in /tmp on a worker (2026-09-04).
+WORKSPACE_LAYOUT = {
+    "dataset_dir":    "dataset",
+    "checkpoint_dir": "checkpoints",
+    "release_dir":    "release",
+    "log":            "pipeline.log",
+    # nam_output is named after the workspace itself, not a fixed "model.param.nam" --
+    # these files get copied out and shared, and four devices' worth of identically-named
+    # model.param.nam in a downloads folder is useless.
+}
+
+
+def apply_workspace(args) -> "list[str]":
+    """Fill any unset output path from --workspace. Returns the names it defaulted.
+
+    An explicit flag ALWAYS wins -- a dataset is the one artifact routinely parked on another
+    disk (Duke's is 7.99 GB), so --workspace must not make that impossible. This only fills
+    Nones, which is also why it runs AFTER the config merge: a path in the config counts as
+    explicit, exactly as it does for every other flag.
+    """
+    if args.workspace is None:
+        return []
+    ws = args.workspace.expanduser()
+    filled = []
+    for dest, rel in WORKSPACE_LAYOUT.items():
+        if getattr(args, dest, None) is None:
+            setattr(args, dest, ws / rel)
+            filled.append(dest)
+    if getattr(args, "nam_output", None) is None:
+        args.nam_output = ws / f"{ws.name}.param.nam"
+        filled.append("nam_output")
+    return filled
+
+
+def guard_workspace_reuse(args, config_text: "str | None", force: bool) -> None:
+    """Refuse to run a DIFFERENT config into an existing workspace.
+
+    A workspace is per-run, so the mistake it has to prevent is aiming a second, different
+    run at the first one's directory and overwriting its checkpoints and model. Re-running
+    the SAME config is not that -- it is a resume after a crash or an interrupted train, and
+    is already handled (generation skips when outputs.npy exists; --force-generate redoes
+    it). So the test is the config's own text, not whether the directory is empty: the
+    permissive case stays permissive and only the destructive one stops.
+
+    With no --config there is nothing to compare, so nothing is claimed and nothing blocks.
+    """
+    if args.workspace is None or config_text is None:
+        return
+    ws = args.workspace.expanduser()
+    stamp = ws / "config.toml"
+    if stamp.exists() and stamp.read_text() != config_text and not force:
+        sys.exit(
+            f"ERROR: {ws} already holds a run built from a DIFFERENT config.\n"
+            f"  Its {stamp.name} does not match the --config you passed.\n"
+            f"  A workspace is per-run: use a new --workspace so the existing run "
+            f"survives,\n  or pass --force-workspace to overwrite it in place.")
+    # Always (re)stamp, including after --force-workspace. Leaving the old stamp in place
+    # would make the workspace claim a config it no longer holds -- and the NEXT run would
+    # then compare against the wrong one, so a single --force would silently disarm the
+    # guard from that point on.
+    ws.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(config_text)
 
 
 def load_config(path: Path) -> dict:
@@ -638,6 +707,13 @@ def main():
                    help="TOML per-circuit config (knobs/ranges/fixed/schx/input/widths/"
                         "hyperparams). CLI flags override it. See "
                         "parametric-nam-models/<category>/<device-id>/config.toml.")
+    g.add_argument("--workspace",      type=Path, default=None,
+                   help="ONE directory holding everything this run produces, instead of "
+                        "naming --dataset-dir/--checkpoint-dir/--nam-output/--release-dir/"
+                        "--log separately. See WORKSPACE_LAYOUT. A workspace is PER RUN, not "
+                        "per circuit: point a second run at a second directory and the first "
+                        "stays intact. Any of the individual flags still wins over the "
+                        "layout, so you can put the dataset on a different disk.")
     # These three may come from --config OR the CLI; validated after parsing.
     g.add_argument("--dataset-dir",    type=Path, default=None,
                    help="Dataset directory (generation output / training input)")
@@ -647,6 +723,9 @@ def main():
                    help="Directory for epoch checkpoints and metrics.csv")
     g.add_argument("--log",            type=Path, default=None,
                    help="Log file (default: <dataset-dir>/pipeline.log)")
+    g.add_argument("--force-workspace", action="store_true",
+                   help="allow reusing a --workspace that holds a run from a different "
+                        "config, overwriting it")
     g.add_argument("--force-generate", action="store_true",
                    help="Re-run generation even if outputs.npy already exists")
     g.add_argument("--skip-generate",  action="store_true")
@@ -889,12 +968,21 @@ def main():
     args.repeats_explicit = any(a == "--repeats" or a.startswith("--repeats=") for a in _cli)
 
 
+    # --workspace fills whatever the CLI and config between them left unset, so it runs
+    # before the required-args check and cannot mask an explicit path.
+    _filled = apply_workspace(args)
+    guard_workspace_reuse(args, args.config.read_text() if args.config else None,
+                          args.force_workspace)
+    if _filled:
+        print(f"workspace {args.workspace}: "
+              + ", ".join("--" + f.replace("_", "-") for f in sorted(_filled)))
+
     # dataset-dir/nam-output/checkpoint-dir are required but may arrive via --config.
     _missing = [n for n in ("dataset_dir", "nam_output", "checkpoint_dir")
                 if getattr(args, n) is None]
     if _missing:
         ap.error("missing required " + ", ".join("--" + m.replace("_", "-") for m in _missing)
-                 + " (set on the CLI or in --config)")
+                 + " (set on the CLI, in --config, or via --workspace)")
 
     # Keep the machine awake for the whole pipeline (may run for hours).
     # Re-execs under caffeinate / systemd-inhibit before any work begins.

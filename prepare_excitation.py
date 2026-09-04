@@ -234,7 +234,18 @@ def main():
     # excitation-building
     ap.add_argument("--real-clip", required=True,
                      help="real-playing clip, passed through to build_excitation.py --input")
-    ap.add_argument("--output", required=True)
+    ap.add_argument("--output",
+                    help="where to write the excitation wav (its .recipe.json sidecar goes "
+                         "beside it -- every consumer finds the sidecar by deriving it from "
+                         "the wav's own path, so they must stay together). Required unless "
+                         "--workspace is given.")
+    ap.add_argument("--workspace", type=Path,
+                    help="write the excitation to <workspace>/excitation/excitation.wav, the "
+                         "same layout run_pipeline.py --workspace uses. This argument exists "
+                         "because --output had no default at all: the measured Mesa RED "
+                         "excitation -- the only copy of its 104-corner sizing measurement -- "
+                         "was written to /tmp on a worker and came within a cleanup of being "
+                         "lost (2026-09-04). A run's excitation belongs with the run.")
     ap.add_argument("--margin", type=float, default=2.0,
                      help="sweep-peaks max = margin x worst-case onset (default 2.0x -- past "
                           "the onset, not just at it, matching this repo's own precedent, e.g. "
@@ -283,6 +294,13 @@ def main():
                      help="--lead-silence-s passed to build_excitation.py itself (distinct "
                           "from --lead-silence-s above, which is for the ngspice sweep probe)")
     args = ap.parse_args()
+    if args.workspace and not args.output:
+        d = args.workspace.expanduser() / "excitation"
+        d.mkdir(parents=True, exist_ok=True)
+        args.output = str(d / "excitation.wav")
+        print(f"workspace {args.workspace}: --output {args.output}")
+    elif not args.output:
+        ap.error("--output is required (or pass --workspace to place it for you)")
 
     backend, identity, cache_extra, knob_ranges, fixed, sweep_lead_silence_s, label = _setup(args)
 

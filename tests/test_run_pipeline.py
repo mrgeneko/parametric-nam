@@ -257,3 +257,95 @@ def test_check_missing_combinations_noop_when_combination_count_is_absent(tmp_pa
     fh = io.StringIO()
     rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
     assert fh.getvalue() == ""
+
+
+# --------------------------------------------------------------- --workspace
+
+class TestApplyWorkspace:
+    """--workspace collapses five path flags into one, WITHOUT ever silently winning over
+    a path the user actually stated."""
+
+    def _args(self, ws=None, **over):
+        d = dict(workspace=ws, dataset_dir=None, checkpoint_dir=None, nam_output=None,
+                 release_dir=None, log=None)
+        d.update(over)
+        return SimpleNamespace(**d)
+
+    def test_it_fills_every_output_path_from_one_directory(self, tmp_path):
+        a = self._args(tmp_path / "duke_run1")
+        filled = rp.apply_workspace(a)
+        assert a.dataset_dir    == tmp_path / "duke_run1" / "dataset"
+        assert a.checkpoint_dir == tmp_path / "duke_run1" / "checkpoints"
+        assert a.release_dir    == tmp_path / "duke_run1" / "release"
+        assert a.log            == tmp_path / "duke_run1" / "pipeline.log"
+        assert set(filled) == {"dataset_dir", "checkpoint_dir", "release_dir", "log",
+                               "nam_output"}
+
+    def test_the_model_is_named_after_the_workspace(self, tmp_path):
+        """Not a fixed model.param.nam -- these get copied out and shared, and four devices'
+        worth of identically-named files in one folder is useless."""
+        a = self._args(tmp_path / "duke_of_tone")
+        rp.apply_workspace(a)
+        assert a.nam_output.name == "duke_of_tone.param.nam"
+
+    def test_an_explicit_path_always_wins(self, tmp_path):
+        """The dataset is the artifact routinely parked on another disk (Duke's is 7.99 GB),
+        so --workspace must not make that impossible."""
+        a = self._args(tmp_path / "ws", dataset_dir=Path("/Volumes/SSD1/duke_ds"))
+        filled = rp.apply_workspace(a)
+        assert a.dataset_dir == Path("/Volumes/SSD1/duke_ds")
+        assert "dataset_dir" not in filled
+        assert a.checkpoint_dir == tmp_path / "ws" / "checkpoints"   # the rest still fill
+
+    def test_no_workspace_changes_nothing(self):
+        a = self._args(None)
+        assert rp.apply_workspace(a) == []
+        assert a.dataset_dir is None and a.nam_output is None
+
+
+class TestGuardWorkspaceReuse:
+    """A workspace is PER RUN. The mistake to prevent is aiming a second, different run at
+    the first one's directory and overwriting its checkpoints and model."""
+
+    def test_a_fresh_workspace_is_stamped_with_its_config(self, tmp_path):
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, "schx = 'x.schx'\n", force=False)
+        assert (tmp_path / "ws" / "config.toml").read_text() == "schx = 'x.schx'\n"
+
+    def test_rerunning_the_same_config_is_allowed(self, tmp_path):
+        """A repeat run is a resume after a crash, not an overwrite -- and generation already
+        skips when outputs.npy exists. The permissive case must stay permissive."""
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, "schx = 'x.schx'\n", force=False)
+        rp.guard_workspace_reuse(a, "schx = 'x.schx'\n", force=False)   # must not raise
+
+    def test_a_different_config_is_refused(self, tmp_path):
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, "schx = 'duke.schx'\n", force=False)
+        with pytest.raises(SystemExit) as e:
+            rp.guard_workspace_reuse(a, "schx = 'mesa.schx'\n", force=False)
+        assert "different config" in str(e.value).lower()
+        assert "--force-workspace" in str(e.value)
+
+    def test_force_workspace_overrides(self, tmp_path):
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, "schx = 'duke.schx'\n", force=False)
+        rp.guard_workspace_reuse(a, "schx = 'mesa.schx'\n", force=True)   # must not raise
+
+    def test_no_config_claims_nothing_and_blocks_nothing(self, tmp_path):
+        """run_pipeline can be driven by pure CLI. With no --config there is nothing to
+        compare, so the guard must not invent a verdict."""
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, None, force=False)
+        assert not (tmp_path / "ws" / "config.toml").exists()
+
+    def test_force_restamps_so_the_guard_stays_armed(self, tmp_path):
+        """After --force-workspace the directory holds the NEW run, so it must say so. If the
+        old stamp survived, the next run would compare against a config no longer present --
+        one --force would silently disarm the guard from then on."""
+        a = SimpleNamespace(workspace=tmp_path / "ws")
+        rp.guard_workspace_reuse(a, "schx = 'duke.schx'\n", force=False)
+        rp.guard_workspace_reuse(a, "schx = 'mesa.schx'\n", force=True)
+        assert (tmp_path / "ws" / "config.toml").read_text() == "schx = 'mesa.schx'\n"
+        with pytest.raises(SystemExit):        # a THIRD, different config still blocked
+            rp.guard_workspace_reuse(a, "schx = 'other.schx'\n", force=False)
