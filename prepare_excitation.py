@@ -49,8 +49,8 @@ from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # 
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
-                      peak_max_v=40.0, no_cache=False, full_hypercube=True, quiet=False,
-                      lead_silence_s=0.0):
+                      peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
+                      lead_silence_s=0.0, max_corners=None):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -58,7 +58,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     finder and corner-generator directly instead of routing through a check meant for a
     different question). Raises if any corner's onset couldn't be determined -- see module
     docstring's "refuse to guess"."""
-    corners = _corners(knob_ranges, full_hypercube=full_hypercube)
+    corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
     if not quiet:
         print(f"  {len(corners)} corners ({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)")
     rows = []
@@ -186,8 +186,17 @@ def main():
                           "livespice.")
     ap.add_argument("--fixed-params", default="", help="NAME=VAL,... held fixed at every corner")
     ap.add_argument("--no-full-hypercube", action="store_true",
-                     help="skip the full 2**n min/max hypercube (only solo + all-min/all-max/"
-                          "center corners) -- use for many knobs where 2**n would be impractical")
+                     help="DEPRECATED, prefer --max-corners. Drops to the structural corners only "
+                          "(solo + all-min/all-max/center), which cannot represent a MIXED "
+                          "some-knobs-low-others-high corner AT ALL -- the blind spot that shipped "
+                          "the tweed blowup and, on 2026-09-04, sized Duke of Tone's excitation "
+                          "short at three Gain=lo,Volume=lo corners. Warns when used.")
+    ap.add_argument("--max-corners", type=int, default=None,
+                     help="cap the TOTAL corner count, sampling the hypercube deterministically "
+                          "when it does not all fit, instead of abandoning it. Use this rather "
+                          "than --no-full-hypercube for a many-knob device: same budget, but it "
+                          "still reaches mixed corners (a 16-knob config at --max-corners 48 gets "
+                          "13 of them; --no-full-hypercube gets 0).")
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                      help="find_saturation_point sweep ceiling -- the 40V default suits an "
                           "amp; lower it (e.g. 3-5) for a small pedal circuit")
@@ -204,9 +213,9 @@ def main():
                           "effect saturates)")
     ap.add_argument("--sweep-peak-fracs", default="0.25,0.5,0.75,1.0",
                      help="comma list of fractions of the margined max, passed as --sweep-peaks")
-    ap.add_argument("--realistic-peak-frac", type=float, default=1.0,
-                     help="fraction of worst-case onset used for --realistic-peak. Default 1.0 "
-                          "(not less) is load-bearing: check_transient_coverage.py's own default "
+    ap.add_argument("--realistic-peak-frac", type=float, default=1.02,
+                     help="fraction of worst-case onset used for --realistic-peak. Never go BELOW "
+                          "1.0: check_transient_coverage.py's own default "
                           "margin requires transient_peak >= onset AT THE WORST CORNER, and the "
                           "worst corner's own onset IS worst-case onset by definition -- any "
                           "fraction below 1.0 guarantees that check fails there, regardless of "
@@ -215,7 +224,13 @@ def main():
                           "the real-playing content to stay short of the worst corner (e.g. to "
                           "match a case where a real player realistically never drives that hard) "
                           "and are prepared for check_transient_coverage.py to FAIL there as a "
-                          "correct, expected result, not a bug.")
+                          "correct, expected result, not a bug. The default is 1.02 rather than a "
+                          "bare 1.0 because sizing EXACTLY at the measured worst onset leaves zero "
+                          "slack: the coverage check compares transient_peak >= onset, so any "
+                          "re-measurement at a different oversample/margin, or any corner the "
+                          "sizing run did not probe, fails by a hair. Duke of Tone failed exactly "
+                          "that way on 2026-09-04 (8.647 V sized vs 8.766 V found) -- the corner "
+                          "set was the primary bug, but 1.0 left nothing to absorb it.")
     ap.add_argument("--realistic-dur", type=float, default=None)
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="passed through to build_excitation.py. 'auto' uses the derived "
@@ -237,7 +252,8 @@ def main():
     Path(tmp).mkdir(parents=True, exist_ok=True)
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
-                                    full_hypercube=not args.no_full_hypercube, quiet=False,
+                                    full_hypercube=(False if args.no_full_hypercube else None),
+                                    max_corners=args.max_corners, quiet=False,
                                     lead_silence_s=sweep_lead_silence_s)
     print(f"worst-case onset: {worst:.4f} V (across {len(rows)} corners)")
 
@@ -245,6 +261,8 @@ def main():
     fracs = [float(f) for f in args.sweep_peak_fracs.split(",") if f.strip()]
     sweep_peaks = [round(sweep_max * f, 4) for f in fracs]
     realistic_peak = round(worst * args.realistic_peak_frac, 4)
+    # NOTE the default frac is 1.02, not 1.0 -- see --realistic-peak-frac's help for why sizing
+    # EXACTLY at the measured worst is too tight to survive a re-measurement.
     print(f"derived: sweep_peaks={sweep_peaks}  realistic_peak={realistic_peak}  "
           f"(margin={args.margin}x onset)")
 
@@ -268,6 +286,42 @@ def main():
             cmd += ["--synth-burst-dur", str(args.synth_burst_dur)]
     print("running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
+
+    # SIZING PROVENANCE. build_excitation.py records WHAT it built (args, source hash, output
+    # hash); it cannot record WHY those numbers, because the measurement that justified them
+    # happened here. Without this block a later check_transient_coverage.py failure is
+    # unexplainable from the artifacts alone: you see realistic_peak=8.6473 and an onset of
+    # 8.766 V and cannot tell whether the sizing run simply never probed that corner. That is
+    # exactly what happened to Duke of Tone on 2026-09-04 -- sized against the reduced 11-corner
+    # set, checked against the full 25, three mixed Gain=lo,Volume=lo corners missed by 0.3-1.4%
+    # and nothing on disk said the two runs had used different corner sets.
+    recipe_path = Path(args.output).with_suffix(".recipe.json")
+    if recipe_path.exists():
+        try:
+            recipe = json.loads(recipe_path.read_text())
+            recipe["sizing"] = {
+                "tool": "prepare_excitation.py",
+                "worst_case_onset_v": round(float(worst), 4),
+                "corner_count": len(rows),
+                "corner_set": ("structural-only (DEPRECATED --no-full-hypercube: cannot represent "
+                               "mixed low/high corners)" if args.no_full_hypercube
+                               else f"budgeted (--max-corners {args.max_corners})"
+                               if args.max_corners is not None else "full binary hypercube"),
+                "realistic_peak_frac": args.realistic_peak_frac,
+                "sweep_margin": args.margin,
+                "peak_max_v": args.peak_max_v,
+                "onsets_v": {r["corner"]: (None if r["onset_v"] is None else round(float(r["onset_v"]), 4))
+                             for r in rows},
+            }
+            recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
+            print(f"recorded sizing provenance into {recipe_path.name} "
+                  f"(worst {worst:.4f} V across {len(rows)} corners)")
+        except Exception as e:
+            print(f"WARNING: could not record sizing provenance into {recipe_path.name}: {e}",
+                  file=sys.stderr)
+    else:
+        print(f"WARNING: {recipe_path.name} not found after build_excitation.py -- sizing "
+              f"provenance NOT recorded", file=sys.stderr)
 
     print(f"wrote {args.output} -- built from a measured onset (worst-case {worst:.4f} V "
           f"across {len(rows)} corners), not a guess. For ngspice, render with your "

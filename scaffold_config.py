@@ -250,10 +250,18 @@ def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
     cap; a shorter source is left alone rather than padded or otherwise altered.
     """
     info = sf.info(str(real_clip))
+    # NOTE: deliberately does NOT pass --no-full-hypercube. It used to be hardcoded here, which
+    # opted EVERY scaffolded device out of the full-hypercube corner set -- the set that exists
+    # precisely because the structural-only set cannot represent a mixed
+    # some-knobs-low-others-high corner (see check_transient_coverage._corners.__doc__ and the
+    # tweed blowup it records). For a 4-knob pedal that "saving" was 11 corners instead of 25,
+    # and it cost Duke of Tone a failed coverage gate on 2026-09-04: the excitation was sized
+    # from a reduced-set worst onset of 8.647 V, then the full set found 8.766 V.
+    # prepare_excitation.py raises a clear, actionable error above 9 knobs; pass --max-corners
+    # there instead of going back to the blind set.
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
            "--backend", "livespice", "--config", str(config_path),
-           "--real-clip", str(real_clip), "--output", str(output_wav),
-           "--no-full-hypercube"]
+           "--real-clip", str(real_clip), "--output", str(output_wav)]
     if info.duration > realistic_dur_cap:
         print(f"  {real_clip.name} is {info.duration:.1f}s, longer than the "
               f"{realistic_dur_cap:.0f}s realistic-content cap -- truncating to "

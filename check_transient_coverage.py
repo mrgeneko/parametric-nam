@@ -41,6 +41,7 @@ Usage:
 import argparse
 import importlib
 import itertools
+import random
 import json
 import os
 import sys
@@ -59,7 +60,12 @@ from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # 
 SR = 48000
 
 
-def _corners(knob_ranges: dict, full_hypercube: bool = True, max_full_corners: int = 512) -> list:
+DEFAULT_MAX_CORNERS = 512
+
+
+def _corners(knob_ranges: dict, full_hypercube: "bool | None" = None,
+             max_full_corners: int = DEFAULT_MAX_CORNERS,
+             max_corners: "int | None" = None) -> list:
     """Corner set: all-min, all-max, center, each knob solo-extreme (rest at their own
     center), PLUS (if full_hypercube) the full binary hypercube -- every knob independently
     at its own min or max, 2**n corners total (all-min/all-max are 2 of them; deduped below).
@@ -90,21 +96,64 @@ def _corners(knob_ranges: dict, full_hypercube: bool = True, max_full_corners: i
         corners.append((f"{n}=lo-solo", solo_lo))
         corners.append((f"{n}=hi-solo", solo_hi))
 
-    if full_hypercube and names:
-        n_full = 2 ** len(names)
-        if n_full > max_full_corners:
-            raise ValueError(f"full hypercube would be {n_full} corners (> max_full_corners="
-                             f"{max_full_corners}) for {len(names)} knobs -- pass "
-                             f"full_hypercube=False, or raise max_full_corners, explicitly")
-        seen = {tuple(sorted(v.items())) for _, v in corners}
+    if full_hypercube is False:
+        # DEPRECATED. Kept so existing callers keep working, but it is the WORST available
+        # reduction and it warns: the structural set above holds every OTHER knob at CENTER
+        # while moving one, so a mixed some-low-others-high corner is unreachable BY
+        # CONSTRUCTION, no matter how long you run. That is the exact blind spot that shipped
+        # the tweed blowup (see this function's docstring) and, on 2026-09-04, sized Duke of
+        # Tone's excitation 0.3-1.4% short at three Gain=lo,Volume=lo corners. Use max_corners
+        # instead -- it keeps the structural corners AND fills from the hypercube, so it
+        # degrades gracefully instead of going blind.
+        print("WARNING: full_hypercube=False selects the structural-corner set only, which "
+              "cannot represent MIXED some-knobs-low-others-high corners at all. Prefer "
+              "max_corners=N (a budget) -- same cost, not blind. See _corners.__doc__.",
+              file=sys.stderr)
+        return corners
+
+    if not names:
+        return corners
+
+    # NOTE two different bounds, deliberately: max_full_corners bounds the HYPERCUBE portion
+    # (legacy semantics -- its "default 512, i.e. up to 9 knobs" doc counts 2**n only), while
+    # max_corners bounds the TOTAL corner count including the structural ones. Conflating them
+    # would silently drop 9-knob configs that work today.
+    n_full = 2 ** len(names)
+    seen = {tuple(sorted(v.items())) for _, v in corners}
+    fits = (n_full <= max_full_corners) if max_corners is None else (n_full + len(corners) <= max_corners)
+
+    def _add(bits):
+        vals = {n: (hi[n] if b else lo[n]) for n, b in zip(names, bits)}
+        key = tuple(sorted(vals.items()))
+        if key in seen:
+            return False
+        seen.add(key)
+        corners.append((",".join(f"{n}={'hi' if b else 'lo'}" for n, b in zip(names, bits)), vals))
+        return True
+
+    if fits:
         for bits in itertools.product((0, 1), repeat=len(names)):
-            vals = {n: (hi[n] if b else lo[n]) for n, b in zip(names, bits)}
-            key = tuple(sorted(vals.items()))
-            if key in seen:
-                continue
-            seen.add(key)
-            corners.append((",".join(f"{n}={'hi' if b else 'lo'}" for n, b in zip(names, bits)),
-                            vals))
+            _add(bits)
+        return corners
+    budget = max_corners if max_corners is not None else max_full_corners
+    room = max(0, budget - len(corners))
+
+    # Over budget: SAMPLE the hypercube rather than abandon it. Deterministic (fixed seed, so
+    # two runs of two different tools agree on the same corner set), and drawn as raw integers
+    # so this stays cheap for a 16-knob device where materialising 2**16 patterns to shuffle
+    # would be silly. Previously this raised and the caller's only out was full_hypercube=False
+    # -- i.e. the guard against a too-big hypercube pushed you onto the structurally-blind set.
+    if max_corners is None:
+        raise ValueError(
+            f"full hypercube would be {n_full} corners (> max_full_corners={max_full_corners}) "
+            f"for {len(names)} knobs -- pass max_corners=N to sample it instead (recommended), "
+            f"or raise max_full_corners explicitly. full_hypercube=False also works but is "
+            f"structurally blind to mixed corners; see _corners.__doc__.")
+    rng = random.Random(0xC0FFEE)
+    tries = 0
+    while len(corners) < budget and tries < room * 64:
+        tries += 1
+        _add([(rng.randrange(n_full) >> i) & 1 for i in range(len(names))])
     return corners
 
 
@@ -139,7 +188,8 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
 def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict, fixed: dict,
                     transient_peak: float, label: str, margin: float = 1.0,
                     peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
-                    full_hypercube: bool = True, lead_silence_s: float = 0.0) -> dict:
+                    full_hypercube: "bool | None" = None, lead_silence_s: float = 0.0,
+                    max_corners: "int | None" = None) -> dict:
     """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
     vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
     check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
@@ -148,11 +198,11 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
     Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
     couldn't be determined (a render failure is not a pass -- see main()'s same convention).
     """
-    corners = _corners(knob_ranges, full_hypercube=full_hypercube)
+    corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
     if not quiet:
         print(f"Transient saturation coverage: {label}")
         print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners "
-              f"({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)  "
+              f"({'structural-only (DEPRECATED)' if full_hypercube is False else                 f'budgeted, max {max_corners}' if max_corners is not None else                 f'full binary hypercube'} set)  "
               f"margin={margin}x\n")
 
     rows = []
@@ -208,7 +258,7 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
 def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
-                   full_hypercube: bool = True) -> dict:
+                   full_hypercube: "bool | None" = None, max_corners: "int | None" = None) -> dict:
     """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
@@ -218,14 +268,16 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
     cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}"
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
-                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube)
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
+                           max_corners=max_corners)
 
 
 def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, knob_ranges: dict,
                                 fixed: dict, transient_peak: float, margin: float = 1.0,
                                 maxstep: float = 3e-6, parallel_sims: int = 8,
                                 peak_max_v: float = 40.0, no_cache: bool = False,
-                                quiet: bool = False, full_hypercube: bool = True,
+                                quiet: bool = False, full_hypercube: "bool | None" = None,
+                                max_corners: "int | None" = None,
                                 lead_silence_s: float = 3.0) -> dict:
     """[hand-written ngspice-deck path] For a device whose real component (a MOSFET, a real
     BJT) has no .schx model at all -- see render_backends.py's NgspiceBackend and
@@ -240,7 +292,7 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           lead_silence_s=lead_silence_s)
+                           max_corners=max_corners, lead_silence_s=lead_silence_s)
 
 
 def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ranges: dict,
@@ -248,7 +300,7 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                                 maxstep: float = 3e-6, parallel_sims: int = 8,
                                 out_scale: float = 0.05, peak_max_v: float = 40.0,
                                 no_cache: bool = False, quiet: bool = False,
-                                full_hypercube: bool = True) -> dict:
+                                full_hypercube: "bool | None" = None, max_corners: "int | None" = None) -> dict:
     """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
     converge on real playing content at all -- see ltspice_spicelib.py's own docstring.
     `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
@@ -262,7 +314,8 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
     cache_extra = f"maxv={peak_max_v}"
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
-                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube)
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
+                           max_corners=max_corners)
 
 
 def main():
@@ -279,6 +332,12 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--max-corners", type=int, default=None,
+                     help="cap the TOTAL corner count, deterministically sampling the hypercube "
+                          "when it does not all fit, instead of abandoning it. Prefer this to "
+                          "--no-full-hypercube on a many-knob device: same budget, still reaches "
+                          "mixed low/high corners (16 knobs at --max-corners 48 gets 13; "
+                          "--no-full-hypercube gets 0).")
     ap.add_argument("--no-full-hypercube", action="store_true",
                     help="skip the full 2**n min/max hypercube (only the solo + all-min/"
                          "all-max/center corners) -- use for a config with many knobs where "
@@ -329,7 +388,8 @@ def main():
                                              margin=args.margin, maxstep=args.maxstep,
                                              peak_max_v=args.peak_max_v,
                                              no_cache=args.no_cache,
-                                             full_hypercube=not args.no_full_hypercube,
+                                             full_hypercube=(False if args.no_full_hypercube else None),
+                                             max_corners=args.max_corners,
                                              lead_silence_s=args.lead_silence_s)
         schx_or_module = module
     elif backend_name == "ltspice-deck":
@@ -344,7 +404,8 @@ def main():
                                              out_scale=args.out_scale,
                                              peak_max_v=args.peak_max_v,
                                              no_cache=args.no_cache,
-                                             full_hypercube=not args.no_full_hypercube)
+                                             full_hypercube=(False if args.no_full_hypercube else None),
+                                             max_corners=args.max_corners)
         schx_or_module = module
     else:
         schx = str(cfg["schx"])

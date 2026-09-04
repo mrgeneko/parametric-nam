@@ -349,3 +349,63 @@ class TestMainNgspiceDeckDispatch:
         monkeypatch.setattr(_sys, "argv", ["check_transient_coverage.py", "--config", str(config),
                                           "--transient-peak", "1.0"])
         assert main() == 0
+
+
+# ----------------------------------------------------------------- corner-set budget
+#
+# The structural-only set (--no-full-hypercube) holds every OTHER knob at CENTER while moving
+# one, so a mixed some-knobs-low-others-high corner is unreachable BY CONSTRUCTION. That blind
+# spot shipped the tweed blowup, and on 2026-09-04 sized Duke of Tone's excitation short at
+# three Gain=lo,Volume=lo corners. max_corners is the replacement: a budget that keeps the
+# structural corners AND fills from the hypercube, sampling deterministically when it does not
+# all fit -- so it degrades gracefully instead of going blind.
+
+import io
+import contextlib
+from check_transient_coverage import _corners
+
+
+def _ranges(n):
+    return {f"K{i}": [0.2, 0.5, 0.8] for i in range(n)}
+
+
+def _mixed(labels):
+    return [l for l in labels if "=lo" in l and "=hi" in l and "solo" not in l]
+
+
+def test_small_configs_get_the_whole_hypercube_by_default():
+    assert len(_corners(_ranges(4))) == 25          # 16 hypercube + all-min/max/center + 8 solos
+    assert len(_corners(_ranges(5))) == 43
+
+
+def test_nine_knobs_still_allowed_by_default_as_before():
+    # max_full_corners bounds the HYPERCUBE portion (its "512, i.e. up to 9 knobs" doc counts
+    # 2**n only), NOT the total -- conflating them would silently reject configs that work today.
+    assert len(_corners(_ranges(9))) == 512 + 19
+
+
+def test_over_cap_without_a_budget_raises_and_points_at_max_corners():
+    with pytest.raises(ValueError, match="max_corners"):
+        _corners(_ranges(10))
+
+
+def test_max_corners_bounds_the_total_and_is_deterministic():
+    a = [l for l, _ in _corners(_ranges(16), max_corners=48)]
+    b = [l for l, _ in _corners(_ranges(16), max_corners=48)]
+    assert len(a) == 48
+    assert a == b, "two tools sizing/checking the same config must agree on the corner set"
+
+
+def test_budget_still_reaches_mixed_corners_where_the_deprecated_set_never_does():
+    budgeted = [l for l, _ in _corners(_ranges(16), max_corners=48)]
+    with contextlib.redirect_stderr(io.StringIO()):
+        reduced = [l for l, _ in _corners(_ranges(16), full_hypercube=False)]
+    assert len(_mixed(budgeted)) > 0
+    assert len(_mixed(reduced)) == 0, "the deprecated set is structurally blind to mixed corners"
+
+
+def test_deprecated_reduced_set_warns():
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _corners(_ranges(4), full_hypercube=False)
+    assert "max_corners" in err.getvalue()

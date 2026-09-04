@@ -126,7 +126,15 @@ measured one. No other repos are required.
 
 **Before training on it for real** (the bundled Large Muffin example's own config cuts this corner —
 see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
-with `check_transient_coverage.py`. `run_pipeline.py` only checks a **weaker version of this
+with `check_transient_coverage.py`. That verify step is **not** your only protection — the same
+check re-runs as a **hard gate** inside Step 1 below, so a bad excitation cannot reach training
+either way. You run it by hand first because it is a *build* loop: when it fails, the fix is to
+rebuild the excitation (raise `--realistic-peak`, widen the corner set), and doing that iteration
+inside the pipeline means paying Step 0's grid-adequacy renders on every attempt. It is also
+close to free the second time — per-corner saturation onsets cache to
+`~/.cache/parametric-nam/findpeak`, keyed on the `.schx`'s own bytes so an edited circuit
+re-measures automatically — and it is the only place you get to choose `--max-corners`,
+`--margin` and friends, which Step 1 takes as defaults. `run_pipeline.py` only checks a **weaker version of this
 automatically** (Step 0b below, `check_input_headroom.py`) — a WARN-only check at *default*
 (0.5) knob settings, not a hard gate, and not every knob corner. It's not a substitute:
 skipping the full corner-by-corner check is exactly how a real shipped model (the tweed-style amp)
