@@ -395,8 +395,11 @@ def main():
         try:
             cfg.write_text(set_input_line(
                 cfg.read_text(), args.output,
-                f"sized by prepare_excitation.py against this config's grid -- worst-case "
-                f"onset {worst:.4f} V across {len(rows)} corners; see the recipe.json sidecar"))
+                f"sized against this config's grid AS IT WAS -- worst-case onset "
+                f"{worst:.4f} V across {len(rows)} corners (see the recipe.json sidecar). "
+                f"CHANGING THE GRID INVALIDATES THIS: re-run prepare_excitation.py after "
+                f"grid_adequacy.py --apply, or corners the new grid reaches will have no "
+                f"transient content"))
             print(f"updated {cfg.name}: input -> {args.output}")
         except Exception as e:
             print(f"WARNING: could not update {cfg.name}'s `input` -- point it at "

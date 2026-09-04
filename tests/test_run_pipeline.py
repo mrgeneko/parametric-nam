@@ -415,3 +415,15 @@ class TestSetInputLine:
         d = tomllib.loads(out)
         assert d["input"] == "/w/exc.wav"
         assert d["schx"] == "/a/b.schx" and d["oversample"] == 8
+
+    def test_rewriting_twice_leaves_one_input_line(self):
+        """scaffold_config.py used to overwrite the line prepare_excitation.py had just
+        written, replacing its measured onset/corner numbers with something vaguer. Whatever
+        the writer, the file must end up with exactly one `input` key."""
+        t = 'schx = "a.schx"\nbackend = "livespice"\n'
+        out = rp.set_input_line(t, "/w/exc.wav", "onset 20.8276 V across 104 corners")
+        out = rp.set_input_line(out, "/w/exc.wav", "built by the scaffold")
+        assert len([l for l in out.splitlines() if l.startswith("input")]) == 1
+        assert "onset 20.8276" not in out and "built by the scaffold" in out
+        import tomllib
+        assert tomllib.loads(out)["input"] == "/w/exc.wav"

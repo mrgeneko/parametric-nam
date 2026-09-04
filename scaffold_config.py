@@ -461,13 +461,20 @@ def main() -> None:
         ok = _prepare_excitation(output, Path(args.input), excitation_wav,
                                  args.realistic_dur_cap, n_knobs=len(names))
         if ok and excitation_wav.exists():
-            output.write_text(set_input_line(
-                output.read_text(), excitation_wav,
-                f"built by prepare_excitation.py from {Path(args.input).name} -- see its "
-                f"own recipe.json sidecar for the measured saturation onset this was "
-                f"sized from"))
-            print(f"  input -> {excitation_wav} (calibrated; run "
-                  f"check_transient_coverage.py against {output} to verify independently)")
+            # prepare_excitation.py already pointed `input` here, and its line carries the
+            # measured worst-case onset and corner count that this function does not have.
+            # Rewriting it from out here just replaced those numbers with something vaguer.
+            # Verify instead -- a config still naming the raw sweep is a silent trap, since
+            # the raw sweep is a perfectly valid wav that simply never saturates the circuit.
+            if str(excitation_wav) not in output.read_text():
+                output.write_text(set_input_line(output.read_text(), excitation_wav))
+                print(f"  NOTE: pointed `input` at {excitation_wav.name} from the scaffold "
+                      f"(prepare_excitation.py did not)")
+            print(f"  input -> {excitation_wav}\n"
+                  f"  PROVISIONAL: sized against the PLACEHOLDER grid above. Re-run "
+                  f"prepare_excitation.py after grid_adequacy.py --apply settles the real "
+                  f"grid -- refining it changes the corner set, and so the worst-case onset "
+                  f"the excitation has to reach.")
         else:
             print(f"  WARNING: prepare_excitation.py failed or produced no output -- "
                   f"leaving `input` pointed at the raw {args.input}. "

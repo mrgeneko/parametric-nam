@@ -29,6 +29,9 @@ Does four things you would otherwise do by hand:
   which is too low for most real circuits.
 - **Guesses each knob's kind** (`drive`/`hi`/`lo`/`mid`/`rms`) from its name.
 - **Builds a first excitation** via `prepare_excitation.py` and points `input` at it.
+  This one is **provisional** — it is sized against the placeholder grid written moments
+  earlier, which step 3 is about to change. Step 4 replaces it. The scaffold says so when
+  it finishes.
 
 `--write-backend-sidecar` writes `<stem>.backends.toml` if the backend *diverges* while
 measuring oversample. That verdict is a measurement — the scaffold just watched the circuit
