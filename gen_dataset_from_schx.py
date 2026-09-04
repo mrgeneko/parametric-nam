@@ -454,6 +454,17 @@ class Result:
     # next person deserves to know it without re-deriving it.
     rung: int = 0
     settings: str = ""
+    # WHAT THE ORACLE SAID WHILE SUCCEEDING. livespice_cli runs LiveSPICE's own ConsoleLog at
+    # MessageType.Warning, and those warnings are emitted on a ZERO exit -- so until now every
+    # one was captured into `stderr` and thrown away. The two that matter:
+    #     "Failed to find partition initial conditions, simulation may be unstable."
+    #     "Warning: Unconnected terminal '<node>'"
+    # The first is the solver saying it is not confident in an answer it is about to hand you.
+    # The second is a SCHEMATIC defect -- a dangling terminal -- which is a different and
+    # arguably worse thing to discover from a trained model rather than from the render.
+    # Recorded per row because it is a property of THE DATA: "this combination rendered, but
+    # the solver was uneasy at this corner" is exactly what the next person needs.
+    warnings: str = ""
 
 
 # Single-sample solver-overshoot spike detector (see _finalize_wav). A sample is flagged as a spike
@@ -984,6 +995,93 @@ def _run_with_stall_detect(proc, base_timeout_s: float):
     return "".join(out_buf), "".join(err_buf)
 
 
+# livespice_cli prints an informational banner (Input/Format/Circuit/Output) on every run.
+# Warnings are anything that is not that -- LiveSPICE's own ConsoleLog at MessageType.Warning.
+_BANNER = re.compile(r"^\s*(Input|Format|Circuit|Output|PROGRESS|note):", re.I)
+
+
+def _oracle_warnings(stderr: str) -> str:
+    """LiveSPICE's own warnings from a SUCCESSFUL render, as one line.
+
+    A zero exit is not silence. `livespice_cli` runs LiveSPICE at MessageType.Warning, and the
+    warnings that matter arrive on runs that otherwise succeed:
+
+        "Failed to find partition initial conditions, simulation may be unstable."
+            -- the solver saying it is not confident in the answer it is handing you. Duke of
+               Tone's three real wiring bugs were each found through this message.
+        "Warning: Unconnected terminal '<node>'"
+            -- a SCHEMATIC defect, not a solver one, and a worse thing to learn about from a
+               trained model than from the render that produced it.
+
+    Deliberately NOT a failure. Some are benign, and promoting a warning to an error would make
+    a dataset unbuildable over a deprecated symbol. The point is that it stops being invisible:
+    it lands in params.csv next to the combination it happened on.
+
+    NOTE it will not catch every wrong answer. The fuzz pedal renders at exit 0, finite, with
+    RMS 1738 where a correct render is ~0.03, and says NOTHING -- LiveSPICE is confident and
+    wrong. Warnings catch the cases where the solver knows it struggled; the silent ones still
+    need a second backend to disagree.
+    """
+    if not stderr:
+        return ""
+    keep = [ln.strip() for ln in stderr.splitlines()
+            if ln.strip() and not _BANNER.match(ln)]
+    return " | ".join(dict.fromkeys(keep))[:300]
+
+
+def _report_oracle_warnings(out_dir: Path) -> None:
+    """Surface what the oracle warned about on renders that SUCCEEDED.
+
+    These land in params.csv per row, but a column nobody opens is barely better than the
+    /dev/null they used to go to -- every warning on every zero-exit render was captured into
+    `stderr` and dropped. Summarised here, grouped, with the combination count, because the
+    shape matters: one corner warning is a corner to look at, and 600 of 648 warning is a
+    circuit to look at.
+    """
+    csv_path = out_dir / "params.csv"
+    if not csv_path.exists():
+        return
+    try:
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return
+    groups: dict = {}
+    for r in rows:
+        w = (r.get("warnings") or "").strip()
+        if w:
+            groups.setdefault(w, []).append(r.get("idx"))
+    if not groups:
+        return
+    total = sum(len(v) for v in groups.values())
+    print(f"\nORACLE WARNINGS on {total}/{len(rows)} combination(s) that otherwise SUCCEEDED.")
+    print("  These renders produced output and exited 0 -- the solver simply was not quiet "
+          "about it.")
+    for w, idxs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        shown = ", ".join(str(i) for i in idxs[:6]) + (" ..." if len(idxs) > 6 else "")
+        print(f"  [{len(idxs):>4}] {w[:150]}")
+        print(f"         idx: {shown}")
+    if any("unstable" in w.lower() for w in groups):
+        print("  'simulation may be unstable' means the solver could not find partition initial "
+              "conditions. On this fleet that has meant a real wiring defect as often as a stiff "
+              "circuit -- worth probing intermediate nodes before trusting these combinations.")
+    if any("unconnected" in w.lower() for w in groups):
+        print("  'Unconnected terminal' is a SCHEMATIC defect, not a solver one. Fix the .schx.")
+
+
+def _params_header(knobs: list) -> list:
+    """The params.csv column order, defined ONCE.
+
+    There are two writers -- the fresh-file path and the repair path that prepends a header to
+    a headerless CSV left by an interrupted run -- and they were two separate literals. Adding
+    a column to one would give a repaired file a header narrower than its own rows, which
+    nothing downstream would notice until a reader silently mis-associated every field.
+    """
+    return (["idx"] + list(knobs) +
+            ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver",
+             "warnings"])
+
+
 def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                  backend: str, circuit: str = None, schx: str = None,
                  param_map: dict = None, fixed_params: str = None,
@@ -1056,6 +1154,9 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 return Result(idx, error=f"timeout after {timeout_s}s")
             if proc.returncode != 0:
                 return Result(idx, error=stderr[:500])
+            # Zero exit is NOT silence. Keep whatever the oracle warned about; _finalize_wav
+            # threads it onto the Result below.
+            warned = _oracle_warnings(stderr)
             dsp = proc_t = -1.0
             for line in stdout.splitlines():
                 if "DSP load:" in line:
@@ -1065,8 +1166,10 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         finally:
             with _procs_lock:
                 _active_procs.discard(proc)
-        return _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
-                             warmup_s=warmup_s)
+        res = _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
+                            warmup_s=warmup_s)
+        res.warnings = warned
+        return res
 
     except Exception as e:
         return Result(idx, error=str(e)[:500])
@@ -2684,8 +2787,7 @@ def main():
             print(f"WARNING: {csv_path} exists but has no header (stale/interrupted prior run?) "
                   f"-- repairing in place (prepending the header, keeping existing rows)",
                   file=sys.stderr)
-            header = ",".join(["idx"] + knobs +
-                              ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver"])
+            header = ",".join(_params_header(knobs))
             csv_path.write_text(header + "\n" + existing_body)
             fresh = False  # header now written by the repair above; append normally from here
     csv_fh = open(csv_path, "a", newline="")
@@ -2694,8 +2796,7 @@ def main():
         # `rung` / `solver` say WHAT IT TOOK to converge this combination. That is a property of
         # the DATA, not of the run: "high gain needed 4x oversampling" is exactly what the next
         # person needs and would otherwise have to rediscover.
-        csv_w.writerow(["idx"] + knobs +
-                       ["dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung", "solver"])
+        csv_w.writerow(_params_header(knobs))
 
     existing = {int(p.stem) for p in (out_dir / "sig").rglob("*.npy")} if (out_dir / "sig").exists() else set()
     to_run = [(i, p) for i, p in enumerate(combos) if i not in existing]
@@ -2771,7 +2872,7 @@ def main():
             p = combos[idx]
             row = ([idx] + [p[k] for k in knobs] +
                    [r.dsp_load, r.proc_time, f"{r.rms:.6f}", f"{r.peak:.6f}", int(r.ok), r.error,
-                    r.rung, r.settings])
+                    r.rung, r.settings, r.warnings])
             csv_w.writerow(row)
             csv_fh.flush()
             status = "OK" if r.ok else "FAIL"
@@ -2831,6 +2932,8 @@ def main():
                       args.fixed_params, args.speaker,
                       _rung0.get("oversample", args.oversample),
                       _rung0.get("iterations", 8), workers=args.workers)
+
+    _report_oracle_warnings(out_dir)
 
     print(f"\nPost-process with:  python gen_dataset_from_schx.py --combine {out_dir}")
 

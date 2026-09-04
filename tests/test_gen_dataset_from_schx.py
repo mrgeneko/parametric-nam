@@ -539,3 +539,63 @@ def test_a_correct_sidecar_lints_clean(tmp_path):
     with pytest.raises(SystemExit):
         _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "diverges" }\n'), ap=ap)
     # blocked on the verdict, with no lint noise
+
+
+# ------------------------------------------ what the oracle said while SUCCEEDING
+#
+# livespice_cli runs LiveSPICE's own ConsoleLog at MessageType.Warning, and the warnings that
+# matter arrive on renders that exit 0:
+#     "Failed to find partition initial conditions, simulation may be unstable."
+#     "Warning: Unconnected terminal '<node>'"
+# _render_once captured stderr and then used it ONLY on a non-zero exit, so every one of these
+# was dropped. The first is the solver saying it is not confident in the answer it is handing
+# you -- Duke of Tone's three real wiring bugs were each found through that message. The second
+# is a schematic defect, and a far worse thing to learn about from a trained model.
+
+_BANNER_STDERR = ("Input:    h1k.wav\n"
+                  "Format:   48000 Hz, 1 ch, 32-bit float\n"
+                  "Circuit:  Some Pedal  (oversample 4x)\n"
+                  "Output:   /tmp/x.wav  (144000 samples)\n")
+
+
+def test_a_clean_render_reports_no_warnings():
+    # The banner is printed on every run; treating it as a warning would make the signal
+    # useless by firing on everything.
+    assert g._oracle_warnings(_BANNER_STDERR) == ""
+
+
+def test_the_micro_sign_note_is_not_a_warning():
+    # livespice_cli's own "note:" about normalising U+00B5 is informational.
+    err = _BANNER_STDERR + "note: normalising U+00B5 MICRO SIGN -> U+03BC GREEK MU\n"
+    assert g._oracle_warnings(err) == ""
+
+
+def test_the_solver_saying_it_may_be_unstable_is_kept():
+    err = _BANNER_STDERR + "Failed to find partition initial conditions, simulation may be unstable.\n"
+    assert "may be unstable" in g._oracle_warnings(err)
+
+
+def test_an_unconnected_terminal_is_kept():
+    err = _BANNER_STDERR + "Warning: Unconnected terminal 'n_bout'\n"
+    assert "Unconnected terminal" in g._oracle_warnings(err)
+
+
+def test_repeated_warnings_are_collapsed():
+    err = _BANNER_STDERR + ("Warning: Unconnected terminal 'n_x'\n" * 5)
+    assert g._oracle_warnings(err).count("Unconnected") == 1
+
+
+def test_a_kept_warning_would_be_classed_as_a_convergence_concern():
+    # The existing classifier already matches "unstable" -- it just never saw the text, because
+    # nothing on the success path passed it along.
+    err = _BANNER_STDERR + "Failed to find partition initial conditions, simulation may be unstable.\n"
+    assert g._is_convergence_failure(g._oracle_warnings(err))
+
+
+def test_params_header_is_defined_once_for_both_writers():
+    # Two literals existed: the fresh-file writer and the repair path that prepends a header to
+    # a headerless CSV. Adding a column to one would give a repaired file a header narrower
+    # than its own rows, and a reader would silently mis-associate every field after it.
+    h = g._params_header(["Gain", "Tone"])
+    assert h[:3] == ["idx", "Gain", "Tone"]
+    assert h[-1] == "warnings"
