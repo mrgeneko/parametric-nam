@@ -69,7 +69,8 @@ sys.path.insert(0, str(HERE))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
-from find_saturation_point import find_saturation_point, _linear_region_top, findpeak_cache_key  # noqa: E402
+from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
+                                   findpeak_cache_key, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 from knob_classify import classify as _classify_by_name  # noqa: E402
 
@@ -205,6 +206,11 @@ def main():
                           "ngspice decks conventionally pass an explicit value, e.g. 1.0)")
     ap.add_argument("--seconds", type=float, default=10.0, help="probe-input length")
     ap.add_argument("--esr-dead", type=float, default=1e-3)
+    ap.add_argument("--keep-scratch", action="store_true",
+                    help="keep this run's intermediate renders instead of deleting them on "
+                         "exit (they go to ~/.cache/parametric-nam/preflight_scratch). For debugging "
+                         "a bad render; off by default because these are write-only files "
+                         "nothing reads back.")
     ap.add_argument("--dir-margin", type=float, default=0.05,
                      help="min relative metric change to call a direction (else inconclusive)")
     ap.add_argument("--eq-check-drive-level", type=float, default=0.1,
@@ -251,8 +257,7 @@ def main():
 
     hard_fail, warn = [], []
     report = {"backend": args.backend, "knobs": {}, "input_calibration": {}}
-    scratch = os.path.join(os.path.expanduser("~/.cache/parametric-nam/preflight_scratch"))
-    Path(scratch).mkdir(parents=True, exist_ok=True)
+    scratch = str(scratch_dir("preflight", args.keep_scratch))
 
     x, sr = sf.read(args.input, dtype="float32")
     if x.ndim > 1: x = x[:, 0]

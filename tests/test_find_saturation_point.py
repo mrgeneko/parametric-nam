@@ -7,6 +7,8 @@ ceiling/onset selection, failure handling -- is tested independently of any circ
 
 See find_saturation_point.py, preflight.py, prepare_excitation.py.
 """
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -212,3 +214,59 @@ class TestFindpeakCacheKey:
         assert path.suffix == ".json"
         assert path.parent == tmp_path / ".cache" / "parametric-nam" / "findpeak"
         assert path.parent.is_dir()
+
+
+class TestScratchDir:
+    """Scratch must not survive the process that made it.
+
+    preflight.py and prepare_excitation.py wrote their intermediate renders to
+    ~/.cache/parametric-nam/<tool>_scratch and never cleaned them, next to the real
+    content-keyed caches. They reached 123 MB of write-only files under fixed names, for
+    devices long finished. These pin the distinction so it can't drift back.
+    """
+
+    def _child(self, body, tmp_path):
+        """Run `body` in a real subprocess -- atexit cleanup only happens on interpreter exit,
+        so an in-process test would prove nothing."""
+        import subprocess, sys, textwrap
+        code = textwrap.dedent(f"""
+            import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
+            from pathlib import Path
+            from find_saturation_point import scratch_dir
+            {body}
+        """)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           env={**os.environ, "HOME": str(tmp_path)})
+        assert r.returncode == 0, r.stderr
+        return r
+
+    def test_it_is_removed_when_the_process_exits(self, tmp_path):
+        r = self._child('d = scratch_dir("t"); (d / "probe.wav").write_bytes(b"x" * 10);'
+                        ' print(d)', tmp_path)
+        d = Path(r.stdout.strip().splitlines()[-1])
+        assert not d.exists(), f"scratch survived the process: {d}"
+
+    def test_it_is_removed_even_when_the_tool_exits_nonzero_paths(self, tmp_path):
+        """Both callers are long main()s full of sys.exit() -- the case a `with` block around
+        one call site would have missed."""
+        r = self._child('d = scratch_dir("t"); print(d); '
+                        'import sys; sys.exit(0)', tmp_path)
+        assert not Path(r.stdout.strip().splitlines()[-1]).exists()
+
+    def test_it_is_not_inside_the_cache_directory(self, tmp_path):
+        """The bug was scratch living next to findpeak/gridadq, which made 'clear the cache'
+        and 'clear dead scratch' the same destructive gesture."""
+        r = self._child('print(scratch_dir("t"))', tmp_path)
+        d = Path(r.stdout.strip().splitlines()[-1])
+        assert ".cache/parametric-nam" not in str(d), \
+            f"scratch must not live among the real caches: {d}"
+
+    def test_keep_scratch_keeps_it_at_a_predictable_path(self, tmp_path):
+        """--keep-scratch exists to be looked at afterwards, so it must both survive AND be
+        somewhere findable -- not a random tempdir name printed once and lost."""
+        r = self._child('d = scratch_dir("t", keep=True); (d / "probe.wav").write_bytes(b"x");'
+                        ' print(d)', tmp_path)
+        d = Path(r.stdout.strip().splitlines()[-1])
+        assert d.exists() and (d / "probe.wav").exists(), "--keep-scratch must not clean up"
+        assert d == tmp_path / ".cache" / "parametric-nam" / "t_scratch"
+        assert "keep" in r.stderr.lower(), "keeping scratch should say so on stderr"

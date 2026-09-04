@@ -48,7 +48,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
 from check_transient_coverage import _corners, _sample_interior  # noqa: E402
-from find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
+from find_saturation_point import find_saturation_point, findpeak_cache_key, scratch_dir  # noqa: E402
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
@@ -193,6 +193,11 @@ def main():
                      help="[ngspice-deck] silence prepended before each saturation-sweep probe tone "
                           "-- see this repo's README ('Known issue: excitation needs a silent "
                           "lead-in')")
+    ap.add_argument("--keep-scratch", action="store_true",
+                    help="keep this run's intermediate renders instead of deleting them on "
+                         "exit (they go to ~/.cache/parametric-nam/prepare_excitation_scratch). For debugging "
+                         "a bad render; off by default because these are write-only files "
+                         "nothing reads back.")
     ap.add_argument("--out-scale", type=float, default=0.05,
                      help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
                           "ltspice_spicelib.py's docstring")
@@ -282,8 +287,7 @@ def main():
     backend, identity, cache_extra, knob_ranges, fixed, sweep_lead_silence_s, label = _setup(args)
 
     print(f"finding saturation onset across the knob-grid corners of {label}...")
-    tmp = os.path.expanduser("~/.cache/parametric-nam/prepare_excitation_scratch")
-    Path(tmp).mkdir(parents=True, exist_ok=True)
+    tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                     full_hypercube=(False if args.no_full_hypercube else None),

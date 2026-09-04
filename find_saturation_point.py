@@ -28,8 +28,12 @@ Usage:
                                     lead_silence_s=3.0, max_v=5.0)
     # {'ceiling_rms':..., 'ceiling_at_input_v':..., 'onset_99pct_input_v':..., 'curve':[(v,rms),...]}
 """
+import atexit
 import hashlib
 import math
+import shutil
+import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -136,6 +140,35 @@ def _linear_region_top(curve, tol=0.05):
             break
         top = a
     return top
+
+
+def scratch_dir(tool: str, keep: bool = False) -> Path:
+    """A scratch directory for one run's intermediate renders, deleted when the process exits.
+
+    SCRATCH IS NOT CACHE, and the distinction is the whole point of this helper. A cache
+    (findpeak_cache_key above, grid_adequacy's gridadq) is content-keyed, read back on a later
+    run, and worth keeping. Scratch is write-only intermediate renders under fixed names --
+    nothing ever reads them again. preflight.py and prepare_excitation.py used to drop theirs
+    in ~/.cache/parametric-nam/<tool>_scratch, next to the real caches and never cleaned, where
+    they quietly reached 123 MB of files for devices nobody was working on any more.
+
+    Cleanup is registered with atexit rather than a `with` block because both callers are long
+    single-function CLIs with many sys.exit() paths; atexit covers every one of them, including
+    an unhandled exception. It does NOT cover SIGKILL, which is the accepted gap -- the previous
+    behaviour did not clean up on ANY exit.
+
+    `keep` (wired to --keep-scratch) skips both the cleanup and the tempdir, using a stable
+    predictable path instead, because the reason to keep scratch is to go and look at it.
+    """
+    if keep:
+        d = Path.home() / ".cache" / "parametric-nam" / f"{tool}_scratch"
+        d.mkdir(parents=True, exist_ok=True)
+        print(f"--keep-scratch: intermediate renders kept in {d} (not cleaned up)",
+              file=sys.stderr)
+        return d
+    d = Path(tempfile.mkdtemp(prefix=f"parametric-nam-{tool}-"))
+    atexit.register(shutil.rmtree, d, ignore_errors=True)
+    return d
 
 
 def findpeak_cache_key(identity_bytes, params, extra):
