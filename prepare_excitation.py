@@ -16,10 +16,14 @@ determined, rather than silently building against a partial result -- same "refu
 convention as preflight.py/check_transient_coverage.py.
 
 After building, running check_transient_coverage.py (livespice or --backend ngspice-deck) is
-still worth doing as an independent gate before training -- this tool derives its levels FROM
-the same onset numbers such a check would verify against, so a clean result is expected, not a
-coincidence, but it isn't a substitute for actually checking. This is only true at
---realistic-peak-frac's default of 1.0 (not less) -- see that flag's own help text.
+still worth doing as an independent gate before training -- and it is a REAL gate, not a
+formality. This tool derives its levels from onset numbers measured at a SET OF PROBED POINTS,
+and onset is not monotonic in the knobs, so the grid's true worst corner need not be one of
+them: Mesa Dual Rectifier ORANGE's worst (23.177 V, Bass=min with the others centred) is 1.27x
+the highest of all 32 hypercube vertices. --realistic-peak-frac (default 1.3) buys headroom
+against that; --sample-grid N buys coverage of it. A clean check is expected, not guaranteed --
+and both Mesa channels FAILED one on 2026-09-04 against an excitation whose peak was
+hand-picked rather than measured at all.
 
 Usage:
   livespice: python prepare_excitation.py --backend livespice \\
@@ -43,14 +47,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
-from check_transient_coverage import _corners  # noqa: E402
+from check_transient_coverage import _corners, _sample_interior  # noqa: E402
 from find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
-                      lead_silence_s=0.0, max_corners=None):
+                      lead_silence_s=0.0, max_corners=None, sample_grid=0):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -59,6 +63,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     different question). Raises if any corner's onset couldn't be determined -- see module
     docstring's "refuse to guess"."""
     corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
+    corners = _sample_interior(knob_ranges, corners, sample_grid)
     if not quiet:
         print(f"  {len(corners)} corners ({'full binary hypercube' if full_hypercube else 'reduced hypercube'} set)")
     rows = []
@@ -191,6 +196,12 @@ def main():
                           "some-knobs-low-others-high corner AT ALL -- the blind spot that shipped "
                           "the tweed blowup and, on 2026-09-04, sized Duke of Tone's excitation "
                           "short at three Gain=lo,Volume=lo corners. Warns when used.")
+    ap.add_argument("--sample-grid", type=int, default=0, metavar="N",
+                     help="ALSO probe N points from the full grid product, not just the min/max "
+                          "hypercube -- see check_transient_coverage.py's _sample_interior for "
+                          "the Mesa Orange case where the true worst onset sits 27%% above every "
+                          "vertex, at Bass=min with the other knobs CENTRED. Deterministic, so a "
+                          "later coverage check probes the same points.")
     ap.add_argument("--max-corners", type=int, default=None,
                      help="cap the TOTAL corner count, sampling the hypercube deterministically "
                           "when it does not all fit, instead of abandoning it. Use this rather "
@@ -213,7 +224,7 @@ def main():
                           "effect saturates)")
     ap.add_argument("--sweep-peak-fracs", default="0.25,0.5,0.75,1.0",
                      help="comma list of fractions of the margined max, passed as --sweep-peaks")
-    ap.add_argument("--realistic-peak-frac", type=float, default=1.02,
+    ap.add_argument("--realistic-peak-frac", type=float, default=1.3,
                      help="fraction of worst-case onset used for --realistic-peak. Never go BELOW "
                           "1.0: check_transient_coverage.py's own default "
                           "margin requires transient_peak >= onset AT THE WORST CORNER, and the "
@@ -224,13 +235,23 @@ def main():
                           "the real-playing content to stay short of the worst corner (e.g. to "
                           "match a case where a real player realistically never drives that hard) "
                           "and are prepared for check_transient_coverage.py to FAIL there as a "
-                          "correct, expected result, not a bug. The default is 1.02 rather than a "
-                          "bare 1.0 because sizing EXACTLY at the measured worst onset leaves zero "
-                          "slack: the coverage check compares transient_peak >= onset, so any "
-                          "re-measurement at a different oversample/margin, or any corner the "
-                          "sizing run did not probe, fails by a hair. Duke of Tone failed exactly "
-                          "that way on 2026-09-04 (8.647 V sized vs 8.766 V found) -- the corner "
-                          "set was the primary bug, but 1.0 left nothing to absorb it.")
+                          "correct, expected result, not a bug.\n"
+                          "The default is 1.3, and the history is worth knowing. It was 1.0 -- "
+                          "sizing EXACTLY at the measured worst onset -- which leaves zero slack "
+                          "against a check comparing transient_peak >= onset, so any "
+                          "re-measurement at a different oversample, or any corner the sizing run "
+                          "did not probe, fails by a hair; Duke of Tone did exactly that on "
+                          "2026-09-04 (8.647 V sized, 8.766 V found). 1.02 fixed the hair. It "
+                          "does NOT fix the real hazard, which is the measured worst being below "
+                          "the TRUE worst: onset is not monotonic in the knobs, so its maximum "
+                          "over the grid need not sit at any probed point. Measured the same day "
+                          "on Mesa Dual Rectifier ORANGE -- true worst 23.177 V at Bass=min with "
+                          "every other knob CENTRED, 1.27x the highest of all 32 hypercube "
+                          "vertices (18.232 V). 1.3 covers that observed ratio from vertex data "
+                          "alone, at no extra probing cost. It is insurance, not a substitute for "
+                          "--sample-grid: a hotter excitation drives every ALREADY-covered corner "
+                          "further into saturation, so do not inflate it beyond what the "
+                          "non-monotonicity actually demands.")
     ap.add_argument("--realistic-dur", type=float, default=None)
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="passed through to build_excitation.py. 'auto' uses the derived "
@@ -253,7 +274,8 @@ def main():
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                     full_hypercube=(False if args.no_full_hypercube else None),
-                                    max_corners=args.max_corners, quiet=False,
+                                    max_corners=args.max_corners, sample_grid=args.sample_grid,
+                                    quiet=False,
                                     lead_silence_s=sweep_lead_silence_s)
     print(f"worst-case onset: {worst:.4f} V (across {len(rows)} corners)")
 

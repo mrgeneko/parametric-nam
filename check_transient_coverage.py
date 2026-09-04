@@ -65,7 +65,8 @@ DEFAULT_MAX_CORNERS = 512
 
 def _corners(knob_ranges: dict, full_hypercube: "bool | None" = None,
              max_full_corners: int = DEFAULT_MAX_CORNERS,
-             max_corners: "int | None" = None) -> list:
+             max_corners: "int | None" = None,
+             sample_grid: int = 0) -> list:
     """Corner set: all-min, all-max, center, each knob solo-extreme (rest at their own
     center), PLUS (if full_hypercube) the full binary hypercube -- every knob independently
     at its own min or max, 2**n corners total (all-min/all-max are 2 of them; deduped below).
@@ -89,12 +90,31 @@ def _corners(knob_ranges: dict, full_hypercube: "bool | None" = None,
     hi = {n: max(vs) for n, vs in knob_ranges.items()}
     mid = {n: vs[len(vs) // 2] for n, vs in knob_ranges.items()}   # nearest-to-center grid point
 
-    corners = [("all-min", dict(lo)), ("all-max", dict(hi)), ("center", dict(mid))]
+    # Structural corners are DEDUPED, not just the hypercube ones below. `mid` is the
+    # nearest-to-centre GRID POINT, so on an even-cardinality axis it is not central: for a
+    # 2-value axis [0.2, 0.8] it picks index 1, i.e. the MAX -- which makes that axis's
+    # "hi-solo" bit-identical to "center". Measured on Mesa Dual Rectifier (2026-09-04):
+    # center, Bass=hi-solo, Mid=hi-solo and Treble=hi-solo all returned onset 14.041 V,
+    # because they were the same knob setting sweep-probed four times. Three wasted onset
+    # sweeps out of 43, on a run where each costs ~50s. Deduping is the conservative fix;
+    # redefining `mid` would change which point "centre" means for every device.
+    corners = []
+    seen_struct = set()
+    def _push(label, vals):
+        key = tuple(sorted(vals.items()))
+        if key in seen_struct:
+            return
+        seen_struct.add(key)
+        corners.append((label, vals))
+
+    _push("all-min", dict(lo))
+    _push("all-max", dict(hi))
+    _push("center", dict(mid))
     for n in names:
         solo_lo = dict(mid); solo_lo[n] = lo[n]
         solo_hi = dict(mid); solo_hi[n] = hi[n]
-        corners.append((f"{n}=lo-solo", solo_lo))
-        corners.append((f"{n}=hi-solo", solo_hi))
+        _push(f"{n}=lo-solo", solo_lo)
+        _push(f"{n}=hi-solo", solo_hi)
 
     if full_hypercube is False:
         # DEPRECATED. Kept so existing callers keep working, but it is the WORST available
@@ -157,6 +177,43 @@ def _corners(knob_ranges: dict, full_hypercube: "bool | None" = None,
     return corners
 
 
+def _sample_interior(knob_ranges: dict, corners: list, n_points: int) -> list:
+    """Add n_points drawn from the FULL grid product, not just its min/max hypercube.
+
+    Corners -- vertices, solos, all-min/all-max, center -- are a heuristic, and the Mesa
+    Dual Rectifier proved on 2026-09-04 that they are not sufficient in principle: the
+    ORANGE channel's highest saturation onset (23.177 V, at Bass=min with every other knob
+    at its CENTRE grid value) is 27% above the highest of all 32 hypercube vertices
+    (18.232 V). Onset is not monotonic in the knobs, so its maximum over the box need not
+    sit at a vertex, and vertex enumeration cannot find it. The solo corners happened to
+    catch that one; nothing guarantees the next circuit's maximum lies on a solo axis
+    either.
+
+    Probing the whole grid would guarantee it and is not worth it: 648 points at the
+    measured ~1.2 points/min is ~9 hours per channel, before every render, to choose one
+    scalar. A bounded deterministic sample gets most of the protection at a cost the caller
+    picks. Deterministic (fixed seed) so a sizing run and a later checking run agree on the
+    same points.
+    """
+    names = list(knob_ranges.keys())
+    if not names or n_points <= 0:
+        return corners
+    seen = {tuple(sorted(v.items())) for _, v in corners}
+    rng = random.Random(0x5EED)
+    added = 0
+    for _ in range(n_points * 64):
+        if added >= n_points:
+            break
+        vals = {k: rng.choice(list(vs)) for k, vs in knob_ranges.items()}
+        key = tuple(sorted(vals.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        corners.append((",".join(f"{k}={vals[k]:g}" for k in names), vals))
+        added += 1
+    return corners
+
+
 def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
     recipe_path = input_wav.with_suffix(".recipe.json")
     if not recipe_path.exists():
@@ -189,7 +246,7 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     transient_peak: float, label: str, margin: float = 1.0,
                     peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                     full_hypercube: "bool | None" = None, lead_silence_s: float = 0.0,
-                    max_corners: "int | None" = None) -> dict:
+                    max_corners: "int | None" = None, sample_grid: int = 0) -> dict:
     """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
     vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
     check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
@@ -198,7 +255,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
     Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
     couldn't be determined (a render failure is not a pass -- see main()'s same convention).
     """
-    corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
+    corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners, sample_grid=sample_grid)
+    corners = _sample_interior(knob_ranges, corners, sample_grid)
     if not quiet:
         print(f"Transient saturation coverage: {label}")
         print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners "
@@ -258,7 +316,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
 def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
-                   full_hypercube: "bool | None" = None, max_corners: "int | None" = None) -> dict:
+                   full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
+                   sample_grid: int = 0) -> dict:
     """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
@@ -269,7 +328,7 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners)
+                           max_corners=max_corners, sample_grid=sample_grid)
 
 
 def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, knob_ranges: dict,
@@ -277,7 +336,7 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
                                 maxstep: float = 3e-6, parallel_sims: int = 8,
                                 peak_max_v: float = 40.0, no_cache: bool = False,
                                 quiet: bool = False, full_hypercube: "bool | None" = None,
-                                max_corners: "int | None" = None,
+                                max_corners: "int | None" = None, sample_grid: int = 0,
                                 lead_silence_s: float = 3.0) -> dict:
     """[hand-written ngspice-deck path] For a device whose real component (a MOSFET, a real
     BJT) has no .schx model at all -- see render_backends.py's NgspiceBackend and
@@ -292,7 +351,7 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, lead_silence_s=lead_silence_s)
+                           max_corners=max_corners, sample_grid=sample_grid, lead_silence_s=lead_silence_s)
 
 
 def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ranges: dict,
@@ -300,7 +359,8 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                                 maxstep: float = 3e-6, parallel_sims: int = 8,
                                 out_scale: float = 0.05, peak_max_v: float = 40.0,
                                 no_cache: bool = False, quiet: bool = False,
-                                full_hypercube: "bool | None" = None, max_corners: "int | None" = None) -> dict:
+                                full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
+                   sample_grid: int = 0) -> dict:
     """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
     converge on real playing content at all -- see ltspice_spicelib.py's own docstring.
     `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
@@ -315,7 +375,7 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners)
+                           max_corners=max_corners, sample_grid=sample_grid)
 
 
 def main():
@@ -332,6 +392,14 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--sample-grid", type=int, default=0, metavar="N",
+                    help="ALSO probe N points drawn from the full grid product, not just the "
+                         "min/max hypercube. Corners are a heuristic: Mesa Orange's highest "
+                         "onset sits at Bass=min with every other knob CENTRED, 27%% above the "
+                         "best of all 32 vertices, because onset is not monotonic in the knobs. "
+                         "Deterministic, so a sizing run and a later check agree. Costs about "
+                         "one render-sweep per point -- budget it, do not probe the whole grid "
+                         "(648 points is ~9h on a full amp, for one scalar).")
     ap.add_argument("--max-corners", type=int, default=None,
                      help="cap the TOTAL corner count, deterministically sampling the hypercube "
                           "when it does not all fit, instead of abandoning it. Prefer this to "
@@ -390,6 +458,7 @@ def main():
                                              no_cache=args.no_cache,
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
+                                             sample_grid=args.sample_grid,
                                              lead_silence_s=args.lead_silence_s)
         schx_or_module = module
     elif backend_name == "ltspice-deck":
@@ -405,7 +474,8 @@ def main():
                                              peak_max_v=args.peak_max_v,
                                              no_cache=args.no_cache,
                                              full_hypercube=(False if args.no_full_hypercube else None),
-                                             max_corners=args.max_corners)
+                                             max_corners=args.max_corners,
+                                             sample_grid=args.sample_grid)
         schx_or_module = module
     else:
         schx = str(cfg["schx"])

@@ -409,3 +409,64 @@ def test_deprecated_reduced_set_warns():
     with contextlib.redirect_stderr(err):
         _corners(_ranges(4), full_hypercube=False)
     assert "max_corners" in err.getvalue()
+
+
+# ------------------------------------------------------------- interior grid sampling
+#
+# Corners are a heuristic, and Mesa Dual Rectifier ORANGE proved on 2026-09-04 that they are
+# not sufficient in principle: its highest saturation onset (23.177 V, at Bass=min with every
+# OTHER knob at its centre grid value) is 27% above the highest of all 32 hypercube vertices
+# (18.232 V). Onset is not monotonic in the knobs, so its maximum over the box need not sit at
+# a vertex, and vertex enumeration cannot find it. --sample-grid buys bounded coverage of the
+# interior; probing all 648 points would guarantee it at ~9h per channel, which is not worth
+# paying before every render to choose one scalar.
+
+from check_transient_coverage import _sample_interior
+
+
+def _grid():
+    return {"Gain": [0.1, 0.35, 0.5, 0.8, 1.0], "Master": [0.1, 0.35, 0.5, 0.8, 1.0],
+            "Bass": [0.2, 0.8], "Mid": [0.2, 0.8], "Treble": [0.2, 0.8]}
+
+
+def test_sampling_adds_the_requested_number_of_points():
+    base = _corners(_grid())
+    got = _sample_interior(_grid(), list(base), 20)
+    assert len(got) == len(base) + 20
+
+
+def test_sampled_points_reach_values_no_corner_can():
+    # The whole point: corners only ever use each knob's min or max (plus centre). A sampled
+    # point may use ANY grid value, which is where Orange's true worst onset lived.
+    base = _corners(_grid())
+    sampled = _sample_interior(_grid(), list(base), 40)[len(base):]
+    mids = {0.35, 0.8}          # Gain/Master values that are neither min nor max
+    assert any(v["Gain"] in mids or v["Master"] in mids for _, v in sampled)
+
+
+def test_sampling_is_deterministic_so_sizing_and_checking_agree():
+    a = [l for l, _ in _sample_interior(_grid(), list(_corners(_grid())), 20)]
+    b = [l for l, _ in _sample_interior(_grid(), list(_corners(_grid())), 20)]
+    assert a == b
+
+
+def test_sampling_never_duplicates_an_existing_corner():
+    base = _corners(_grid())
+    got = _sample_interior(_grid(), list(base), 30)
+    keys = [tuple(sorted(v.items())) for _, v in got]
+    assert len(keys) == len(set(keys))
+
+
+def test_zero_is_a_no_op():
+    base = _corners(_grid())
+    assert len(_sample_interior(_grid(), list(base), 0)) == len(base)
+
+
+def test_structural_corners_are_deduped_on_an_even_cardinality_axis():
+    # `mid` is the nearest-to-centre GRID POINT, so on a 2-value axis it picks the MAX and
+    # that axis's hi-solo becomes bit-identical to centre. Mesa Dual Rectifier probed the
+    # same setting four times (center + Bass/Mid/Treble hi-solo), all returning 14.041 V.
+    grid = {"Gain": [0.1, 0.5, 1.0], "Bass": [0.2, 0.8], "Mid": [0.2, 0.8]}
+    got = _corners(grid)
+    keys = [tuple(sorted(v.items())) for _, v in got]
+    assert len(keys) == len(set(keys)), "an onset sweep is expensive; never probe one twice"
