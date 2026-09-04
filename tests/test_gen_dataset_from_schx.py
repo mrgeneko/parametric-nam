@@ -500,3 +500,42 @@ def test_refusal_names_the_sidecar_not_a_private_repo(tmp_path):
         _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "no" }\n'), ap=ap)
     assert "Mine.backends.toml" in ap.errors[0]
     assert "parametric-devices" not in ap.errors[0]
+
+
+# ---- the sidecar is HAND-WRITTEN, so lint it -------------------------------------------------
+#
+# Nothing generates these files and nothing can: a verdict records what a SIMULATOR can and
+# cannot do, which is not derivable from a .schx. So the realistic failure is a typo, and both
+# typos are silent in the worst way -- a misspelt BACKEND key reads as "no verdict, assumed
+# valid" (indistinguishable from an uncharacterised device), and a misspelt VALID key makes the
+# author's own "this backend is invalid" text print as an ordinary approving note while the
+# backend is allowed through.
+
+def test_misspelt_backend_key_is_flagged_as_a_dead_verdict(tmp_path):
+    out = _run(_sidecar(tmp_path, 'livespcie = { valid = false, reason = "x" }\n'))
+    assert "typo for 'livespice'" in out and "DEAD" in out
+
+
+def test_misspelt_valid_key_is_flagged(tmp_path):
+    # The nastier one: without this the reason prints as an approval.
+    out = _run(_sidecar(tmp_path, 'livespice = { vaild = false, reason = "x" }\n'))
+    assert "unknown key 'vaild'" in out and "assumed VALID" in out
+
+
+def test_a_valid_value_that_is_neither_bool_nor_partial_is_flagged(tmp_path):
+    out = _run(_sidecar(tmp_path, 'livespice = { valid = "no", reason = "x" }\n'))
+    assert "neither true, false nor" in out
+
+
+def test_a_backend_this_script_cannot_render_is_not_a_typo(tmp_path):
+    # ltspice verdicts are recorded for the deck tooling; --backend here is cpp/livespice/
+    # ngspice. An unknown key must not be flagged unless it LOOKS like a known one.
+    out = _run(_sidecar(tmp_path, 'ltspice = { valid = true, reason = "shipping backend" }\n'))
+    assert "WARNING" not in out
+
+
+def test_a_correct_sidecar_lints_clean(tmp_path):
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        _run(_sidecar(tmp_path, 'livespice = { valid = false, reason = "diverges" }\n'), ap=ap)
+    # blocked on the verdict, with no lint noise

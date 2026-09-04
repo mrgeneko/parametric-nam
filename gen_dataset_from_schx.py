@@ -217,7 +217,56 @@ def check_backend(schx: Path, backend: str, ap) -> None:
               f"parse ({e}). Nothing is checking whether {backend!r} suits this circuit.",
               file=sys.stderr)
         return
+    _lint_backend_sidecar(spec_all, sidecar.name)
     return _apply_backend_verdict(spec_all, backend, schx.stem, sidecar.name, ap)
+
+
+# Backends that may legitimately appear as a key. Not all are renderable by THIS script
+# (--backend is cpp/livespice/ngspice); ltspice/*-deck verdicts are recorded for the deck
+# tooling, so an unknown key is not by itself an error.
+_KNOWN_BACKENDS = ("livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
+_VERDICT_KEYS = ("valid", "reason")
+
+
+def _lint_backend_sidecar(specs: dict, name: str) -> None:
+    """Warn about a sidecar that parses but cannot do its job.
+
+    These files are HAND-WRITTEN -- nothing generates them, because a verdict records what a
+    SIMULATOR can and cannot do and that cannot be derived from a .schx. So the failure mode is
+    a typo, and both typos are silent in the worst way:
+
+      livespcie = { valid = false }   -> "records no verdict for livespice, assumed valid",
+                                         indistinguishable from an uncharacterised device
+      livespice = { vaild = false }   -> valid defaults to True, and the reason is printed as
+                                         an ordinary approving note, so it looks like the gate
+                                         ran and passed the circuit
+
+    The second is nastier: the author's own "this backend is invalid" text is displayed while
+    the backend is allowed. Typo-matching rather than unknown-key-rejection, so a legitimate
+    key this script does not render (ltspice) is not flagged.
+    """
+    import difflib
+    for key, spec in specs.items():
+        if key not in _KNOWN_BACKENDS:
+            near = difflib.get_close_matches(key, _KNOWN_BACKENDS, n=1, cutoff=0.8)
+            if near:
+                print(f"WARNING: {name} declares a backend {key!r}, which looks like a typo for "
+                      f"{near[0]!r}. As written this verdict is DEAD -- nothing reads it, and "
+                      f"{near[0]!r} is left assumed-valid.", file=sys.stderr)
+            continue
+        if not isinstance(spec, dict):
+            continue
+        for k in spec:
+            if k not in _VERDICT_KEYS:
+                near = difflib.get_close_matches(k, _VERDICT_KEYS, n=1, cutoff=0.7)
+                hint = f" (typo for {near[0]!r}?)" if near else ""
+                print(f"WARNING: {name} [{key}] has unknown key {k!r}{hint}. Only "
+                      f"{', '.join(_VERDICT_KEYS)} are read; if you meant to declare validity, "
+                      f"this backend is currently assumed VALID.", file=sys.stderr)
+        v = spec.get("valid", True)
+        if not (isinstance(v, bool) or (isinstance(v, str) and v.strip().lower() == "partial")):
+            print(f"WARNING: {name} [{key}] has valid={v!r}, which is neither true, false nor "
+                  f"\"partial\". Any other truthy value is treated as VALID.", file=sys.stderr)
 
 
 def _apply_backend_verdict(specs: dict, backend: str, label: str, source: str, ap) -> None:
