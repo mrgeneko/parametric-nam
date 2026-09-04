@@ -56,6 +56,16 @@ class Worker:
         self.failed = 0
         self.busy = False
         self.secs = 0.0        # cumulative render time, for the throughput report
+        # QUARANTINE. A worker that fails FAST is worse than one that is merely slow: it drains
+        # the queue faster than healthy workers can take work, and with a small --retries every
+        # chunk it touches twice is dead. Measured on the Duke of Tone 252-combination run
+        # (2026-09-04): worker4 could not import the transient-coverage gate (missing spicelib in
+        # its venv), failed in under a second, and killed 27 of 31 chunks in ~70s while four
+        # healthy machines completed 4 between them. Consecutive failures, reset by any success --
+        # so a machine with one flaky chunk is not punished, but a systematically broken one gets
+        # benched instead of eating the run.
+        self.consec_fail = 0
+        self.quarantined = False
 
     @property
     def rate(self):
@@ -74,6 +84,60 @@ class Worker:
         return r.returncode, dt, (r.stdout + r.stderr)
 
 
+
+def _warn_chunk_aliasing(gen_args, chunks):
+    """Warn when --chunks shares a factor with a knob axis, freezing that knob inside every shard.
+
+    Modulo sharding takes every index where idx % chunks == k. The knob grid is a product with
+    the LAST knob varying fastest, so an axis of cardinality c is constant within every shard
+    whenever c divides chunks -- the shard steps by `chunks`, which is a whole number of that
+    axis's cycles, so it lands on the same value every time.
+
+    That does not corrupt anything: the union of shards is still the whole grid, and every
+    combination is rendered exactly once. What it breaks is gen_dataset_from_schx.py's own
+    per-shard KNOB SENSITIVITY check, which measures each knob's effect across the rows it can
+    see. A frozen knob shows 0.00% spread and is reported as
+        WARNING <knob>: RMS varies only 0.00% -- knob may have no effect (check param_map name)
+    which reads exactly like a dead knob or a param_map typo. Duke of Tone hit this on
+    2026-09-04: --chunks 32 against a 4-value Volume axis (4 | 32) froze Volume in all 32 shards
+    and cried wolf on a knob that had just been measured moving output by 28x.
+
+    A chunk count coprime with every axis cardinality avoids it -- a prime is the easy answer.
+    """
+    ranges = []
+    for i, a in enumerate(gen_args):
+        if a == "--range" and i + 1 < len(gen_args):
+            ranges.append(gen_args[i + 1])
+        elif a.startswith("--range="):
+            ranges.append(a.split("=", 1)[1])
+    axes = []
+    for r in ranges:
+        if "=" not in r:
+            continue
+        name, vals = r.split("=", 1)
+        n_vals = len([v for v in vals.split(",") if v.strip()])
+        if n_vals >= 2:
+            axes.append((name, n_vals))
+    if not axes:
+        return
+    frozen = [(n, c) for n, c in axes if chunks % c == 0]
+    if not frozen:
+        return
+    log("WARNING chunk-count aliasing: --chunks %d is divisible by %s"
+        % (chunks, ", ".join(f"{n}'s {c} values" for n, c in frozen)))
+    log("        Those knobs are CONSTANT inside every shard, so each shard's own "
+        "knob-sensitivity check goes blind and reports them as 0.00% / 'may have no effect'.")
+    log("        The dataset itself is unaffected -- every combination is still rendered once.")
+    total_grid = 1
+    for _, c in axes:
+        total_grid *= c
+    for cand in range(chunks, chunks + 24):
+        if all(cand % c for _, c in axes):
+            log(f"        Use --chunks {cand} instead (coprime with every axis; "
+                f"~{total_grid / cand:.1f} combinations per chunk).")
+            break
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -90,6 +154,11 @@ def main():
                          "possible -- a chunk that fails on one machine and succeeds on another "
                          "is a machine problem, not a data problem, and the resume-skip means "
                          "the retry only renders what is still missing (default 1)")
+    ap.add_argument("--quarantine-after", type=int, default=3,
+                    help="bench a worker after this many CONSECUTIVE failures with no successes "
+                         "(default 3). A fast-failing worker drains the queue faster than healthy "
+                         "ones can take work -- see Worker's quarantine comment for the run where "
+                         "one killed 27 of 31 chunks in ~70s. 0 disables.")
     ap.add_argument("--", dest="_sep", nargs="?", help=argparse.SUPPRESS)
     args, gen_args = ap.parse_known_args()
     if gen_args and gen_args[0] == "--":
@@ -101,10 +170,13 @@ def main():
     workers = [Worker(w) for w in args.worker]
     queue = deque(f"{i}-{i}/{args.chunks}" for i in range(args.chunks))
     attempts = {c: 0 for c in queue}
+    tried_on = {c: set() for c in queue}   # chunk -> hosts that have already failed it
     lock = threading.Lock()
     total = len(queue)
     completed = failed_final = 0
     t_start = time.time()
+
+    _warn_chunk_aliasing(gen_args, args.chunks)
 
     log(f"{total} chunks over {len(workers)} worker(s): "
         + ", ".join(f"{w.host}(par={w.parallel})" for w in workers))
@@ -113,9 +185,25 @@ def main():
         nonlocal completed, failed_final
         while True:
             with lock:
-                if not queue:
+                if w.quarantined or not queue:
                     return
-                chunk = queue.popleft()
+                # Honour the retry contract the docstring already promises -- "on a DIFFERENT
+                # worker where possible". Appending to the back of the queue does not achieve
+                # that by itself: a worker failing in under a second grabs the chunk again
+                # before anyone else is free. Skip past chunks this host has already failed,
+                # and only fall back to one of them if nothing else is left.
+                chunk = None
+                for _ in range(len(queue)):
+                    cand = queue.popleft()
+                    if w.host in tried_on.get(cand, ()):
+                        queue.append(cand)
+                        continue
+                    chunk = cand
+                    break
+                if chunk is None:
+                    if not queue:
+                        return
+                    chunk = queue.popleft()
                 attempts[chunk] = attempts.get(chunk, 0) + 1
                 n_try = attempts[chunk]
             w.busy = True
@@ -123,11 +211,22 @@ def main():
             w.busy = False
             with lock:
                 if rc == 0:
+                    w.consec_fail = 0
                     w.done += 1; completed += 1
                     log(f"  {w.host:<10} chunk {chunk:<10} OK   {dt/60:5.1f} min   "
                         f"[{completed + failed_final}/{total}]")
                 else:
                     w.failed += 1
+                    w.consec_fail += 1
+                    tried_on.setdefault(chunk, set()).add(w.host)
+                    if (args.quarantine_after and w.done == 0
+                            and w.consec_fail >= args.quarantine_after):
+                        w.quarantined = True
+                        log(f"  {w.host:<10} QUARANTINED after {w.consec_fail} consecutive "
+                            f"failures and no successes -- draining the queue, not doing work. "
+                            f"Remaining chunks go to the other workers. Last error:")
+                        for line in out.strip().splitlines()[-4:]:
+                            log(f"      {line[:110]}")
                     if n_try <= args.retries:
                         queue.append(chunk)   # back of the queue: likely a different worker
                         log(f"  {w.host:<10} chunk {chunk:<10} FAIL rc={rc} -- requeued "
