@@ -483,7 +483,9 @@ def main():
         result = check_coverage(schx, knob_ranges, fixed, oversample, transient_peak,
                                 margin=args.margin, iterations=args.iterations,
                                 peak_max_v=args.peak_max_v, no_cache=args.no_cache,
-                                full_hypercube=not args.no_full_hypercube)
+                                full_hypercube=(False if args.no_full_hypercube else None),
+                                max_corners=args.max_corners,
+                                sample_grid=args.sample_grid)
         schx_or_module = schx
 
     if args.json:

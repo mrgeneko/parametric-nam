@@ -470,3 +470,26 @@ def test_structural_corners_are_deduped_on_an_even_cardinality_axis():
     got = _corners(grid)
     keys = [tuple(sorted(v.items())) for _, v in got]
     assert len(keys) == len(set(keys)), "an onset sweep is expensive; never probe one twice"
+
+
+def test_every_backend_branch_forwards_the_corner_selection_flags():
+    """--max-corners and --sample-grid must reach ALL THREE backend branches.
+
+    They did not: when --max-corners was added, the ngspice-deck and ltspice-deck call
+    sites were updated and the LIVESPICE one -- the primary backend -- was missed, because
+    its formatting differed and a blind string replace did not match it. The flag parsed,
+    documented itself in --help, and was silently ignored on the path almost every device
+    uses. Caught only when --sample-grid 40 came back reporting 25 corners.
+
+    Asserting on the source text is crude, but the alternative is driving main() with a
+    real config and a real oracle, and a silently-dropped kwarg is exactly the failure a
+    cheap check catches.
+    """
+    import inspect
+    import check_transient_coverage as m
+    src = inspect.getsource(m)
+    for entry in ("check_coverage(", "check_coverage_ngspice_deck(", "check_coverage_ltspice_deck("):
+        i = src.index("result = " + entry)
+        call = src[i:src.index(")\n", i) + 1]
+        assert "max_corners=args.max_corners" in call, f"{entry} drops --max-corners"
+        assert "sample_grid=args.sample_grid" in call, f"{entry} drops --sample-grid"
