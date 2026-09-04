@@ -502,8 +502,48 @@ def sig_path(out_dir: Path, idx: int) -> Path:
     return out_dir / "sig" / f"{idx // 100:02d}" / f"{idx:06d}.npy"
 
 
+def rail_bound(schx_path: str) -> "float | None":
+    """Largest output RMS this circuit could physically produce, in wav units. None if unknown.
+
+    EVERY OTHER INTEGRITY CHECK HERE IS SCALE-INVARIANT, and that is not an accident -- crest
+    factor is peak/RMS, the spike detector compares a sample to its neighbours and to the
+    combination's own p99, and the silence check is a floor. Multiply a whole waveform by
+    58,000 and not one of them moves. So the fleet's worst SILENT failure sails through: the
+    fuzz pedal renders at exit 0, finite, crest normal, no spikes, RMS 1738 where a correct
+    render (confirmed on another backend) is ~0.03.
+
+    A supply rail is the one ABSOLUTE bound available, and it is per-circuit rather than an
+    arbitrary number: a circuit cannot SUSTAIN more output than its own supply. Sustained, not
+    peak -- inductive kickback and transformer ringing can push a peak past the rail for an
+    instant, so this bounds RMS, which nothing physical can.
+
+    Deliberately conservative, and it will miss things:
+      * an amp with an output transformer produces output well BELOW its rail (the SVT's
+        theoretical ceiling is 49 V rms from a 695 V supply), so a moderately wrong render
+        there still passes. This catches catastrophe, not inaccuracy.
+      * a circuit with no Rail component gets no bound at all.
+    Measured margins on real renders: Duke 0.2 V against a 9 V rail, Mesa Orange 8.6 V against
+    450 V. The failure it catches is 193x over.
+
+    Units: the .schx's Speaker declares V0dBFS, so volts = wav x V0dBFS. Most of this fleet
+    uses 1 V, but a few preamps normalise with 100-120 V, and ignoring that would flag them
+    wrongly.
+    """
+    try:
+        text = Path(schx_path).read_text()
+    except Exception:
+        return None
+    rails = [abs(float(m.group(1)))
+             for m in re.finditer(r'Circuit\.Rail[^/]*?Voltage="(-?[\d.]+)\s*V?"', text)]
+    if not rails:
+        return None
+    m = re.search(r'Circuit\.Speaker[^/]*?V0dBFS="(-?[\d.]+)\s*V?"', text)
+    v0 = float(m.group(1)) if m else 1.0
+    return max(rails) / v0 if v0 > 0 else None
+
+
 def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc_t=-1.0,
-                   warmup_s=1.0):
+                   warmup_s=1.0, rail_rms=None):
     """Read out_wav, run integrity + crest checks, save .npy. Shared by all backends."""
     sig, sr = sf.read(str(out_wav))
     sig = sig.astype(np.float32)
@@ -527,6 +567,12 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
         return Result(idx, error=f"silent WAV: RMS={rms:.2e}")
     # Crest factor (peak/RMS) is a scale-invariant divergence detector: clean audio
     # sits <~10, numerical runaway spikes to tens–thousands. Fail those.
+    # ABSOLUTE bound, where every check above and below is relative. See rail_bound().
+    if rail_rms and rms > rail_rms:
+        out_wav.unlink(missing_ok=True)
+        return Result(idx, error=f"output exceeds the supply rail: RMS={rms:.4g} > {rail_rms:.4g} "
+                                 f"(circuit's own max rail / speaker V0dBFS). A circuit cannot "
+                                 f"SUSTAIN more than its supply -- this render is wrong, not loud")
     crest = peak / (rms + 1e-9)
     if max_crest > 0 and crest > max_crest:
         out_wav.unlink(missing_ok=True)
@@ -848,7 +894,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 speaker: str = None, expected_frames: int = 0,
                 timeout_s: int = 1200, oversample: int = 2,
                 max_crest: float = 0.0, ng: dict = None,
-                warmup_s: float = 1.0, no_retry: bool = False,
+                warmup_s: float = 1.0, no_retry: bool = False, rail_rms: float = None,
                 start_rung: int = 0) -> Result:
     """Render one combination, ESCALATING THE SOLVER when it fails to converge.
 
@@ -879,7 +925,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         r = _render_once(idx, params, out_dir, input_wav, backend, circuit, schx,
                          param_map, fixed_params, speaker, expected_frames, timeout_s,
                          os_i, max_crest, ng_i, warmup_s,
-                         iterations=rung.get("iterations"))
+                         iterations=rung.get("iterations"), rail_rms=rail_rms)
         if r.ok:
             r.rung, r.settings = i, (_rung_str(rung) if i else "")
             if i and i > start:
@@ -1088,7 +1134,8 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                  speaker: str = None, expected_frames: int = 0,
                  timeout_s: int = 1200, oversample: int = 2,
                  max_crest: float = 0.0, ng: dict = None,
-                 warmup_s: float = 1.0, iterations: int = None) -> Result:
+                 warmup_s: float = 1.0, iterations: int = None,
+                 rail_rms: float = None) -> Result:
     path = sig_path(out_dir, idx)
     out_wav = path.with_suffix(".wav")
 
@@ -1097,7 +1144,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             err = _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                param_map, fixed_params, ng or {})
             return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest,
-                                        warmup_s=warmup_s)
+                                        warmup_s=warmup_s, rail_rms=rail_rms)
 
         if backend == "cpp":
             args = [str(HARNESS), "--input", str(input_wav), "--output", str(out_wav),
@@ -1167,7 +1214,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             with _procs_lock:
                 _active_procs.discard(proc)
         res = _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
-                            warmup_s=warmup_s)
+                            warmup_s=warmup_s, rail_rms=rail_rms)
         res.warnings = warned
         return res
 
@@ -2327,6 +2374,13 @@ def main():
                          "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "
                          "build_excitation.py's --realistic-peak). Required for the transient "
                          "check unless a recipe sidecar exists.")
+    ap.add_argument("--skip-rail-check", action="store_true",
+                    help="skip the supply-rail bound on output RMS. That bound is the ONLY "
+                         "absolute check here -- crest factor, the spike detector and the "
+                         "silence floor are all scale-invariant, so a uniformly-wrong render "
+                         "(the fuzz pedal's RMS 1738 where correct is 0.03) passes every one of "
+                         "them. Skip only if your .schx declares rails that are not the output "
+                         "stage's supply.")
     ap.add_argument("--transient-sample-grid", type=int, default=None, metavar="N",
                     help="interior grid points the transient gate probes ON TOP of the corner "
                          "set. Default: the same knob-count-scaled budget scaffold_config.py "
@@ -2859,6 +2913,7 @@ def main():
                         args.fixed_params, args.speaker, audio_frames, timeout_s,
                         args.oversample, args.max_crest, ng,
                         warmup_s=args.skip_warmup_s, no_retry=args.no_retry,
+                        rail_rms=(None if args.skip_rail_check else rail_bound(schx)),
                         start_rung=max(args.start_rung, prev_rungs.get(i, 0))): i
             for i, p in to_run
         }

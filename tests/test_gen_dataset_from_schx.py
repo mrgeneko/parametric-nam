@@ -599,3 +599,67 @@ def test_params_header_is_defined_once_for_both_writers():
     h = g._params_header(["Gain", "Tone"])
     assert h[:3] == ["idx", "Gain", "Tone"]
     assert h[-1] == "warnings"
+
+
+# ------------------------------------------------- the one ABSOLUTE integrity bound
+#
+# Every other check in _finalize_wav is scale-invariant BY DESIGN: crest factor is peak/RMS,
+# the spike detector compares a sample to its neighbours and to the combination's own p99, the
+# silence check is a floor. Multiply a waveform by 58,000 and none of them move -- which is
+# exactly what the fuzz pedal does (exit 0, finite, crest normal, RMS 1738 where a correct
+# render is ~0.03). A supply rail is the one absolute bound available, and it is per-circuit
+# rather than an arbitrary number: nothing can SUSTAIN more output than its own supply.
+
+def _schx_with(tmp_path, rails, v0dbfs="1 V", name="R.schx"):
+    parts = ['<?xml version="1.0"?>', "<Schematic>"]
+    for v in rails:
+        parts.append(f'<Component _Type="Circuit.Rail, Circuit, Version=1.0.0.0" Voltage="{v}" />')
+    parts.append(f'<Component _Type="Circuit.Speaker, Circuit, Version=1.0.0.0" V0dBFS="{v0dbfs}" />')
+    parts.append("</Schematic>")
+    p = tmp_path / name
+    p.write_text("\n".join(parts))
+    return p
+
+
+def test_bound_is_the_largest_rail(tmp_path):
+    assert g.rail_bound(str(_schx_with(tmp_path, ["9 V"]))) == 9.0
+    assert g.rail_bound(str(_schx_with(tmp_path, ["450 V", "-51 V"]))) == 450.0
+
+
+def test_bound_is_scaled_by_the_speakers_v0dbfs(tmp_path):
+    # volts = wav x V0dBFS. A preamp normalised at 100 V would be flagged wrongly without this:
+    # its 420 V rail is 4.2 in wav units, not 420.
+    assert g.rail_bound(str(_schx_with(tmp_path, ["420 V"], v0dbfs="100 V"))) == 4.2
+
+
+def test_no_rail_means_no_bound(tmp_path):
+    # Absence of evidence: a circuit that declares no supply gets no absolute check, rather
+    # than a made-up one.
+    assert g.rail_bound(str(_schx_with(tmp_path, []))) is None
+
+
+def test_a_missing_schx_does_not_raise(tmp_path):
+    assert g.rail_bound(str(tmp_path / "nope.schx")) is None
+
+
+def test_rms_above_the_rail_is_rejected(tmp_path):
+    import soundfile as sf
+    import numpy as np
+    wav = tmp_path / "out.wav"
+    # subtype FLOAT: livespice_cli writes 32-bit float, and the default PCM_16 would CLIP the
+    # very level under test to 1.0 -- which is how this test first "passed" the check it was
+    # written to trip.
+    sf.write(str(wav), np.full(48000, 1738.0, dtype=np.float32), 48000, subtype="FLOAT")
+    r = g._finalize_wav(0, tmp_path / "0.npy", wav, 0, 0.0, warmup_s=0.0, rail_rms=9.0)
+    assert not r.ok and "exceeds the supply rail" in r.error
+
+
+def test_a_normal_render_passes_the_rail_bound(tmp_path):
+    import soundfile as sf
+    import numpy as np
+    wav = tmp_path / "out.wav"
+    sr = 48000
+    sig = (0.2 * np.sin(2 * np.pi * 200 * np.arange(sr) / sr)).astype(np.float32)
+    sf.write(str(wav), sig, sr)
+    r = g._finalize_wav(0, tmp_path / "0.npy", wav, 0, 0.0, warmup_s=0.0, rail_rms=9.0)
+    assert r.ok, r.error
