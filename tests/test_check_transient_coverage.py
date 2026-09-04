@@ -493,3 +493,20 @@ def test_every_backend_branch_forwards_the_corner_selection_flags():
         call = src[i:src.index(")\n", i) + 1]
         assert "max_corners=args.max_corners" in call, f"{entry} drops --max-corners"
         assert "sample_grid=args.sample_grid" in call, f"{entry} drops --sample-grid"
+
+
+def test_the_gate_and_the_sizer_share_one_budget_definition():
+    """The pipeline's transient gate must never probe less than the sizing that fed it.
+
+    prepare_excitation (via scaffold_config) probes corners PLUS a knob-count-scaled number
+    of interior grid points, because onset is not monotonic in the knobs. The gate inside
+    gen_dataset_from_schx probed corners ONLY until 2026-09-04, so an excitation sized
+    against 104 points was re-checked against 40 -- a verifier weaker than its own input,
+    which reads as confirmation while actually checking less.
+
+    Asserting they are the SAME OBJECT, not merely equal: two copies that agree today can
+    drift, and the drift would be silent and in the dangerous direction.
+    """
+    import scaffold_config
+    import check_transient_coverage as ctc
+    assert scaffold_config._interior_sample_budget is ctc.interior_sample_budget

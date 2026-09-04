@@ -64,6 +64,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import parse_schx_controls
 from measure_truncation import measure, probe_clips
 from knob_classify import classify  # noqa: E402
+# ONE definition, shared with gen_dataset_from_schx.py's transient gate. If the sizer and
+# the gate computed this separately they could drift, and a gate weaker than the sizing
+# that fed it is worse than no gate: it reads as confirmation while checking less.
+from check_transient_coverage import interior_sample_budget as _interior_sample_budget  # noqa: E402
 
 DEFAULT_REALISTIC_DUR_CAP = 150.0
 
@@ -228,28 +232,6 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
     return chosen, comment
 
 
-def _interior_sample_budget(n_knobs: int) -> int:
-    """How many FULL-GRID points to probe on top of the corner set, from the knob count.
-
-    Corners are a heuristic and Mesa Dual Rectifier ORANGE showed they are not sufficient in
-    principle: its highest saturation onset (23.177 V, at Bass=min with every OTHER knob at
-    its CENTRE grid value) is 1.27x the highest of all 32 hypercube vertices. Onset is not
-    monotonic in the knobs, so its maximum over the grid need not sit at a vertex.
-    --realistic-peak-frac's 1.3 buys headroom against that; only probing the interior
-    actually MEASURES it.
-
-    Scaled at ~1.5x the corner count (2*n+3 structural + 2**n hypercube), because that is
-    what the corner set already costs -- so sizing gets meaningfully better coverage for
-    roughly 1.5x the probe time it was already paying, not an open-ended bill. Capped at 64:
-    beyond that the marginal point buys little and a full amp's onset sweep is ~50s, so the
-    cap is what keeps a 6-knob device's sizing from quietly turning into an hour.
-    Probing every grid point WOULD guarantee it and is not worth it -- 648 points at a
-    measured ~1.2/min is ~9h per channel, before every render, to choose one scalar.
-    """
-    if n_knobs <= 0:
-        return 0          # no grid to sample; also the default when a caller omits n_knobs
-    corners = 2 * n_knobs + 3 + 2 ** n_knobs
-    return min(64, int(corners * 1.5))
 
 
 def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,

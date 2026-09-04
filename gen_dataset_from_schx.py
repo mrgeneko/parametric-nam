@@ -2127,6 +2127,13 @@ def main():
                          "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "
                          "build_excitation.py's --realistic-peak). Required for the transient "
                          "check unless a recipe sidecar exists.")
+    ap.add_argument("--transient-sample-grid", type=int, default=None, metavar="N",
+                    help="interior grid points the transient gate probes ON TOP of the corner "
+                         "set. Default: the same knob-count-scaled budget scaffold_config.py "
+                         "hands prepare_excitation, so the gate is never weaker than the sizing "
+                         "that produced the excitation it is checking. 0 disables (corners only "
+                         "-- the pre-2026-09-04 behaviour, which could pass an excitation the "
+                         "sizing step would have rejected).")
     ap.add_argument("--transient-margin", type=float, default=1.0,
                     help="transient check: require transient-peak >= per-corner onset * this "
                          "(default 1.0 = must just reach onset)")
@@ -2398,7 +2405,8 @@ def main():
     # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
     if not args.skip_transient_check and args.backend == "livespice" and not args.random:
-        from check_transient_coverage import check_coverage, _transient_peak_from_recipe
+        from check_transient_coverage import (check_coverage, _transient_peak_from_recipe,
+                                              interior_sample_budget as _interior_budget)
         transient_peak = args.transient_peak
         if transient_peak is None:
             transient_peak = _transient_peak_from_recipe(in_wav)
@@ -2411,8 +2419,19 @@ def main():
         fixed_kv = {}
         for kv in filter(None, (s.strip() for s in (args.fixed_params or "").split(","))):
             k, v = kv.split("="); fixed_kv[k.strip()] = float(v)
+        # SAMPLE THE GRID INTERIOR, matching what sized the excitation. The sizing path
+        # (scaffold_config -> prepare_excitation --sample-grid) probes interior points because
+        # onset is NOT monotonic in the knobs: Mesa Dual Rectifier ORANGE's true worst onset
+        # sits at Bass=min with every OTHER knob CENTRED, 1.27x the highest of all 32 hypercube
+        # vertices. This gate used to probe corners ONLY, which made the VERIFIER weaker than
+        # the sizer that fed it -- an excitation sized against 104 points was re-checked against
+        # 40, so the gate could pass something the sizing step would have caught. A gate weaker
+        # than its own input is worse than no gate, because it reads as confirmation.
+        sample_grid = (args.transient_sample_grid if args.transient_sample_grid is not None
+                       else _interior_budget(len(values_per_knob)))
         result = check_coverage(schx, values_per_knob, fixed_kv,
-                                args.oversample, transient_peak, margin=args.transient_margin)
+                                args.oversample, transient_peak, margin=args.transient_margin,
+                                sample_grid=sample_grid)
         print()
         if not result["ok"]:
             print("Transient check FAILED -- refusing to start generation (--skip-transient-check "
