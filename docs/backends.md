@@ -44,7 +44,7 @@ high-gain amp head) where LiveSPICE's fixed-step solver diverges or needs extrem
 oversampling. It translates any `.schx` to an ngspice netlist (exact Dempwolf–Zölzer /
 Koren tube models, E+F ideal transformer) and feeds the input via an XSPICE filesource.
 Tuning knobs for stiff amps: `--koren`, `--ot-damp`, `--ot-snub`, `--nfb-comp`.
-See **[`ngspice/README.md`](ngspice/README.md)** for usage, the convergence findings,
+See **[`ngspice/README.md`](../ngspice/README.md)** for usage, the convergence findings,
 and the important fidelity caveats.
 
 **This safety comes at a real, sometimes severe, speed cost** — adaptive timestepping

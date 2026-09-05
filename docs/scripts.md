@@ -822,14 +822,15 @@ release) if `render_parametric` itself isn't built.
 
 Calls `plot_tone_response.py` above automatically to produce the release bundle's
 `tone_response.svg`/`.md`. Its own defaults assume a private archive layout you don't
-have; override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead, including the
-bundled `examples/large_muffin/` one — continuing straight from the
-[Try it now](../README.md#try-it-now) run:
+have; override `RUN`/`DS`/`SCHX`/`CONFIG` to point at any recipe instead — continuing
+straight from a run made by the
+[new-circuit walkthrough](new-circuit-walkthrough.md), whose `--workspace` layout the
+paths below assume:
 
 ```bash
-RUN=/tmp/large_muffin DS=/tmp/large_muffin_ds \
-SCHX=examples/large_muffin/large_muffin.schx \
-CONFIG=examples/large_muffin/config.toml \
+RUN=~/runs/device_run1 DS=~/runs/device_run1/dataset \
+SCHX="path/to/My Pedal.schx" \
+CONFIG=my_pedal.config.toml \
     ./release_run.sh
 ```
 Packages a finished (or killed) `run_pipeline.py` run into a verified release bundle:

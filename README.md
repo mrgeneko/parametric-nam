@@ -62,117 +62,45 @@ python param_train.py --dataset /tmp/mypedal_ds --output /tmp/mypedal.param.nam 
     --checkpoint-dir /tmp/mypedal_ckpt
 ```
 
-### Try it now
+### Train from a SPICE schematic
 
-The third path — building from a SPICE schematic instead of real captures — is more involved:
-it needs the oracle (`livespice-cli`) built separately and a config recipe for the circuit. But
-`examples/large_muffin/` holds a real, complete one: the `.schx` circuit and an annotated
-`config.toml`. Two things are not in the repo:
+The third path — building from a circuit instead of real captures — is the one this repo
+exists for, and it needs two things the clone does not bring:
 
 1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
    Needs the .NET SDK to build.
-2. **The sweep file** — download `T3K-sweep-v3.wav` from
-   **<https://www.tone3000.com/create/capture>** into `examples/`. Feel free to substitute your own
-   favorite sweep or DI recording instead — just point `input` in the config at it. A good
-   input covers the top of the band (real playing alone rarely does) and includes real
-   transient attacks, not just steady tones.
+2. **An input file** — download `T3K-sweep-v3.wav`, the standard TONE3000 capture sweep, from
+   **<https://www.tone3000.com/create/capture>** into `examples/`. You can substitute your own
+   sweep or DI recording; a good one covers the top of the band and contains sharp attacks
+   rather than only steady tones.
 
 ```bash
 git clone https://github.com/mrgeneko/parametric-nam
-git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of parametric-nam
+git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # SIBLING of parametric-nam
 cd livespice-cli && ./build.sh && cd ..
 # .NET 10 SDK required for the build: `apt install dotnet-sdk-10.0` (Linux) / `brew install dotnet` (macOS)
 # / see https://dotnet.microsoft.com/download for Windows or other install methods
 
 cd parametric-nam && ./setup.sh && . .venv/bin/activate
-# download T3K-sweep-v3.wav (see above) into examples/ before running this:
-
-# For a NEW circuit, start here -- discovers the real controls straight from the .schx and
-# measures a real starting oversample, rather than hand-typing a config from scratch (shown
-# here against the bundled Large Muffin circuit as a concrete example; see "Bring your own circuit"
-# below for the full explanation):
-python scaffold_config.py --schx "examples/large_muffin/large_muffin.schx" \
-    --output /tmp/large_muffin_scaffold.config.toml
-# scaffold_config.py's own knob grid is a role-aware PLACEHOLDER, not a measured one --
-# review it (and anything else you want to change) by hand, then run
-# `grid_adequacy.py --config /tmp/large_muffin_scaffold.config.toml --apply` to refine it into a
-# real, measured grid before training on it for real.
-
-# This walkthrough continues with the bundled, already-reviewed example config instead of
-# the placeholder above, so it stays fast and reproducible:
-python run_pipeline.py --config examples/large_muffin/config.toml \
-    --dataset-dir /tmp/large_muffin_ds --nam-output /tmp/large_muffin.param.nam \
-    --checkpoint-dir /tmp/large_muffin_ckpt
-# The example config's target-steps (25000) is a starting point, not a guarantee -- it may
-# not reach a low ESR by then. Raise --target-steps (or pass --epochs/--repeats directly)
-# for a longer fixed run, or resume the same checkpoint dir past its original end point with:
-#   python run_pipeline.py --config examples/large_muffin/config.toml ... \
-#       --resume /tmp/large_muffin_ckpt/latest.pt --target-steps 50000
 ```
 
-This trains an actual Large Muffin model end to end. See `examples/large_muffin/large_muffin.md` for the circuit notes.
-
-### Bring your own circuit
-
-The bundled example above needs nothing beyond what it already cloned. To train your own
-circuit, all you need on top of that is your own `.schx` (e.g. from
-`LiveSPICE-Amp-Collection`, or one you built yourself) and a `config.toml` recipe for it.
-`scaffold_config.py --schx yours.schx` discovers its real controls and measures a
-starting `oversample` for you (see [`docs/scripts.md`](docs/scripts.md)) — or copy
-`examples/template.config.toml`
-by hand (see **Per-circuit configs** below for the format). Then finish with
-`grid_adequacy.py --config ... --apply` to turn the placeholder knob grid into a
-measured one. No other repos are required.
-
-**[`docs/new-circuit-walkthrough.md`](docs/new-circuit-walkthrough.md) is the full
-six-command path** from a `.schx` you have never trained to a finished `.param.nam`,
-including the two steps that are easy to skip and expensive to skip: reviewing the
-scaffold's knob order and kinds, and re-sizing the excitation *after* the grid is
-settled rather than before.
-
-**Before training on it for real** (the bundled Large Muffin example's own config cuts this corner —
-see its `input` comment), size a proper excitation with `prepare_excitation.py` and verify it
-with `check_transient_coverage.py`. That verify step is **not** your only protection — the same
-check re-runs as a **hard gate** inside Step 1 below, so a bad excitation cannot reach training
-either way. You run it by hand first because it is a *build* loop: when it fails, the fix is to
-rebuild the excitation (raise `--realistic-peak`, widen the corner set), and doing that iteration
-inside the pipeline means paying Step 1's grid-adequacy renders on every attempt. It is also
-close to free the second time — per-corner saturation onsets cache to
-`~/.cache/parametric-nam/findpeak`, keyed on the `.schx`'s own bytes so an edited circuit
-re-measures automatically — and it is the only place you get to choose `--max-corners`,
-`--margin` and friends, which Step 1 takes as defaults. `run_pipeline.py` only checks a **weaker version of this
-automatically** (Step 2 below, `check_input_headroom.py`) — a WARN-only check at *default*
-(0.5) knob settings, not a hard gate, and not every knob corner. It's not a substitute:
-skipping the full corner-by-corner check is exactly how a real shipped model (the tweed-style amp)
-ended up never seeing saturation at some corners and misbehaving on real hot input later (see
-`docs/scripts.md`).
-
-`setup.sh` builds the oracle from `../livespice-cli` (needs the .NET SDK; `--no-cli` to
-skip). If your checkout isn't a sibling of this repo, point at it explicitly:
+`setup.sh` builds the oracle from `../livespice-cli` (`--no-cli` to skip). If your checkout
+is not a sibling of this repo, point at it explicitly:
 
 ```bash
 export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ```
 
-### Train a device
+Then follow **[`docs/new-circuit-walkthrough.md`](docs/new-circuit-walkthrough.md)** — six
+steps from a `.schx` you have never trained to a finished `.param.nam`, with the reasoning
+for each. All you need on top of the above is a `.schx`: your own, one from
+`LiveSPICE-Amp-Collection`, or the **bundled `examples/large_muffin/large_muffin.schx`** if
+you would rather practise on a known circuit first (see `large_muffin.md` for its notes).
 
-```bash
-python run_pipeline.py --config path/to/your-device/config.toml \
-    --dataset-dir    /tmp/ds \
-    --nam-output     /tmp/model.param.nam \
-    --checkpoint-dir /tmp/ckpt
-```
-
-One command runs **five** steps:
-
-| step | what it does | why it exists |
-|---|---|---|
-| **0 — Grid adequacy** | renders each knob cell's midpoint and checks the grid can represent the target ESR | a too-coarse cell puts a floor under the model that **no training can lift**. Cheap either way — render count scales with knob-axis count, not the full combination count (~15–200 across the real device fleet) — but not a fixed time: cost per render follows `--oversample` and backend (`ngspice` is markedly slower than `livespice`). Aborts the pipeline on failure. |
-| 0b — Input headroom | checks the excitation reaches the device's saturation onset at *default* knob settings (`check_input_headroom.py`) | catches an excitation that never gets loud enough to show the device's real nonlinear character, independent of grid density. **WARN only, not a gate** — a low ratio can be a real gap or a genuine high-headroom device; only checks default settings, not the grid's own hottest corner (see `prepare_excitation.py`/`check_transient_coverage.py` above for the real, every-corner check). `--skip-headroom-check` to skip. |
-| 1 — Generate | renders the dataset across the knob grid | |
-| 2 — Combine | per-combination WAVs → `outputs.npy` | |
-| 3 — Train | FiLM-conditioned WaveNet → `.param.nam` + release folder | prints the **training budget** in gradient steps |
-
+The walkthrough is deliberately not summarised here. Two of its six steps are easy to skip
+and expensive to skip — reviewing the scaffold's knob order and kinds, and re-sizing the
+excitation *after* the grid is settled — and a condensed version is how you end up skipping
+them.
 ### Listen
 
 ```bash
@@ -213,9 +141,29 @@ each script directly (see `docs/scripts.md`).
 
 ## `run_pipeline.py` — the primary entry point
 
-Runs **generate → combine → train** as one command, with per-step timing, a durable
-**release folder**, and macOS/Linux **sleep-inhibition** for long runs. Steps auto-skip
-when their outputs exist (`--skip-generate/-combine/-train`, `--force-generate`).
+Runs **six** steps as one command — three pre-flight gates, then generate → combine →
+train — with per-step timing, a durable **release folder**, and macOS/Linux
+**sleep-inhibition** for long runs. Steps auto-skip when their outputs exist
+(`--skip-generate/-combine/-train`, `--force-generate`).
+
+| | | on failure |
+|---|---|---|
+| `STEP 1 / 6 — Grid Adequacy` | is the knob grid dense enough to be worth rendering | **aborts** |
+| `STEP 2 / 6 — Input Headroom` | does the excitation reach saturation at default settings | warns |
+| `STEP 3 / 6 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
+| `STEP 4 / 6 — Dataset Generation` | renders every combination | **aborts** |
+| `STEP 5 / 6 — Combine` | per-combination WAVs → `outputs.npy` | |
+| `STEP 6 / 6 — Training` | FiLM-conditioned WaveNet → `.param.nam` | |
+
+Why each gate exists, and what to do when one fires, is in
+[`docs/checklist.md`](docs/checklist.md).
+
+`--workspace <dir>` puts everything one run produces under a single directory —
+`dataset/`, `checkpoints/`, `release/`, the model and the log — instead of naming
+`--dataset-dir`/`--checkpoint-dir`/`--nam-output`/`--release-dir`/`--log` separately. A
+workspace is per *run*: point a second run at a second directory and the first survives.
+Any individual flag still wins, so the dataset can live on another disk. See
+[`docs/scripts.md`](docs/scripts.md#--workspace--one-directory-per-run).
 
 ```bash
 python run_pipeline.py \
@@ -244,23 +192,29 @@ python run_pipeline.py \
 A circuit's *recipe* — schematic, input, knob grid, fixed params, widths, and
 hyperparameters — lives in a declarative TOML, so the pipeline stays generic (one
 `run_pipeline.py`, one small reviewable file per circuit) instead of a script per
-`.schx`. Only the per-run output paths stay on the CLI:
+`.schx`. The per-run output paths stay off it:
 
 ```bash
-python run_pipeline.py --config /path/to/device-config.toml \
-    --dataset-dir /tmp/ds --nam-output /tmp/model.param.nam \
-    --checkpoint-dir /tmp/ckpt
+python run_pipeline.py --config /path/to/device-config.toml --workspace ~/runs/device_run1
 ```
 
-Any CLI flag overrides the config (config is loaded as argparse defaults). The `[knobs]`
-table (`NAME = [v1, v2, …]`) expands to `--knobs`/`--range`, `[fixed]` to
-`--fixed-params`, and `widths = [3,4,8]` to `--widths`.
+Any CLI flag overrides the config (config is loaded as argparse defaults). The tables:
 
-**This repo carries no per-device configs of its own** beyond the bundled example — a
-`config.toml` is a *living* recipe you maintain alongside your own circuits, distinct from
-a specific run's *frozen* `reproduce.sh` output. `examples/large_muffin/config.toml` is a fully
-worked, annotated example of the format; `examples/template.config.toml` is a minimal
-blank one to copy for a new device.
+| table | expands to | what it means |
+|---|---|---|
+| `[knobs]` | `--knobs` / `--range` | `NAME = [v1, v2, …]` — swept, becomes a model knob |
+| `[fixed]` | `--fixed-params` | `NAME = v` — pinned for every render, **not** a model knob |
+| `[defaults]` | `--defaults` | a *swept* knob's default position, recorded in the `.nam` |
+| `[knob-kind]` | `--knob-kind` | `drive`/`hi`/`lo`/`mid`/`rms` — drives the sensitivity and preflight checks |
+| `[knob-boost]` | `--knob-boost` | per-knob conditioning gain |
+| `widths = [3,4,8]` | `--widths` | the model tiers to train |
+
+A control in none of these is left at its `.schx` default.
+
+**This repo carries no per-device configs of its own.** A `config.toml` is a *living*
+recipe you maintain alongside your own circuits, distinct from a specific run's *frozen*
+`reproduce.sh` output. Generate one with `scaffold_config.py` (see the walkthrough);
+`examples/template.config.toml` is a minimal annotated one to copy from instead.
 
 ## Scripts
 
