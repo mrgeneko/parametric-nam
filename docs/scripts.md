@@ -485,23 +485,29 @@ python distribute_pull.py \
 Four things that are easy to get wrong:
 
 - **A *slow* worker is invisible unless you watch combinations, not chunks.** The scheduler
-  streams each worker's output and parses the renderer's own per-combination progress line, so
-  it knows every worker's **seconds per combination** — the one unit comparable across
-  machines. A worker that goes `--slow-mult` (default 3) times the *fleet median* with nothing
-  completed has its chunk abandoned and requeued elsewhere. The baseline is a **median** over
-  the whole fleet, so a single pathological host cannot raise the bar it is judged against, and
-  it does not exist at all until `--slow-min-samples` (4) combinations have finished anywhere —
-  a cold fleet is not evidence about any host. `--slow-floor-min` (10) keeps a fast fleet from
-  killing a machine over ordinary variance.
+  streams each worker's output and parses the renderer's own per-combination progress line,
+  so it knows who is producing and who is not. Judging that correctly needs **two** baselines,
+  not one:
 
-  This is not the same guard as the renderer's own. `gen_dataset_from_schx.py` has a stall
-  detector that deliberately tolerates a **slow but progressing** render up to
-  `TOTAL_CEILING_MULT` (20×) its per-rung budget — on a full amp at oversample 8 that is
-  **36.7 hours for one combination**. Measured on a Mesa Dual Rectifier run: a worker rendering
-  at 54× real-time needed ~148 min per combination against a 110 min budget, so every render
-  progressed, nothing stalled, nothing failed, and nothing printed. It held a chunk for **7.5
-  hours and produced zero combinations** while its neighbours finished a 16-combination chunk
-  every 40 minutes. Per-combination pacing catches that in about an hour.
+  *Startup* — from chunk start until a worker's first completion. Producing nothing here is
+  normal, because the renderer runs its transient-coverage gate first, and on a cold
+  saturation-onset cache that is ~100 min on a full amp. Judged against the fleet's median
+  time-to-first-combination, floored by `--slow-startup-floor-min` (90).
+
+  *Steady* — after the first completion, judged on **rate** (completions ÷ elapsed), floored
+  by `--slow-steady-floor-min` (30). Rate rather than the gap between arrivals, because
+  `--workers N` renders concurrently and completions land in a **burst**: ~25 min of parallel
+  work, then eight finishing within seconds. Inter-arrival gaps of `[25 min, 0.3 s, 0.2 s, …]`
+  have a median near zero, which is how an earlier version of this check derived "0.3
+  min/combo" and killed a healthy worker sitting in a legitimate coverage gate.
+
+  Both baselines are medians, so one pathological host cannot raise the bar it is judged
+  against, and neither exists until `--slow-min-samples` worker-chunks have contributed.
+  Abandoning a chunk **kills the renderer on the worker**, matched on its unique `--shard`
+  argument, and clears the lock — killing only the local ssh client leaves the remote process
+  reparented to init, still holding the renderer's exclusive `.generation.lock`, so every
+  later chunk on that host fails instantly and quarantines it. `--slow-mult 0` disables the
+  whole check.
 
 - **`--collect LOCAL_DIR` — use it.** The scheduler renders; gathering is the other half. `sig/`
   merges cleanly because its filenames are the **global** grid index, but `params.csv` is one

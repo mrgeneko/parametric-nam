@@ -159,51 +159,68 @@ def test_merge_tolerates_an_empty_shard(tmp_path):
 
 
 class TestComboPace:
-    """Judging a worker by seconds-per-COMBINATION rather than by completed chunks.
+    """Two failures shaped this, both observed on real runs.
 
-    From the Mesa RED 648-combination run (2026-09-04): one worker rendered at 54x
-    real-time, needing ~148 min per combination against a 110 min per-rung budget. Every
-    render kept emitting progress, so gen_dataset's stall detector -- which deliberately
-    tolerates slow-but-progressing work up to TOTAL_CEILING_MULT (20x) the budget, i.e.
-    36.7 HOURS for one combination -- never fired. Nothing stalled, nothing failed, nothing
-    printed. It held a chunk for 7.5 h and produced zero combinations while its neighbours
-    completed a 16-combination chunk every 40 min.
+    The one it exists for: a worker rendered at 54x real-time, needed ~148 min per
+    combination against a 110 min budget, and so produced NOTHING for 7.5 h while its
+    neighbours finished a 16-combination chunk every 40 min. Nothing fired -- the renderer's
+    own stall detector deliberately tolerates slow-but-progressing work, and the controller
+    only judged completed chunks.
+
+    The one the first fix caused: measuring the GAP between consecutive completions ignored
+    that the renderer runs --workers N concurrently, so completions arrive in a burst. The
+    median gap collapsed to 0.3 min, the deadline fell to its floor, and a healthy worker was
+    killed mid-way through a legitimate cold coverage gate.
     """
 
-    def test_no_baseline_means_nobody_is_slow(self):
-        """A cold fleet is not evidence about any host: with too few samples there is no
-        deadline at all, so the first worker to start cannot be killed for being first."""
-        p = dp.ComboPace(min_samples=4)
-        assert p.median() is None and p.deadline() is None
+    def test_a_burst_of_completions_does_not_collapse_the_baseline(self):
+        """THE REGRESSION. 8 combinations finishing within seconds of each other after 25 min
+        of parallel work is normal, not fast. Rate divides by the whole elapsed time, so the
+        burst cannot drag the baseline toward zero the way inter-arrival gaps did."""
+        p = dp.ComboPace(min_samples=2)
         for _ in range(3):
-            p.record(60.0)
-        assert p.deadline() is None, "3 samples is below min_samples=4"
-        p.record(60.0)
-        assert p.deadline() is not None
+            p.record_rate(8, 25 * 60)          # 8 combos per 25 min, as observed
+        limit = p.steady_limit()
+        assert limit >= 30 * 60, "a burst must not produce a sub-minute per-combination view"
+        # the old metric derived ~0.3 min/combo from the same run; sanity-check the new one
+        assert 8 / (25 * 60) == pytest.approx(p.rates[0])
 
-    def test_the_baseline_is_a_median_not_a_mean(self):
-        """One 36-hour outlier must not raise the bar it is itself being judged against."""
-        p = dp.ComboPace(min_samples=4, slow_mult=3.0, floor_s=0.0)
-        for s in (60.0, 60.0, 60.0, 60.0, 36 * 3600.0):
-            p.record(s)
-        assert p.median() == 60.0
-        assert p.deadline() == 180.0
+    def test_a_worker_that_has_produced_nothing_is_judged_on_STARTUP_not_rate(self):
+        """Producing nothing early is normal: the renderer runs its coverage gate first, which
+        on a cold onset cache is ~100 min on a full amp. That must not read as 'stalled'."""
+        p = dp.ComboPace(min_samples=2, startup_floor_s=90 * 60)
+        for _ in range(2):
+            p.record_first(25 * 60)            # others took 25 min to first combination
+        slow, why = p.verdict(completions=0, since_last_s=40 * 60, elapsed_s=40 * 60)
+        assert not slow, f"killed a worker still inside a legitimate coverage gate: {why}"
 
-    def test_the_floor_protects_a_fast_fleet_from_ordinary_variance(self):
-        p = dp.ComboPace(min_samples=2, slow_mult=3.0, floor_s=600.0)
-        p.record(5.0); p.record(5.0)
-        assert p.deadline() == 600.0, "3x a 5s median is 15s -- far too tight to act on"
+    def test_the_worker_it_exists_to_catch_is_still_caught(self):
+        """7.5 h with nothing produced, against neighbours whose first combination lands in
+        25 min. Must fire -- well before the 7.5 h it actually ran."""
+        p = dp.ComboPace(min_samples=2, startup_floor_s=90 * 60, slow_mult=3.0)
+        for _ in range(3):
+            p.record_first(25 * 60)
+        slow, why = p.verdict(completions=0, since_last_s=7.5 * 3600, elapsed_s=7.5 * 3600)
+        assert slow and "produced nothing" in why
+        assert p.startup_limit() < 7.5 * 3600
 
-    def test_a_slow_worker_is_caught_in_minutes_not_never(self):
-        """The real numbers: neighbours ~21 min/combo, so the limit is ~63 min. The slow
-        worker completed nothing in 7.5 h and would have been abandoned after ~1 h."""
-        p = dp.ComboPace(min_samples=4, slow_mult=3.0, floor_s=600.0)
-        for _ in range(6):
-            p.record(21 * 60.0)
-        limit = p.deadline()
-        assert 60 * 60 <= limit <= 65 * 60
-        assert limit < 7.5 * 3600, "must fire long before the 7.5 h this actually ran"
-        assert limit < 36.7 * 3600, "and long before gen_dataset's own 36.7 h ceiling"
+    def test_a_cold_fleet_judges_nobody(self):
+        p = dp.ComboPace(min_samples=2)
+        assert p.startup_limit() is None and p.steady_limit() is None
+        assert p.verdict(0, 10 * 3600, 10 * 3600) == (False, None)
+
+    def test_one_pathological_host_cannot_raise_the_bar_it_is_judged_against(self):
+        p = dp.ComboPace(min_samples=2, startup_floor_s=0.0, slow_mult=3.0)
+        for s in (25 * 60, 25 * 60, 25 * 60, 36 * 3600):
+            p.record_first(s)
+        assert p.startup_limit() == pytest.approx(3 * 25 * 60)
+
+    def test_a_producing_worker_that_stops_is_caught(self):
+        p = dp.ComboPace(min_samples=2, steady_floor_s=30 * 60, slow_mult=3.0)
+        for _ in range(2):
+            p.record_rate(16, 40 * 60)         # a chunk every 40 min
+        slow, why = p.verdict(completions=4, since_last_s=6 * 3600, elapsed_s=8 * 3600)
+        assert slow and "after producing 4" in why
 
 
 class TestComboLineParsing:

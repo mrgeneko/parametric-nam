@@ -66,33 +66,83 @@ COMBO_LINE = re.compile(r"^\[\s*\d+/\s*\d+\]\s+[\d.]+%\s+combo_(\d+)\s+(OK|FAIL)
 
 
 class ComboPace:
-    """Fleet-wide median seconds-per-combination, and the deadline derived from it.
+    """Is a worker producing combinations at a rate the rest of the fleet makes plausible?
 
-    Median, not mean: one 36-hour outlier must not raise the bar it is being judged against.
-    Until `min_samples` combinations have completed anywhere there is no baseline, so no
-    worker can be killed for being slow -- a cold fleet is not evidence about any host.
+    THE OBVIOUS METRIC IS WRONG, and cost a healthy worker its chunk before this was
+    rewritten. Measuring the gap between consecutive completions looks right, but the
+    renderer runs `--workers N` combinations CONCURRENTLY, so they finish in a BURST: about
+    25 minutes of parallel work, then eight completions inside a few seconds. The gaps are
+    [25 min, 0.3 s, 0.2 s, ...], their median collapses toward zero, and the derived deadline
+    lands on its own floor -- which then killed a worker that was legitimately still in a
+    cold 104-corner coverage gate, having produced nothing yet BY DESIGN.
+
+    So this tracks two different questions with two different baselines:
+
+      STARTUP   -- from chunk start until that worker's FIRST completion. Every worker spends
+                   real time here before producing anything: the renderer runs its transient
+                   coverage gate first, which on a cold saturation-onset cache is ~100 min on
+                   a full amp. Judged against the fleet's median time-to-first-completion,
+                   with a generous floor, because a cold cache is legitimate and common.
+
+      STEADY    -- after the first completion. Judged on RATE (completions / elapsed), which
+                   is immune to bursts because it divides by the whole elapsed time rather
+                   than looking at the space between arrivals.
+
+    Both baselines are medians, so one pathological host cannot move the bar it is judged
+    against, and neither exists until `min_samples` workers have contributed -- a cold fleet
+    is not evidence about any host.
     """
 
-    def __init__(self, slow_mult=3.0, min_samples=4, floor_s=600.0):
-        self.samples: list[float] = []
-        self.slow_mult, self.min_samples, self.floor_s = slow_mult, min_samples, floor_s
+    def __init__(self, slow_mult=3.0, min_samples=2, startup_floor_s=5400.0,
+                 steady_floor_s=1800.0):
+        self.ttfc: list[float] = []        # seconds from chunk start to first completion
+        self.rates: list[float] = []       # completions per second, per worker-chunk
+        self.slow_mult = slow_mult
+        self.min_samples = min_samples
+        self.startup_floor_s = startup_floor_s
+        self.steady_floor_s = steady_floor_s
         self._lock = threading.Lock()
 
-    def record(self, seconds: float) -> None:
+    def record_first(self, seconds: float) -> None:
         with self._lock:
-            self.samples.append(seconds)
+            self.ttfc.append(seconds)
 
-    def median(self) -> "float | None":
+    def record_rate(self, completions: int, elapsed_s: float) -> None:
+        if completions <= 0 or elapsed_s <= 0:
+            return
         with self._lock:
-            if len(self.samples) < self.min_samples:
-                return None
-            return statistics.median(self.samples)
+            self.rates.append(completions / elapsed_s)
 
-    def deadline(self) -> "float | None":
-        """Seconds a worker may go with NO completed combination before it is called slow."""
-        m = self.median()
-        # The floor keeps a fast fleet from killing a host over ordinary variance.
-        return None if m is None else max(self.floor_s, m * self.slow_mult)
+    def _median(self, xs):
+        return statistics.median(xs) if len(xs) >= self.min_samples else None
+
+    def startup_limit(self) -> "float | None":
+        """How long a worker may run having completed NOTHING."""
+        with self._lock:
+            m = self._median(self.ttfc)
+        return None if m is None else max(self.startup_floor_s, m * self.slow_mult)
+
+    def steady_limit(self) -> "float | None":
+        """How long a worker that HAS produced may go without producing again."""
+        with self._lock:
+            m = self._median(self.rates)
+        # Convert the fleet's median rate into a per-combination time, then allow a multiple.
+        return None if not m else max(self.steady_floor_s, (1.0 / m) * self.slow_mult)
+
+    def verdict(self, completions: int, since_last_s: float, elapsed_s: float):
+        """(too_slow, human-readable reason). Reason is None when the worker is fine."""
+        if completions == 0:
+            lim = self.startup_limit()
+            if lim is not None and elapsed_s > lim:
+                return True, (f"produced nothing in {elapsed_s/60:.1f} min "
+                              f"(fleet median time-to-first-combination "
+                              f"{statistics.median(self.ttfc)/60:.1f} min; limit {lim/60:.1f} min)")
+            return False, None
+        lim = self.steady_limit()
+        if lim is not None and since_last_s > lim:
+            return True, (f"no combination in {since_last_s/60:.1f} min after producing "
+                          f"{completions} (limit {lim/60:.1f} min)")
+        return False, None
 
 
 class Worker:
@@ -125,6 +175,24 @@ class Worker:
         """Chunks per hour, MEASURED. Nothing here is estimated from core count."""
         return self.done / (self.secs / 3600) if self.secs > 0 else 0.0
 
+    def _kill_remote(self, chunk, output):
+        """Kill the gen_dataset THIS chunk started, on the worker, and release its lock.
+
+        proc.kill() kills the local ssh CLIENT. The remote process is not signalled -- it is
+        reparented to init and keeps running, still holding the renderer's exclusive
+        .generation.lock, so every chunk dispatched to that host afterwards fails instantly
+        with "another gen_dataset_from_schx is already generating" and the host quarantines
+        itself. Abandoning a chunk without this is worse than not abandoning it at all.
+
+        Matched on `--shard <chunk>`, which is unique to this dispatch, so a concurrent
+        generation for a different chunk or dataset on the same host is never touched.
+        """
+        pat = f"gen_dataset_from_schx.py.*--shard {re.escape(chunk)}"
+        cmd = (f"pkill -f '{pat}'; sleep 3; pkill -9 -f '{pat}'; "
+               f"rm -f {output}/.generation.lock; exit 0")
+        subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+                        self.host, cmd], capture_output=True, text=True, timeout=90)
+
     def run_chunk(self, chunk, gen_args, output, pace=None, on_combo=None):
         """Run one chunk, watching it COMBINATION BY COMBINATION as it goes.
 
@@ -133,10 +201,6 @@ class Worker:
         simply thrown away, because subprocess.run(capture_output=True) does not return until
         the child exits. A worker whose combinations never finish therefore said NOTHING for
         as long as it took the whole chunk to end, which for a slow host is effectively never.
-
-        Streaming it costs nothing and buys three things: live progress, a real
-        seconds-per-combination measurement, and the ability to abandon a worker that is
-        producing nothing WITHOUT waiting out the chunk.
         """
         env = f"export {self.env} && " if self.env else ""
         cmd = (f"cd {self.dir} && {env}./.venv/bin/python -u gen_dataset_from_schx.py "
@@ -146,17 +210,19 @@ class Worker:
             ["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", self.host, cmd],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         lines: list[str] = []
-        last = t0                      # last time THIS worker finished a combination
+        done = 0                       # combinations THIS chunk has completed
+        last = t0                      # when the most recent one landed
         killed_slow = False
 
         def pump():
-            nonlocal last
+            nonlocal last, done
             for line in proc.stdout:
                 lines.append(line.rstrip("\n"))
                 if COMBO_LINE.match(line.strip()):
                     now = time.time()
-                    if pace is not None:
-                        pace.record(now - last)
+                    done += 1
+                    if pace is not None and done == 1:
+                        pace.record_first(now - t0)
                     last = now
                     self.combos += 1
                     if on_combo:
@@ -168,23 +234,23 @@ class Worker:
             t.join(timeout=5)
             if not t.is_alive():
                 break
-            dl = pace.deadline() if pace is not None else None
-            if dl is not None and time.time() - last > dl:
-                killed_slow = True
-                self.slow_kills += 1
-                lines.append(
-                    f"[controller] no combination completed in {(time.time()-last)/60:.1f} min "
-                    f"(fleet median {pace.median()/60:.1f} min/combo; limit "
-                    f"{dl/60:.1f} min) -- abandoning this chunk")
-                proc.kill()
-                break
+            if pace is not None:
+                slow, why = pace.verdict(done, time.time() - last, time.time() - t0)
+                if slow:
+                    killed_slow = True
+                    self.slow_kills += 1
+                    lines.append(f"[controller] {why} -- abandoning this chunk")
+                    self._kill_remote(chunk, output)   # BEFORE dropping the ssh, not after
+                    proc.kill()
+                    break
         proc.wait()
         t.join(timeout=10)
         dt = time.time() - t0
         self.secs += dt
+        if pace is not None and done and not killed_slow:
+            pace.record_rate(done, dt)
         rc = proc.returncode if not killed_slow else 1
         return rc, dt, "\n".join(lines)
-
 
 
 def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
@@ -406,13 +472,18 @@ def main():
                          "gen_dataset's own stall detector deliberately tolerates a slow but "
                          "PROGRESSING render for 20x its per-rung budget, which on a full amp "
                          "at oversample 8 is 36.7 hours for one combination.")
-    ap.add_argument("--slow-min-samples", type=int, default=4,
-                    help="how many completed combinations the fleet needs before any worker can "
-                         "be called slow (default 4). A cold fleet is not evidence about a host.")
-    ap.add_argument("--slow-floor-min", type=float, default=10.0,
-                    help="never abandon a chunk for slowness before this many minutes without a "
-                         "completed combination (default 10), so a fast fleet cannot kill a host "
-                         "over ordinary variance.")
+    ap.add_argument("--slow-min-samples", type=int, default=2,
+                    help="how many WORKER-CHUNKS the fleet must have contributed before any host "
+                         "can be called slow (default 2). A cold fleet is not evidence about a "
+                         "host.")
+    ap.add_argument("--slow-startup-floor-min", type=float, default=90.0,
+                    help="never abandon a worker that has completed NOTHING before this many "
+                         "minutes (default 90). Producing nothing early is normal: the renderer "
+                         "runs its transient-coverage gate first, which on a cold saturation-onset "
+                         "cache is ~100 min on a full amp.")
+    ap.add_argument("--slow-steady-floor-min", type=float, default=30.0,
+                    help="once a worker HAS produced, never abandon it for going fewer than this "
+                         "many minutes without producing again (default 30).")
     ap.add_argument("--quarantine-after", type=int, default=3,
                     help="bench a worker after this many CONSECUTIVE failures with no successes "
                          "(default 3). A fast-failing worker drains the queue faster than healthy "
@@ -435,7 +506,9 @@ def main():
     attempts = {c: 0 for c in queue}
     tried_on = {c: set() for c in queue}   # chunk -> hosts that have already failed it
     pace = ComboPace(slow_mult=args.slow_mult, min_samples=args.slow_min_samples,
-                     floor_s=args.slow_floor_min * 60.0) if args.slow_mult > 0 else None
+                     startup_floor_s=args.slow_startup_floor_min * 60.0,
+                     steady_floor_s=args.slow_steady_floor_min * 60.0
+                     ) if args.slow_mult > 0 else None
     lock = threading.Lock()
     total = len(queue)
     completed = failed_final = 0
@@ -479,8 +552,8 @@ def main():
                 if rc == 0:
                     w.consec_fail = 0
                     w.done += 1; completed += 1
-                    m = pace.median()
-                    rate = f"  {w.combos} combos" + (f", fleet ~{m/60:.1f} min/combo" if m else "")
+                    rate = f"  {w.combos} combos" + (
+                        f" @ {w.combos/(w.secs/3600):.1f}/h" if w.secs > 0 else "")
                     log(f"  {w.host:<10} chunk {chunk:<10} OK   {dt/60:5.1f} min   "
                         f"[{completed + failed_final}/{total}]{rate}")
                 else:
