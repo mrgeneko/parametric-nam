@@ -1,7 +1,7 @@
 # Large Muffin (a classic silicon fuzz/sustain pedal circuit) — worked example.
 #
 # The .schx is bundled alongside this file; the excitation is NOT — download T3K-sweep-v3.wav
-# from https://www.tone3000.com/capture into examples/ first (see README, "The sweep file").
+# from https://www.tone3000.com/create/capture into examples/ first (see README, "The sweep file").
 # No sibling parametric-devices or sweep-files checkout is required beyond that. See
 # "large_muffin.md" next to this file for the circuit notes.
 #
@@ -15,7 +15,7 @@
 schx       = "examples/large_muffin/large_muffin.schx"
 
 # INPUT CHANGED 2026-08-28: examples/sweepv5.wav (removed from this repo) -> T3K-sweep-v3.wav,
-# the standard TONE3000 capture sweep. Download it from https://www.tone3000.com/capture.
+# the standard TONE3000 capture sweep. Download it from https://www.tone3000.com/create/capture.
 # Not a licensing move -- sweepv5.wav was ours and freely redistributable. sweep-v3 is simply
 # the better and more standard choice: it is what the ecosystem captures against (so NAM's
 # blip alignment calibrates for real instead of falling back to delay=0), and its attack

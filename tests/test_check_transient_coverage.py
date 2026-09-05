@@ -1,6 +1,6 @@
 """Properties check_transient_coverage.py must have. Built after a real miss: the tweed-style
 amp's shipped excitation cleared saturation at its own overall peak, but the transient
-(real-playing) segment never did at a corner where two knobs sat at grid-min while three
+--input segment never did at a corner where two knobs sat at grid-min while three
 others sat at grid-max simultaneously -- a corner the "solo extreme" set literally cannot
 represent (solo holds every OTHER knob at center). _corners' binary hypercube exists
 specifically to catch that. check_coverage is exercised with find_saturation_point/

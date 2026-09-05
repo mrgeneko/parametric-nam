@@ -48,7 +48,7 @@ validation ESR (which averages over everything else).
   excitation's transient content actually reaches each corner's own saturation onset,
   across the **full min/max hypercube** (every swept knob independently at its own grid
   min or max, not just one knob varied from center) plus the traditional solo-knob
-  corners. A corner whose real-playing content never crosses into saturation during
+  corners. A corner whose transient-bearing `--input` content never crosses into saturation during
   training is a corner the network has to extrapolate at inference time. Supports
   `backend = "ngspice-deck"` or `"ltspice-deck"` in the config (same
   `pedal-dir`/`module`/`probe-node` convention as
@@ -120,7 +120,7 @@ know that in advance without checking, since the RC time constant is set by both
 values, not something knob positions expose directly.
 
 **Fix, applied by default**: `build_excitation.py --lead-silence-s` (default `3.0`)
-prepends that many seconds of true silence before the `--input`-derived real-playing segment.
+prepends that many seconds of true silence before the `--input`-derived segment.
 The silent segment is written into the excitation file itself (not stripped after generation),
 so it also gives the DC-blocking network real settling time before the file's `real` segment
 dynamics are what training actually samples. Set to `0` to disable for a circuit already

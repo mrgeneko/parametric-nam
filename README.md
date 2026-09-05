@@ -72,7 +72,7 @@ it needs the oracle (`livespice-cli`) built separately and a config recipe for t
 1. **The oracle** (`livespice-cli`) — a small public sibling repo that simulates the circuit.
    Needs the .NET SDK to build.
 2. **The sweep file** — download `T3K-sweep-v3.wav` from
-   **<https://www.tone3000.com/capture>** into `examples/`. Feel free to substitute your own
+   **<https://www.tone3000.com/create/capture>** into `examples/`. Feel free to substitute your own
    favorite sweep or DI recording instead — just point `input` in the config at it. A good
    input covers the top of the band (real playing alone rarely does) and includes real
    transient attacks, not just steady tones.

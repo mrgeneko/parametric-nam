@@ -16,6 +16,18 @@ run produces. It is per *run*, not per circuit: a second run goes in a second di
 
 ## 1. Scaffold the config
 
+**First, get an input file — the repo does not ship one.** `T3K-sweep-v3.wav` is the standard
+TONE3000 capture sweep; download it from
+**<https://www.tone3000.com/create/capture>** and put it in `examples/`:
+
+```
+parametric-nam/examples/T3K-sweep-v3.wav
+```
+
+You can substitute your own sweep or DI recording; a good one covers the top of the band and
+contains sharp attacks rather than only steady tones. Whatever you use, pass its path as
+`--input` below.
+
 ```bash
 ./scaffold_config.py --schx "My Pedal.schx" \
                      --input examples/T3K-sweep-v3.wav \
@@ -166,7 +178,7 @@ Probe renders are cached on disk, so step 6's re-verification of this grid is fr
 ```bash
 ./prepare_excitation.py --backend livespice \
                         --config my_pedal.config.toml \
-                        --real-clip <a real playing clip> \
+                        --real-clip examples/T3K-sweep-v3.wav \
                         --workspace ~/runs/device_run1
 ```
 
@@ -204,20 +216,27 @@ pair together: every consumer finds the sidecar by deriving it from the wav's ow
 ./check_transient_coverage.py --config my_pedal.config.toml
 ```
 
-**What it compares.** An excitation file is not one uniform signal. It contains a synthetic
-**sweep** — smooth tones, no attack shape — and a **real-playing segment** carrying actual
-transients, built separately at its own peak level. This tool takes the peak of the
-*transient-bearing* part alone (read automatically from the recipe sidecar) and, for every
-knob setting it tests, measures that setting's own saturation onset and checks the transient
-peak clears it.
+**What it compares.** The excitation `build_excitation.py` produces is not one uniform
+signal. It is a concatenation:
+
+```
+[ your --input clip, placed at --realistic-peak ]   crest-bearing, mostly low level
+[ amplitude-stepped log sine sweeps ]               dense level x frequency coverage, loud
+[ short fade-out to zero ]
+```
+
+The first segment carries the sharp attacks; the sweeps carry the loud, smooth content. This
+tool takes the peak of that **first segment alone** (read automatically from the recipe
+sidecar) and, for every knob setting it tests, measures that setting's own saturation onset
+and checks the segment's peak clears it.
 
 **Why that is not the same as "is the excitation loud enough".** The file's overall peak
-usually comes from the sweep, so it can clear saturation comfortably while the transient
-segment never does. When that happens the training data contains transients — but only in
-the clean, linear region — and saturation — but only from smooth sweep tones. The two never
-co-occur. The model therefore never sees what this circuit does to a *hard attack that
-clips*, and improvises when a real one arrives. Nothing about the overall peak, the file's
-RMS, or the dataset's size reveals this.
+comes from the sweeps, so it can clear saturation comfortably while the crest-bearing segment
+never does. When that happens the training data contains sharp attacks — but only in the
+clean, linear region — and saturation — but only from smooth swept tones. The two never
+co-occur, so the model has no example of what this circuit does to *a hard attack that
+clips*, and improvises when one arrives. Nothing about the overall peak, the file's RMS, or
+the dataset's size reveals this.
 
 **Which settings it tests.** Every structural corner of the knob grid, plus interior sample
 points — because saturation onset is not monotonic in the knobs, so the worst case can sit

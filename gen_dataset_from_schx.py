@@ -2370,7 +2370,7 @@ def main():
                          "there (the solo-only corner set this check used to run missed it "
                          "entirely -- see check_transient_coverage.py's _corners() docstring).")
     ap.add_argument("--transient-peak", type=float, default=None,
-                    help="excitation's transient/real-playing segment peak, in volts at "
+                    help="excitation's transient-bearing --input segment peak, in volts at "
                          "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "
                          "build_excitation.py's --realistic-peak). Required for the transient "
                          "check unless a recipe sidecar exists.")

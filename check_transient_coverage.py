@@ -4,11 +4,15 @@ saturation at every knob-grid corner, not just the excitation's overall peak?
 
 Background (internal engineering notes): a device can have a peak level
 (from its synthetic sweep tail) that comfortably clears its saturation onset, while
-the TRANSIENT-bearing (real-playing) segment -- built independently, at its own
-`--realistic-peak` -- never does, at some corners. The tweed-style amp is the exact case
+the TRANSIENT-bearing segment -- build_excitation.py's `--input` clip, placed at its own
+`--realistic-peak` -- never does, at some corners. (That segment is NOT necessarily real
+playing: the standard capture sweep normally passed as `--input` is itself synthesized --
+frequency sweep + noise-staircase + calibration blips -- and its high crest factor comes
+from that structure, not from musical dynamics. See build_excitation.py's docstring. What
+matters here is only that it is the crest-bearing part, whatever its source.) The tweed-style amp is the exact case
 this happened on: `find-peak @ knobs=0.5` measured onset ~0.51 V, but
 `--realistic-peak` was set to 0.2 V regardless (chosen for input-signal realism,
-not cross-checked against the measured onset) -- so the real-playing content
+not cross-checked against the measured onset) -- so that `--input` content
 stayed in the LINEAR region at every corner tested, while only the sweep (a smooth
 tone, no attack shape) crossed into saturation there. The network never saw a
 transient AND saturation together at that corner, and ran open-loop when a real
@@ -32,7 +36,7 @@ Usage:
       ngspice-deck) -- for a device whose clipping needs a real component .schx has no model
       for (a MOSFET, a real BJT), so there's no .schx at all to check against.
 
---transient-peak: the excitation's transient/real-playing segment peak, in volts
+--transient-peak: the excitation's transient-bearing `--input` segment peak, in volts
   at V0dBFS=1. Auto-read from the excitation's <stem>.recipe.json sidecar
   (build_excitation.py's `args.realistic_peak`) if present; otherwise REQUIRED --
   this tool refuses to guess it from the raw audio (silently mis-slicing the
@@ -243,7 +247,7 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
         return None
     try:
         args = json.loads(recipe_path.read_text())["args"]
-        # The TRANSIENT peak is not just the real-playing segment. build_excitation.py can
+        # The TRANSIENT peak is not just the `--input` segment. build_excitation.py can
         # append transient BURSTS -- broadband, instant attack, exponential decay, crest ~8.5,
         # "matching a real hard pick-attack" in its own words -- at levels well above
         # --realistic-peak, precisely so sharp-attack behaviour is exercised at EVERY level

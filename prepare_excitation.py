@@ -233,7 +233,11 @@ def main():
 
     # excitation-building
     ap.add_argument("--real-clip", required=True,
-                     help="real-playing clip, passed through to build_excitation.py --input")
+                     help="clip passed through to build_excitation.py --input -- it becomes the "
+                          "crest-bearing segment placed at --realistic-peak. Commonly the "
+                          "standard capture sweep, which is SYNTHESIZED (sweep + "
+                          "noise-staircase + blips), not a real-playing recording; a real "
+                          "recording works equally well but is not required.")
     ap.add_argument("--output",
                     help="where to write the excitation wav (its .recipe.json sidecar goes "
                          "beside it -- every consumer finds the sidecar by deriving it from "
@@ -266,7 +270,7 @@ def main():
                           "fraction below 1.0 guarantees that check fails there, regardless of "
                           "margin or grid, contradicting this tool's own claim that a check run "
                           "afterward should pass cleanly. Lower it only if you deliberately want "
-                          "the real-playing content to stay short of the worst corner (e.g. to "
+                          "the --input content to stay short of the worst corner (e.g. to "
                           "match a case where a real player realistically never drives that hard) "
                           "and are prepared for check_transient_coverage.py to FAIL there as a "
                           "correct, expected result, not a bug.\n"

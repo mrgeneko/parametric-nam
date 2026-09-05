@@ -269,7 +269,7 @@ def main():
     #   native_peak -- peak of the WHOLE input; what the dataset will actually be rendered at,
     #                  and therefore the only correct reference for input_level_dbu.
     # --seconds takes a PREFIX, and an excitation built by build_excitation.py puts its
-    # loud content LAST (real playing, then amplitude-stepped sweeps, then transient bursts).
+    # loud content LAST (the --input segment, then amplitude-stepped sweeps, then bursts).
     # Measured on the budget clone pedal's 38 s excitation: the 10 s prefix peaks at 3.940 V against the
     # file's 14.833 V -- 11.5 dB down -- so deriving the exported dBu from the probe slice
     # understated it by exactly that, while labelling it "training input peak".

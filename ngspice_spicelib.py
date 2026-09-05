@@ -53,7 +53,7 @@ def load_input(infile, vin, tmp, src_name='input.src'):
     `vin=None` selects ABSOLUTE-VOLTS mode: the file's own sample values are used directly as
     volts, with NO peak rescaling. Use this for a file already built at the parametric-nam
     V0dBFS=1V convention (e.g. build_excitation.py's output), where different SEGMENTS
-    intentionally sit at different absolute levels (a real-playing clip at --realistic-peak,
+    intentionally sit at different absolute levels (the --input clip at --realistic-peak,
     sweeps at each of --sweep-peaks) -- rescaling by the file's own peak would flatten that
     deliberate multi-level structure into one uniform scale, destroying the point of building
     it that way. Only meaningful for a float WAV (int PCM has no way to represent volts >1

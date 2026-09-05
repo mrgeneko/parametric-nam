@@ -34,7 +34,7 @@ awkward than sharing the lower-level primitives both already use.
 --absolute: use the input file's own sample values directly as volts (V0dBFS=1V convention),
 with NO peak rescaling -- for a file already built by build_excitation.py or
 prepare_excitation.py --backend ngspice-deck, whose different segments intentionally sit
-at different absolute drive levels (a real-playing clip at --realistic-peak, sweeps at each
+at different absolute drive levels (the --input clip at --realistic-peak, sweeps at each
 --sweep-peaks value). --vin is ignored when this is set (rescaling by the file's own single
 peak would flatten that deliberate multi-level structure). See ngspice_spicelib.py's
 load_input() docstring.

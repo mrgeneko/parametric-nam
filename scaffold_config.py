@@ -354,7 +354,7 @@ def main() -> None:
     ap.add_argument("--input", default="examples/T3K-sweep-v3.wav",
                     help="sweep/DI to measure truncation against and record as `input` "
                          "(default: examples/T3K-sweep-v3.wav -- NOT bundled, download it "
-                         "from https://www.tone3000.com/capture; assumes you run "
+                         "from https://www.tone3000.com/create/capture; assumes you run "
                          "this from the repo root)")
     ap.add_argument("--output", type=Path, default=None,
                     help="config.toml path to write (default: <schx stem>.config.toml "

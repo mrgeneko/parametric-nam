@@ -349,12 +349,19 @@ measured at all.
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 
 Pre-generation gate answering a narrower, more dangerous question than "does the excitation have
-enough peak somewhere": does the excitation's **transient-bearing** content (the real-playing
-segment, not just the sweep tail) actually reach saturation at **every** knob-grid corner?
+enough peak somewhere": does the excitation's **transient-bearing** content — the `--input`
+segment placed at `--realistic-peak`, not just the sweep tail — actually reach saturation at
+**every** knob-grid corner?
+
+> That segment is **not** necessarily real playing. The standard capture sweep normally passed
+> as `--input` is itself synthesized (frequency sweep + noise-staircase + calibration blips);
+> its ~22 dB crest factor comes from that structure, not from musical dynamics. A genuine
+> playing recording works equally well but is not required. See `build_excitation.py`'s
+> docstring. What matters to this check is only that it is the crest-bearing part.
 
 This is not hypothetical — it's the exact failure this tool was built to catch. The tweed-style amp's
 `--realistic-peak` had been chosen for input-signal realism, not cross-checked against the
-measured onset, so the real-playing content stayed in the *linear* region at every corner tested
+measured onset, so that `--input` content stayed in the *linear* region at every corner tested
 while only the sweep (a smooth tone, no attack shape) crossed into saturation there. The network
 never saw a transient and saturation together at that corner, and ran open-loop when a real one
 eventually arrived.
@@ -378,7 +385,8 @@ python check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/
     && python gen_dataset_from_schx.py ...
 ```
 
-`--transient-peak` (the excitation's real-playing-segment peak, in volts at V0dBFS=1) is
+`--transient-peak` (the excitation's transient-bearing `--input`-segment peak, in volts at
+V0dBFS=1) is
 auto-read from the excitation's `<stem>.recipe.json` sidecar (`build_excitation.py`'s
 `args.realistic_peak`) if present; otherwise it's **required** — this tool refuses to guess it
 from the raw audio rather than silently mis-slicing the file's realistic/sweep boundary.
