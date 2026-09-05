@@ -26,13 +26,15 @@ schx       = "examples/large_muffin/large_muffin.schx"
 # !! THE MEASURED NUMBERS BELOW WERE TAKEN ON sweepv5.wav AND HAVE NOT BEEN RE-MEASURED. !!
 # Both the oversample choice and the knob grid are properties of the circuit AND THE INPUT --
 # truncation error was measured against sweepv5's 20 kHz log chirps at 0.9, and grid_adequacy's
-# residuals are computed through whatever excitation is configured. sweep-v3 is a real-playing
-# clip with a ~22 dB crest factor and a completely different spectral/level distribution, so
+# residuals are computed through whatever excitation is configured. sweep-v3 is a SYNTHESIZED
+# capture sweep (frequency sweep + noise-staircase + calibration blips) whose ~22 dB crest factor
+# comes from that structure, not from playing dynamics, and it has a completely different
+# spectral/level distribution from sweepv5, so
 # re-run measure_truncation.py and grid_adequacy.py before trusting either.
 #
 # Note sweep-v3 alone does NOT cover the loud region (0.075% of its samples sit within 6 dB of
 # peak), which is the excitation defect behind this pipeline's FiLM-runaway failures. For a real
-# run, feed it through tools/build_excitation.py, which concatenates the real clip with
+# run, feed it through build_excitation.py, which concatenates that clip with
 # amplitude-stepped log sweeps that DO reach the device's maximum output.
 input      = "examples/T3K-sweep-v3.wav"
 backend    = "livespice"
@@ -96,7 +98,7 @@ target-steps = 25000
 
 # --- knob grid (12 x 5 = 60 combos) ---
 #
-# MEASURED, not auditioned: tools/grid_adequacy.py --config examples/large_muffin/config.toml --target 0.009
+# MEASURED, not auditioned: grid_adequacy.py --config examples/large_muffin/config.toml --target 0.009
 # It renders the circuit's TRUE output at each cell's midpoint and compares it against interpolating
 # the two neighbours. The residual is the error the GRID imposes -- no model in it. Above the ESR you
 # are chasing, the grid is the limiting factor and no amount of training can fix it.
