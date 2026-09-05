@@ -154,3 +154,76 @@ def test_merge_tolerates_an_empty_shard(tmp_path):
     empty = _shard_csv(tmp_path, "empty.csv", [])
     out = tmp_path / "params.csv"
     assert dp.merge_params([a, empty], out) == 2
+
+
+class TestComboPace:
+    """Judging a worker by seconds-per-COMBINATION rather than by completed chunks.
+
+    From the Mesa RED 648-combination run (2026-09-04): one worker rendered at 54x
+    real-time, needing ~148 min per combination against a 110 min per-rung budget. Every
+    render kept emitting progress, so gen_dataset's stall detector -- which deliberately
+    tolerates slow-but-progressing work up to TOTAL_CEILING_MULT (20x) the budget, i.e.
+    36.7 HOURS for one combination -- never fired. Nothing stalled, nothing failed, nothing
+    printed. It held a chunk for 7.5 h and produced zero combinations while its neighbours
+    completed a 16-combination chunk every 40 min.
+    """
+
+    def test_no_baseline_means_nobody_is_slow(self):
+        """A cold fleet is not evidence about any host: with too few samples there is no
+        deadline at all, so the first worker to start cannot be killed for being first."""
+        p = dp.ComboPace(min_samples=4)
+        assert p.median() is None and p.deadline() is None
+        for _ in range(3):
+            p.record(60.0)
+        assert p.deadline() is None, "3 samples is below min_samples=4"
+        p.record(60.0)
+        assert p.deadline() is not None
+
+    def test_the_baseline_is_a_median_not_a_mean(self):
+        """One 36-hour outlier must not raise the bar it is itself being judged against."""
+        p = dp.ComboPace(min_samples=4, slow_mult=3.0, floor_s=0.0)
+        for s in (60.0, 60.0, 60.0, 60.0, 36 * 3600.0):
+            p.record(s)
+        assert p.median() == 60.0
+        assert p.deadline() == 180.0
+
+    def test_the_floor_protects_a_fast_fleet_from_ordinary_variance(self):
+        p = dp.ComboPace(min_samples=2, slow_mult=3.0, floor_s=600.0)
+        p.record(5.0); p.record(5.0)
+        assert p.deadline() == 600.0, "3x a 5s median is 15s -- far too tight to act on"
+
+    def test_a_slow_worker_is_caught_in_minutes_not_never(self):
+        """The real numbers: neighbours ~21 min/combo, so the limit is ~63 min. The slow
+        worker completed nothing in 7.5 h and would have been abandoned after ~1 h."""
+        p = dp.ComboPace(min_samples=4, slow_mult=3.0, floor_s=600.0)
+        for _ in range(6):
+            p.record(21 * 60.0)
+        limit = p.deadline()
+        assert 60 * 60 <= limit <= 65 * 60
+        assert limit < 7.5 * 3600, "must fire long before the 7.5 h this actually ran"
+        assert limit < 36.7 * 3600, "and long before gen_dataset's own 36.7 h ceiling"
+
+
+class TestComboLineParsing:
+    """The per-combination signal already existed; it was thrown away. These pin the exact
+    line format so a change to the renderer's progress output cannot silently disable the
+    detector -- it would just go quiet again, which is the failure being fixed."""
+
+    def test_it_matches_the_renderers_real_progress_line(self):
+        line = ("[   3/  16]  18.8%  combo_000034  OK  DSP=42.1%  elapsed=1260s  ETA ~14:22")
+        m = dp.COMBO_LINE.match(line)
+        assert m and m.group(1) == "000034" and m.group(2) == "OK"
+
+    def test_a_failed_combination_still_counts_as_progress(self):
+        """A worker producing FAILs is making progress through its chunk -- it is a data
+        problem, not a slow-host problem, and the existing fail-fast handles it."""
+        line = "[   4/  16]  25.0%  combo_000035  FAIL  DSP=0.0%  elapsed=6604s  ETA ~14:22  [timeout after 6604s]"
+        m = dp.COMBO_LINE.match(line)
+        assert m and m.group(2) == "FAIL"
+
+    def test_unrelated_output_is_not_mistaken_for_progress(self):
+        for line in ("Workers:      12",
+                     "Timeout:      6604s per combination",
+                     "  Red Bass: [0.2, 0.8]",
+                     "[controller] no combination completed in 70.0 min"):
+            assert dp.COMBO_LINE.match(line) is None, line
