@@ -204,9 +204,30 @@ pair together: every consumer finds the sidecar by deriving it from the wav's ow
 ./check_transient_coverage.py --config my_pedal.config.toml
 ```
 
-Step 4 sized the excitation; this checks the result from the outside, across structural
-corners *and* interior sample points. It reads the required peak from the recipe sidecar
-automatically.
+**What it compares.** An excitation file is not one uniform signal. It contains a synthetic
+**sweep** — smooth tones, no attack shape — and a **real-playing segment** carrying actual
+transients, built separately at its own peak level. This tool takes the peak of the
+*transient-bearing* part alone (read automatically from the recipe sidecar) and, for every
+knob setting it tests, measures that setting's own saturation onset and checks the transient
+peak clears it.
+
+**Why that is not the same as "is the excitation loud enough".** The file's overall peak
+usually comes from the sweep, so it can clear saturation comfortably while the transient
+segment never does. When that happens the training data contains transients — but only in
+the clean, linear region — and saturation — but only from smooth sweep tones. The two never
+co-occur. The model therefore never sees what this circuit does to a *hard attack that
+clips*, and improvises when a real one arrives. Nothing about the overall peak, the file's
+RMS, or the dataset's size reveals this.
+
+**Which settings it tests.** Every structural corner of the knob grid, plus interior sample
+points — because saturation onset is not monotonic in the knobs, so the worst case can sit
+between corners rather than at one.
+
+It exits nonzero if any setting fails, so it chains as a gate:
+
+```bash
+./check_transient_coverage.py --config my_pedal.config.toml && ./run_pipeline.py ...
+```
 
 **Per-combination ESR cannot substitute for this.** It is tempting to assume a coverage gap
 would show up as bad ESR at those knob settings. It does not: validation data is drawn from
