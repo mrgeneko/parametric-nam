@@ -270,3 +270,42 @@ class TestScratchDir:
         assert d.exists() and (d / "probe.wav").exists(), "--keep-scratch must not clean up"
         assert d == tmp_path / ".cache" / "parametric-nam" / "t_scratch"
         assert "keep" in r.stderr.lower(), "keeping scratch should say so on stderr"
+
+
+class TestCacheKeySeparatesBackends:
+    """The findpeak cache is keyed on (identity, params, extra). `extra` is where the caller
+    states everything about the SOLVER that changes the answer -- and it used to omit two
+    such things for the deck backends.
+    """
+
+    def test_the_two_deck_backends_do_not_share_a_key(self):
+        """ngspice-deck and ltspice-deck both key on the generator MODULE's bytes, so if their
+        `extra` also matches, the key matches and one simulator's onset is served for the
+        other. That is the documented pairing, not a corner case: ltspice-deck exists for a
+        device whose ngspice deck cannot converge -- the same module through both."""
+        module_bytes, params = b"gen_device_ngspice.py source", {"Gain": 0.5}
+        ng = f"backend=ngspice-deck|maxstep={3e-6}|maxv={40.0}"
+        lt = f"backend=ltspice-deck|maxstep={3e-6}|maxv={40.0}"
+        assert findpeak_cache_key(module_bytes, params, ng) != \
+               findpeak_cache_key(module_bytes, params, lt)
+
+    def test_maxstep_changes_the_key(self):
+        """docs/backends.md describes sweeping maxstep from 3e-6 down to 3e-8. With maxstep
+        absent from the key, every step after the first was served the first one's answer."""
+        b, p = b"module", {"Gain": 0.5}
+        keys = {findpeak_cache_key(b, p, f"backend=ngspice-deck|maxstep={m}|maxv={40.0}")
+                for m in (3e-6, 3e-7, 3e-8)}
+        assert len(keys) == 3
+
+    def test_livespice_keys_are_unchanged(self):
+        """Deliberately NOT touched. The livespice extra carries os=..|it=.., which no deck
+        backend emits, so it cannot collide with either -- and altering it would invalidate
+        every cached entry across the fleet to fix a bug it does not have."""
+        k = findpeak_cache_key(b"schx bytes", {"Gain": 0.5}, f"os=8|it=256|maxv={40.0}")
+        assert k == findpeak_cache_key(b"schx bytes", {"Gain": 0.5}, "os=8|it=256|maxv=40.0")
+
+    def test_livespice_cannot_collide_with_a_deck_backend(self):
+        b, p = b"same bytes", {"Gain": 0.5}
+        live = findpeak_cache_key(b, p, f"os=8|it=256|maxv={40.0}")
+        deck = findpeak_cache_key(b, p, f"backend=ngspice-deck|maxstep={3e-6}|maxv={40.0}")
+        assert live != deck

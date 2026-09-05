@@ -151,7 +151,17 @@ def _setup(args):
         backend = NgspiceBackend(mod.build_deck, probe_node=args.probe_node,
                                   maxstep=args.maxstep, parallel_sims=args.parallel_sims)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"maxv={args.peak_max_v}"
+        # The BACKEND NAME and maxstep must be in this key. Without the name, ngspice-deck and
+        # ltspice-deck produced an IDENTICAL one -- same identity (the generator module's bytes)
+        # and the same "maxv=..." extra -- so one simulator's onset was served to the other. Not a
+        # corner case: docs/backends.md says ltspice-deck exists for a device whose ngspice deck
+        # cannot converge, i.e. THE SAME MODULE through both. Without maxstep, the sweep from 3e-6
+        # down to 3e-8 that the same doc describes gets the first value's answers back every time.
+        #
+        # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
+        # backend emits, so it cannot collide with either, and touching it would invalidate every
+        # cached entry in the fleet to fix a bug it does not have.
+        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
         return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -164,7 +174,7 @@ def _setup(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.ltspice_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"maxv={args.peak_max_v}"
+        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module

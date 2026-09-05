@@ -156,6 +156,32 @@ place:
 Keep SSH for bootstrap — starting the agent and shipping the repo. It works, and the mesh VPN
 already provides the network.
 
+### 4a. Warm the shared cache before sharding
+
+Saturation-onset measurements are cached per machine at `~/.cache/parametric-nam/findpeak`,
+keyed on a content hash, and the whole fleet's cache is only a few megabytes — smaller than a
+single rendered combination. Unioning them before distributing work would let every shard
+start warm with whatever any machine has already measured, at negligible transfer cost.
+Filenames are content-addressed, so merging is a set union with no possible conflict.
+
+The prerequisite is that the key must be complete, because syncing turns a single machine's
+wrong entry into the whole fleet's wrong entry. Auditing it before proposing the sync found
+two real gaps, since fixed: the two deck backends produced identical keys for the same
+generator module — which is exactly the documented pairing, one simulator used because the
+other cannot converge — and `maxstep` was absent despite being a solver parameter the docs
+describe sweeping. A third gap remains open: the key does not include the simulator's own
+version, so a rebuilt oracle silently reuses old measurements. That one is worth closing
+before any sync, and it invalidates existing entries when it lands.
+
+Onset measurement is also the one pipeline stage that is embarrassingly parallel and not yet
+distributed. It parallelises over *amplitudes within one corner* and runs the corners
+serially; corners are the right axis, being fully independent. Adding `--shard i-i/N` with
+the same modulo convention the renderer uses would make it dispatchable by the existing
+scheduler with no new machinery — merge is `max()` for the worst-case onset and a
+concatenation for the per-corner table, with the excitation built once afterwards. Measured
+cost is ~0.8 min/point over ~104 points, so this saves under an hour per device against a
+render of many hours: worth doing, but after the items above.
+
 ### 5. Data gravity
 
 The queue should carry a **destination**. Results should land where training will run, once.

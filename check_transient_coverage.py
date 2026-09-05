@@ -374,7 +374,18 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     backend = NgspiceBackend(build_deck, probe_node=probe_node, maxstep=maxstep,
                              parallel_sims=parallel_sims)
     identity = Path(module_file).read_bytes()
-    cache_extra = f"maxv={peak_max_v}"
+    # The BACKEND NAME and maxstep must be in the key. Without the name, ngspice-deck and
+    # ltspice-deck produced an IDENTICAL key -- same identity (the generator module's bytes)
+    # and the same "maxv=..." extra -- so one simulator's onset was served to the other. That
+    # is not a corner case: docs/backends.md says ltspice-deck exists for a device whose
+    # ngspice deck cannot converge, i.e. THE SAME MODULE through both. Without maxstep, a
+    # sweep from 3e-6 down to 3e-8 -- which that same doc describes doing -- gets the first
+    # value's answers back for every step after it.
+    #
+    # The livespice extra is deliberately left alone: it carries "os=..|it=.." which no deck
+    # backend emits, so it cannot collide with either, and changing it would invalidate every
+    # cached entry in the fleet to fix a bug it does not have.
+    cache_extra = f"backend=ngspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
@@ -398,7 +409,7 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
     backend = LtspiceBackend(build_deck, tap=tap, maxstep=maxstep, parallel_sims=parallel_sims,
                              out_scale=out_scale)
     identity = Path(module_file).read_bytes()
-    cache_extra = f"maxv={peak_max_v}"
+    cache_extra = f"backend=ltspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
