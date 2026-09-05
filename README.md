@@ -97,10 +97,15 @@ for each. All you need on top of the above is a `.schx`: your own, one from
 `LiveSPICE-Amp-Collection`, or the **bundled `examples/large_muffin/large_muffin.schx`** if
 you would rather practise on a known circuit first (see `large_muffin.md` for its notes).
 
-The walkthrough is deliberately not summarised here. Two of its six steps are easy to skip
-and expensive to skip — reviewing the scaffold's knob order and kinds, and re-sizing the
-excitation *after* the grid is settled — and a condensed version is how you end up skipping
-them.
+Do all six, in order. Two of them look optional and are not, because both fail **silently**:
+
+- **Step 2 — review the scaffold's knob order and kinds.** The order is baked into the
+  dataset and the model, so fixing it later means re-rendering everything. A misclassified
+  knob passes every automated check downstream, dead or not.
+- **Step 4 — re-size the excitation after the grid is settled.** Step 1 sizes one against a
+  placeholder grid; step 3 then changes that grid. Train on the stale one and the model
+  plays clean at knob settings where the real circuit distorts.
+
 ### Listen
 
 ```bash
