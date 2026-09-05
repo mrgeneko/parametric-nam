@@ -63,6 +63,9 @@ Drive    = "drive"   # guessed from name (gain/distortion) -- verify
 Tone     = "hi"      # guessed from name (treble/high-freq) -- verify
 Level    = "rms"     # guessed from name (output level) -- verify
 # Wobble = "UNCONFIRMED"   # name matched no known keyword -- classify by hand
+
+[fixed]
+Presence = 0.5       # pinned, not swept -- see "Pinning a control" below
 ```
 
 **Fix 1 — knob order.** The scaffold writes `[knobs]` alphabetically. You want **signal
@@ -96,6 +99,47 @@ genuinely dead control can pass every downstream gate.
 full `[0.0, 1.0]` — that is the scaffold's own role-aware default (a tone control at a hard
 endpoint is rarely a useful training point), not something `grid_adequacy` chose. Widen it
 if your circuit is meant to be played there.
+
+### Pinning a control at one value
+
+Not every control has to become a model knob. Each control lands in exactly one of three
+states:
+
+| where you put it | what happens | in the trained model? |
+|---|---|---|
+| `[knobs]` | swept across the listed values | **yes** — a knob you can turn |
+| `[fixed]` | held at the value you state, every render | no |
+| neither | held at whatever the `.schx` itself defaults to | no |
+
+To pin one, add a `[fixed]` table naming the control and its value in the same 0–1 units the
+`[knobs]` lists use:
+
+```toml
+[fixed]
+Presence = 0.5
+Rock     = 1.0
+```
+
+Put a control in `[fixed]` **or** `[knobs]`, never both — the two are concatenated into one
+parameter string per render, so listing a name twice is ambiguous rather than clever.
+
+Two reasons to pin. The first is **cost**: combinations multiply, so dropping a 3-point axis
+from a 5-knob grid cuts the render count — and the dataset size, and the training time — by
+two thirds. The second is **scope**: a control that is really a mode switch, or one you have
+no intention of modelling, adds a dimension the network has to spend capacity on for no
+benefit. Devices with more than three swept knobs tend to hit a capacity ceiling rather than
+a training-time one, so pinning is a real lever, not a shortcut.
+
+The cost of pinning is that it makes the config a **variant** of the device rather than the
+device — the resulting model cannot move that control at all. Say so in a comment, and
+ideally in the config's filename, so nobody later mistakes it for the full device.
+
+> There is also a `[defaults]` table, which is a different thing and easy to confuse with
+> `[fixed]`. It applies to knobs that **are** swept, and records each one's default position
+> in the `.nam`'s `parameters[].default`, so that baking a static model with no explicit
+> parameter values uses the circuit's real default position rather than the midpoint of the
+> range — for a pedal whose controls do not center at noon. It does not remove a knob from
+> the grid.
 
 ## 3. Refine the knob grid
 
