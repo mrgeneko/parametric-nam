@@ -430,6 +430,35 @@ automatic tripwire, not a substitute for them.
 
 ## `distribute_pull.py` — hand rendering chunks out as workers free up
 
+**Takes the same `--config` as `run_pipeline.py`.** One description of a device, whether it
+renders on one machine or four:
+
+```bash
+# single machine
+python run_pipeline.py     --config device.config.toml --workspace ~/runs/device_run1
+
+# sharded across a fleet — same config, same device
+python distribute_pull.py  --config device.config.toml \
+    --worker host-a:~/work/parametric-nam:10 \
+    --worker host-b:~/work/parametric-nam:10 \
+    --chunks 41 --output '~/device_ds' --collect ~/runs/device_run1/dataset
+```
+
+It expands the config into the renderer's `--backend`/`--schx`/`--input`/`--knobs`/`--range`/
+`--fixed-params`/`--oversample` using `run_pipeline.py`'s own loader, so the two paths cannot
+drift. Anything after `--` is appended and wins, so `-- --oversample 4` still overrides the
+config without editing it.
+
+`schx` and `input` are rewritten **relative to the repo**, because each worker runs from its
+own checkout and homes differ across a fleet (`/Users/gene`, `/Users/chewie`, `/home/gene`) —
+an absolute path from the controller can be a *different user's* home on a worker. Keep the
+device files in a sibling directory of the repo and this is automatic; the tool warns when a
+path is too far outside to travel.
+
+> Before this existed, the sharded path took eleven hand-written renderer flags. The Mesa RED
+> launch omitted `--backend` — whose default is `cpp` — and all four workers quarantined in
+> under a second.
+
 `distribute_gen.sh` splits the grid **once**, up front, by core count or `--weights`, and each
 worker keeps its slice. That only works when every worker's throughput is known in advance *and
 stays constant*. On a 648-combination run neither held: one Linux box managed 43.8 combos/hr and

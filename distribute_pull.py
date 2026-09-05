@@ -35,10 +35,12 @@ where startup is a few percent of chunk runtime.
 NOT A REPLACEMENT for distribute_gen.sh's setup work (repo sync, --sync-file, gate). Run
 those first; this only schedules the rendering.
 """
-import argparse, csv, re, statistics, subprocess, sys, threading, time
+import argparse, csv, os, re, statistics, subprocess, sys, threading, time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+
+from run_pipeline import load_config
 
 
 def log(msg):
@@ -183,6 +185,49 @@ class Worker:
         rc = proc.returncode if not killed_slow else 1
         return rc, dt, "\n".join(lines)
 
+
+
+def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
+    """Expand a per-circuit config.toml into gen_dataset_from_schx.py arguments.
+
+    THE POINT IS THAT THERE IS ONE SOURCE OF TRUTH. run_pipeline.py takes --config; this
+    scheduler took eleven hand-written flags instead, so rendering the same device on one
+    machine and across four used two different descriptions of it that nothing reconciled.
+    Retyping them is not a theoretical hazard: the Mesa RED launch (2026-09-05) omitted
+    --backend, which defaults to `cpp`, and every worker quarantined in under a second.
+    load_config() is run_pipeline's own loader, so the two paths cannot drift.
+
+    PATHS ARE MADE RELATIVE to the repo root, because run_chunk cds into each worker's own
+    checkout before running. Absolute paths from the config cannot work across a
+    heterogeneous fleet -- homes differ (/Users/gene, /Users/chewie, /home/gene), and a
+    path that resolves on the controller may be a DIFFERENT user's home on a worker.
+    """
+    cfg = load_config(config_path)
+    out: list[str] = []
+    if cfg.get("backend"):
+        out += ["--backend", str(cfg["backend"])]
+    for dest, flag in (("schx", "--schx"), ("input", "--input")):
+        v = cfg.get(dest)
+        if v is None:
+            continue
+        try:
+            rel = os.path.relpath(Path(v).expanduser().resolve(), repo_root.resolve())
+        except ValueError:                     # different drive (Windows) -- keep absolute
+            rel = str(v)
+        if rel.startswith(".." + os.sep + ".."):
+            print(f"WARNING: {dest} is {rel} relative to the repo -- that is unlikely to "
+                  f"resolve the same way on every worker. Put it in a sibling directory of "
+                  f"the repo, or pass --{dest} yourself after --.", file=sys.stderr)
+        out += [flag, rel]
+    if cfg.get("knobs"):
+        out += ["--knobs", str(cfg["knobs"])]
+    for r in cfg.get("ranges") or []:
+        out += ["--range", str(r)]
+    if cfg.get("fixed_params"):
+        out += ["--fixed-params", str(cfg["fixed_params"])]
+    if cfg.get("oversample") is not None:
+        out += ["--oversample", str(cfg["oversample"])]
+    return out
 
 
 def _warn_chunk_aliasing(gen_args, chunks):
@@ -347,6 +392,13 @@ def main():
                          "cleanly (global-index filenames) but params.csv is one file per worker "
                          "holding only that worker's rows, so a naive rsync leaves you the LAST "
                          "worker's metadata describing the whole grid.")
+    ap.add_argument("--config", type=Path, default=None,
+                    help="per-circuit TOML, the SAME file run_pipeline.py --config takes. "
+                         "Expands to the renderer's --backend/--schx/--input/--knobs/--range/"
+                         "--fixed-params/--oversample so the sharded and single-machine paths "
+                         "describe the device identically. Paths are rewritten relative to this "
+                         "repo, since each worker runs from its own checkout. Anything you pass "
+                         "after -- is appended and wins.")
     ap.add_argument("--slow-mult", type=float, default=3.0,
                     help="abandon a chunk when a worker goes this many times the FLEET MEDIAN "
                          "seconds-per-combination with nothing finished (default 3; 0 disables). "
@@ -370,9 +422,13 @@ def main():
     args, gen_args = ap.parse_known_args()
     if gen_args and gen_args[0] == "--":
         gen_args = gen_args[1:]
+    if args.config:
+        # Config first, explicit flags second: argparse-style "last wins" for the renderer,
+        # so --  --oversample 4  still overrides the config without editing it.
+        gen_args = gen_args_from_config(args.config, Path(__file__).resolve().parent) + gen_args
     gen_args_str = " ".join(f"'{a}'" if " " in a else a for a in gen_args)
     if not gen_args_str:
-        ap.error("pass the renderer's own arguments after --")
+        ap.error("pass --config, or the renderer's own arguments after --")
 
     workers = [Worker(w) for w in args.worker]
     queue = deque(f"{i}-{i}/{args.chunks}" for i in range(args.chunks))
