@@ -119,7 +119,7 @@ file, comments included.
 **Probe renders are cached on disk** (`~/.cache/parametric-nam/gridadq`), so the second run
 of this tool on a device is near-instant instead of re-rendering everything the first one
 already rendered. That second run is not hypothetical: `--apply` refines the grid, and
-`run_pipeline.py`'s STEP 0 then re-verifies it, so the normal path runs `grid_adequacy`
+`run_pipeline.py`'s STEP 1 then re-verifies it, so the normal path runs `grid_adequacy`
 twice on the same circuit (see [checklist](checklist.md)).
 
 The cache is keyed on everything that changes a probe's **answer** — the `.schx`'s own
@@ -389,7 +389,7 @@ For a hand-written ngspice deck with no `.schx` at all, `--backend ngspice-deck`
 
 ## `check_input_headroom.py` — warn if the excitation doesn't get loud enough (runs automatically)
 
-Runs automatically as `run_pipeline.py`'s **Step 0b**, right after grid adequacy — the only one
+Runs automatically as `run_pipeline.py`'s **Step 2**, right after grid adequacy — the only one
 of the excitation-coverage scripts on this page that's wired into the pipeline by default.
 Answers a narrower, cheaper question than `check_transient_coverage.py` above: at *default*
 (0.5) knob settings, does the excitation's peak reach this device's own measured saturation

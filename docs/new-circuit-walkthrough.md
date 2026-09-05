@@ -177,23 +177,35 @@ Coverage is a property of the input signal and has to be checked against the inp
 ./run_pipeline.py --config my_pedal.config.toml --workspace ~/runs/device_run1
 ```
 
-Everything from here is automatic:
+Everything from here is automatic. This one command runs six stages of its own, and
+prints each as a banner — these are `run_pipeline.py`'s internal steps, not the six
+walkthrough steps on this page:
 
-| | | on failure |
+| banner it prints | what it does | on failure |
 |---|---|---|
-| STEP 0 | `grid_adequacy` re-verify (cached, so ~instant) | **aborts** |
-| STEP 0b | `check_input_headroom` | warns |
-| STEP 0c | `preflight` — dead/reversed knobs, input calibration | **aborts** |
-| STEP 1 | generate (transient coverage re-checked inside) | **aborts** |
-| STEP 2 | combine → `outputs.npy` | |
-| STEP 3 | train — SGDR warm restarts, open-ended | |
-| — | release folder: models, `.schx`, `MANIFEST.md`, `reproduce.sh` | |
+| `STEP 1 / 6 — Grid Adequacy` | re-verifies the grid from step 3 (cached, so ~instant) | **aborts** |
+| `STEP 2 / 6 — Input Headroom` | does the excitation reach saturation at default settings | warns |
+| `STEP 3 / 6 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
+| `STEP 4 / 6 — Dataset Generation` | renders every combination (coverage re-checked inside) | **aborts** |
+| `STEP 5 / 6 — Combine` | assembles `outputs.npy` | |
+| `STEP 6 / 6 — Training` | SGDR warm restarts, open-ended | |
+| `RELEASE` | models, `.schx`, `MANIFEST.md`, `reproduce.sh` | |
 
 Training with `epochs = 0` runs until you `touch <workspace>/checkpoints/STOP`, exporting
 the best model continuously. Use the first run to find the budget, then set a real schedule.
 
-Always pass `--restart-mult 2 --restart-decay 0.85`: equal-length full-reset SGDR cycles
-waste roughly half the steps (measured).
+**On SGDR restarts.** The defaults are `--restart-mult 1` (equal-length cycles) and
+`--restart-decay 0.97`. Every full-LR restart pays a roughly *fixed* recovery cost — several
+epochs spent re-descending to where the previous cycle already was — so with equal-length
+cycles that cost stays a constant fraction of the run no matter how long you train
+(measured: ~54% of total epochs spent re-climbing).
+
+`--restart-mult 2` grows each cycle geometrically while the per-restart cost stays fixed, so
+the wasted fraction shrinks toward zero (~9% on the same budget). It is **not** a safe
+always-on default, which is why it isn't one: `--stale-cycles` counts *cycles*, not epochs,
+so geometrically growing cycles make that auto-stop rule geometrically slower to fire. If
+you use `mult 2`, lower `--stale-cycles` to 2–3, add `--stale-epochs` as an epoch-counted
+backstop, or set an explicit epoch/step budget instead of relying on `--stale-cycles`.
 
 ---
 

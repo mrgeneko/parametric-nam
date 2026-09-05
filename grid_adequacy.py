@@ -207,7 +207,7 @@ class Renderer:
         self.cache: dict = {}
         # ON-DISK cache, so a re-run does not re-render probes that have not changed. The
         # in-process dict above only ever helped WITHIN one invocation, which meant
-        # run_pipeline's STEP 0 verification re-rendered everything grid_adequacy.py --apply
+        # run_pipeline's STEP 1 verification re-rendered everything grid_adequacy.py --apply
         # had just rendered -- 48 probes on a 4-knob pedal, and on a full amp at ~1.2
         # probes/min that is real time paid twice for the same answer.
         #

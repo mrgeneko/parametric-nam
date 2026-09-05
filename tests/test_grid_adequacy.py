@@ -450,7 +450,7 @@ class TestRendererDiskCache:
     and on nothing that doesn't.
 
     grid_adequacy is run twice on every device -- once by `--apply` to refine the grid, then
-    again by run_pipeline's STEP 0 to verify it -- so without a cache that survives the
+    again by run_pipeline's STEP 1 to verify it -- so without a cache that survives the
     process, the second run re-renders every probe the first one just rendered. The risk of
     a cache is the opposite failure: serving a stale render after the circuit or the
     excitation changed. These tests pin both directions.
@@ -494,7 +494,7 @@ class TestRendererDiskCache:
                            ({"Gain": 0.7})[0], 0.7)
         assert c1, "first Renderer should have actually rendered"
 
-        c2 = []   # a FRESH Renderer, i.e. what run_pipeline's STEP 0 is
+        c2 = []   # a FRESH Renderer, i.e. what run_pipeline's STEP 1 is
         out = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2)({"Gain": 0.7})
         assert c2 == [], "second Renderer re-rendered a probe the first one cached"
         assert np.allclose(out[0], 0.7), "cached render must round-trip its values"

@@ -136,12 +136,12 @@ with `check_transient_coverage.py`. That verify step is **not** your only protec
 check re-runs as a **hard gate** inside Step 1 below, so a bad excitation cannot reach training
 either way. You run it by hand first because it is a *build* loop: when it fails, the fix is to
 rebuild the excitation (raise `--realistic-peak`, widen the corner set), and doing that iteration
-inside the pipeline means paying Step 0's grid-adequacy renders on every attempt. It is also
+inside the pipeline means paying Step 1's grid-adequacy renders on every attempt. It is also
 close to free the second time — per-corner saturation onsets cache to
 `~/.cache/parametric-nam/findpeak`, keyed on the `.schx`'s own bytes so an edited circuit
 re-measures automatically — and it is the only place you get to choose `--max-corners`,
 `--margin` and friends, which Step 1 takes as defaults. `run_pipeline.py` only checks a **weaker version of this
-automatically** (Step 0b below, `check_input_headroom.py`) — a WARN-only check at *default*
+automatically** (Step 2 below, `check_input_headroom.py`) — a WARN-only check at *default*
 (0.5) knob settings, not a hard gate, and not every knob corner. It's not a substitute:
 skipping the full corner-by-corner check is exactly how a real shipped model (the tweed-style amp)
 ended up never seeing saturation at some corners and misbehaving on real hot input later (see
@@ -277,7 +277,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `build_excitation.py` | Build a training excitation that covers the full input range |
 | `prepare_excitation.py` | Size an excitation from measured saturation onset, automatically |
 | `check_transient_coverage.py` | Gate: does the excitation reach saturation at every knob corner? |
-| `check_input_headroom.py` | Warn if the excitation doesn't reach saturation at default knob settings (runs automatically as `run_pipeline.py` Step 0b) |
+| `check_input_headroom.py` | Warn if the excitation doesn't reach saturation at default knob settings (runs automatically as `run_pipeline.py` Step 2) |
 | `pick_dynamic_window.py` | Cut the most-dynamic N-second window out of a long real-playing clip |
 | `apply_output_limiter.py` | Opt-in: soft-limit a rendered training-target WAV so the trainer sees an explicit output ceiling |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |

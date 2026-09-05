@@ -91,7 +91,7 @@ def check_oracle(backend: str) -> None:
     clear, actionable message (built vs. not built vs. wrong path) if not -- instead
     of letting the first real render fail deep into a run with a raw subprocess
     FileNotFoundError, which is what happens with no check at all (confirmed: this is
-    exactly what grid_adequacy.py and run_pipeline.py's own STEP 0 used to hit,
+    exactly what grid_adequacy.py and run_pipeline.py's own STEP 1 used to hit,
     since neither called this check before this was factored out to be shared).
 
     Callers: gen_dataset_from_schx.py's own generation path, run_pipeline.py (once, up

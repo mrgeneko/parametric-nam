@@ -893,7 +893,7 @@ def main():
                         "grid otherwise changes how long the model trains — regridding Large Muffin "
                         "126→60 combos silently HALVED its budget. 0 = off (use --repeats).")
     g.add_argument("--skip-grid-check", action="store_true",
-                   help="skip the STEP 0 grid-adequacy measurement. It renders each knob cell's "
+                   help="skip the STEP 1 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
                         "cell that fails puts a floor under the model that NO training can lift. "
                         "Cheap relative to generation+training regardless (renders scale with knob-"
@@ -905,7 +905,7 @@ def main():
                    help="the interpolation ESR the knob grid must support (default 0.03, the "
                         "audibility floor -- NOT the training-fidelity ESR; see grid_adequacy.py)")
     g.add_argument("--skip-headroom-check", action="store_true",
-                   help="skip the STEP 0b input-headroom check. It finds the device's saturation "
+                   help="skip the STEP 2 input-headroom check. It finds the device's saturation "
                         "onset (--find-peak, at default knob settings) and compares it against the "
                         "excitation's own peak -- an excitation that stays well under the onset "
                         "means the trained dataset may never explore the device's nonlinear/breakup "
@@ -917,7 +917,7 @@ def main():
     g.add_argument("--headroom-margin", type=float, default=0.8,
                    help="WARN if excitation peak < margin * saturation onset (default 0.8)")
     g.add_argument("--skip-preflight-check", action="store_true",
-                   help="skip the STEP 0c knob-sanity preflight. Probes a handful of short clips "
+                   help="skip the STEP 3 knob-sanity preflight. Probes a handful of short clips "
                         "through the oracle and ABORTS (like the grid check, unlike the headroom "
                         "check) when a knob is dead, moves the wrong way, or the input-level "
                         "calibration is implausible -- see preflight.py. Only runs for "
@@ -1044,7 +1044,7 @@ def main():
         timings = {}  # step -> wall seconds (absent = skipped)
 
         # ------------------------------------------------------------------
-        # Step 1: Generate
+        # Step 4: Generate
         # ------------------------------------------------------------------
         run_generate = not args.skip_generate
         if run_generate and not args.force_generate:
@@ -1053,7 +1053,7 @@ def main():
                     "Use --force-generate to redo.", fh)
                 run_generate = False
 
-        # Oracle preflight: Step 0 (grid adequacy) and Step 1 (generate) both need it,
+        # Oracle preflight: Step 1 (grid adequacy) and Step 4 (generate) both need it,
         # and both are about to start if run_generate is still true here. Check before
         # either, not after the first render fails deep into one of them -- confirmed
         # that's a raw subprocess FileNotFoundError with no useful message otherwise.
@@ -1061,7 +1061,7 @@ def main():
             check_oracle(args.backend)
 
         # ------------------------------------------------------------------
-        # Step 0: is the knob grid dense enough to be worth rendering?
+        # Step 1: is the knob grid dense enough to be worth rendering?
         #
         # A grid too coarse in even one cell puts a FLOOR under the model that no amount of training
         # can lift -- the information is simply not in the data. That is not hypothetical: the Big
@@ -1076,7 +1076,7 @@ def main():
         # See internal engineering notes.
         # ------------------------------------------------------------------
         if run_generate and args.config and not args.skip_grid_check:
-            section("STEP 0 / 3 — Grid Adequacy", fh)
+            section("STEP 1 / 6 — Grid Adequacy", fh)
             log("Measuring whether the knob grid can even represent the target ESR. A cell whose "
                 "interpolation error exceeds it cannot be fixed by training — the data does not "
                 "contain what the model would need. Re-run grid_adequacy.py --suggest for a "
@@ -1090,7 +1090,7 @@ def main():
                        fh, "grid-adequacy")
 
         # ------------------------------------------------------------------
-        # Step 0b: does the excitation actually reach this device's own saturation ceiling?
+        # Step 2: does the excitation actually reach this device's own saturation ceiling?
         #
         # A dense knob grid is not the same question as an excitation that gets loud enough. A
         # model can only learn what's in the data -- if every rendered combination stays in the
@@ -1106,7 +1106,7 @@ def main():
         # not a verdict either way.
         # ------------------------------------------------------------------
         if run_generate and args.config and not args.skip_headroom_check:
-            section("STEP 0b / 3 — Input Headroom", fh)
+            section("STEP 2 / 6 — Input Headroom", fh)
             log("Checking whether the excitation reaches this device's own saturation onset at "
                 "default knob settings. A WARN here is a prompt to check the grid's own hottest "
                 "corner directly, not an automatic verdict -- see check_input_headroom.py. "
@@ -1133,7 +1133,7 @@ def main():
                 log("input-headroom check: OK.", fh)
 
         # ------------------------------------------------------------------
-        # Step 0c: is every knob sane -- none dead, none reversed, input level plausible?
+        # Step 3: is every knob sane -- none dead, none reversed, input level plausible?
         #
         # preflight.py only has a mode for --backend livespice (plus the separate ngspice-deck/
         # ltspice-deck hand-deck path this pipeline doesn't drive) -- there is no mode for the
@@ -1146,7 +1146,7 @@ def main():
         # ------------------------------------------------------------------
         if (run_generate and args.config and args.backend == "livespice" and args.schx
                 and args.input and not args.skip_preflight_check):
-            section("STEP 0c / 3 — Preflight", fh)
+            section("STEP 3 / 6 — Preflight", fh)
             log("Checking that every knob is alive and moves the right direction, and that the "
                 "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
             cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "livespice",
@@ -1161,12 +1161,12 @@ def main():
 
         # NOTE: the transient/saturation-coverage check (check_transient_coverage.py) is NOT a
         # separate step here -- it already runs automatically inside gen_dataset_from_schx.py's
-        # own STEP 1 generation (gated by --skip-transient-check/--transient-peak/
+        # own STEP 4 generation (gated by --skip-transient-check/--transient-peak/
         # --transient-margin, all forwarded below), so adding another call here would just run it
         # twice. See gen_dataset_from_schx.py's own transient-check block for the real gate.
 
         if run_generate:
-            section("STEP 1 / 3 — Dataset Generation", fh)
+            section("STEP 4 / 6 — Dataset Generation", fh)
             gen_cmd = [
                 PYTHON, BATCH,
                 "--backend", args.backend,
@@ -1210,7 +1210,7 @@ def main():
         check_missing_combinations(dataset_dir, fh, args.allow_missing_combos)
 
         # ------------------------------------------------------------------
-        # Step 2: Combine
+        # Step 5: Combine
         # ------------------------------------------------------------------
         run_combine = not args.skip_combine
         if run_combine and not sig_dir.exists():
@@ -1223,14 +1223,14 @@ def main():
             run_combine = False
 
         if run_combine:
-            section("STEP 2 / 3 — Combine", fh)
+            section("STEP 5 / 6 — Combine", fh)
             timings["combine"] = stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
 
         # ------------------------------------------------------------------
-        # Step 3: Train
+        # Step 6: Train
         # ------------------------------------------------------------------
         if not args.skip_train:
-            section("STEP 3 / 3 — Training", fh)
+            section("STEP 6 / 6 — Training", fh)
 
             # ------------------------------------------------------------------
             # THE TRAINING BUDGET IS A DERIVED QUANTITY, AND IT WAS INVISIBLE.
