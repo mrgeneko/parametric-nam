@@ -4,8 +4,26 @@ The end-to-end path for a circuit this repo has never seen: **six steps, five co
 Step 2 is pure review — no command, and the one step whose omission the pipeline's own
 gates cannot catch for you.
 
+**Before you start**, you need what the [README](../README.md#train-from-a-spice-schematic)
+sets up: the `livespice-cli` oracle built (`./setup.sh`, or `export LIVESPICE_CLI=...` if your
+checkout is not a sibling of this repo) and the venv active. Every command below is run from
+the repo root.
+
 For what each script does in detail see [scripts.md](scripts.md); for the gates the pipeline
 applies and what each one aborts on, [checklist.md](checklist.md).
+
+**Budget the time.** These steps simulate a circuit thousands of times; only step 2 is quick.
+Rough shape, on a many-core desktop:
+
+| step | cost | what drives it |
+|---|---|---|
+| 1 — scaffold | minutes | measured at 3m26s for a 3-knob pedal; most of it is the excitation build |
+| 3 — grid refine | minutes to tens of minutes | knob-*axis* count, not combination count; cached between runs |
+| 4 — re-size excitation | minutes | corner count × per-render cost |
+| 6 — generate + train | **hours to days** | combinations × clip length × oversample, then training |
+
+`--oversample` and the backend move all of these by large factors — `ngspice` is markedly
+slower than `livespice`. See [backends.md](backends.md) for choosing one.
 
 Throughout, `~/runs/device_run1` is a **workspace** — one directory holding everything this
 run produces. It is per *run*, not per circuit: a second run goes in a second directory, and
@@ -332,3 +350,32 @@ Deliberately outside it: content-keyed caches in `~/.cache/parametric-nam/`
 
 More devices hit a **capacity** ceiling than a training-time one once more than three knobs
 are swept. If the widest tier plateaus, widen it before training longer.
+
+## While it runs, and when it finishes
+
+Every step streams to the terminal and to `<workspace>/pipeline.log`, so from another
+terminal:
+
+```bash
+tail -f ~/runs/device_run1/pipeline.log
+```
+
+`<workspace>/checkpoints/metrics.csv` carries the same training progress per epoch, as
+val ESR per tier.
+
+Open-ended training (`epochs = 0`) exports the best model continuously, so there is a usable
+`.param.nam` well before you stop it. When the numbers stop improving, `touch
+~/runs/device_run1/checkpoints/STOP`; the run finishes the current cycle, exports, and builds
+`<workspace>/release/`.
+
+Then:
+
+- **Hear it** — `checkpoint_infer.py` renders audio through the model at any knob position,
+  in PyTorch, with no C++ build required.
+- **Play it in a stock plugin** — `bake_nam.py` bakes one knob position into a static `.nam`
+  that any standard NAM loader opens. One `.nam` per tone; ship a pack for a set of them.
+- **Check it does not blow up** — `scan_film_runaway.py` looks for knob corners where the
+  model explodes on a hard attack. It needs a genuinely real playing clip as its reference,
+  not the training excitation.
+
+All three are documented in [scripts.md](scripts.md).
