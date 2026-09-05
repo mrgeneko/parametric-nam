@@ -430,6 +430,10 @@ automatic tripwire, not a substitute for them.
 
 ## `distribute_pull.py` — hand rendering chunks out as workers free up
 
+> Where this is heading — mesh SSH, a generated fleet inventory, a pull-based queue and a
+> dashboard — is written up in
+> [fleet-deployment-proposal.md](fleet-deployment-proposal.md). None of it is implemented.
+
 **Takes the same `--config` as `run_pipeline.py`.** One description of a device, whether it
 renders on one machine or four:
 
@@ -450,7 +454,7 @@ drift. Anything after `--` is appended and wins, so `-- --oversample 4` still ov
 config without editing it.
 
 `schx` and `input` are rewritten **relative to the repo**, because each worker runs from its
-own checkout and homes differ across a fleet (`/Users/gene`, `/Users/chewie`, `/home/gene`) —
+own checkout and homes differ across a fleet (`/Users/alice`, `/Users/bob`, `/home/alice`) —
 an absolute path from the controller can be a *different user's* home on a worker. Keep the
 device files in a sibling directory of the repo and this is automatic; the tool warns when a
 path is too far outside to travel.
