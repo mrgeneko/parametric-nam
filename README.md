@@ -125,9 +125,14 @@ just want to try the knob experience before training your own.
 ## How it works
 
 ```
-.schx schematic                             fixed-setting captures (.nam export or raw .wav)
+ your input clip (e.g. a capture sweep)
+     ↓  prepare_excitation.py → build_excitation.py
+     (measure this circuit's saturation onset across the knob grid,
+      then build an excitation that actually reaches it)
+     ↓
+.schx schematic + excitation                fixed-setting captures (.nam export or raw .wav)
     ↓  gen_dataset_from_schx.py                  ↓  gen_dataset_from_captures.py
-    (simulate: sweep × N combinations)           (align each capture to a shared sweep, 1/file)
+    (simulate: excitation × N combinations)      (align each capture to a shared sweep, 1/file)
                         ╲                        ╱
                          Paired audio dataset (config.json, sweep.wav, outputs.npy, params.csv)
                              ↓  param_train.py  (train A2 Lite 4ch + Full 8ch jointly, FiLM knob conditioning)
@@ -139,8 +144,16 @@ just want to try the knob experience before training your own.
 
 Two ways to reach the same dataset contract: simulate a circuit, or point at a folder of
 real captures — see `gen_dataset_from_captures.py` in [`docs/scripts.md`](docs/scripts.md).
-`run_pipeline.py` orchestrates the `.schx` path's three steps in one command; you can also run
-each script directly (see `docs/scripts.md`).
+
+The excitation step is not a formality. Feeding a capture sweep straight in is the
+documented cause of this pipeline's FiLM-runaway failures: such a file spends almost none of
+its time near peak (0.07% of samples within 6 dB, measured on the standard sweep), so the
+circuit's loud, clipping region is barely sampled and the model runs open-loop when a real
+hot signal arrives.
+
+`run_pipeline.py` orchestrates the `.schx` path's six steps in one command — three
+pre-flight gates, then generate → combine → train; you can also run each script directly
+(see `docs/scripts.md`).
 
 ---
 
