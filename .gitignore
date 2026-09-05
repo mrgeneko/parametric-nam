@@ -19,6 +19,6 @@ ngspice/*.cir
 ngspice/*.csv
 
 # Excitation source clip. T3K-sweep-v3.wav is TONE3000's, not ours to redistribute -- download
-# it from https://www.tone3000.com/capture (see README: "The sweep file"). This is not why the
+# it from https://www.tone3000.com/create/capture (see README: "The sweep file"). This is not why the
 # old sweepv5.wav was removed; that one WAS ours and freely redistributable.
 examples/*.wav
