@@ -41,17 +41,61 @@ discovered here than four hours into a render.
 
 ## 2. Review the config — the step you cannot skip
 
-The scaffold cannot know two things:
+This is the one step with no command and no automatic gate. Open the `config.toml` the
+scaffold wrote and fix two things it cannot know.
 
-**Knob order.** It writes them alphabetically; you want **signal flow**. The order is
-recorded in the dataset and the model, so getting it right later means re-rendering.
+Here is what it produces for a four-knob pedal, and what you change:
 
-**Knob kinds.** Each guess is marked `UNCONFIRMED`. A misclassified knob silently gets the
-wrong sensitivity metric in `grid_adequacy.py` *and* skips `preflight.py`'s role-aware EQ
-safeguard — so a dead knob can pass every gate.
+```toml
+schx       = "/path/to/My Pedal.schx"
+input      = "/path/to/my_pedal_excitation.wav"   # sized against this config's grid AS IT WAS ...
+backend    = "livespice"
+oversample = 8
 
-Also check the `[knobs]` ranges. EQ knobs are narrowed to `[0.2, 0.8]` by the scaffold's own
-role-aware default; that is deliberate, not something `grid_adequacy` chose.
+[knobs]
+Drive    = [0.0, 0.25, 0.5, 0.75, 1.0]
+Level    = [0.0, 0.5, 1.0]
+Tone     = [0.2, 0.5, 0.8]
+Wobble   = [0.0, 0.5, 1.0]
+
+[knob-kind]
+Drive    = "drive"   # guessed from name (gain/distortion) -- verify
+Tone     = "hi"      # guessed from name (treble/high-freq) -- verify
+Level    = "rms"     # guessed from name (output level) -- verify
+# Wobble = "UNCONFIRMED"   # name matched no known keyword -- classify by hand
+```
+
+**Fix 1 — knob order.** The scaffold writes `[knobs]` alphabetically. You want **signal
+flow**: the order a signal actually passes through the circuit. Above, if `Tone` sits before
+`Level` in the circuit, reorder the `[knobs]` lines to `Drive, Tone, Level, Wobble`. The
+order is recorded in the dataset and baked into the model, so changing it later means
+re-rendering everything.
+
+**Fix 2 — knob kinds.** Every guess is name-based and marked `-- verify`; anything the
+scaffold could not match is **commented out** as `UNCONFIRMED`, which means it is not
+classified at all until you uncomment and set it. The valid values:
+
+| kind | means | effect |
+|---|---|---|
+| `"drive"` | a gain/distortion control | held **low** while another knob's EQ effect is checked |
+| `"hi"` | treble / high-frequency | checked by per-band spectral spread; held low during another EQ knob's check |
+| `"lo"` | bass / low-frequency | same as `hi`, different band |
+| `"mid"` | midrange | same as `hi`, different band |
+| `"rms"` | a volume/level control | checked by output-level spread |
+
+Omitting a knob entirely is legal — it falls back to a plain RMS-spread check with no
+special preflight treatment. That is the right choice for a control that is genuinely none
+of the above (`Wobble`, a modulation depth); it is the *wrong* choice for one you simply did
+not get around to.
+
+Getting this wrong is quiet, not loud: a misclassified knob gets the wrong sensitivity
+metric in `grid_adequacy.py` **and** skips `preflight.py`'s role-aware EQ safeguard, so a
+genuinely dead control can pass every downstream gate.
+
+**Also check the `[knobs]` ranges.** EQ knobs are narrowed to `[0.2, 0.8]` rather than the
+full `[0.0, 1.0]` — that is the scaffold's own role-aware default (a tone control at a hard
+endpoint is rarely a useful training point), not something `grid_adequacy` chose. Widen it
+if your circuit is meant to be played there.
 
 ## 3. Refine the knob grid
 
@@ -66,11 +110,12 @@ converged grid back, leaving all your comments intact.
 
 Probe renders are cached on disk, so step 6's re-verification of this grid is free.
 
-> **`--apply` can also *coarsen* an axis.** It cut Duke of Tone's Tone and Presence to their
-> 2-point floor on measured error alone. Those were restored by hand: endpoints
-> interpolating well over one probe window is not the same as a knob being linear
-> everywhere in use, and a 2-point axis leaves nothing to catch it if it isn't. If you
-> override a suggestion, say so in a comment — a later `--apply` will otherwise re-cut it.
+> **`--apply` can also *coarsen* an axis**, down to a 2-point floor, when a knob's midpoints
+> interpolate well. Think before accepting that on an interacting tone network. Measured
+> error says the endpoints interpolate well *over one probe window*, which is not the same
+> as the knob being linear everywhere in use — and a 2-point axis leaves nothing to catch it
+> if it isn't. Restoring a midpoint by hand is cheap insurance; if you do, say so in a
+> comment, because a later `--apply` will otherwise re-cut it.
 
 ## 4. Re-size the excitation against the refined grid
 
@@ -85,11 +130,25 @@ Probe renders are cached on disk, so step 6's re-verification of this grid is fr
 the *placeholder* grid. Step 3 changed the grid underneath it, which changes the corner set,
 which changes the worst-case saturation onset the excitation has to reach.
 
-This is not hypothetical. Mesa Orange and RED both trained against an excitation whose
-15.4369 V transient peak had been hand-picked and never measured against any corner set.
-They failed 6 of 43 and 4 of 43 corners respectively. RED's re-measured worst case was
-20.8276 V — at `RD Gain=lo-solo`, **1.27× the highest of all 32 hypercube vertices**, because
-saturation onset is not monotonic in the knobs and the worst corner need not be a vertex.
+**Why the excitation has to be scaled to the circuit.** A model can only learn behaviour the
+training data contains. If the input never drives the circuit hard enough to clip at some
+knob setting, that setting's clipping is simply absent from the dataset — and the model will
+confidently produce a clean output where the real circuit distorts. So the excitation's
+transient peak has to exceed the *worst-case* saturation onset across the whole grid, not
+the typical one.
+
+Two things make that worst case impossible to guess:
+
+- **Onset is measured at the output.** A setting with the output level turned down needs far
+  *more* input drive to reach saturation. The knob combinations that demand the hottest
+  excitation are often the quiet-sounding ones.
+- **Onset is not monotonic in the knobs**, so the worst corner need not be a hypercube
+  vertex at all — it can sit in the interior, above every corner you would have thought to
+  check. This is why `prepare_excitation.py` probes interior grid points as well as corners,
+  and why a peak chosen by ear or by eye is not good enough.
+
+A hand-picked peak that has never been measured against a corner set will look fine, train
+without error, and quietly fail at whatever fraction of the grid it never reached.
 
 The excitation lands at `~/runs/device_run1/excitation/excitation.wav`, its
 `.recipe.json` sidecar beside it, and `input` in the config is updated to match. Keep the
@@ -105,9 +164,12 @@ Step 4 sized the excitation; this checks the result from the outside, across str
 corners *and* interior sample points. It reads the required peak from the recipe sidecar
 automatically.
 
-Per-combination ESR cannot substitute for this: validation is drawn from the same
-under-covered data, so a gap looks like *good* performance. Measured on Orange — failing
-corners scored **better** (0.1140) than passing neighbours (0.1405) in the same region.
+**Per-combination ESR cannot substitute for this.** It is tempting to assume a coverage gap
+would show up as bad ESR at those knob settings. It does not: validation data is drawn from
+the same under-covered renders, so both the model and its scoring are missing the same
+content, and the gap reads as *good* performance. In a measured control on a real amp,
+corners that failed coverage scored **better** than passing corners in the same region.
+Coverage is a property of the input signal and has to be checked against the input signal.
 
 ## 6. Train
 
