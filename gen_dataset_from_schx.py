@@ -1043,7 +1043,13 @@ def _run_with_stall_detect(proc, base_timeout_s: float):
 
 # livespice_cli prints an informational banner (Input/Format/Circuit/Output) on every run.
 # Warnings are anything that is not that -- LiveSPICE's own ConsoleLog at MessageType.Warning.
-_BANNER = re.compile(r"^\s*(Input|Format|Circuit|Output|PROGRESS|note):", re.I)
+# The trailing ":" binds to the WHOLE alternation, so listing PROGRESS inside it never
+# matched: livespice_cli emits "PROGRESS 4096/7924800", with a space, while the descriptive
+# banner lines ("Input:", "Format:") carry a colon. Every render therefore reported its own
+# progress output as an oracle warning -- 252 of 252 combinations on Duke of Tone, which is
+# exactly the "a signal that fires on every render is not a signal" this filter exists to
+# prevent. PROGRESS needs a word boundary, not a colon.
+_BANNER = re.compile(r"^\s*(?:(?:Input|Format|Circuit|Output|note):|PROGRESS\b)", re.I)
 
 
 def _oracle_warnings(stderr: str) -> str:

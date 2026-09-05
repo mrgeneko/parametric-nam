@@ -552,7 +552,14 @@ def test_a_correct_sidecar_lints_clean(tmp_path):
 # you -- Duke of Tone's three real wiring bugs were each found through that message. The second
 # is a schematic defect, and a far worse thing to learn about from a trained model.
 
-_BANNER_STDERR = ("Input:    h1k.wav\n"
+# CAPTURED from a real `livespice_cli --progress` run, not hand-written. The original
+# version of this fixture omitted the PROGRESS lines, which is precisely why the filter
+# shipped broken: the regex required a colon after each keyword, so "Input:" matched and
+# "PROGRESS 4096/144000" did not, and every render reported its own progress as an oracle
+# warning. A fixture invented from what the tool is assumed to print cannot catch that.
+_BANNER_STDERR = ("PROGRESS 4096/144000\n"
+                  "PROGRESS 144000/144000\n"
+                  "Input:    h1k.wav\n"
                   "Format:   48000 Hz, 1 ch, 32-bit float\n"
                   "Circuit:  Some Pedal  (oversample 4x)\n"
                   "Output:   /tmp/x.wav  (144000 samples)\n")
@@ -573,6 +580,26 @@ def test_the_micro_sign_note_is_not_a_warning():
 def test_the_solver_saying_it_may_be_unstable_is_kept():
     err = _BANNER_STDERR + "Failed to find partition initial conditions, simulation may be unstable.\n"
     assert "may be unstable" in g._oracle_warnings(err)
+
+
+def test_progress_lines_are_never_a_warning():
+    """The regression: `PROGRESS n/total` uses a SPACE, while the banner lines use a colon.
+    A filter written as (Input|Format|...|PROGRESS): silently never matched PROGRESS, so the
+    feature fired on 252 of 252 combinations -- and a signal that fires on every render is
+    not a signal."""
+    many = "".join(f"PROGRESS {i * 4096}/7924800\n" for i in range(1, 60))
+    assert g._oracle_warnings(many) == ""
+    assert g._oracle_warnings(many + _BANNER_STDERR) == ""
+
+
+def test_a_real_warning_survives_a_flood_of_progress_lines():
+    """The warnings field truncates at 300 chars, so unfiltered progress noise does not just
+    add clutter -- it can push the thing worth reading out of the record entirely."""
+    flood = "".join(f"PROGRESS {i * 4096}/7924800\n" for i in range(1, 200))
+    err = flood + "Warning: Unconnected terminal 'n_bfb'\n" + _BANNER_STDERR
+    got = g._oracle_warnings(err)
+    assert "Unconnected terminal" in got
+    assert "PROGRESS" not in got
 
 
 def test_an_unconnected_terminal_is_kept():
