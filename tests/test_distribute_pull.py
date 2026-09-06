@@ -13,6 +13,7 @@ Both cover failures seen on the Duke of Tone 252-combination run (2026-09-04):
     moving output 28x as "RMS varies only 0.00% -- knob may have no effect".
 """
 import os
+from pathlib import Path
 
 import pytest
 
@@ -327,3 +328,16 @@ Presence = 0.5
         ranges = [a[i + 1] for i, x in enumerate(a) if x == "--range"]
         assert ranges == [f"{k}=" + ",".join(str(v) for v in vals)
                           for k, vals in raw["knobs"].items()]
+
+
+def test_abandoning_a_chunk_never_deletes_the_generation_lock():
+    """flock auto-releases on process exit, crash or kill, so a lock file that still exists
+    means a LIVE process holds it. Deleting it releases nothing -- the holder keeps its lock
+    on the unlinked inode while a new run locks a fresh file, and the two append to one
+    params.csv. That is silent corruption: duplicate rows, .npy files that still look
+    perfect, and a params.csv no longer 1:1 with outputs.npy, so knobs pair with the WRONG
+    audio. It has happened twice; the second time the delete was in this file."""
+    src = (Path(__file__).resolve().parent.parent / "distribute_pull.py").read_text()
+    body = src[src.index("def _kill_remote"):src.index("def run_chunk")]
+    assert "generation.lock" not in body or "DO NOT rm" in body
+    assert "rm -f" not in body, "_kill_remote must not delete the generation lock"

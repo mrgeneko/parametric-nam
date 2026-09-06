@@ -187,9 +187,16 @@ class Worker:
         Matched on `--shard <chunk>`, which is unique to this dispatch, so a concurrent
         generation for a different chunk or dataset on the same host is never touched.
         """
+        # DO NOT rm the lock file. gen_dataset_from_schx.acquire_generation_lock uses flock,
+        # which auto-releases when the fd closes -- process exit, crash, or kill -- so a lock
+        # file that still exists means a process is still ALIVE holding it. Deleting it does
+        # not release anything: the old process keeps its lock on the now-unlinked inode while
+        # a new run creates a fresh file and locks that, and the two then append to one
+        # params.csv. That corrupts it SILENTLY -- duplicate rows, .npy files that still look
+        # perfect, and a params.csv that no longer lines up 1:1 with outputs.npy, so knobs get
+        # paired with the WRONG audio. Kill the holder and the lock takes care of itself.
         pat = f"gen_dataset_from_schx.py.*--shard {re.escape(chunk)}"
-        cmd = (f"pkill -f '{pat}'; sleep 3; pkill -9 -f '{pat}'; "
-               f"rm -f {output}/.generation.lock; exit 0")
+        cmd = f"pkill -f '{pat}'; sleep 3; pkill -9 -f '{pat}'; exit 0"
         subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
                         self.host, cmd], capture_output=True, text=True, timeout=90)
 
