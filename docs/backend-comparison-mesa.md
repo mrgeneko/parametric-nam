@@ -283,6 +283,52 @@ actual defect -- a mis-wired tone stack -- was untouched by either. Netlist infe
 four wrong "fixes" this session against one right answer, and the right answer came from
 node-by-node comparison against an authoritative schematic, not from sweeping the model.
 
+### 2026-09-06 follow-up: Rsrc works where no solver lever does, on a DIFFERENT corner
+
+The framing above — "damping the symptom of the wiring defect, not the cause" — was right for
+the corner it was written about, and is now incomplete. The same lever was re-tested on the
+**Orange** channel at `Or Master = 0.10, OR Gain = 0.95`, on the **post-fix** build, and the
+circumstances are materially different:
+
+* the wiring defect is fixed and `preflight.py` PASSES all five knobs;
+* `tools/check_generator_drift.py` confirms the generator reproduces the committed `.schx`;
+* the previously-failing `Master = 1.0` corner now renders clean — this is the OPPOSITE extreme.
+
+Every solver-side lever was re-measured on a 12 s reproduction clip and none of them move it:
+
+| lever | result |
+|---|---|
+| oversample 8 / 16 / 32 | identical spike count, identical worst value |
+| Newton iterations 8 → 4096 (512x) | byte-identical output, **flat runtime** — the loop converges in under 8 iterations |
+| global Newton damping (patched fork, `--damping`) | clears the spikes at 0.01, but alters **19.3 %** of samples and is non-monotonic in its own parameter; rejected — see parametric-nam's `docs/livespice-newton-damping-proposal.md` |
+
+`Rsrc` does, and cleanly:
+
+    Rsrc            spikes   rms vs stock   samples differing >10% of peak   render time
+    39 Ohm (stock)      2        100 %              —                            97 s
+    100 Ohm             0       88.3 %            0.96 %                         98 s
+    200 Ohm             0       74.8 %            2.40 %                         99 s
+
+Set against global damping at the **same** overall level (88 % of stock), `Rsrc = 100` disturbs
+0.96 % of samples where damping disturbs 19.33 % — twenty times less — with no runtime penalty
+against damping's 3.4x. That is what a physical parameter looks like next to a numerical one:
+it changes one thing (how hard the rails sag) rather than perturbing every timestep's solution
+path.
+
+**It is still not free, and still not a fix.** `Rsrc = 39` was empirically calibrated by
+DC-probing each rail, and sag is a defining characteristic of this amp, so raising it trades a
+numerical artefact for a deliberate change to the circuit being modelled. What has changed is
+the alternative: with the wiring verified and every solver lever measured and eliminated, "the
+model is marginally over-stiff at this operating point" is now a live reading rather than an
+excuse for not finding the real defect.
+
+The corner was handled for the current run by dropping `Or Master = 0.10` from the grid
+(648 → 576 combinations), which is localised to the channel and setting that actually fails.
+The RED channel needs nothing: a scan of all 72 of its `Red Master = 0.1` combinations in the
+finished dataset gives a worst neighbour-ratio of **1.26** against a gate at 3.0 — a factor of
+2.4 in headroom, median 0.00 — so the channel asymmetry is real and RED carries no
+sub-threshold artefacts.
+
 ### Ruled out: non-determinism
 
 Renders are bit-identical (SHA-256) across: repeated runs, 10 concurrent renders, parameter
