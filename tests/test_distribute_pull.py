@@ -330,6 +330,76 @@ Presence = 0.5
                           for k, vals in raw["knobs"].items()]
 
 
+class TestKillRemote:
+    """Abandoning a chunk must kill the RENDERER ON THE WORKER, and nothing else.
+
+    Killing the local ssh client does not signal the remote process -- it is reparented to
+    init and keeps running, holding the renderer's exclusive .generation.lock. On Mesa Orange
+    that left an orphaned generation racing the live one on one host for 11.5 hours.
+    """
+
+    def _worker(self, monkeypatch, host="hostA", d="~/work/parametric-nam"):
+        calls = []
+        monkeypatch.setattr(dp.subprocess, "run",
+                            lambda argv, **kw: calls.append(argv) or
+                            type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+        return dp.Worker(f"{host}:{d}:4"), calls
+
+    def test_it_ssh_es_to_the_worker_and_kills_by_shard(self, monkeypatch):
+        w, calls = self._worker(monkeypatch)
+        w._kill_remote("7-7/41", "~/ds")
+        assert len(calls) == 1
+        argv = calls[0]
+        assert argv[0] == "ssh" and "hostA" in argv
+        cmd = argv[-1]
+        assert "pkill -f" in cmd
+        # Assert the pattern MATCHES a real command line, not that it contains a literal
+        # string: re.escape renders the hyphen as "\\-", which both BSD and GNU ERE accept as
+        # a literal (verified on Darwin and Linux). Asserting the literal would fail on a
+        # harmless escaping detail while missing an actually-broken pattern.
+        import re as _re
+        pat = _re.search(r"pkill -f '([^']+)'", cmd).group(1)
+        assert _re.search(pat, "python -u gen_dataset_from_schx.py --shard 7-7/41 --output ~/ds")
+
+    def test_it_escalates_to_SIGKILL(self, monkeypatch):
+        """A renderer mid-simulation may ignore a polite TERM; the lock is only released when
+        the process actually dies."""
+        w, calls = self._worker(monkeypatch)
+        w._kill_remote("7-7/41", "~/ds")
+        cmd = calls[0][-1]
+        assert cmd.index("pkill -f") < cmd.index("pkill -9 -f"), "TERM must precede KILL"
+
+    def test_it_does_not_touch_the_lock(self, monkeypatch):
+        """flock releases itself when the holder dies. Deleting the file releases nothing and
+        lets a second generation start alongside the first -- silent params.csv corruption."""
+        w, calls = self._worker(monkeypatch)
+        w._kill_remote("7-7/41", "~/ds")
+        assert "rm" not in calls[0][-1], calls[0][-1]
+        assert "generation.lock" not in calls[0][-1]
+
+    def test_the_pattern_cannot_match_a_different_shard(self, monkeypatch):
+        """A host may legitimately be running another chunk, or another dataset entirely. The
+        pattern is anchored on this dispatch's own --shard argument."""
+        import re as _re
+        w, calls = self._worker(monkeypatch)
+        w._kill_remote("7-7/41", "~/ds")
+        pat = _re.search(r"pkill -f '([^']+)'", calls[0][-1]).group(1)
+        mine  = "python -u gen_dataset_from_schx.py --backend livespice --shard 7-7/41 --output ~/ds"
+        other = "python -u gen_dataset_from_schx.py --backend livespice --shard 8-8/41 --output ~/ds"
+        assert _re.search(pat, mine)
+        assert not _re.search(pat, other), "would kill an unrelated chunk on the same host"
+
+    def test_a_kill_failure_does_not_raise(self, monkeypatch):
+        """pkill exits non-zero when nothing matched -- that is the normal case when the
+        renderer already exited. It must not propagate."""
+        def boom(argv, **kw):
+            raise dp.subprocess.TimeoutExpired(cmd="ssh", timeout=90)
+        monkeypatch.setattr(dp.subprocess, "run", boom)
+        w = dp.Worker("hostA:~/x:4")
+        with pytest.raises(dp.subprocess.TimeoutExpired):
+            w._kill_remote("7-7/41", "~/ds")
+
+
 def test_abandoning_a_chunk_never_deletes_the_generation_lock():
     """flock auto-releases on process exit, crash or kill, so a lock file that still exists
     means a LIVE process holds it. Deleting it releases nothing -- the holder keeps its lock
