@@ -12,6 +12,7 @@ Full backend comparison for parametric-nam (`livespice` vs `ngspice` vs `ltspice
 | diverges, or needs extreme `oversample` | **ngspice** (`.schx`-native, no deck needed) |
 | converges but the output is **impossible** (bigger than the supply rails allow) | **ltspice-deck** / **ngspice** — see below |
 | ngspice can't converge on real playing content at any `maxstep` | **ltspice-deck** |
+| LiveSPICE emits isolated single-sample overshoots that survive every oversample and iteration count | a solver limitation — see [livespice-newton-damping-proposal.md](livespice-newton-damping-proposal.md) |
 
 The third row is the one that costs you a training run, because it is **silent**: divergence
 announces itself, wrongness does not. Two questions catch it, and neither is a knob sweep —
