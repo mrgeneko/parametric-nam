@@ -1052,6 +1052,28 @@ def _run_with_stall_detect(proc, base_timeout_s: float):
 _BANNER = re.compile(r"^\s*(?:(?:Input|Format|Circuit|Output|note):|PROGRESS\b)", re.I)
 
 
+def _render_error(stderr: str, limit: int = 500) -> str:
+    """The USEFUL part of a failed render's stderr, for params.csv and the retry ladder.
+
+    Was `stderr[:500]` -- the HEAD. With --progress, livespice_cli floods stderr with
+    "PROGRESS n/total" lines, so on a long render the first 500 chars are ENTIRELY progress
+    noise and the actual exception, which arrives last, is discarded.
+
+    That is not just an unreadable error column. `_is_convergence_failure()` decides whether
+    to escalate the retry ladder by REGEX-MATCHING this string for diverg|NaN|spike|... , so a
+    truncated-away "Circuit.SimulationDiverged" reads as a non-convergence failure and the
+    combination is never retried at a higher oversample -- it fails once at rung 0 and gives up.
+    Measured on Duke of Tone (Overdrive) 2026-09-06: 16 of 28 combinations diverged, 0 of 16
+    carried a convergence keyword, every one recorded rung=0, and the ladder (correctly built as
+    32/64/128/256) never ran. Gain>=0.75 needed os=64+ and would have been found automatically.
+
+    So: drop the banner/PROGRESS lines _oracle_warnings already knows how to recognise, then
+    keep the TAIL, where the exception and its stack live.
+    """
+    kept = [ln for ln in (stderr or "").splitlines() if ln.strip() and not _BANNER.match(ln)]
+    return ("\n".join(kept) or (stderr or ""))[-limit:]
+
+
 def _oracle_warnings(stderr: str) -> str:
     """LiveSPICE's own warnings from a SUCCESSFUL render, as one line.
 
@@ -1206,7 +1228,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 proc.kill(); proc.communicate()
                 return Result(idx, error=f"timeout after {timeout_s}s")
             if proc.returncode != 0:
-                return Result(idx, error=stderr[:500])
+                return Result(idx, error=_render_error(stderr))
             # Zero exit is NOT silence. Keep whatever the oracle warned about; _finalize_wav
             # threads it onto the Result below.
             warned = _oracle_warnings(stderr)

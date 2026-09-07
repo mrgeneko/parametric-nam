@@ -690,3 +690,31 @@ def test_a_normal_render_passes_the_rail_bound(tmp_path):
     sf.write(str(wav), sig, sr)
     r = g._finalize_wav(0, tmp_path / "0.npy", wav, 0, 0.0, warmup_s=0.0, rail_rms=9.0)
     assert r.ok, r.error
+
+
+def test_render_error_keeps_the_exception_under_progress_flood():
+    """A --progress flood must not push the exception out of the captured error.
+
+    Regression for the 2026-09-06 Duke of Tone (Overdrive) render: stderr[:500] kept only
+    PROGRESS lines, so _is_convergence_failure() saw no keyword, the retry ladder never
+    escalated, and 16 of 28 combinations failed at rung 0 that os=64 would have rendered.
+    """
+    import gen_dataset_from_schx as g
+    noise = "\n".join(f"PROGRESS {i * 4096}/7924800" for i in range(400))
+    err = (noise + "\nUnhandled exception. Circuit.SimulationDiverged: "
+                   "Simulation diverged near t = 162 s\n   at Circuit.Simulation.Run(...)")
+
+    assert not g._is_convergence_failure(err[:500]), "precondition: the old head-slice hid it"
+
+    kept = g._render_error(err)
+    assert "SimulationDiverged" in kept
+    assert g._is_convergence_failure(kept), "the retry ladder must see a convergence failure"
+    assert "PROGRESS" not in kept, "banner/progress noise should be filtered out"
+    assert len(kept) <= 500
+
+
+def test_render_error_survives_stderr_with_no_progress():
+    """Plain stderr (no --progress) must still be reported."""
+    import gen_dataset_from_schx as g
+    assert "boom" in g._render_error("boom: something broke")
+    assert g._render_error("") == ""
