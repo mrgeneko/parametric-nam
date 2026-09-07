@@ -441,6 +441,37 @@ def _collect(workers, remote_out, local_dir):
     for f in scratch.glob("*.csv"):
         f.unlink()
     scratch.rmdir()
+    return len(rows) == n_npy
+
+
+def should_combine(consistent: bool, no_combine: bool):
+    """None => combine. A string => the reason not to (logged verbatim).
+
+    Kept separate from main() so the decision is testable without a fleet.
+    """
+    if no_combine:
+        return "--no-combine given; run 'gen_dataset_from_schx.py --combine <dir>' when ready."
+    if not consistent:
+        return "rows != .npy; fix the shards first (combine would refuse this, correctly)."
+    return None
+
+
+def _combine(local_dir: Path) -> bool:
+    """Build outputs.npy in the collected dir, using gen_dataset_from_schx's own combine().
+
+    WHY HERE. Combining needs EVERY shard present, so it cannot live in the renderer:
+    `gen_dataset_from_schx.py --shard 3/37` sees one slice of the grid and could not do it
+    correctly. --collect is by definition the moment all shards exist in one directory, and it
+    already merges params.csv and checks rows-vs-.npy -- the exact precondition combine needs.
+    It used to do that check and then stop, leaving a directory that LOOKS finished but that
+    param_train.py refuses ("outputs.npy not found"). That cost Mesa Orange and Duke of Tone
+    (Overdrive) a manual step each on 2026-09-07; run_pipeline.py has had a Combine step all
+    along, so only the distributed path was missing it.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from gen_dataset_from_schx import combine as _do_combine
+    _do_combine(local_dir)
+    return True
 
 
 def main():
@@ -465,6 +496,11 @@ def main():
                          "cleanly (global-index filenames) but params.csv is one file per worker "
                          "holding only that worker's rows, so a naive rsync leaves you the LAST "
                          "worker's metadata describing the whole grid.")
+    ap.add_argument("--no-combine", action="store_true",
+                    help="--collect: stop after merging, without building outputs.npy. Combine "
+                         "NORMALISES the data and records output_scale into config.json, and for "
+                         "a big grid it is a multi-GB write, so this exists for inspecting or "
+                         "re-combining with a different --output-peak/--raw.")
     ap.add_argument("--config", type=Path, default=None,
                     help="per-circuit TOML, the SAME file run_pipeline.py --config takes. "
                          "Expands to the renderer's --backend/--schx/--input/--knobs/--range/"
@@ -606,7 +642,13 @@ def main():
             r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
                                 f"cd ~ && echo {args.output}"], capture_output=True, text=True)
             remote_out.append(r.stdout.strip() or args.output)
-        _collect(workers, remote_out, args.collect)
+        consistent = _collect(workers, remote_out, args.collect)
+        why = should_combine(consistent, args.no_combine)
+        if why is None:
+            log("  combining -> outputs.npy ...")
+            _combine(args.collect)
+        else:
+            log(f"  collect: NOT combining -- {why}")
     else:
         log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
             "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "

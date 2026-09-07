@@ -411,3 +411,40 @@ def test_abandoning_a_chunk_never_deletes_the_generation_lock():
     body = src[src.index("def _kill_remote"):src.index("def run_chunk")]
     assert "generation.lock" not in body or "DO NOT rm" in body
     assert "rm -f" not in body, "_kill_remote must not delete the generation lock"
+
+
+def test_collect_returns_consistency_flag(tmp_path, monkeypatch):
+    """_collect reports whether rows == .npy -- the precondition for combining."""
+    import distribute_pull as dp
+    local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
+    monkeypatch.setattr(dp.subprocess, "run",
+                        lambda *a, **k: __import__("types").SimpleNamespace(returncode=1, stdout="", stderr=""))
+    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: 2)
+    (local / "sig" / "a.npy").write_bytes(b"x")
+    assert dp._collect([], [], local) is False          # 2 rows, 1 npy
+    (local / "sig" / "b.npy").write_bytes(b"x")
+    assert dp._collect([], [], local) is True           # 2 rows, 2 npy
+
+
+def test_should_combine_decision_table():
+    """Regression: --collect used to stop before outputs.npy, so param_train refused the dir.
+
+    Cost Mesa Orange and Duke of Tone (Overdrive) a manual step each on 2026-09-07.
+    run_pipeline.py has had a Combine step all along; only the distributed path lacked one.
+    """
+    from distribute_pull import should_combine
+    assert should_combine(consistent=True, no_combine=False) is None          # the default: combine
+    assert "no-combine" in should_combine(consistent=True, no_combine=True)   # explicit opt-out
+    assert "rows != .npy" in should_combine(consistent=False, no_combine=False)  # never on a mismatch
+    # opt-out wins over inconsistency: both are reasons not to, and the explicit one is clearer
+    assert "no-combine" in should_combine(consistent=False, no_combine=True)
+
+
+def test_no_combine_flag_exists_and_defaults_off():
+    import distribute_pull as dp
+    ap = dp.build_parser() if hasattr(dp, "build_parser") else None
+    if ap is None:
+        import inspect
+        assert "--no-combine" in inspect.getsource(dp), "flag must be registered"
+    else:
+        assert ap.parse_args([]).no_combine is False
