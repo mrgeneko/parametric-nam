@@ -431,7 +431,7 @@ def _collect(workers, remote_out, local_dir):
     n_rows = merge_params([f for _, f in got], local_dir / "params.csv")
     if n_rows == 0:
         log("  collect: no params.csv found on any worker -- nothing merged")
-        return
+        return False   # explicit: a bare `return` gave None, which is only ACCIDENTALLY falsy
     rows = range(n_rows)
     n_npy = sum(1 for _ in local_dir.glob("sig/**/*.npy"))
     log(f"  collect: {len(rows)} params rows, {n_npy} .npy files -> {local_dir}")

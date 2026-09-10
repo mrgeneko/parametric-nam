@@ -448,3 +448,22 @@ def test_no_combine_flag_exists_and_defaults_off():
         assert "--no-combine" in inspect.getsource(dp), "flag must be registered"
     else:
         assert ap.parse_args([]).no_combine is False
+
+
+def test_collect_returns_false_not_none_when_nothing_merged(tmp_path, monkeypatch):
+    """The no-params.csv path must return False, not a bare None.
+
+    None is only ACCIDENTALLY falsy: should_combine() treats it as "not consistent" and so
+    happens to refuse the combine, which is right -- but nothing pins that, and any future
+    `if consistent is False` / `is None` distinction would silently start combining an empty
+    collect. Returning the flag explicitly makes _collect's contract total.
+    """
+    import distribute_pull as dp
+    from distribute_pull import should_combine
+    local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
+    monkeypatch.setattr(dp.subprocess, "run",
+                        lambda *a, **k: __import__("types").SimpleNamespace(returncode=1, stdout="", stderr=""))
+    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: 0)   # nothing merged
+    got = dp._collect([], [], local)
+    assert got is False, f"expected False, got {got!r}"
+    assert should_combine(got, no_combine=False) is not None, "must refuse to combine"
