@@ -97,9 +97,14 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
         rows.append({"corner": label, "params": params, "onset_v": onset})
     missing = [r for r in rows if r["onset_v"] is None]
     if missing:
-        raise RuntimeError(f"no saturation onset found at corner(s) "
-                            f"{[r['corner'] for r in missing]} -- refusing to build an "
-                            f"excitation against a partial/failed result")
+        raise RuntimeError(
+            f"no saturation onset found at corner(s) {[r['corner'] for r in missing]} -- "
+            f"refusing to build an excitation against a partial/failed result. "
+            f"find_saturation_point already extends the sweep DOWNWARD when it starts above "
+            f"the onset, so reaching here means either every render at that corner failed, or "
+            f"the onset is below the extension floor. Run the corner directly and look at the "
+            f"curve before assuming --peak-max-v (the sweep CEILING) is what needs raising -- "
+            f"on a high-gain circuit it is the floor that matters.")
     worst = max(r["onset_v"] for r in rows)
     return worst, rows
 

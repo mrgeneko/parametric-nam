@@ -38,6 +38,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import itertools
 import numpy as np
 
 SR = 48000
@@ -52,7 +53,7 @@ def _loglog_interp(x1, y1, x2, y2, ytarget):
 
 def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silence_s=0.0,
                            start_v=0.005, max_v=40.0, npoints=20, sr=SR, workers=8,
-                           progress=None):
+                           progress=None, max_extend_decades=4, min_start_v=1e-9):
     """Sweep a clean `freq` Hz tone's amplitude (log-spaced, `start_v`..`max_v`, `npoints`
     points) through `backend` at fixed `params`, and find where output RMS stops rising.
 
@@ -80,35 +81,72 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
     raw = np.concatenate([silence, tone])
     tone_start = len(silence)
 
-    log_amps = np.geomspace(start_v, max_v, npoints)
-
-    def _one(i_amp):
-        i, amp = i_amp
-        tag = f"fp_{i}"
-        handle = backend.prepare_input(raw, sr, float(amp), tmp, tag)
-        ys = backend.render_many([{"params": params, "tag": tag}], handle, tmp)
-        return float(amp), ys.get(tag)
-
     t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=min(workers, len(log_amps))) as ex:
-        futures = [ex.submit(_one, ia) for ia in enumerate(log_amps)]
-        raw_results = []
-        for i, fut in enumerate(as_completed(futures), 1):
-            raw_results.append(fut.result())
-            if progress is not None:
-                progress(i, len(futures), time.monotonic() - t0)
+    seq = itertools.count()
 
-    curve = []
-    for amp, y in raw_results:
-        if y is None:
-            continue
-        steady = y[tone_start + int(sr * dur * 0.5):]
-        if len(steady) == 0:
-            continue
-        curve.append((amp, float(np.sqrt((steady ** 2).mean()))))
+    def _sweep(lo, hi, n):
+        """Render `n` log-spaced amplitudes in [lo, hi] and return [(in_v, out_rms), ...]."""
+        def _one(i_amp):
+            i, amp = i_amp
+            tag = f"fp_{i}"
+            handle = backend.prepare_input(raw, sr, float(amp), tmp, tag)
+            ys = backend.render_many([{"params": params, "tag": tag}], handle, tmp)
+            return float(amp), ys.get(tag)
+
+        amps = list(np.geomspace(lo, hi, n))
+        with ThreadPoolExecutor(max_workers=min(workers, len(amps))) as ex:
+            futures = [ex.submit(_one, (next(seq), a)) for a in amps]
+            raw_results = []
+            for fut in as_completed(futures):
+                raw_results.append(fut.result())
+                if progress is not None:
+                    progress(len(raw_results), len(futures), time.monotonic() - t0)
+
+        out = []
+        for amp, y in raw_results:
+            if y is None:
+                continue
+            steady = y[tone_start + int(sr * dur * 0.5):]
+            if len(steady) == 0:
+                continue
+            out.append((amp, float(np.sqrt((steady ** 2).mean()))))
+        return out
+
+    curve = _sweep(start_v, max_v, npoints)
     curve.sort()
     if not curve:
         return None
+
+    # The sweep can START ABOVE the onset. For a high-gain circuit the whole
+    # `start_v`..`max_v` range sits on the saturated plateau, so output RMS is flat, the
+    # `r0 < target <= r1` crossing below never fires, and this returns onset=None -- which
+    # reads as "never saturates, raise --peak-max-v" when the truth is the exact opposite
+    # and raising the ceiling only adds more plateau. Measured on Mesa Dual Rectifier Ch1
+    # (2026-09-10): 0.005-400 V was FLAT at 11.2 V out (80000x input range, 0.8% output
+    # change) because its real onset is 2.08 mV, below start_v. So when the lowest point is
+    # already at the plateau, extend DOWNWARD a decade at a time until it isn't.
+    for _ in range(max_extend_decades):
+        ceiling_now = max(r for _, r in curve)
+        if curve[0][1] < 0.99 * ceiling_now:
+            break  # lowest point is off the plateau -- a crossing is in range
+        lo = curve[0][0]
+        if lo <= min_start_v:
+            break
+        new_lo = max(lo / 100.0, min_start_v)
+        # Printed UNCONDITIONALLY, not gated on `progress`: prepare_excitation.py (the main
+        # caller, one sweep per grid corner) passes no progress callback, so gating this on it
+        # made the extension silent in exactly the pipeline that depends on it -- Ch1's 2026-09-10
+        # run extended down on real corners and reported nothing. It fires rarely (only when the
+        # floor is on the plateau), so it cannot flood even a 200-corner run.
+        print(f"    sweep started above the saturation onset (out flat at "
+              f"{ceiling_now:.4g} V from {lo:.4g} V up) -- extending down to {new_lo:.3g} V",
+              flush=True)
+        extra = _sweep(new_lo, lo, max(4, npoints // 2))
+        if not extra:
+            break
+        seen = {a for a, _ in curve}
+        curve.extend((a, r) for a, r in extra if a not in seen)
+        curve.sort()
 
     ceiling_a, ceiling = max(curve, key=lambda p: p[1])
     target = 0.99 * ceiling

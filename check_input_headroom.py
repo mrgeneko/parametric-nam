@@ -142,9 +142,12 @@ def main() -> int:
     onset = sat.get("onset_99pct_input_v") if sat else None
     if onset is None:
         print("WARN: no saturation onset found within the sweep range "
-              f"(0-{args.peak_max_v}V) -- either this device never saturates (plausible for a "
-              "very clean/high-headroom design) or --peak-max-v needs to go higher. Not scored "
-              "against the excitation peak; investigate directly.")
+              f"(0-{args.peak_max_v}V). Either this device never saturates (plausible for a "
+              "very clean/high-headroom design, so --peak-max-v may need to go HIGHER), or -- "
+              "for a high-gain circuit -- the sweep started ABOVE the onset and saw nothing but "
+              "the saturated plateau, in which case raising --peak-max-v makes it worse and the "
+              "sweep floor is what needs to come DOWN. Check the curve: flat from the very first "
+              "point means the latter. Not scored against the excitation peak; investigate directly.")
         return 1
 
     excitation_peak = read_peak_v(inp)
