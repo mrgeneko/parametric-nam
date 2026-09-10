@@ -48,7 +48,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
 from check_transient_coverage import _corners, _sample_interior  # noqa: E402
-from find_saturation_point import find_saturation_point, findpeak_cache_key, scratch_dir  # noqa: E402
+from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
+                                    cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 
@@ -88,8 +89,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
         else:
             sat = find_saturation_point(backend, params, tmp, max_v=peak_max_v,
                                          lead_silence_s=lead_silence_s)
-            if sat is not None:
-                cpath.write_text(json.dumps(sat))
+            cache_findpeak(cpath, sat)
         onset = sat.get("onset_99pct_input_v") if sat else None
         if not quiet:
             onset_str = "NONE (not reached)" if onset is None else f"{onset:.3f} V"

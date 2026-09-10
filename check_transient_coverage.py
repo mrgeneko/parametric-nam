@@ -58,7 +58,8 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
-from find_saturation_point import find_saturation_point, findpeak_cache_key  # noqa: E402
+from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
+                                    cache_findpeak)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 
 SR = 48000
@@ -308,8 +309,7 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     print(f"  [{i}/{len(corners)}] {clabel} — rendering ...", flush=True)
                 sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
                                              lead_silence_s=lead_silence_s)
-                if sat is not None:
-                    cpath.write_text(json.dumps(sat))
+                cache_findpeak(cpath, sat)
             onset = sat.get("onset_99pct_input_v") if sat else None
             if onset is None:
                 status = "SKIP (onset not bracketed / render failed)"

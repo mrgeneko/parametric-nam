@@ -103,3 +103,36 @@ def test_all_renders_failing_still_returns_none():
             return {j["tag"]: None for j in jobs}
     assert find_saturation_point(DeadBackend(1.0), {}, "/tmp/nonexistent-unused",
                                  dur=0.2, npoints=8, workers=4) is None
+
+
+class TestFailureIsNeverCached:
+    """A null-onset result must NOT reach the findpeak cache.
+
+    find_saturation_point returns a DICT CONTAINING a null onset on failure, never a bare
+    None. All three call sites (prepare_excitation, check_transient_coverage, preflight)
+    guarded on `if sat is not None`, which is therefore always true -- so failures were
+    cached permanently and every later run re-read the null and re-failed. Mesa Dual
+    Rectifier Ch1 (2026-09-10) kept failing on 5 corners a verified fix had already
+    solved, until ~/.cache was cleared by hand.
+    """
+
+    def test_null_onset_is_not_cached(self, tmp_path):
+        from find_saturation_point import cache_findpeak
+        p = tmp_path / "e.json"
+        assert cache_findpeak(p, {"ceiling_rms": 11.2, "onset_99pct_input_v": None,
+                                  "curve": [(0.005, 11.2)]}) is False
+        assert not p.exists(), "a failed sweep was written to the cache"
+
+    def test_real_onset_is_cached(self, tmp_path):
+        import json
+        from find_saturation_point import cache_findpeak
+        p = tmp_path / "g.json"
+        sat = {"ceiling_rms": 11.2, "onset_99pct_input_v": 0.00212, "curve": [(0.005, 11.2)]}
+        assert cache_findpeak(p, sat) is True
+        assert json.loads(p.read_text())["onset_99pct_input_v"] == 0.00212
+
+    def test_none_result_is_not_cached(self, tmp_path):
+        from find_saturation_point import cache_findpeak
+        p = tmp_path / "n.json"
+        assert cache_findpeak(p, None) is False
+        assert not p.exists()

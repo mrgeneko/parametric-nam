@@ -30,6 +30,7 @@ Usage:
 """
 import atexit
 import hashlib
+import json
 import math
 import shutil
 import sys
@@ -220,3 +221,20 @@ def findpeak_cache_key(identity_bytes, params, extra):
     d = Path.home() / ".cache" / "parametric-nam" / "findpeak"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{h.hexdigest()[:16]}.json"
+
+
+def cache_findpeak(cpath, sat):
+    """Write `sat` to the findpeak cache -- but ONLY if it actually found an onset.
+
+    A result whose `onset_99pct_input_v` is None is a FAILURE, not an answer, and caching
+    it is permanent: every later run reads the null back and re-fails identically, so a fix
+    to the sweep itself has no effect until someone manually clears ~/.cache. That is not
+    hypothetical -- Mesa Dual Rectifier Ch1 (2026-09-10) kept failing on the exact corners a
+    verified fix had already solved, because the three call sites all guarded on
+    `if sat is not None` and find_saturation_point returns a DICT CONTAINING a null onset,
+    never a bare None, so the guard never fired. Returns True if it cached.
+    """
+    if not sat or sat.get("onset_99pct_input_v") is None:
+        return False
+    cpath.write_text(json.dumps(sat))
+    return True
