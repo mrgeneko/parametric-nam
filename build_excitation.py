@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Build a device training excitation that actually covers the full input range.
 
-A high-crest --input clip (e.g. sweep-v3.wav, ~22 dB crest) samples its own loud region
-essentially never (<0.1% of time within 6 dB of peak), so a model trained on it alone
-never learns the device's saturation/blocking behavior and goes out-of-distribution when a
-hot input (upstream boost) arrives. NOTE: sweep-v3.wav (NAM's/TONE3000's standard capture
-sweep) is NOT a real-playing recording despite its high crest factor -- it is itself a
-synthesized capture sweep (frequency sweep + noise-staircase + calibration blips). Its high
-crest factor comes from that structure, not from musical dynamics; a genuine real-playing
-recording works equally well here and is not required to be this specific file. This
-concatenates:
+NAMING (2026-09-10): TONE3000 calls this style of file a "sweep signal" (see
+tone3000.com/create/capture) -- the term this tool now uses too, for what used to be called
+the "--input"/"real" clip. --sweep-file is NOT necessarily a real-playing recording: e.g.
+sweep-v3.wav (NAM's/TONE3000's standard capture sweep, ~22 dB crest) is itself a synthesized
+capture sweep (frequency sweep + noise-staircase + calibration blips), not musical dynamics --
+its high crest factor comes from that structure. A genuine real-playing recording works
+equally well here and is not required to be this specific file. Separately, this tool ALSO
+generates its own internal amplitude-stepped log sine tones -- those are called "chirps"
+(--chirp-levels/--chirp-f0/--chirp-f1/--chirp-dur) specifically so the name does not collide
+with --sweep-file, which is an unrelated, externally-supplied concept.
 
-  [ --input clip @ --realistic-peak ]        (dynamics/perceptual realism, mostly low level)
-  [ amplitude-stepped log sine sweeps ]      (dense level x frequency coverage of the loud region)
+A high-crest --sweep-file clip samples its own loud region essentially never (<0.1% of time
+within 6 dB of peak), so a model trained on it alone never learns the device's
+saturation/blocking behavior and goes out-of-distribution when a hot input (upstream boost)
+arrives. This concatenates:
+
+  [ --sweep-file clip @ --sweep-peak ]       (dynamics/perceptual realism, mostly low level)
+  [ amplitude-stepped log sine chirps ]      (dense level x frequency coverage of the loud region)
   [ short fade-out to zero ]
 
-so the whole 0 -> --sweep-peaks[-1] transfer, including the memory-dependent blocking region,
+so the whole 0 -> --chirp-levels[-1] transfer, including the memory-dependent blocking region,
 is genuinely learned. Under the V0dBFS=1V convention a sample value == drive volts, so pass
---sweep-peaks in volts and set the max to the device's saturation/max-output point + headroom.
+--chirp-levels in volts and set the max to the device's saturation/max-output point + headroom.
 Written float32 so values >1.0 survive (they represent >1 V drive, which is legitimate).
 
 LEADING SILENCE (--lead-silence-s, default 3.0): every render starts a `.tran` from a cold,
@@ -122,41 +128,43 @@ def _transient_burst(sec, amp, decay_tau):
     # (as flat_burst does) then multiplying by env systematically undershoots `amp` by
     # however much the envelope has already decayed by the time x reaches ITS peak.
     # Renormalizing the final enveloped signal instead makes "peak level == amp" exact,
-    # matching --sweep-peaks/--realistic-peak's own contract elsewhere in this file.
+    # matching --chirp-levels/--sweep-peak's own contract elsewhere in this file.
     y /= (np.abs(y).max() + 1e-12)
     return (amp * y).astype(np.float32)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True,
-                    help="high-crest source clip (e.g. sweep-v3.wav, itself a synthesized "
-                         "capture sweep, not a real-playing recording -- see module docstring)")
+    ap.add_argument("--sweep-file", required=True,
+                    help="high-crest source clip, TONE3000's term for this style of file "
+                         "(e.g. sweep-v3.wav, itself a synthesized capture sweep, not a "
+                         "real-playing recording -- see module docstring)")
     ap.add_argument("--output", required=True)
-    ap.add_argument("--realistic-peak", type=float, default=1.0,
-                    help="peak (V, at V0dBFS=1) to scale the --input clip to")
-    ap.add_argument("--realistic-dur", type=float, default=None,
-                    help="seconds of --input to keep (prefix), default: the whole file. The "
-                         "realistic clip only needs to sample varied dynamics/perceptual content "
-                         "-- it is not what provides saturation coverage (the sweeps do) -- so a "
+    ap.add_argument("--sweep-peak", type=float, default=1.0,
+                    help="peak (V, at V0dBFS=1) to scale the --sweep-file clip to")
+    ap.add_argument("--sweep-dur", type=float, default=None,
+                    help="seconds of --sweep-file to keep (prefix), default: the whole file. "
+                         "This segment only needs to sample varied dynamics/perceptual content "
+                         "-- it is not what provides saturation coverage (the chirps do) -- so a "
                          "short prefix is normally enough, and every second of it costs a "
                          "render-time multiplier across the whole combination grid.")
-    ap.add_argument("--sweep-peaks", default="0.5,1.0,1.5,2.0",
-                    help="comma list of sine-sweep peak amplitudes (V); last = training max drive")
-    ap.add_argument("--sweep-f0", type=float, default=40.0)
-    ap.add_argument("--sweep-f1", type=float, default=12000.0)
-    ap.add_argument("--sweep-dur", type=float, default=3.0, help="seconds per amplitude step")
+    ap.add_argument("--chirp-levels", default="0.5,1.0,1.5,2.0",
+                    help="comma list of sine-chirp peak amplitudes (V); last = training max drive")
+    ap.add_argument("--chirp-f0", type=float, default=40.0)
+    ap.add_argument("--chirp-f1", type=float, default=12000.0)
+    ap.add_argument("--chirp-dur", type=float, default=3.0, help="seconds per amplitude step")
     ap.add_argument("--noise-burst-src", default=None,
                     help="source WAV to pull a broadband white-noise burst staircase from -- "
-                         "default: same file as --input. A sine sweep only tests ONE frequency "
-                         "at a time at each level; a broadband noise ATTACK (0 -> level, sharp "
-                         "rise) stress-tests saturation onset the way a real pick attack does, "
-                         "across the whole spectrum at once, at a level the sweep-tail alone "
-                         "doesn't guarantee (see check_transient_coverage.py's docstring -- this "
-                         "is the same gap that under-covered the tweed-style amp originally). T3K-sweep-v3 "
-                         "has exactly this built in already (a 3-step discrete noise staircase "
-                         "plus a continuous swell, found by scanning for high spectral-flatness "
-                         "windows) -- reusing it beats synthesizing a new one from scratch.")
+                         "default: same file as --sweep-file. A sine chirp only tests ONE "
+                         "frequency at a time at each level; a broadband noise ATTACK (0 -> "
+                         "level, sharp rise) stress-tests saturation onset the way a real pick "
+                         "attack does, across the whole spectrum at once, at a level the "
+                         "chirp-tail alone doesn't guarantee (see check_transient_coverage.py's "
+                         "docstring -- this is the same gap that under-covered the tweed-style "
+                         "amp originally). T3K-sweep-v3 has exactly this built in already (a "
+                         "3-step discrete noise staircase plus a continuous swell, found by "
+                         "scanning for high spectral-flatness windows) -- reusing it beats "
+                         "synthesizing a new one from scratch.")
     ap.add_argument("--noise-burst-window", default=None, metavar="START,END",
                     help="seconds into --noise-burst-src to extract (e.g. '12.0,17.0' for "
                          "T3K-sweep-v3's own noise staircase). Required if --noise-burst-src "
@@ -165,7 +173,7 @@ def main():
                     help="peak (V) to rescale the extracted noise-burst window to -- scales the "
                          "WHOLE window by one factor, preserving its internal staircase shape "
                          "(so the low steps land at the same fraction of this peak the source "
-                         "window has). Typically the same as --sweep-peaks' last value. Omit to "
+                         "window has). Typically the same as --chirp-levels' last value. Omit to "
                          "skip the noise-burst segment entirely (default: off, matches prior "
                          "behavior).")
     ap.add_argument("--synth-burst-peaks", default=None,
@@ -178,7 +186,7 @@ def main():
                          "--synth-burst-decay-tau), matching a real hard pick-attack -- so "
                          "saturation-onset behavior under a sharp transient gets tested at "
                          "EVERY level, not just the loudest. Typically the same list as "
-                         "--sweep-peaks.")
+                         "--chirp-levels.")
     ap.add_argument("--synth-burst-decay-tau", type=float, default=0.03,
                     help="exponential decay time constant (s) for --synth-burst-peaks. "
                          "Default 0.03s gives crest factor ~8.5.")
@@ -192,27 +200,27 @@ def main():
                          "see module docstring's LEADING SILENCE note. 0 to disable.")
     args = ap.parse_args()
 
-    x, sr = sf.read(args.input, dtype="float32")
+    x, sr = sf.read(args.sweep_file, dtype="float32")
     if x.ndim > 1: x = x[:, 0]
-    if sr != SR: raise SystemExit(f"input sr {sr} != {SR}")
-    if args.realistic_dur is not None:
-        x = x[:int(SR * args.realistic_dur)]
+    if sr != SR: raise SystemExit(f"sweep-file sr {sr} != {SR}")
+    if args.sweep_dur is not None:
+        x = x[:int(SR * args.sweep_dur)]
 
-    real = _fade((x / max(np.abs(x).max(), 1e-9) * args.realistic_peak).astype(np.float32), 10, 10)
-    peaks = [float(p) for p in args.sweep_peaks.split(",") if p.strip()]
+    sweep_seg = _fade((x / max(np.abs(x).max(), 1e-9) * args.sweep_peak).astype(np.float32), 10, 10)
+    chirp_levels = [float(p) for p in args.chirp_levels.split(",") if p.strip()]
     pad = np.zeros(int(SR * 0.1), dtype=np.float32)
     lead_silence = np.zeros(int(SR * args.lead_silence_s), dtype=np.float32)
-    parts = ([lead_silence] if args.lead_silence_s > 0 else []) + [real, pad] + \
-            [_fade(_log_sweep(args.sweep_f0, args.sweep_f1, args.sweep_dur, a), 8, 8)
-             for a in peaks]
+    parts = ([lead_silence] if args.lead_silence_s > 0 else []) + [sweep_seg, pad] + \
+            [_fade(_log_sweep(args.chirp_f0, args.chirp_f1, args.chirp_dur, a), 8, 8)
+             for a in chirp_levels]
 
     noise_burst = None
     if args.noise_burst_peak is not None:
         if not args.noise_burst_window:
             raise SystemExit("--noise-burst-peak needs --noise-burst-window START,END")
-        burst_src = args.noise_burst_src or args.input
-        # Read fresh, UNTRUNCATED -- the burst window can fall past --realistic-dur's prefix
-        # cutoff (e.g. T3K's own noise staircase runs to ~17s, past a 15s realistic-dur).
+        burst_src = args.noise_burst_src or args.sweep_file
+        # Read fresh, UNTRUNCATED -- the burst window can fall past --sweep-dur's prefix
+        # cutoff (e.g. T3K's own noise staircase runs to ~17s, past a 15s sweep-dur).
         bx, bsr = sf.read(burst_src, dtype="float32")
         if bx.ndim > 1: bx = bx[:, 0]
         if bsr != SR: raise SystemExit(f"--noise-burst-src sr {bsr} != {SR}")
@@ -241,10 +249,10 @@ def main():
     sf.write(args.output, comp, SR, subtype="FLOAT")
     a = np.abs(comp)
     print(f"wrote {args.output}  dur {len(comp)/SR:.1f}s  peak {a.max():.3f}  rms {np.sqrt((comp**2).mean()):.4f}")
-    for thr in sorted(set([0.5] + peaks)):
+    for thr in sorted(set([0.5] + chirp_levels)):
         print(f"  time >= {thr:.2f} V : {100*np.mean(a >= thr):6.3f}%")
     if noise_burst is not None:
-        print(f"  noise burst: {len(noise_burst)/SR:.2f}s from {args.noise_burst_src or args.input} "
+        print(f"  noise burst: {len(noise_burst)/SR:.2f}s from {args.noise_burst_src or args.sweep_file} "
               f"[{args.noise_burst_window}]  rescaled peak {np.abs(noise_burst).max():.3f}")
     for peak, burst in zip(synth_peaks, synth_bursts):
         b_peak = np.abs(burst).max()
@@ -264,13 +272,13 @@ def main():
         "built_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "args": {
             "lead_silence_s": args.lead_silence_s,
-            "realistic_peak": args.realistic_peak,
-            "realistic_dur": args.realistic_dur,
-            "sweep_peaks": peaks,
-            "sweep_f0": args.sweep_f0,
-            "sweep_f1": args.sweep_f1,
+            "sweep_peak": args.sweep_peak,
             "sweep_dur": args.sweep_dur,
-            "noise_burst_src": args.noise_burst_src or (args.input if noise_burst is not None else None),
+            "chirp_levels": chirp_levels,
+            "chirp_f0": args.chirp_f0,
+            "chirp_f1": args.chirp_f1,
+            "chirp_dur": args.chirp_dur,
+            "noise_burst_src": args.noise_burst_src or (args.sweep_file if noise_burst is not None else None),
             "noise_burst_window": args.noise_burst_window if noise_burst is not None else None,
             "noise_burst_peak": args.noise_burst_peak,
             "synth_burst_peaks": synth_peaks or None,
@@ -278,7 +286,7 @@ def main():
             "synth_burst_dur": args.synth_burst_dur if synth_peaks else None,
             "fade_out_ms": args.fade_out_ms,
         },
-        "source": _audio_provenance(args.input),
+        "source": _audio_provenance(args.sweep_file),
         "output": {**_audio_provenance(args.output, x=comp),
                    "peak": round(float(a.max()), 6),
                    "rms": round(float(np.sqrt((comp ** 2).mean())), 6)},

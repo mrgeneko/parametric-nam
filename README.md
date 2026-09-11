@@ -185,7 +185,7 @@ Any individual flag still wins, so the dataset can live on another disk. See
 
 ```bash
 python run_pipeline.py \
-    --dataset-dir <ds> --nam-output <model.param.nam> --checkpoint-dir <ckpt> \
+    --workspace <run-dir> \
     --backend livespice --schx "<amp>.schx" \
     --knobs gain,tone,volume --random 200 --bounds tone=0.15,0.85 \
     --input guitar.wav --mmap \

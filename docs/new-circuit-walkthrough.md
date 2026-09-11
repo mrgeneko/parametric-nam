@@ -196,7 +196,7 @@ Probe renders are cached on disk, so step 6's re-verification of this grid is fr
 ```bash
 ./prepare_excitation.py --backend livespice \
                         --config my_pedal.config.toml \
-                        --real-clip examples/T3K-sweep-v3.wav \
+                        --sweep-file examples/T3K-sweep-v3.wav \
                         --workspace ~/runs/device_run1
 ```
 
@@ -238,8 +238,8 @@ pair together: every consumer finds the sidecar by deriving it from the wav's ow
 signal. It is a concatenation:
 
 ```
-[ your --input clip, placed at --realistic-peak ]   crest-bearing, mostly low level
-[ amplitude-stepped log sine sweeps ]               dense level x frequency coverage, loud
+[ your --sweep-file clip, placed at --sweep-peak ]  crest-bearing, mostly low level
+[ amplitude-stepped log sine chirps ]               dense level x frequency coverage, loud
 [ short fade-out to zero ]
 ```
 

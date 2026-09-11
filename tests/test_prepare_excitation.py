@@ -1,6 +1,6 @@
 """Properties prepare_excitation.py must have. This tool closes the human-in-the-loop gap
-between find_saturation_point.py and build_excitation.py by deriving --sweep-peaks/
---realistic-peak directly from a MEASURED worst-case onset across the knob grid's corners --
+between find_saturation_point.py and build_excitation.py by deriving --chirp-levels/
+--sweep-peak directly from a MEASURED worst-case onset across the knob grid's corners --
 worst_case_onset's "refuse to guess" behavior (raise rather than silently build against a
 partial sweep) and its worst-case (not average, not first) selection are the properties an
 excitation's whole calibration depends on. Exercised with find_saturation_point stubbed out.
@@ -89,13 +89,17 @@ class TestWorstCaseOnset:
         assert len(calls) == n_first
 
 
-class TestMainRealisticPeakVsCheckTransientCoverage:
-    """The exact regression this session found: with --realistic-peak-frac below 1.0,
-    --realistic-peak comes out LESS than worst-case onset by construction, which guarantees
+class TestMainSweepPeakVsCheckTransientCoverage:
+    """The exact regression this session found: with --sweep-peak-frac below 1.0,
+    --sweep-peak comes out LESS than worst-case onset by construction, which guarantees
     check_transient_coverage.py's own default gate (transient_peak >= onset at margin=1.0)
     FAILS at exactly the worst corner -- contradicting this tool's own docstring claim that a
-    check run afterward should pass cleanly. --realistic-peak-frac's default (1.0) must not
-    regress back below that line."""
+    check run afterward should pass cleanly. --sweep-peak-frac's default (1.0) must not
+    regress back below that line.
+
+    (--real-clip/--realistic-peak/--realistic-peak-frac were renamed --sweep-file/--sweep-peak/
+    --sweep-peak-frac on 2026-09-10, to match TONE3000's own "sweep signal" term for this
+    style of file -- see build_excitation.py's docstring.)"""
 
     def _write_pedal_module(self, tmp_path, name="gen_fake_ngspice"):
         (tmp_path / f"{name}.py").write_text(
@@ -114,20 +118,20 @@ class TestMainRealisticPeakVsCheckTransientCoverage:
 
         argv = ["prepare_excitation.py", "--backend", "ngspice-deck",
                 "--pedal-dir", str(tmp_path), "--module", "gen_fake_ngspice",
-                "--range", "Gain=0.0,1.0", "--real-clip", "clip.wav",
+                "--range", "Gain=0.0,1.0", "--sweep-file", "clip.wav",
                 "--output", str(tmp_path / "out.wav"), *extra_argv]
         monkeypatch.setattr(sys, "argv", argv)
         main()
         return captured["cmd"]
 
-    def _realistic_peak_from_cmd(self, cmd):
-        return float(cmd[cmd.index("--realistic-peak") + 1])
+    def _sweep_peak_from_cmd(self, cmd):
+        return float(cmd[cmd.index("--sweep-peak") + 1])
 
-    def test_default_realistic_peak_meets_or_exceeds_worst_case_onset(self, tmp_path, monkeypatch):
+    def test_default_sweep_peak_meets_or_exceeds_worst_case_onset(self, tmp_path, monkeypatch):
         cmd = self._run_main_and_capture_cmd(tmp_path, monkeypatch, worst_onset=5.0)
-        assert self._realistic_peak_from_cmd(cmd) >= 5.0
+        assert self._sweep_peak_from_cmd(cmd) >= 5.0
 
-    def test_realistic_peak_scales_with_the_explicit_frac(self, tmp_path, monkeypatch):
+    def test_sweep_peak_scales_with_the_explicit_frac(self, tmp_path, monkeypatch):
         cmd = self._run_main_and_capture_cmd(tmp_path, monkeypatch, worst_onset=5.0,
-                                             extra_argv=["--realistic-peak-frac", "2.0"])
-        assert self._realistic_peak_from_cmd(cmd) == pytest.approx(10.0)
+                                             extra_argv=["--sweep-peak-frac", "2.0"])
+        assert self._sweep_peak_from_cmd(cmd) == pytest.approx(10.0)

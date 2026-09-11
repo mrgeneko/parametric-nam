@@ -328,7 +328,7 @@ def test_process_one_start_rung_resumes_past_previously_failed_rungs(tmp_path, m
 # built excitation whose sidecar was left behind when the wav moved. Worse, nothing checked that
 # the sidecar described THIS wav -- a stale one attached confidently wrong provenance, and
 # check_transient_coverage._transient_peak_from_recipe reads that same sidecar to decide whether
-# the coverage gate passes, so a stale --realistic-peak silently mis-gates the run too.
+# the coverage gate passes, so a stale --sweep-peak silently mis-gates the run too.
 
 import json
 import numpy as np
@@ -352,17 +352,17 @@ def test_provenance_embeds_and_marks_verified_when_sidecar_hash_matches(tmp_path
     w = _wav(tmp_path)
     real_sha = g.input_provenance(w)["audio_sha1"]
     (tmp_path / "x.recipe.json").write_text(json.dumps(
-        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9},
+        {"tool": "build_excitation.py", "args": {"sweep_peak": 9.9},
          "output": {"audio_sha1": real_sha}}))
     prov = g.input_provenance(w)
-    assert prov["build_recipe"]["args"]["realistic_peak"] == 9.9
+    assert prov["build_recipe"]["args"]["sweep_peak"] == 9.9
     assert prov["build_recipe_status"].startswith("verified")
 
 
 def test_provenance_refuses_a_stale_sidecar_rather_than_attaching_wrong_provenance(tmp_path):
     w = _wav(tmp_path)
     (tmp_path / "x.recipe.json").write_text(json.dumps(
-        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9},
+        {"tool": "build_excitation.py", "args": {"sweep_peak": 9.9},
          "output": {"audio_sha1": "deadbeef" * 5}}))
     prov = g.input_provenance(w)
     assert "build_recipe" not in prov, "a recipe for a DIFFERENT wav must not be embedded"
@@ -373,9 +373,9 @@ def test_provenance_refuses_a_stale_sidecar_rather_than_attaching_wrong_provenan
 def test_provenance_embeds_but_flags_a_sidecar_with_no_hash_to_verify_against(tmp_path):
     w = _wav(tmp_path)
     (tmp_path / "x.recipe.json").write_text(json.dumps(
-        {"tool": "build_excitation.py", "args": {"realistic_peak": 9.9}, "output": {}}))
+        {"tool": "build_excitation.py", "args": {"sweep_peak": 9.9}, "output": {}}))
     prov = g.input_provenance(w)
-    assert prov["build_recipe"]["args"]["realistic_peak"] == 9.9
+    assert prov["build_recipe"]["args"]["sweep_peak"] == 9.9
     assert prov["build_recipe_status"].startswith("embedded")
 
 

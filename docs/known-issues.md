@@ -74,14 +74,14 @@ validation ESR (which averages over everything else).
   time — that exact (level, shape) combination was simply never in the loss, so nothing
   constrained the model's behavior there. `--synth-burst-peaks` inserts one synthesized,
   deterministic, license-free broadband transient burst (`_transient_burst()`, crest≈8.5,
-  instant attack + exponential decay) at every `--sweep-peaks` level, closing that gap
+  instant attack + exponential decay) at every `--chirp-levels` level, closing that gap
   directly. Verified end-to-end on a 2-knob retrain of that amp: `scan_film_runaway.py`
   came back clean across the full grid **at full training convergence** (not just an early
   checkpoint — the original instability itself only emerged well into training, so a
   clean early scan alone doesn't prove a fix held).
 
 If a corner gets flagged, first check whether it's a *level* problem
-(`check_transient_coverage.py`, fixed by raising `--realistic-peak`/`--sweep-peaks`) or a
+(`check_transient_coverage.py`, fixed by raising `--sweep-peak`/`--chirp-levels`) or a
 *shape* problem (a real reference clip flags it but the excitation's own peak clears
 onset fine — fixed by `--synth-burst-peaks`, not by more level). Don't just retrain
 longer at the same excitation — the blowup in the Tweed case was a spike lasting well

@@ -194,7 +194,7 @@ class TestReplaceLine:
 # (23.177 V, at Bass=min with every OTHER knob at its CENTRE grid value) is 1.27x the
 # highest of all 32 hypercube vertices, because onset is not monotonic in the knobs. The
 # scaffold now asks prepare_excitation.py to probe the grid interior too, rather than
-# relying on --realistic-peak-frac's headroom to cover a gap it never measures.
+# relying on --sweep-peak-frac's headroom to cover a gap it never measures.
 
 from scaffold_config import _interior_sample_budget
 

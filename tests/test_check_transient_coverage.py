@@ -79,9 +79,23 @@ class TestTransientPeakFromRecipe:
     def test_missing_sidecar_returns_none(self, tmp_path):
         assert _transient_peak_from_recipe(tmp_path / "input.wav") is None
 
-    def test_reads_realistic_peak_from_a_valid_recipe(self, tmp_path):
+    def test_reads_sweep_peak_from_a_valid_recipe(self, tmp_path):
+        wav = tmp_path / "input.wav"
+        wav.with_suffix(".recipe.json").write_text(json.dumps({"args": {"sweep_peak": 0.42}}))
+        assert _transient_peak_from_recipe(wav) == pytest.approx(0.42)
+
+    def test_reads_pre_rename_realistic_peak_key_as_a_fallback(self, tmp_path):
+        """A recipe.json written before the 2026-09-10 --real-clip/--realistic-peak ->
+        --sweep-file/--sweep-peak rename must still work -- this fleet has many already on
+        disk, and rewriting them is out of scope for a naming change."""
         wav = tmp_path / "input.wav"
         wav.with_suffix(".recipe.json").write_text(json.dumps({"args": {"realistic_peak": 0.42}}))
+        assert _transient_peak_from_recipe(wav) == pytest.approx(0.42)
+
+    def test_sweep_peak_takes_priority_over_realistic_peak_if_both_present(self, tmp_path):
+        wav = tmp_path / "input.wav"
+        wav.with_suffix(".recipe.json").write_text(
+            json.dumps({"args": {"sweep_peak": 0.42, "realistic_peak": 0.99}}))
         assert _transient_peak_from_recipe(wav) == pytest.approx(0.42)
 
     def test_malformed_json_returns_none_not_a_crash(self, tmp_path):

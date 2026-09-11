@@ -49,6 +49,11 @@ unclassified knob keeps the old naive `[0, 1]` evenly-spaced behavior.
 
 ## `--workspace` — one directory per run
 
+**Mandatory for `run_pipeline.py`** (2026-09-10, either on the CLI or in `--config`) — a run
+with no workspace is exactly how a measured excitation's sizing (the only copy of a 104-corner
+onset measurement) once ended up parked in `/tmp` and lost. `prepare_excitation.py`'s own
+`--workspace` remains optional (it still requires `--output` otherwise).
+
 ```bash
 ./prepare_excitation.py --config <device>.config.toml --workspace ~/runs/duke_run1 ...
 ./run_pipeline.py       --config <device>.config.toml --workspace ~/runs/duke_run1
@@ -253,13 +258,18 @@ never — a model trained on it alone never sees the device saturating, and goes
 out-of-distribution the moment a hot input arrives. Build a proper training excitation from it:
 
 ```bash
-python build_excitation.py --input examples/T3K-sweep-v3.wav \
+python build_excitation.py --sweep-file examples/T3K-sweep-v3.wav \
     --output ~/work/tmp/DEVICE_excitation.wav \
-    --realistic-peak <below the device's measured saturation onset> \
-    --sweep-peaks <levels up to the device's max output + headroom>
+    --sweep-peak <below the device's measured saturation onset> \
+    --chirp-levels <levels up to the device's max output + headroom>
 ```
 
-That concatenates the `--input` clip with amplitude-stepped log sweeps that **do** reach
+(`--sweep-file` follows TONE3000's own term for this style of file — see
+tone3000.com/create/capture — since it's often itself a synthesized capture sweep, not a
+real-playing recording. The internally-generated tones are called "chirps" instead, so the
+two concepts don't share a name.)
+
+That concatenates the `--sweep-file` clip with amplitude-stepped log chirps that **do** reach
 maximum output, plus a leading silence so the render is not sampling a cold-start transient.
 Then gate it with `check_transient_coverage.py`, which fails if any knob corner's
 transient content never reaches that corner's own saturation onset.
@@ -268,7 +278,7 @@ transient content never reaches that corner's own saturation onset.
 the excitation file that `--dataset-dir`'s generation step (`gen_dataset_from_schx.py`, via
 `run_pipeline.py`'s `input` config setting) then consumes.
 
-**Keep transients intact, whatever you use as `--input`.** Sharp-attack content — whether a
+**Keep transients intact, whatever you use as `--sweep-file`.** Sharp-attack content — whether a
 real-playing recording's pick attacks or a standard capture sweep's own built-in noise-staircase/
 calibration-blip transients — is the excitation's source of real transient dynamics; thinning or
 filtering it (e.g. to work around a solver convergence issue during dataset generation) removes
@@ -285,7 +295,7 @@ excitations — `measure_truncation.py` and `grid_adequacy.py` both measure thro
 ## `prepare_excitation.py` — size an excitation from measured saturation onset, automatically
 
 Closes the manual gap `build_excitation.py` above leaves: someone has to read a saturation-onset
-number by hand and pick `--realistic-peak`/`--sweep-peaks` themselves — literally how every
+number by hand and pick `--sweep-peak`/`--chirp-levels` themselves — literally how every
 existing device's excitation was sized before this tool existed (e.g. the non-midpoint-default pedal's excitation,
 peak-sized from a direct output-V-vs-input-V sweep at one hand-picked knob setting).
 
@@ -303,9 +313,9 @@ choose one scalar. `scaffold_config.py` passes a knob-count-scaled budget (~1.5x
 count, capped at 64) so the default path measures the interior rather than assuming headroom
 covers it.
 
-- `--sweep-peaks` max = `--margin × worst-case onset` (default margin **2.0x** — past the onset,
-  not just at it), staged as fractions of that (`--sweep-peak-fracs`, default `0.25,0.5,0.75,1.0`).
-- `--realistic-peak` = `--realistic-peak-frac × worst-case onset` (default frac **1.3**). Never
+- `--chirp-levels` max = `--margin × worst-case onset` (default margin **2.0x** — past the onset,
+  not just at it), staged as fractions of that (`--chirp-level-fracs`, default `0.25,0.5,0.75,1.0`).
+- `--sweep-peak` = `--sweep-peak-frac × worst-case onset` (default frac **1.3**). Never
   go *below* 1.0: `check_transient_coverage.py`'s default margin requires the transient content
   to reach the worst corner's own onset, and the worst corner's onset *is* worst-case onset by
   definition, so any fraction below 1.0 guarantees that check fails there. It is 1.3 rather than
@@ -323,13 +333,13 @@ onset can't be determined, rather than silently building against a partial resul
 # livespice:
 python prepare_excitation.py --backend livespice \
     --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \
-    --real-clip examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
+    --sweep-file examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
 
 # ngspice-deck:
 python prepare_excitation.py --backend ngspice-deck \
     --pedal-dir ~/work/parametric-devices/pedals --module gen_device_ngspice \
     --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \
-    --real-clip ~/work/parametric-devices/pedals/device_realistic_clip.wav \
+    --sweep-file ~/work/parametric-devices/pedals/device_realistic_clip.wav \
     --output ~/work/tmp/device_excitation.wav
 ```
 
@@ -349,20 +359,21 @@ measured at all.
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 
 Pre-generation gate answering a narrower, more dangerous question than "does the excitation have
-enough peak somewhere": does the excitation's **transient-bearing** content — the `--input`
-segment placed at `--realistic-peak`, not just the sweep tail — actually reach saturation at
+enough peak somewhere": does the excitation's **transient-bearing** content — the `--sweep-file`
+segment placed at `--sweep-peak`, not just the chirp tail — actually reach saturation at
 **every** knob-grid corner?
 
 > That segment is **not** necessarily real playing. The standard capture sweep normally passed
-> as `--input` is itself synthesized (frequency sweep + noise-staircase + calibration blips);
-> its ~22 dB crest factor comes from that structure, not from musical dynamics. A genuine
-> playing recording works equally well but is not required. See `build_excitation.py`'s
-> docstring. What matters to this check is only that it is the crest-bearing part.
+> as `--sweep-file` (TONE3000's own term for this style of file) is itself synthesized
+> (frequency sweep + noise-staircase + calibration blips); its ~22 dB crest factor comes from
+> that structure, not from musical dynamics. A genuine playing recording works equally well but
+> is not required. See `build_excitation.py`'s docstring. What matters to this check is only
+> that it is the crest-bearing part.
 
 This is not hypothetical — it's the exact failure this tool was built to catch. The tweed-style amp's
-`--realistic-peak` had been chosen for input-signal realism, not cross-checked against the
-measured onset, so that `--input` content stayed in the *linear* region at every corner tested
-while only the sweep (a smooth tone, no attack shape) crossed into saturation there. The network
+`--sweep-peak` had been chosen for input-signal realism, not cross-checked against the
+measured onset, so that `--sweep-file` content stayed in the *linear* region at every corner tested
+while only the chirp (a smooth tone, no attack shape) crossed into saturation there. The network
 never saw a transient and saturation together at that corner, and ran open-loop when a real one
 eventually arrived.
 
@@ -385,11 +396,12 @@ python check_transient_coverage.py --config ~/work/parametric-nam-models/pedals/
     && python gen_dataset_from_schx.py ...
 ```
 
-`--transient-peak` (the excitation's transient-bearing `--input`-segment peak, in volts at
+`--transient-peak` (the excitation's transient-bearing `--sweep-file`-segment peak, in volts at
 V0dBFS=1) is
 auto-read from the excitation's `<stem>.recipe.json` sidecar (`build_excitation.py`'s
-`args.realistic_peak`) if present; otherwise it's **required** — this tool refuses to guess it
-from the raw audio rather than silently mis-slicing the file's realistic/sweep boundary.
+`args.sweep_peak`, or its pre-2026-09-10 name `args.realistic_peak` for an older recipe) if
+present; otherwise it's **required** — this tool refuses to guess it
+from the raw audio rather than silently mis-slicing the file's sweep/chirp boundary.
 `--margin` (default 1.0) is how far past each corner's own onset the transient peak must reach.
 For a hand-written ngspice deck with no `.schx` at all, `--backend ngspice-deck` takes the same
 `[knobs]`/`[fixed]`/pedal-dir/module/probe-node TOML convention as `preflight.py`/

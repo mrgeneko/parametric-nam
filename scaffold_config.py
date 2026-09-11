@@ -70,7 +70,7 @@ from run_pipeline import set_input_line  # noqa: E402
 # that fed it is worse than no gate: it reads as confirmation while checking less.
 from check_transient_coverage import interior_sample_budget as _interior_sample_budget  # noqa: E402
 
-DEFAULT_REALISTIC_DUR_CAP = 150.0
+DEFAULT_SWEEP_DUR_CAP = 150.0
 
 TEMPLATE = Path(__file__).resolve().parent / "examples" / "template.config.toml"
 
@@ -294,8 +294,8 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
 
 
 
-def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
-                        realistic_dur_cap: float, n_knobs: int = 0) -> bool:
+def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
+                        sweep_dur_cap: float, n_knobs: int = 0) -> bool:
     """Build a properly-calibrated excitation via prepare_excitation.py (which measures
     this circuit's REAL saturation onset across the knob grid's corners, rather than
     pointing `input` at a raw downloaded sweep with no calibration behind it at all --
@@ -308,14 +308,14 @@ def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
     pointed at the raw clip (same "best-effort, don't abort the scaffold" philosophy as
     _measure_oversample), not an aborted scaffold.
 
-    --realistic-dur is capped at `realistic_dur_cap` -- build_excitation.py's own default
-    is "the whole --input file" (uncapped), which for a typical multi-minute downloaded
-    sweep would make the realistic-content portion LONGER than the excitation needs to be
-    for its stated purpose (sampling dynamics/perceptual variety, not saturation coverage
-    -- the sweeps provide that). Only passed when the source clip actually exceeds the
-    cap; a shorter source is left alone rather than padded or otherwise altered.
+    --sweep-dur is capped at `sweep_dur_cap` -- build_excitation.py's own default is "the
+    whole --sweep-file" (uncapped), which for a typical multi-minute downloaded sweep would
+    make that segment LONGER than the excitation needs to be for its stated purpose
+    (sampling dynamics/perceptual variety, not saturation coverage -- the chirps provide
+    that). Only passed when the source clip actually exceeds the cap; a shorter source is
+    left alone rather than padded or otherwise altered.
     """
-    info = sf.info(str(real_clip))
+    info = sf.info(str(sweep_file))
     # NOTE: deliberately does NOT pass --no-full-hypercube. It used to be hardcoded here, which
     # opted EVERY scaffolded device out of the full-hypercube corner set -- the set that exists
     # precisely because the structural-only set cannot represent a mixed
@@ -327,7 +327,7 @@ def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
     # there instead of going back to the blind set.
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
            "--backend", "livespice", "--config", str(config_path),
-           "--real-clip", str(real_clip), "--output", str(output_wav)]
+           "--sweep-file", str(sweep_file), "--output", str(output_wav)]
     # Probe the grid INTERIOR too, not just corners -- see _interior_sample_budget.
     budget = _interior_sample_budget(n_knobs)
     if budget:
@@ -335,11 +335,11 @@ def _prepare_excitation(config_path: Path, real_clip: Path, output_wav: Path,
         print(f"  probing {budget} interior grid point(s) on top of the corner set -- corners "
               f"alone cannot see a non-monotonic onset maximum (Mesa Orange's was 1.27x every "
               f"vertex)")
-    if info.duration > realistic_dur_cap:
-        print(f"  {real_clip.name} is {info.duration:.1f}s, longer than the "
-              f"{realistic_dur_cap:.0f}s realistic-content cap -- truncating to "
-              f"{realistic_dur_cap:.0f}s (--realistic-dur {realistic_dur_cap:.0f}).")
-        cmd += ["--realistic-dur", str(realistic_dur_cap)]
+    if info.duration > sweep_dur_cap:
+        print(f"  {sweep_file.name} is {info.duration:.1f}s, longer than the "
+              f"{sweep_dur_cap:.0f}s sweep-content cap -- truncating to "
+              f"{sweep_dur_cap:.0f}s (--sweep-dur {sweep_dur_cap:.0f}).")
+        cmd += ["--sweep-dur", str(sweep_dur_cap)]
     print(f"  building a calibrated excitation (measuring saturation onset across the "
           f"knob grid's corners, then build_excitation.py) -- this renders, budget "
           f"real time for it ...")
@@ -390,12 +390,12 @@ def main() -> None:
                          "run against this scaffold's own output -- only skip this if you "
                          "specifically want that raw, uncalibrated behavior back (e.g. to "
                          "avoid the extra render time right now).")
-    ap.add_argument("--realistic-dur-cap", type=float, default=DEFAULT_REALISTIC_DUR_CAP,
-                    help=f"cap (seconds) on the excitation's realistic-content portion "
-                         f"when --input exceeds it (default {DEFAULT_REALISTIC_DUR_CAP:.0f}s) "
-                         f"-- build_excitation.py's own default is the WHOLE --input file, "
-                         f"uncapped, which the realistic segment doesn't need (it only "
-                         f"samples dynamics/perceptual variety; the sweeps provide "
+    ap.add_argument("--sweep-dur-cap", type=float, default=DEFAULT_SWEEP_DUR_CAP,
+                    help=f"cap (seconds) on the excitation's sweep-file-derived portion "
+                         f"when --input exceeds it (default {DEFAULT_SWEEP_DUR_CAP:.0f}s) "
+                         f"-- build_excitation.py's own default is the WHOLE --sweep-file, "
+                         f"uncapped, which that segment doesn't need (it only "
+                         f"samples dynamics/perceptual variety; the chirps provide "
                          f"saturation coverage). No effect if --skip-prepare-excitation.")
     args = ap.parse_args()
 
@@ -459,7 +459,7 @@ def main() -> None:
     elif args.backend == "livespice" and not args.skip_prepare_excitation:
         excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
         ok = _prepare_excitation(output, Path(args.input), excitation_wav,
-                                 args.realistic_dur_cap, n_knobs=len(names))
+                                 args.sweep_dur_cap, n_knobs=len(names))
         if ok and excitation_wav.exists():
             # prepare_excitation.py already pointed `input` here, and its line carries the
             # measured worst-case onset and corner count that this function does not have.

@@ -2,15 +2,22 @@
 """Wire measured saturation onset directly to excitation building -- backend-agnostic
 (--backend {livespice,ngspice-deck}, see render_backends.py). Closes the manual human-in-the-loop
 gap that's existed between find_saturation_point.py and build_excitation.py: until now,
-someone had to read an onset number by hand and pick --realistic-peak/--sweep-peaks themselves
+someone had to read an onset number by hand and pick --sweep-peak/--chirp-levels themselves
 (this is literally how every existing config's excitation was sized, e.g. the non-midpoint-default pedal's "peak sized
 from a direct Gain=0.5-vs-1.0 output-V-vs-input-V sweep" config comment).
+
+NAMING (2026-09-10): --sweep-file (was --real-clip) follows TONE3000's own term for this style
+of file (tone3000.com/create/capture calls it a "sweep signal") -- it is often itself a
+synthesized capture sweep (e.g. T3K-sweep-v3.wav), not a real-playing recording. build_
+excitation.py's OWN internally-generated tones are called "chirps" instead, specifically so
+the two concepts (an externally-supplied file vs. an internally-synthesized tone) don't share
+a name -- see that module's docstring.
 
 Runs find_saturation_point() at EVERY corner of the knob grid (reusing check_transient_
 coverage.py's own _corners() -- the same all-min/all-max/center/solo-extreme/full-hypercube
 set that tool checks against, not just one hand-picked knob setting), takes the WORST-CASE
-(highest) onset across them, derives --sweep-peaks (a staged ramp up to `--margin` x
-worst-case onset) and --realistic-peak (a fraction of worst-case onset), and invokes
+(highest) onset across them, derives --chirp-levels (a staged ramp up to `--margin` x
+worst-case onset) and --sweep-peak (a fraction of worst-case onset), and invokes
 build_excitation.py with them. Refuses to build (raises) if any corner's onset can't be
 determined, rather than silently building against a partial result -- same "refuse to guess"
 convention as preflight.py/check_transient_coverage.py.
@@ -20,7 +27,7 @@ still worth doing as an independent gate before training -- and it is a REAL gat
 formality. This tool derives its levels from onset numbers measured at a SET OF PROBED POINTS,
 and onset is not monotonic in the knobs, so the grid's true worst corner need not be one of
 them: Mesa Dual Rectifier ORANGE's worst (23.177 V, Bass=min with the others centred) is 1.27x
-the highest of all 32 hypercube vertices. --realistic-peak-frac (default 1.3) buys headroom
+the highest of all 32 hypercube vertices. --sweep-peak-frac (default 1.3) buys headroom
 against that; --sample-grid N buys coverage of it. A clean check is expected, not guaranteed --
 and both Mesa channels FAILED one on 2026-09-04 against an excitation whose peak was
 hand-picked rather than measured at all.
@@ -28,12 +35,12 @@ hand-picked rather than measured at all.
 Usage:
   livespice: python prepare_excitation.py --backend livespice \\
       --config ~/work/parametric-nam-models/pedals/DEVICE/config.toml \\
-      --real-clip examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
+      --sweep-file examples/T3K-sweep-v3.wav --output ~/work/tmp/DEVICE_excitation.wav
 
   ngspice:   python prepare_excitation.py --backend ngspice-deck \\
       --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \\
       --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \\
-      --real-clip ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \\
+      --sweep-file ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \\
       --output ~/work/tmp/ocd_excitation.wav
 """
 import argparse
@@ -242,10 +249,10 @@ def main():
     ap.add_argument("--no-cache", action="store_true")
 
     # excitation-building
-    ap.add_argument("--real-clip", required=True,
-                     help="clip passed through to build_excitation.py --input -- it becomes the "
-                          "crest-bearing segment placed at --realistic-peak. Commonly the "
-                          "standard capture sweep, which is SYNTHESIZED (sweep + "
+    ap.add_argument("--sweep-file", required=True,
+                     help="clip passed through to build_excitation.py --sweep-file -- it "
+                          "becomes the crest-bearing segment placed at --sweep-peak. Commonly "
+                          "TONE3000's standard capture sweep, which is SYNTHESIZED (sweep + "
                           "noise-staircase + blips), not a real-playing recording; a real "
                           "recording works equally well but is not required.")
     ap.add_argument("--output",
@@ -266,21 +273,21 @@ def main():
                          "was written to /tmp on a worker and came within a cleanup of being "
                          "lost (2026-09-04). A run's excitation belongs with the run.")
     ap.add_argument("--margin", type=float, default=2.0,
-                     help="sweep-peaks max = margin x worst-case onset (default 2.0x -- past "
+                     help="chirp-levels max = margin x worst-case onset (default 2.0x -- past "
                           "the onset, not just at it, matching this repo's own precedent, e.g. "
                           "the non-midpoint-default pedal's excitation peak sized with headroom past where Gain's own "
                           "effect saturates)")
-    ap.add_argument("--sweep-peak-fracs", default="0.25,0.5,0.75,1.0",
-                     help="comma list of fractions of the margined max, passed as --sweep-peaks")
-    ap.add_argument("--realistic-peak-frac", type=float, default=1.3,
-                     help="fraction of worst-case onset used for --realistic-peak. Never go BELOW "
+    ap.add_argument("--chirp-level-fracs", default="0.25,0.5,0.75,1.0",
+                     help="comma list of fractions of the margined max, passed as --chirp-levels")
+    ap.add_argument("--sweep-peak-frac", type=float, default=1.3,
+                     help="fraction of worst-case onset used for --sweep-peak. Never go BELOW "
                           "1.0: check_transient_coverage.py's own default "
                           "margin requires transient_peak >= onset AT THE WORST CORNER, and the "
                           "worst corner's own onset IS worst-case onset by definition -- any "
                           "fraction below 1.0 guarantees that check fails there, regardless of "
                           "margin or grid, contradicting this tool's own claim that a check run "
                           "afterward should pass cleanly. Lower it only if you deliberately want "
-                          "the --input content to stay short of the worst corner (e.g. to "
+                          "the --sweep-file content to stay short of the worst corner (e.g. to "
                           "match a case where a real player realistically never drives that hard) "
                           "and are prepared for check_transient_coverage.py to FAIL there as a "
                           "correct, expected result, not a bug.\n"
@@ -300,10 +307,10 @@ def main():
                           "--sample-grid: a hotter excitation drives every ALREADY-covered corner "
                           "further into saturation, so do not inflate it beyond what the "
                           "non-monotonicity actually demands.")
-    ap.add_argument("--realistic-dur", type=float, default=None)
+    ap.add_argument("--sweep-dur", type=float, default=None)
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="passed through to build_excitation.py. 'auto' uses the derived "
-                         "--sweep-peaks, so a broadband instant-attack burst is inserted at "
+                         "--chirp-levels, so a broadband instant-attack burst is inserted at "
                          "EVERY level -- the reverse-linear-drive pedal shipped a model that spiked to 12.39 "
                          "peak on a real pick attack because its excitation never showed it a "
                          "stable response to one. Default off, preserving prior behaviour.")
@@ -333,29 +340,29 @@ def main():
                                     lead_silence_s=sweep_lead_silence_s)
     print(f"worst-case onset: {worst:.4f} V (across {len(rows)} corners)")
 
-    sweep_max = worst * args.margin
-    fracs = [float(f) for f in args.sweep_peak_fracs.split(",") if f.strip()]
-    sweep_peaks = [round(sweep_max * f, 4) for f in fracs]
-    realistic_peak = round(worst * args.realistic_peak_frac, 4)
-    # NOTE the default frac is 1.02, not 1.0 -- see --realistic-peak-frac's help for why sizing
+    chirp_max = worst * args.margin
+    fracs = [float(f) for f in args.chirp_level_fracs.split(",") if f.strip()]
+    chirp_levels = [round(chirp_max * f, 4) for f in fracs]
+    sweep_peak = round(worst * args.sweep_peak_frac, 4)
+    # NOTE the default frac is 1.02, not 1.0 -- see --sweep-peak-frac's help for why sizing
     # EXACTLY at the measured worst is too tight to survive a re-measurement.
-    print(f"derived: sweep_peaks={sweep_peaks}  realistic_peak={realistic_peak}  "
+    print(f"derived: chirp_levels={chirp_levels}  sweep_peak={sweep_peak}  "
           f"(margin={args.margin}x onset)")
 
     build_script = HERE / "build_excitation.py"
     cmd = [sys.executable, str(build_script),
-           "--input", args.real_clip, "--output", args.output,
-           "--realistic-peak", str(realistic_peak),
-           "--sweep-peaks", ",".join(str(p) for p in sweep_peaks),
+           "--sweep-file", args.sweep_file, "--output", args.output,
+           "--sweep-peak", str(sweep_peak),
+           "--chirp-levels", ",".join(str(p) for p in chirp_levels),
            "--lead-silence-s", str(args.excitation_lead_silence_s)]
-    if args.realistic_dur is not None:
-        cmd += ["--realistic-dur", str(args.realistic_dur)]
+    if args.sweep_dur is not None:
+        cmd += ["--sweep-dur", str(args.sweep_dur)]
     if args.synth_burst_peaks:
-        # "auto" mirrors the derived sweep levels, which is what build_excitation.py's own
-        # help recommends ("Typically the same list as --sweep-peaks") -- so saturation-onset
+        # "auto" mirrors the derived chirp levels, which is what build_excitation.py's own
+        # help recommends ("Typically the same list as --chirp-levels") -- so saturation-onset
         # behaviour under a sharp transient is tested at every level rather than only the
         # loudest, which is the gap a single --noise-burst-* segment leaves.
-        peaks = (",".join(str(p) for p in sweep_peaks)
+        peaks = (",".join(str(p) for p in chirp_levels)
                  if args.synth_burst_peaks == "auto" else args.synth_burst_peaks)
         cmd += ["--synth-burst-peaks", peaks]
         if args.synth_burst_dur is not None:
@@ -366,7 +373,7 @@ def main():
     # SIZING PROVENANCE. build_excitation.py records WHAT it built (args, source hash, output
     # hash); it cannot record WHY those numbers, because the measurement that justified them
     # happened here. Without this block a later check_transient_coverage.py failure is
-    # unexplainable from the artifacts alone: you see realistic_peak=8.6473 and an onset of
+    # unexplainable from the artifacts alone: you see sweep_peak=8.6473 and an onset of
     # 8.766 V and cannot tell whether the sizing run simply never probed that corner. That is
     # exactly what happened to Duke of Tone on 2026-09-04 -- sized against the reduced 11-corner
     # set, checked against the full 25, three mixed Gain=lo,Volume=lo corners missed by 0.3-1.4%
@@ -383,8 +390,8 @@ def main():
                                "mixed low/high corners)" if args.no_full_hypercube
                                else f"budgeted (--max-corners {args.max_corners})"
                                if args.max_corners is not None else "full binary hypercube"),
-                "realistic_peak_frac": args.realistic_peak_frac,
-                "sweep_margin": args.margin,
+                "sweep_peak_frac": args.sweep_peak_frac,
+                "chirp_margin": args.margin,
                 "peak_max_v": args.peak_max_v,
                 "onsets_v": {r["corner"]: (None if r["onset_v"] is None else round(float(r["onset_v"]), 4))
                              for r in rows},

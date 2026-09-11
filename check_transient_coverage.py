@@ -3,17 +3,18 @@
 saturation at every knob-grid corner, not just the excitation's overall peak?
 
 Background (internal engineering notes): a device can have a peak level
-(from its synthetic sweep tail) that comfortably clears its saturation onset, while
-the TRANSIENT-bearing segment -- build_excitation.py's `--input` clip, placed at its own
-`--realistic-peak` -- never does, at some corners. (That segment is NOT necessarily real
-playing: the standard capture sweep normally passed as `--input` is itself synthesized --
-frequency sweep + noise-staircase + calibration blips -- and its high crest factor comes
-from that structure, not from musical dynamics. See build_excitation.py's docstring. What
-matters here is only that it is the crest-bearing part, whatever its source.) The tweed-style amp is the exact case
+(from its synthetic chirp tail) that comfortably clears its saturation onset, while
+the TRANSIENT-bearing segment -- build_excitation.py's `--sweep-file` clip, placed at its own
+`--sweep-peak` -- never does, at some corners. (That segment is NOT necessarily real
+playing: the standard capture sweep normally passed as `--sweep-file` is itself synthesized --
+frequency sweep + noise-staircase + calibration blips, TONE3000's own term for this style of
+file -- and its high crest factor comes from that structure, not from musical dynamics. See
+build_excitation.py's docstring. What matters here is only that it is the crest-bearing part,
+whatever its source.) The tweed-style amp is the exact case
 this happened on: `find-peak @ knobs=0.5` measured onset ~0.51 V, but
-`--realistic-peak` was set to 0.2 V regardless (chosen for input-signal realism,
-not cross-checked against the measured onset) -- so that `--input` content
-stayed in the LINEAR region at every corner tested, while only the sweep (a smooth
+`--sweep-peak` was set to 0.2 V regardless (chosen for input-signal realism,
+not cross-checked against the measured onset) -- so that `--sweep-file` content
+stayed in the LINEAR region at every corner tested, while only the chirp (a smooth
 tone, no attack shape) crossed into saturation there. The network never saw a
 transient AND saturation together at that corner, and ran open-loop when a real
 one eventually arrived. This tool automates the cross-check that was missing:
@@ -36,11 +37,12 @@ Usage:
       ngspice-deck) -- for a device whose clipping needs a real component .schx has no model
       for (a MOSFET, a real BJT), so there's no .schx at all to check against.
 
---transient-peak: the excitation's transient-bearing `--input` segment peak, in volts
+--transient-peak: the excitation's transient-bearing `--sweep-file` segment peak, in volts
   at V0dBFS=1. Auto-read from the excitation's <stem>.recipe.json sidecar
-  (build_excitation.py's `args.realistic_peak`) if present; otherwise REQUIRED --
-  this tool refuses to guess it from the raw audio (silently mis-slicing the
-  file's realistic/sweep boundary would be worse than refusing to run).
+  (build_excitation.py's `args.sweep_peak`, or its pre-2026-09-10 name `args.realistic_peak`
+  for an older recipe) if present; otherwise REQUIRED -- this tool refuses to guess it from
+  the raw audio (silently mis-slicing the file's sweep/chirp boundary would be worse than
+  refusing to run).
 """
 import argparse
 import importlib
@@ -188,7 +190,7 @@ def interior_sample_budget(n_knobs: int) -> int:
     principle: its highest saturation onset (23.177 V, at Bass=min with every OTHER knob at
     its CENTRE grid value) is 1.27x the highest of all 32 hypercube vertices. Onset is not
     monotonic in the knobs, so its maximum over the grid need not sit at a vertex.
-    --realistic-peak-frac's 1.3 buys headroom against that; only probing the interior
+    --sweep-peak-frac's 1.3 buys headroom against that; only probing the interior
     actually MEASURES it.
 
     Scaled at ~1.5x the corner count (2*n+3 structural + 2**n hypercube), because that is
@@ -247,17 +249,22 @@ def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
         return None
     try:
         args = json.loads(recipe_path.read_text())["args"]
-        # The TRANSIENT peak is not just the `--input` segment. build_excitation.py can
+        # The TRANSIENT peak is not just the `--sweep-file` segment. build_excitation.py can
         # append transient BURSTS -- broadband, instant attack, exponential decay, crest ~8.5,
         # "matching a real hard pick-attack" in its own words -- at levels well above
-        # --realistic-peak, precisely so sharp-attack behaviour is exercised at EVERY level
-        # rather than only the loudest. Reading realistic_peak alone therefore UNDERSTATES what
+        # --sweep-peak, precisely so sharp-attack behaviour is exercised at EVERY level
+        # rather than only the loudest. Reading sweep_peak alone therefore UNDERSTATES what
         # the file actually contains, and fails corners the excitation genuinely covers.
         #
-        # Found on the budget clone pedal: realistic_peak 7.4166 V against an all-min onset of 7.417 V failed
+        # Found on the budget clone pedal: sweep_peak 7.4166 V against an all-min onset of 7.417 V failed
         # by a hair, while the file held 11.125 V and 14.833 V bursts (measured crest 13.6) that
         # clear it outright.
-        peaks = [float(args["realistic_peak"])]
+        #
+        # "sweep_peak" is the arg's name from 2026-09-10 on (--real-clip/--realistic-peak were
+        # renamed to --sweep-file/--sweep-peak to match TONE3000's own "sweep signal" term --
+        # see build_excitation.py's docstring); "realistic_peak" is read as a fallback so a
+        # recipe.json written before that rename still works.
+        peaks = [float(args["sweep_peak"] if "sweep_peak" in args else args["realistic_peak"])]
         for key in ("synth_burst_peaks", "noise_burst_peak"):
             val = args.get(key)
             if isinstance(val, (list, tuple)):
@@ -312,7 +319,20 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     cpath.write_text(json.dumps(sat))
             onset = sat.get("onset_99pct_input_v") if sat else None
             if onset is None:
-                status = "SKIP (onset not bracketed / render failed)"
+                # Two very different situations were previously collapsed into one vague
+                # message. `sat is None` means EVERY amplitude in the sweep failed to render
+                # -- see stderr (each failure now names its own cause: an application
+                # exception, or "KILLED BY SIGNAL ..." for an OS-level kill, almost always
+                # memory pressure under parallel load rather than a circuit problem -- check
+                # `vm_stat` and whether something else is training/rendering concurrently
+                # before assuming the circuit itself is broken). `sat` present but `onset`
+                # None means renders WORKED but the swept amplitude range (start_v..max_v)
+                # never bracketed 99% of the ceiling -- a sweep-range tuning issue, not a
+                # render failure at all.
+                if sat is None:
+                    status = "SKIP (every render in the sweep failed -- see stderr for why)"
+                else:
+                    status = "SKIP (renders OK, but sweep range never bracketed the onset)"
                 ok = None
             else:
                 ok = transient_peak >= onset * margin
@@ -329,8 +349,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
         if failed:
             print(f"FAILED: {len(failed)}/{len(rows)} corners never see a transient past their own "
                   f"saturation onset -- the model can go out-of-distribution there on real playing. "
-                  f"Raise --realistic-peak (build_excitation.py) past the highest FAILED onset, or "
-                  f"lengthen --realistic-dur for more varied transient shapes, and rebuild.")
+                  f"Raise --sweep-peak (build_excitation.py) past the highest FAILED onset, or "
+                  f"lengthen --sweep-dur for more varied transient shapes, and rebuild.")
         if skipped:
             print(f"WARNING: {len(skipped)}/{len(rows)} corners' onset could not be determined "
                   f"(render failures or onset above --peak-max-v) -- treat as unverified, not passing.")
@@ -469,7 +489,7 @@ def main():
     if transient_peak is None:
         ap.error(f"--transient-peak not given and no {input_wav.with_suffix('.recipe.json').name} "
                  f"sidecar found -- refusing to guess it from the raw audio. Pass it explicitly "
-                 f"(the value used for build_excitation.py's --realistic-peak).")
+                 f"(the value used for build_excitation.py's --sweep-peak).")
 
     knob_ranges = {}
     for entry in cfg.get("ranges", []):

@@ -1411,7 +1411,7 @@ def input_provenance(wav: Path) -> dict:
     # AND verifies the sidecar actually describes THIS wav. A stale sidecar (excitation
     # rebuilt, old recipe left behind) is strictly worse than a missing one: absence is
     # visible, wrong provenance is invisible and actively misleading -- it would send someone
-    # rebuilding from the wrong --realistic-peak, and _transient_peak_from_recipe() reads that
+    # rebuilding from the wrong --sweep-peak, and _transient_peak_from_recipe() reads that
     # same sidecar to decide whether the coverage gate passes. build_excitation.py already
     # records output.audio_sha1 over the same float32 samples hashed above, so this is a free
     # equality check, not new machinery.
@@ -2376,9 +2376,9 @@ def main():
                          "there (the solo-only corner set this check used to run missed it "
                          "entirely -- see check_transient_coverage.py's _corners() docstring).")
     ap.add_argument("--transient-peak", type=float, default=None,
-                    help="excitation's transient-bearing --input segment peak, in volts at "
+                    help="excitation's transient-bearing --sweep-file segment peak, in volts at "
                          "V0dBFS=1 (auto-read from <input>.recipe.json if omitted -- see "
-                         "build_excitation.py's --realistic-peak). Required for the transient "
+                         "build_excitation.py's --sweep-peak). Required for the transient "
                          "check unless a recipe sidecar exists.")
     ap.add_argument("--skip-rail-check", action="store_true",
                     help="skip the supply-rail bound on output RMS. That bound is the ONLY "
@@ -2673,7 +2673,7 @@ def main():
         if transient_peak is None:
             print(f"Transient check: SKIPPED -- no --transient-peak given and no "
                   f"{in_wav.with_suffix('.recipe.json').name} sidecar found. Pass --transient-peak "
-                  f"explicitly (the value used for build_excitation.py's --realistic-peak), or "
+                  f"explicitly (the value used for build_excitation.py's --sweep-peak), or "
                   f"--skip-transient-check to proceed unchecked.", file=sys.stderr)
             sys.exit(1)
         fixed_kv = {}
