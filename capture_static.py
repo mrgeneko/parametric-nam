@@ -63,6 +63,24 @@ detection/calibration/split-point logic (`_detect_input_version`, `_get_data_con
 directly -- it's purpose-built, impulse-based, and already trusted by the wider
 ecosystem. Only fall back to a bare `delay=0` (never a guess) for a non-standard,
 custom-built excitation, and say so loudly in the manifest.
+
+CAVEAT, found 2026-09-10 (Duke of Tone Distortion, Gain=0.95/Tone=0.2): even NAM's OWN
+blip calibration -- the thing the paragraph above says to trust -- can itself be fooled,
+on a circuit clipping heavily enough at the probed setting. It returned delay=-1001 (its
+own clamped minimum), with NAM's own code printing "this usually means something is wrong
+with your data" -- and training on that delay plateaued at ESR ~0.66, an order of
+magnitude worse than the same architecture manages elsewhere. Direct multi-window
+cross-correlation of the dry/wet files (8 windows spread across the full render, not just
+the lead-in) found the TRUE delay to be 0 -- median exactly 0, scatter within +-14
+samples, no consistent shift anywhere in the file. Setting delay=0 by hand (LiveSPICE
+renders are zero-latency by construction; a nonzero finding should be treated as a claim
+to verify, not a given) dropped the plateau to ESR ~0.6 -- real, but nowhere near a fix
+for whatever remains. Lesson: NAM's blip calibration is still the right FIRST move (per
+the paragraph above), but on a heavily-clipping circuit its result is a hypothesis, not a
+fact -- if the resulting training result is far worse than comparable captures, check the
+calibration itself before assuming the circuit is just hard. A hard clamp value (like the
+minimum here) is itself a signal worth treating with suspicion, same as NAM's own code
+already flags it as one.
 """
 import argparse
 import glob
