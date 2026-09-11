@@ -40,12 +40,58 @@ class TestItRemovesWhatCannotBeModelled:
             ratio = np.sqrt((out ** 2).mean()) / np.sqrt((ref ** 2).mean())
             assert 0.99 < ratio < 1.01, f"{f} Hz changed by {20*np.log10(ratio):+.2f} dB"
 
-    def test_minus_half_db_at_20hz(self):
-        """The derivation's anchor point: -0.5 dB at 20 Hz, matching a converter spec."""
-        y = _tone(20.0, dur=8.0)
+    def test_preserves_bass_low_e(self):
+        """THE governing rule: bass low E (41.2 Hz) must survive within -0.5 dB.
+
+        It is the lowest note anyone plays through these models, so it is the thing the
+        filter must not damage. This replaced an earlier anchor of "-0.5 dB at 20 Hz",
+        which was a converter datasheet standing in for the musical constraint -- a proxy,
+        and one that would have blocked the 3rd @ 18 Hz default that is strictly better.
+        """
+        from capture_chain import PRESERVE_HZ, PRESERVE_MAX_LOSS_DB
+        y = _tone(PRESERVE_HZ, dur=8.0)
         out = capture_chain(y, SR)[4 * SR:]
-        ratio = np.sqrt((out ** 2).mean()) / np.sqrt((y[4 * SR:] ** 2).mean())
-        assert -0.7 < 20 * np.log10(ratio) < -0.3
+        loss_db = 20 * np.log10(np.sqrt((out ** 2).mean())
+                                / np.sqrt((y[4 * SR:] ** 2).mean()))
+        assert loss_db > -PRESERVE_MAX_LOSS_DB, f"low E lost {loss_db:.3f} dB"
+
+    def test_any_override_must_also_preserve_low_e(self):
+        """The invariant binds per-device overrides too, not just the default.
+
+        Bounds under the -0.5 dB rule: 1st<=14.4, 2nd<=24.4, 3rd<=29.0, 4th<=31.7 Hz.
+        A mic'd-cab-style corner (~70 Hz) violates it by tens of dB -- and would also be
+        wrong to bake into a model meant to stay composable with the user's own cab.
+        """
+        from capture_chain import PRESERVE_HZ, PRESERVE_MAX_LOSS_DB
+        y = _tone(PRESERVE_HZ, dur=8.0)
+        ref = np.sqrt((y[4 * SR:] ** 2).mean())
+
+        def loss(fc, order):
+            out = capture_chain(y, SR, corner_hz=fc, order=order)[4 * SR:]
+            return 20 * np.log10(np.sqrt((out ** 2).mean()) / ref)
+
+        for fc, order in ((14.4, 1), (24.4, 2), (29.0, 3), (31.7, 4)):
+            assert loss(fc, order) > -PRESERVE_MAX_LOSS_DB - 0.05, f"{order} @ {fc} Hz"
+        assert loss(70.0, 2) < -6.0, "a cab-style corner should be obviously disqualified"
+
+    def test_default_beats_the_previous_default_on_every_axis(self):
+        """3rd @ 18 Hz vs the retired 2nd @ 11.8 Hz: better rejection, same low-E cost.
+
+        Pins the reason for the change. Raising ORDER buys stopband rejection; raising the
+        CORNER buys it by trading away bass. If someone later 'simplifies' this back to a
+        2nd-order default, the rejection column regresses ~18 dB at 5 Hz for nothing.
+        """
+        from capture_chain import PRESERVE_HZ
+        for f in (1.0, 5.0):
+            y = _tone(f, dur=20.0)
+            ref = np.sqrt((y[10 * SR:] ** 2).mean())
+            new = np.sqrt((capture_chain(y, SR)[10 * SR:] ** 2).mean()) / ref
+            old = np.sqrt((capture_chain(y, SR, corner_hz=11.8, order=2)[10 * SR:] ** 2).mean()) / ref
+            assert new < old, f"{f} Hz: default rejects less than the old 2nd @ 11.8 Hz"
+        y = _tone(PRESERVE_HZ, dur=8.0)
+        ref = np.sqrt((y[4 * SR:] ** 2).mean())
+        new = 20 * np.log10(np.sqrt((capture_chain(y, SR)[4 * SR:] ** 2).mean()) / ref)
+        assert new > -0.1, f"low E cost {new:.3f} dB -- must stay negligible"
 
     def test_dc_is_removed(self):
         y = np.full(int(SR * 4), 0.5)
@@ -385,3 +431,10 @@ class TestCaptureStaticIsConsistent:
         capture_static.ensure_adequate_excitation("x.schx", {"Gain": 0.5}, str(wav),
                                                   tmp_path, capture=chain)
         assert seen["capture"] == chain, "probe measured a different chain than the render"
+
+
+def test_describe_ordinals_are_correct():
+    """'3nd-order' shipped in the first cut of describe(); the suffix was hardcoded."""
+    from capture_chain import describe
+    for n, want in ((1, "1st-order"), (2, "2nd-order"), (3, "3rd-order"), (4, "4th-order")):
+        assert want in describe({"corner_hz": 18.0, "order": n})

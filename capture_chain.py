@@ -21,16 +21,31 @@ constraint. The predicted floor from unmodellable content, >=0.64, bracketed the
 For scale: 13 other fleet datasets (Joyo, Mesa RED/Orange, JCM800, Duke OVERDRIVE, statics)
 all sit at 0.20-9.47% sub-19 Hz. The Distortion is not the tail of that distribution.
 
-FILTER SHAPE is derived, not picked. A converter spec'd "20 Hz-20 kHz +/-0.5 dB" has its
--3 dB point well below 20 Hz. Solving for exactly -0.5 dB at 20 Hz gives 11.8 Hz at 2nd
-order (or 7.0 Hz at 1st). 2nd order is the default: it reaches -42.9 dB at 1 Hz where 1st
-order manages only -17.0 dB, while being FLATTER above the corner (-0.01 dB at 50 Hz vs
--0.08 dB) -- it removes more of what we cannot model and disturbs less of what we can.
+FILTER SHAPE is governed by a MUSICAL rule, not an equipment spec: **preserve bass low E
+(41.2 Hz) to within -0.5 dB**. That is the lowest note anyone plays through these models, so
+it is the thing we must not damage; a converter's datasheet is a proxy for it at best.
+
+3rd order at 18 Hz costs **-0.030 dB** at 41.2 Hz -- inaudible -- and reaches -33.4 dB at
+5 Hz. Raising the ORDER buys stopband rejection; raising the CORNER buys it by trading away
+bass. Measured on Duke of Tone (Distortion)'s worst corner, sub-19 Hz residual:
+
+    2nd @ 11.8 Hz   10.69%   -0.029 dB @41.2   (the previous default)
+    3rd @ 15.0 Hz    7.23%   -0.010 dB @41.2
+    3rd @ 18.0 Hz    4.42%   -0.030 dB @41.2   <- default
+    3rd @ 29.0 Hz    0.56%   -0.498 dB @41.2   (and -2.27 dB at 5-string low B)
+
+3rd @ 18 Hz more than halves the residual for the same low-E cost as the old 2nd @ 11.8.
+Pushing the corner to 29 Hz would halve it again but takes 2.3 dB off low B, permanently and
+irreversibly, in a model meant to stay composable with the user's own amp and cab.
+
+Counter-intuitively the steeper filter is also EASIER for the model: a higher corner decays
+faster, so less of the filter's own state outlives the receptive field (tail energy beyond
+52 ms: 0.50% at 2nd @ 11.8 Hz, 0.18% at 3rd @ 18 Hz). Corner frequency dominates order here.
 
 CAUSAL, ALWAYS. sosfilt, never sosfiltfilt. A zero-phase filter makes the target depend on
 FUTURE input, so its pre-ringing is unpredictable to a causal model by construction -- a
-self-inflicted error floor in the name of removing one. The 2nd-order 11.8 Hz impulse
-response is ~0.1% by 52 ms, so it sits inside the receptive field and is learnable.
+self-inflicted error floor in the name of removing one. The 3rd-order 18 Hz impulse
+response is ~0.18% by 52 ms, so it sits inside the receptive field and is learnable.
 
 THIS IS NOT A UNIVERSAL SAFETY NET. It removes sub-audio, which is the SYMPTOM. A circuit
 whose multi-second state reaches into the AUDIO band is still unmodellable and this will not
@@ -40,9 +55,14 @@ difference. Use context_sensitivity() to detect that class; an LF-energy check c
 import numpy as np
 from scipy.signal import butter, sosfilt
 
-# -0.5 dB at 20 Hz at 2nd order; see FILTER SHAPE above.
-DEFAULT_CORNER_HZ = 11.8
-DEFAULT_ORDER = 2
+# -0.030 dB at bass low E (41.2 Hz); see FILTER SHAPE above.
+DEFAULT_CORNER_HZ = 18.0
+DEFAULT_ORDER = 3
+
+# The governing invariant: no capture-chain setting, default or per-device override, may
+# take more than this off bass low E. Asserted in tests/test_capture_chain.py.
+PRESERVE_HZ = 41.2
+PRESERVE_MAX_LOSS_DB = 0.5
 
 
 def _sos(sr, corner_hz=DEFAULT_CORNER_HZ, order=DEFAULT_ORDER):
@@ -149,7 +169,9 @@ def describe(capture):
     if not capture:
         return ("capture chain: DISABLED (--no-capture-chain) -- targets keep sub-audio content "
                 "no hardware capture would contain, which a ~52 ms receptive field cannot model")
-    return (f"capture chain: {capture['order']}nd-order high-pass at {capture['corner_hz']:g} Hz "
+    n = capture["order"]
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return (f"capture chain: {n}{suffix}-order high-pass at {capture['corner_hz']:g} Hz "
             f"(the audio-interface input stage a hardware NAM capture goes through)")
 
 
