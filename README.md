@@ -396,6 +396,15 @@ pip install -r requirements.txt
 For NVIDIA CUDA, install the matching `torch` build from the PyTorch index first
 (see the note at the top of `requirements.txt`), then `pip install -r requirements.txt`.
 
+On Debian/Ubuntu, `python3 -m venv` needs the separate `python3-venv` apt package
+(`sudo apt-get install python3-venv`); `setup.sh` checks for it before creating `.venv`.
+On a CPU-only Linux x86_64 box (e.g. a render worker), install the CPU `torch` build first —
+the default PyPI wheel there is a CUDA build that pulls in several GB of `nvidia-*` wheels:
+```bash
+pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
 For AMD GPUs (Linux only), [ROCm](https://rocm.docs.amd.com) needs to be installed at the
 OS level first, then the matching ROCm `torch` build in place of the CUDA one (see the same
 note in `requirements.txt`) — and see "Notes for AMD GPU users" below for kernel-compatibility

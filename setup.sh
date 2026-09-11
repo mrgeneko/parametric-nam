@@ -71,6 +71,14 @@ fi
 
 # --- 2. python venv + deps -------------------------------------------------
 say "2/2  Python venv + deps"
+# Debian/Ubuntu split venv's ensurepip into a separate apt package. Without it `python3 -m venv`
+# fails AFTER creating .venv (no pip inside), and the `[ -d .venv ]` guard below then skips the
+# broken venv on every re-run. Check first so nothing half-made is left behind.
+if [ ! -d "$REPO/.venv" ] && ! python3 -c 'import ensurepip' 2>/dev/null; then
+  echo "ERROR: python3 can't create virtualenvs (ensurepip missing)." >&2
+  echo "       Debian/Ubuntu: sudo apt-get install python3-venv" >&2
+  exit 1
+fi
 [ -d "$REPO/.venv" ] || python3 -m venv "$REPO/.venv"
 "$REPO/.venv/bin/python" -m pip install --quiet --upgrade pip
 

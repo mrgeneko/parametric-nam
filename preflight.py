@@ -70,7 +70,7 @@ from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E4
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
-                                   findpeak_cache_key, scratch_dir)
+                                   findpeak_cache_key, cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
 from knob_classify import classify as _classify_by_name  # noqa: E402
 
@@ -312,8 +312,7 @@ def main():
                 print(f"    {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
             sat = find_saturation_point(backend, base, scratch, lead_silence_s=lead_silence_s,
                                          max_v=args.peak_max_v, progress=_sat_progress)
-            if sat is not None:
-                cpath.write_text(json.dumps(sat))
+            cache_findpeak(cpath, sat)
         if sat is None:
             warn.append("--find-peak: all sweep renders failed")
             print("    FAILED (all renders failed)")
