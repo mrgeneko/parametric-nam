@@ -411,3 +411,97 @@ def test_abandoning_a_chunk_never_deletes_the_generation_lock():
     body = src[src.index("def _kill_remote"):src.index("def run_chunk")]
     assert "generation.lock" not in body or "DO NOT rm" in body
     assert "rm -f" not in body, "_kill_remote must not delete the generation lock"
+
+
+class _FakePopen:
+    """Enough of subprocess.Popen for run_chunk(): captures the ssh argv it was built with,
+    reports an already-exited process (poll() -> 0) so run_chunk's watch loop falls straight
+    through to proc.wait(), and yields no stdout lines (nothing under test here reads them)."""
+
+    instances: "list" = []
+
+    def __init__(self, argv, **kw):
+        self.argv = argv
+        self.stdout = iter(())
+        self.returncode = 0
+        _FakePopen.instances.append(self)
+
+    def poll(self):
+        return 0
+
+    def wait(self):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class TestJobAbstraction:
+    """distribute_pull.py can dispatch either gen_dataset_from_schx.py or grid_adequacy.py,
+    parameterized by a Job (script/progress_re/output_flag/build_args/chunk_output/collect)
+    a Worker carries. Worker(spec) with no job= defaults to GEN_DATASET_JOB, so every test
+    above this class -- written before Job existed -- keeps exercising exactly the same
+    dispatch it always did; these add the other job path and pin the default is unchanged."""
+
+    def _run_chunk_cmd(self, monkeypatch, job=None):
+        _FakePopen.instances.clear()
+        monkeypatch.setattr(dp.subprocess, "Popen", _FakePopen)
+        w = dp.Worker("hostA:~/work/parametric-nam:4", job=job) if job else \
+            dp.Worker("hostA:~/work/parametric-nam:4")
+        w.run_chunk("3-3/16", "--backend livespice", "~/out")
+        return _FakePopen.instances[0].argv[-1]
+
+    def test_default_job_dispatches_gen_dataset_from_schx_unchanged(self, monkeypatch):
+        """Regression pin: this is the exact command line distribute_pull.py has always sent
+        for gen_dataset_from_schx.py -- the refactor to a Job abstraction must not touch it."""
+        cmd = self._run_chunk_cmd(monkeypatch)
+        assert cmd == ("cd ~/work/parametric-nam && ./.venv/bin/python -u "
+                       "gen_dataset_from_schx.py --backend livespice --shard 3-3/16 "
+                       "--output ~/out")
+
+    def test_grid_adequacy_job_dispatches_its_own_script_and_output_flag(self, monkeypatch):
+        cmd = self._run_chunk_cmd(monkeypatch, job=dp.GRID_ADEQUACY_JOB)
+        assert cmd == ("cd ~/work/parametric-nam && ./.venv/bin/python -u "
+                       "grid_adequacy.py --backend livespice --shard 3-3/16 "
+                       "--shard-out ~/out/shard_3-3_16.json")
+
+    def test_chunk_output_naming_differs_per_job(self):
+        assert dp.GEN_DATASET_JOB.chunk_output("~/out", "3-3/16") == "~/out"
+        assert dp.GRID_ADEQUACY_JOB.chunk_output("~/out", "3-3/16") == "~/out/shard_3-3_16.json"
+
+    def test_kill_pattern_matches_a_grid_adequacy_process_line(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(dp.subprocess, "run",
+                            lambda argv, **kw: calls.append(argv) or
+                            type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+        w = dp.Worker("hostA:~/work/parametric-nam:4", job=dp.GRID_ADEQUACY_JOB)
+        w._kill_remote("3-3/16", "~/out")
+        import re as _re
+        pat = _re.search(r"pkill -f '([^']+)'", calls[0][-1]).group(1)
+        mine = "python -u grid_adequacy.py --config d.toml --shard 3-3/16 --shard-out ~/out/shard_3-3_16.json"
+        other = "python -u grid_adequacy.py --config d.toml --shard 4-4/16 --shard-out ~/out/shard_4-4_16.json"
+        assert _re.search(pat, mine)
+        assert not _re.search(pat, other)
+
+    def test_gridadq_progress_line_matches_the_real_heartbeat(self):
+        assert dp.GRIDADQ_PROBE_LINE.match("    3/48 probes done")
+        assert dp.GRIDADQ_PROBE_LINE.match("12/12 probes done")
+
+    def test_gridadq_progress_line_does_not_match_unrelated_output(self):
+        for line in ("Workers:      12", "  Gain:", "    0.1000 -  0.5000    0.0123   ok",
+                     "[controller] no combination completed in 70.0 min"):
+            assert dp.GRIDADQ_PROBE_LINE.match(line) is None, line
+
+    def test_grid_adequacy_build_args_expands_config_and_appends_extras(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text('backend = "livespice"\n', encoding="utf-8")
+        a = dp.GRID_ADEQUACY_JOB.build_args(cfg, tmp_path / "repo", ["--target", "0.02"])
+        assert a[0] == "--config"
+        assert not os.path.isabs(a[1])
+        assert a[2:] == ["--target", "0.02"]
+
+    def test_tools_registry_has_both_jobs_and_gen_dataset_is_the_default(self):
+        assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy"}
+        assert dp.JOBS["gen_dataset"] is dp.GEN_DATASET_JOB
+        assert dp.JOBS["grid_adequacy"] is dp.GRID_ADEQUACY_JOB
+        assert dp.Worker("hostA:~/x:4").job is dp.GEN_DATASET_JOB

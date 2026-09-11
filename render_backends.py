@@ -30,6 +30,7 @@ Adding a third backend (e.g. LTspice) means writing one class implementing these
 not another ~300-line copy of preflight.py's checks.
 """
 import os
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +46,55 @@ from gen_dataset_from_schx import LIVESPICE_CLI  # noqa: E402
 from ngspice_spicelib import load_input, render_grid  # noqa: E402
 import ltspice_spicelib  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
+
+
+def describe_subprocess_failure(r: subprocess.CompletedProcess) -> str:
+    """One-line, ACTIONABLE description of why a livespice_cli render failed.
+
+    Two call sites (this module's own LiveSpiceBackend and grid_adequacy.py's separate
+    inline livespice invocation) used to each just print/group by the LAST LINE of stderr.
+    For a .NET unhandled exception that line is `at Foo.Bar() in .../Program.cs:line N` --
+    the least informative part of the trace (a stack frame, not the exception itself, which
+    is on an earlier line starting "Unhandled exception. System.XxxException: ..."). Worse,
+    every crash of that shape shares the same last line regardless of root cause, so
+    grid_adequacy's failure-grouping-by-message bucketed genuinely different problems as one.
+
+    Also distinguishes a NEGATIVE returncode (Python's convention for "killed by signal N")
+    from a normal nonzero exit. A signal kill -- SIGKILL/-9 especially -- on a healthy render
+    command is the signature of the OS (or macOS's Jetsam) killing the process for memory
+    pressure, not an application bug; conflating the two sends whoever's debugging looking
+    for a code defect that isn't there. Found 2026-09-07: a 9-tube Soldano SLO-100 build
+    failed 242/675 grid_adequacy probes at the default 8 parallel workers on a machine
+    already swapping heavily (vm_stat: ~58 MB free, tens of millions of swap-ins/outs) from
+    a concurrent training run -- dropping to --workers 2 made the failures disappear, which a
+    stack-trace-tail message never would have pointed at.
+    """
+    # getattr, not r.returncode directly: some callers only have a partial mock/result object
+    # (e.g. an ngspice failure path with no subprocess involved at all) that carries `.stderr`
+    # but not `.returncode` -- that's still a real failure worth describing, just not one this
+    # function can classify as a signal kill vs. a normal nonzero exit.
+    rc = getattr(r, "returncode", None)
+    if rc is not None and rc < 0:
+        try:
+            sig = signal.Signals(-rc).name
+        except ValueError:
+            sig = str(-rc)
+        return (f"KILLED BY SIGNAL {sig} (rc={rc}) -- not an application error; "
+                f"this is the OS terminating the process, almost always memory pressure "
+                f"under parallel load (check `vm_stat` free pages / swap activity, and "
+                f"whether something else is training/rendering concurrently) rather than a "
+                f"circuit or solver bug. Lower --workers before assuming the circuit is broken.")
+    lines = [ln for ln in (getattr(r, "stderr", "") or "").strip().splitlines() if ln.strip()]
+    reason = "(no stderr)"
+    if lines:
+        exc_line = next((ln for ln in lines
+                          if "Exception" in ln or ln.lower().startswith("unhandled")), None)
+        reason = exc_line or lines[-1]
+    if rc is None:
+        return f"rc=unknown: {reason}"
+    if rc == 0:
+        return f"rc=0 (process exited cleanly) but produced no readable output: {reason}"
+    return f"rc={rc}: {reason}"
 
 
 class LiveSpiceBackend:
@@ -74,7 +124,7 @@ class LiveSpiceBackend:
             y, _ = sf.read(out, dtype="float32")
             return y[:, 0] if y.ndim > 1 else y
         except Exception:
-            sys.stderr.write(r.stderr[-400:] + "\n")
+            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}\n")
             return None
 
     def render_many(self, jobs, input_handle, scratch):

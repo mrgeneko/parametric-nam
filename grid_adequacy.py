@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os as _os
 import re
 import subprocess
@@ -97,13 +98,14 @@ import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import (LIVESPICE_CLI, _run_ngspice,
                                     check_oracle, write_probe_clip)
+from shard import select as _shard_select
 
 import importlib  # noqa: E402
 
 from ngspice_spicelib import load_input  # noqa: E402
 import ltspice_spicelib  # noqa: E402
 from prepare_excitation import _parse_fixed  # noqa: E402
-from render_backends import NgspiceBackend, LtspiceBackend  # noqa: E402
+from render_backends import NgspiceBackend, LtspiceBackend, describe_subprocess_failure  # noqa: E402
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -480,8 +482,7 @@ class Renderer:
                 d, _ = sf.read(str(w))
                 out.append(np.asarray(d, dtype=np.float64))
             else:
-                tail = (r.stderr.strip().splitlines() or ["(no stderr)"])[-1]
-                self._note_fail(tail)
+                self._note_fail(describe_subprocess_failure(r))
                 out.append(None)
         with self._cache_lock:
             self.cache[key] = out
@@ -513,9 +514,19 @@ def cell_error(render, knobs: dict, axis: str, lo: float, hi: float, others: dic
     return num / den if den > 0 else float("nan")
 
 
-def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict, int, int]:
-    """Probe every cell in `knobs` with `render`, print the per-axis report, and return
-    (worst_by_axis, n_coarse, n_over) -- used standalone and by --apply's iteration loop."""
+def build_jobs(knobs: dict) -> list[tuple]:
+    """Every (axis, lo, hi, other-knobs-slice) cell probe this grid needs -- the FULL,
+    unsharded list, in a stable, deterministic order (iteration order of `knobs`, then cells
+    low-to-high along that axis, then reference slices lo/mid/hi). Sharding (see
+    `--shard` in main()) filters this list by its own index, so the order must be stable
+    across processes/machines for a shard spec to mean the same slice everywhere -- Python
+    3.7+ dicts preserve insertion order, so this only holds as long as `knobs` itself is
+    built the same way on every worker, which it is: every worker parses the SAME config.toml.
+
+    Split out of measure_grid() so a sharded worker and the merge step can both build the
+    identical list and index into it consistently, without either one re-deriving it from
+    something order-fragile like a JSON round-trip of `knobs` itself.
+    """
     # Probe each cell at several positions of the OTHER knobs -- the knobs interact, and a cell
     # that interpolates cleanly at one Tone can fail at another. (On Large Muffin the Sustain
     # 0.85-1.0 cell is 0.0044 at Tone=0 and 0.0813 at Tone=1: an 18x spread. Probing one slice
@@ -534,7 +545,17 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
         for lo, hi in zip(vals, vals[1:]):
             for oth in slices:
                 jobs.append((axis, lo, hi, oth))
+    return jobs
 
+
+def render_jobs(render, knobs: dict, jobs: list[tuple], workers: int) -> list[tuple]:
+    """Dispatch `jobs` (a slice or the whole of build_jobs(knobs)) through `render`, printing
+    a heartbeat as each one lands. Returns `res`: [(axis, lo, hi, error), ...], one per job.
+
+    Split out of measure_grid() so a sharded run (which renders a SLICE of the jobs and does
+    not print the aggregate report at all -- see main()'s --shard branch) and an unsharded run
+    share the exact same dispatch/progress-reporting code, not two copies that can drift.
+    """
     # ex.map blocks silently until EVERY job finishes, with no per-completion feedback --
     # a real probe batch can run for minutes with nothing printed, easy to mistake for a
     # hang (confirmed directly: had to check `ps`/a profiler to tell the difference).
@@ -549,16 +570,22 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
             j = futures[fut]
             res.append((j[0], j[1], j[2], fut.result()))
             print(f"    {i}/{len(jobs)} probes done", flush=True)
+    return res
 
-    render.print_fail_summary()
 
-    # EVERY probe failed. Do NOT fall through to the per-cell table below: every cell would
-    # print "?" with no explanation of why, one row at a time, across every axis -- exactly
-    # the buried-cryptic-failure pattern this guard exists to stop. See the analogous fix in
-    # measure_truncation.py / gen_dataset_from_schx.py.
-    if jobs and all(not np.isfinite(r[3]) for r in res):
+def aggregate_report(res: list[tuple], knobs: dict, target: float) -> tuple[dict, int, int]:
+    """From a (possibly MERGED, from several shards) `res` list, print the per-axis report and
+    return (worst_by_axis, n_coarse, n_over) -- used by the unsharded path directly and by
+    --merge after combining every shard's own `res`.
+
+    Raises RuntimeError if EVERY probe in `res` failed -- do NOT fall through to the per-cell
+    table below in that case: every cell would print "?" with no explanation of why, one row
+    at a time, across every axis -- exactly the buried-cryptic-failure pattern this guard
+    exists to stop. See the analogous fix in measure_truncation.py / gen_dataset_from_schx.py.
+    """
+    if res and all(not np.isfinite(r[3]) for r in res):
         raise RuntimeError(
-            f"EVERY probe render failed ({len(jobs)}/{len(jobs)}). Nothing was measured, so "
+            f"EVERY probe render failed ({len(res)}/{len(res)}). Nothing was measured, so "
             "there is no grid-adequacy table to print. See the failure(s) above -- this "
             "usually means a config problem (wrong knob/fixed-param name, wrong --circuit, "
             "wrong --backend), not a per-cell convergence issue; fix that and re-run.")
@@ -598,6 +625,21 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
     return worst_by_axis, n_coarse, n_over
 
 
+def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict, int, int]:
+    """Probe EVERY cell in `knobs` with `render`, print the per-axis report, and return
+    (worst_by_axis, n_coarse, n_over) -- used standalone and by --apply's iteration loop.
+
+    Thin wrapper over build_jobs/render_jobs/aggregate_report kept for backward compatibility
+    (every existing caller -- --apply's iteration loop, main()'s unsharded path -- calls this
+    exact signature) and because "the whole grid, rendered and reported in one call" is still
+    the common case; --shard/--merge (see main()) call the three pieces separately instead.
+    """
+    jobs = build_jobs(knobs)
+    res = render_jobs(render, knobs, jobs, workers)
+    render.print_fail_summary()
+    return aggregate_report(res, knobs, target)
+
+
 def suggest_axis(values: list, worst: dict, target: float) -> list:
     """Refine the cells that fail, drop points that are not earning their place.
 
@@ -624,6 +666,49 @@ def suggest_axis(values: list, worst: dict, target: float) -> list:
             out.append(hi)
             i += 1
     return out
+
+
+def save_shard_result(path: Path, res: list[tuple], n_failed: int) -> None:
+    """Write one shard's raw per-job measurements to JSON, for a later --merge.
+
+    Deliberately NOT the aggregated per-axis table -- a single shard only ever sees a SLICE
+    of the (axis, cell, reference-slice) job list (see build_jobs()'s docstring on ordering),
+    so printing/saving a per-axis "worst" table from a partial shard would silently understate
+    coverage: a cell whose worst reference-slice landed in a DIFFERENT shard reads as better
+    than it is. The raw (axis, lo, hi, error) rows are what --merge pools across every shard
+    before ever computing a "worst" -- see aggregate_report().
+
+    `n_failed` is this shard's own render.fail_counts total (see Renderer.print_fail_summary):
+    carried through to the merge so the SAME "MEASUREMENT INVALID" exit-2 policy main() already
+    applies to an unsharded run also applies to a merged one -- a shard that lost renders must
+    not be silently treated as if it had none.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "rows": [{"axis": axis, "lo": lo, "hi": hi, "error": error}
+                 for axis, lo, hi, error in res],
+        "n_failed": n_failed,
+    }
+    path.write_text(json.dumps(payload))
+
+
+def load_shard_results(paths: list[Path]) -> tuple[list[tuple], int]:
+    """Inverse of save_shard_result, pooled across every shard file given.
+
+    Returns (res, n_failed) in the exact shape aggregate_report()/the exit-2 policy expect.
+    NaN does not round-trip through JSON (json.dumps(float('nan')) -> the non-standard literal
+    `NaN`, which json.loads DOES accept -- Python's json module is permissive on both ends by
+    default -- so this works, but is worth naming: a stricter JSON reader on the other end of
+    some future tool would choke on it).
+    """
+    res: list[tuple] = []
+    n_failed = 0
+    for p in paths:
+        payload = json.loads(Path(p).read_text())
+        n_failed += int(payload.get("n_failed", 0))
+        for row in payload["rows"]:
+            res.append((row["axis"], row["lo"], row["hi"], row["error"]))
+    return res, n_failed
 
 
 def main() -> None:
@@ -674,10 +759,73 @@ def main() -> None:
     ap.add_argument("--ltspice-out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
                          "ltspice_spicelib.py's docstring")
+    ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL", default=None,
+                    help="render only this slice of the cell x reference-slice probe list "
+                         "(same LOW-HIGH/TOTAL spec gen_dataset_from_schx.py --shard uses, "
+                         "parsed by the same shared shard.py -- see distribute_pull.py for "
+                         "dispatching a fleet of these). Requires --shard-out: a single shard "
+                         "sees only part of the job list, so it cannot print a meaningful "
+                         "per-axis table (build_jobs()'s own ordering means a cell's WORST "
+                         "reference-slice can land in a different shard) -- it saves its raw "
+                         "measurements instead, for a later --merge. Incompatible with --apply "
+                         "(the iterative regrid loop needs the whole grid every iteration) and "
+                         "with --merge (that is the consuming side of this, not the producing "
+                         "one).")
+    ap.add_argument("--shard-out", type=Path, default=None,
+                    help="with --shard, write this shard's raw per-cell measurements here "
+                         "(JSON) instead of printing a table. Required whenever --shard is "
+                         "given.")
+    ap.add_argument("--merge", nargs="+", metavar="SHARD_JSON", default=None,
+                    help="combine the --shard-out files from every shard of a run into the "
+                         "same per-axis report --suggest an unsharded run would have printed, "
+                         "then exit -- no rendering happens (schx/input/backend from --config "
+                         "are not touched). --target/--suggest apply to the merged result the "
+                         "same as always. Incompatible with --shard/--apply.")
     args = ap.parse_args()
+
+    if args.shard and args.merge:
+        ap.error("--shard produces one shard's results; --merge consumes several. Pick one.")
+    if args.shard and not args.shard_out:
+        ap.error("--shard needs --shard-out: a single shard cannot print a meaningful table "
+                 "(see --shard's own help) -- it must save its raw measurements for --merge.")
+    if args.shard and args.apply:
+        ap.error("--shard/--apply: --apply's iterative regrid loop needs the WHOLE grid every "
+                 "iteration, which a single shard by definition does not have. Run --apply "
+                 "unsharded, or --shard the plain (non-apply) measurement and --merge it.")
+    if args.merge and args.apply:
+        ap.error("--merge/--apply: --merge reports on an already-completed measurement; "
+                 "--apply re-renders. Pick one.")
 
     cfg = load_config(args.config)
     knobs: dict = cfg["knobs"]
+
+    if args.merge:
+        # No rendering at all -- schx/input/backend are never touched, only `knobs` (for the
+        # per-axis structure) and `target`/`suggest` (how to judge and report it).
+        n_combos = int(np.prod([len(v) for v in knobs.values()]))
+        print(f"  config     {args.config}")
+        print(f"  merging    {len(args.merge)} shard file(s)")
+        print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_combos} combinations")
+        print(f"  target ESR {args.target}   (a cell above this is the limiting factor)\n")
+        res, n_failed = load_shard_results(args.merge)
+        try:
+            worst_by_axis, n_coarse, n_over = aggregate_report(res, knobs, args.target)
+        except RuntimeError as e:
+            sys.exit(f"\nERROR: {e}")
+        if args.suggest:
+            print("\n  suggested regrid:\n\n  [knobs]")
+            tot = 1
+            for axis, vals in knobs.items():
+                new = suggest_axis(list(vals), worst_by_axis[axis], args.target)
+                tot *= len(new)
+                print(f"  {axis:<8} = {new}")
+            print(f"\n  -> {tot} combinations (was {n_combos})")
+        if n_failed:
+            print(f"\n  MEASUREMENT INVALID: {n_failed} render(s) failed across the merged "
+                  f"shards -- every number above was computed from the probes that survived. "
+                  f"Do not act on this table.", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
     inp = Path(_os.path.expanduser(cfg["input"]))
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
     backend = cfg.get("backend", "livespice")
@@ -733,6 +881,22 @@ def main() -> None:
                           ltspice_deck_maxstep=args.ltspice_deck_maxstep,
                           ltspice_out_scale=args.ltspice_out_scale,
                           ltspice_timeout=args.ltspice_timeout)
+
+        if args.shard:
+            # One slice of the full job list, rendered and saved for a later --merge -- see
+            # build_jobs()'s docstring for why a single shard cannot print its own per-axis
+            # table (a cell's worst reference-slice can live in a DIFFERENT shard).
+            all_jobs = build_jobs(knobs)
+            indexed, low, high, total = _shard_select(list(enumerate(all_jobs)), args.shard)
+            jobs = [j for _, j in indexed]
+            print(f"  shard {args.shard}: {len(jobs)}/{len(all_jobs)} of the cell x "
+                  f"reference-slice probes\n")
+            res = render_jobs(render, knobs, jobs, args.workers)
+            render.print_fail_summary()
+            n_failed = sum(render.fail_counts.values())
+            save_shard_result(args.shard_out, res, n_failed)
+            print(f"\n  wrote {len(res)} row(s) ({n_failed} failure(s)) -> {args.shard_out}")
+            sys.exit(2 if n_failed else 0)
 
         knobs_cur = {k: list(v) for k, v in knobs.items()}
         iteration = 0

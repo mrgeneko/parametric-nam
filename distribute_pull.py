@@ -37,6 +37,7 @@ those first; this only schedules the rendering.
 """
 import argparse, csv, os, re, statistics, subprocess, sys, threading, time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -63,6 +64,14 @@ def log(msg):
 # seconds per COMBINATION -- and to take that measurement from the renderer's own existing
 # per-combination progress line rather than adding any protocol.
 COMBO_LINE = re.compile(r"^\[\s*\d+/\s*\d+\]\s+[\d.]+%\s+combo_(\d+)\s+(OK|FAIL)")
+
+# grid_adequacy.py's own per-probe heartbeat ("    3/48 probes done", printed by
+# render_jobs()) -- the equivalent of COMBO_LINE above, for the OTHER tool this scheduler can
+# dispatch. Deliberately looser than COMBO_LINE (no percent, no OK/FAIL, no combo id): a cell
+# probe has no success/failure status of its own at print time -- a failed render just yields
+# NaN, discovered only when the shard's own fail count is inspected after the fact -- so
+# "N/M probes done" is ALL the per-item signal grid_adequacy.py's progress line carries.
+GRIDADQ_PROBE_LINE = re.compile(r"^\s*\d+/\d+\s+probes\s+done")
 
 
 class ComboPace:
@@ -146,13 +155,18 @@ class ComboPace:
 
 
 class Worker:
-    def __init__(self, spec):
+    def __init__(self, spec, job=None):
         # host:remote_dir:parallel[:env]
         parts = spec.split(":")
         if len(parts) < 3:
             raise ValueError(f"--worker needs host:dir:parallel[:env], got {spec!r}")
         self.host, self.dir, self.parallel = parts[0], parts[1], int(parts[2])
         self.env = parts[3] if len(parts) > 3 else ""
+        # Defaulted, not required, so every existing caller that builds a Worker with just a
+        # spec (this module's own tests included) keeps today's gen_dataset_from_schx.py
+        # behavior byte-for-byte -- see the GEN_DATASET_JOB/GRID_ADEQUACY_JOB Job instances
+        # below for what actually differs between the two tools this scheduler can dispatch.
+        self.job = job or GEN_DATASET_JOB
         self.done = 0          # chunks completed
         self.combos = 0        # COMBINATIONS completed -- the comparable unit across machines
         self.slow_kills = 0
@@ -195,23 +209,30 @@ class Worker:
         # params.csv. That corrupts it SILENTLY -- duplicate rows, .npy files that still look
         # perfect, and a params.csv that no longer lines up 1:1 with outputs.npy, so knobs get
         # paired with the WRONG audio. Kill the holder and the lock takes care of itself.
-        pat = f"gen_dataset_from_schx.py.*--shard {re.escape(chunk)}"
+        #
+        # `self.job.script` parameterizes WHICH renderer's process this matches -- grid_adequacy.py
+        # holds no comparable exclusive lock (each shard writes its own uniquely-named
+        # --shard-out file, never a shared one), so killing it cleanly needs no lock-release
+        # story at all; the pattern below is still correct for it, just less consequential.
+        pat = f"{re.escape(self.job.script)}.*--shard {re.escape(chunk)}"
         cmd = f"pkill -f '{pat}'; sleep 3; pkill -9 -f '{pat}'; exit 0"
         subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
                         self.host, cmd], capture_output=True, text=True, timeout=90)
 
     def run_chunk(self, chunk, gen_args, output, pace=None, on_combo=None):
-        """Run one chunk, watching it COMBINATION BY COMBINATION as it goes.
+        """Run one chunk, watching it ITEM BY ITEM (a combination, or a grid_adequacy cell
+        probe -- see self.job) as it goes.
 
-        gen_dataset_from_schx.py already prints one line per finished combination and is
-        already invoked with `python -u`, so the signal exists and is unbuffered -- it was
-        simply thrown away, because subprocess.run(capture_output=True) does not return until
-        the child exits. A worker whose combinations never finish therefore said NOTHING for
-        as long as it took the whole chunk to end, which for a slow host is effectively never.
+        The renderer already prints one line per finished item and is already invoked with
+        `python -u`, so the signal exists and is unbuffered -- it was simply thrown away,
+        because subprocess.run(capture_output=True) does not return until the child exits. A
+        worker whose items never finish therefore said NOTHING for as long as it took the
+        whole chunk to end, which for a slow host is effectively never.
         """
         env = f"export {self.env} && " if self.env else ""
-        cmd = (f"cd {self.dir} && {env}./.venv/bin/python -u gen_dataset_from_schx.py "
-               f"{gen_args} --shard {chunk} --output {output}")
+        chunk_output = self.job.chunk_output(output, chunk)
+        cmd = (f"cd {self.dir} && {env}./.venv/bin/python -u {self.job.script} "
+               f"{gen_args} --shard {chunk} {self.job.output_flag} {chunk_output}")
         t0 = time.time()
         proc = subprocess.Popen(
             ["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", self.host, cmd],
@@ -225,7 +246,7 @@ class Worker:
             nonlocal last, done
             for line in proc.stdout:
                 lines.append(line.rstrip("\n"))
-                if COMBO_LINE.match(line.strip()):
+                if self.job.progress_re.match(line.strip()):
                     now = time.time()
                     done += 1
                     if pace is not None and done == 1:
@@ -260,6 +281,25 @@ class Worker:
         return rc, dt, "\n".join(lines)
 
 
+def _relpath_or_warn(dest_label: str, v, repo_root: Path) -> str:
+    """Rewrite an absolute path relative to repo_root, warning if it travels too far to be
+    portable. Shared by gen_args_from_config (schx/input, below) and
+    grid_adequacy_args_from_config (--config itself) -- both need the SAME reasoning applied,
+    since run_chunk cds into each worker's own checkout before running: an absolute path from
+    the controller can be a DIFFERENT user's home on a worker (/Users/gene, /Users/chewie,
+    /home/gene), or absent entirely.
+    """
+    try:
+        rel = os.path.relpath(Path(v).expanduser().resolve(), repo_root.resolve())
+    except ValueError:                     # different drive (Windows) -- keep absolute
+        rel = str(v)
+    if rel.startswith(".." + os.sep + ".."):
+        print(f"WARNING: {dest_label} is {rel} relative to the repo -- that is unlikely to "
+              f"resolve the same way on every worker. Put it in a sibling directory of "
+              f"the repo, or pass --{dest_label} yourself after --.", file=sys.stderr)
+    return rel
+
+
 def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     """Expand a per-circuit config.toml into gen_dataset_from_schx.py arguments.
 
@@ -270,10 +310,7 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     --backend, which defaults to `cpp`, and every worker quarantined in under a second.
     load_config() is run_pipeline's own loader, so the two paths cannot drift.
 
-    PATHS ARE MADE RELATIVE to the repo root, because run_chunk cds into each worker's own
-    checkout before running. Absolute paths from the config cannot work across a
-    heterogeneous fleet -- homes differ (/Users/gene, /Users/chewie, /home/gene), and a
-    path that resolves on the controller may be a DIFFERENT user's home on a worker.
+    PATHS ARE MADE RELATIVE to the repo root -- see _relpath_or_warn.
     """
     cfg = load_config(config_path)
     out: list[str] = []
@@ -283,15 +320,7 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
         v = cfg.get(dest)
         if v is None:
             continue
-        try:
-            rel = os.path.relpath(Path(v).expanduser().resolve(), repo_root.resolve())
-        except ValueError:                     # different drive (Windows) -- keep absolute
-            rel = str(v)
-        if rel.startswith(".." + os.sep + ".."):
-            print(f"WARNING: {dest} is {rel} relative to the repo -- that is unlikely to "
-                  f"resolve the same way on every worker. Put it in a sibling directory of "
-                  f"the repo, or pass --{dest} yourself after --.", file=sys.stderr)
-        out += [flag, rel]
+        out += [flag, _relpath_or_warn(dest, v, repo_root)]
     if cfg.get("knobs"):
         out += ["--knobs", str(cfg["knobs"])]
     for r in cfg.get("ranges") or []:
@@ -301,6 +330,18 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     if cfg.get("oversample") is not None:
         out += ["--oversample", str(cfg["oversample"])]
     return out
+
+
+def grid_adequacy_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
+    """--config <repo-relative path> -- the whole equivalent of gen_args_from_config for
+    grid_adequacy.py, which is much simpler because it IS the one-flag-does-it-all interface
+    gen_args_from_config exists to imitate: schx/input/knobs/backend/oversample all live
+    inside the config file already, so there is nothing to expand into separate flags. Only
+    the config path itself needs the same repo-relative treatment (see _relpath_or_warn) --
+    each worker still cds into its own checkout, and this config commonly lives in a sibling
+    repo (parametric-nam-models), not this one.
+    """
+    return ["--config", _relpath_or_warn("config", config_path, repo_root)]
 
 
 def _warn_chunk_aliasing(gen_args, chunks):
@@ -443,6 +484,78 @@ def _collect(workers, remote_out, local_dir):
     scratch.rmdir()
 
 
+def _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_args):
+    """Pull every worker's shard_*.json into one local directory, then run grid_adequacy.py
+    --merge on them so this prints the exact same report --suggest would print unsharded.
+
+    No params.csv-style clobber hazard here, unlike _collect: each shard file's name embeds
+    its own --shard spec (e.g. shard_3-3_16.json), so every worker's output is a globally
+    unique filename and a plain whole-tree rsync from each worker is safe in any order.
+    """
+    local_dir = Path(local_dir).expanduser()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    for w, out in zip(workers, remote_out):
+        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+                       capture_output=True, text=True)
+    shards = sorted(local_dir.glob("shard_*.json"))
+    if not shards:
+        log("  collect: no shard_*.json found on any worker -- nothing to merge")
+        return
+    log(f"  collect: merging {len(shards)} shard file(s) ...")
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "grid_adequacy.py"),
+           "--merge", *[str(s) for s in shards], "--config", str(config_path), *extra_args]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        log(f"  {line}")
+    if r.returncode != 0:
+        log(f"  collect: merge exited {r.returncode}")
+        if r.stderr.strip():
+            log(f"  {r.stderr.strip()}")
+
+
+@dataclass
+class Job:
+    """Everything distribute_pull.py's scheduler needs to know about ONE renderer/analysis
+    tool, so Worker and main() stay tool-agnostic. Adding a new --tool means adding one more
+    Job instance below -- no change to the queue, pacing, quarantine, or retry logic, all of
+    which only ever deal with chunk specs and exit codes.
+    """
+    name: str
+    script: str                # relative to the repo root on each worker
+    progress_re: "re.Pattern"  # matched against each stripped stdout line for the heartbeat
+    output_flag: str           # e.g. "--output" or "--shard-out"
+    build_args: "callable"     # (config_path, repo_root, extra_args) -> list[str]
+    chunk_output: "callable"   # (base_output, chunk_spec) -> str, passed after output_flag
+    collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args) -> None
+
+
+GEN_DATASET_JOB = Job(
+    name="gen_dataset",
+    script="gen_dataset_from_schx.py",
+    progress_re=COMBO_LINE,
+    output_flag="--output",
+    build_args=lambda config_path, repo_root, extra_args:
+        gen_args_from_config(config_path, repo_root) + extra_args,
+    chunk_output=lambda base_output, chunk: base_output,
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args:
+        _collect(workers, remote_out, local_dir),
+)
+
+GRID_ADEQUACY_JOB = Job(
+    name="grid_adequacy",
+    script="grid_adequacy.py",
+    progress_re=GRIDADQ_PROBE_LINE,
+    output_flag="--shard-out",
+    build_args=lambda config_path, repo_root, extra_args:
+        grid_adequacy_args_from_config(config_path, repo_root) + extra_args,
+    chunk_output=lambda base_output, chunk: f"{base_output}/shard_{chunk.replace('/', '_')}.json",
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args:
+        _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_args),
+)
+
+JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -450,6 +563,12 @@ def main():
                     help="repeatable. ENV is an optional 'VAR=value' exported before the run "
                          "(e.g. DOTNET_ROOT=$HOME/.dotnet on a box where dotnet is not on the "
                          "non-interactive PATH).")
+    ap.add_argument("--tool", choices=sorted(JOBS), default="gen_dataset",
+                    help="which script each chunk runs (default gen_dataset, i.e. "
+                         "gen_dataset_from_schx.py -- unchanged behavior for existing callers). "
+                         "'grid_adequacy' dispatches grid_adequacy.py --shard instead, and "
+                         "--collect runs its --merge step so the final report is identical to "
+                         "an unsharded grid_adequacy.py run.")
     ap.add_argument("--chunks", type=int, default=64,
                     help="how many pieces to cut the grid into (default 64). Each is dispatched "
                          "as --shard i-i/CHUNKS. See module docstring on sizing.")
@@ -500,15 +619,19 @@ def main():
     args, gen_args = ap.parse_known_args()
     if gen_args and gen_args[0] == "--":
         gen_args = gen_args[1:]
+    job = JOBS[args.tool]
+    extra_args = gen_args   # raw, un-expanded "after --" flags -- collect() wants these,
+                             # not the config-expanded/path-relativized form built below,
+                             # since collect runs locally against the ORIGINAL --config path.
     if args.config:
         # Config first, explicit flags second: argparse-style "last wins" for the renderer,
         # so --  --oversample 4  still overrides the config without editing it.
-        gen_args = gen_args_from_config(args.config, Path(__file__).resolve().parent) + gen_args
+        gen_args = job.build_args(args.config, Path(__file__).resolve().parent, gen_args)
     gen_args_str = " ".join(f"'{a}'" if " " in a else a for a in gen_args)
     if not gen_args_str:
         ap.error("pass --config, or the renderer's own arguments after --")
 
-    workers = [Worker(w) for w in args.worker]
+    workers = [Worker(w, job=job) for w in args.worker]
     queue = deque(f"{i}-{i}/{args.chunks}" for i in range(args.chunks))
     attempts = {c: 0 for c in queue}
     tried_on = {c: set() for c in queue}   # chunk -> hosts that have already failed it
@@ -606,7 +729,7 @@ def main():
             r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
                                 f"cd ~ && echo {args.output}"], capture_output=True, text=True)
             remote_out.append(r.stdout.strip() or args.output)
-        _collect(workers, remote_out, args.collect)
+        job.collect(workers, remote_out, args.collect, args.config, extra_args)
     else:
         log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
             "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "

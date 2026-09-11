@@ -13,7 +13,10 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from grid_adequacy import Renderer, cell_error, esr, measure_grid, suggest_axis, write_knobs
+from grid_adequacy import (Renderer, aggregate_report, build_jobs, cell_error, esr,
+                           load_shard_results, measure_grid, render_jobs, save_shard_result,
+                           suggest_axis, write_knobs)
+from shard import select as shard_select
 
 
 class FakeRender:
@@ -99,6 +102,97 @@ class TestMeasureGridFailureGuard:
                                                          target=0.03, workers=2)
         assert set(worst_by_axis["Gain"]) == {(0.0, 0.5), (0.5, 1.0)}
         assert n_coarse == 0  # perfectly linear -> every cell interpolates exactly
+
+
+class TestFleetSharding:
+    """build_jobs()/render_jobs()/aggregate_report() are the pieces main()'s --shard/--merge
+    CLI wraps, split out specifically so a sharded fleet run and an unsharded one share the
+    exact aggregation code (see grid_adequacy.py's own docstrings on why). These test the
+    pieces directly rather than through subprocess/argparse, the same way every other class
+    in this file tests grid_adequacy's math without spinning up a real render."""
+
+    KNOBS = {"Gain": [0.0, 0.5, 1.0], "Tone": [0.0, 1.0]}
+
+    def test_build_jobs_is_deterministic_across_calls(self):
+        """A shard spec only means the same slice on every machine if every worker's
+        build_jobs(knobs) produces the identical list in the identical order -- see
+        build_jobs()'s own docstring. Two independent calls (standing in for two different
+        machines parsing the same config) must agree exactly."""
+        a = build_jobs(self.KNOBS)
+        b = build_jobs(dict(self.KNOBS))   # a fresh dict, same insertion order
+        assert a == b
+
+    def test_sharding_the_job_list_is_disjoint_and_exhaustive(self):
+        """Every job lands in EXACTLY one shard when shards 0..N-1 are all dispatched -- the
+        same property shard.py's own tests pin for gen_dataset_from_schx.py's combinations,
+        checked here for grid_adequacy's own (axis, lo, hi, other-knobs) job shape."""
+        jobs = build_jobs(self.KNOBS)
+        n_shards = 3
+        seen = []
+        for i in range(n_shards):
+            indexed, low, high, total = shard_select(list(enumerate(jobs)), f"{i}-{i}/{n_shards}")
+            assert low == high == i and total == n_shards
+            seen.extend(j for _, j in indexed)
+        assert sorted(seen, key=repr) == sorted(jobs, key=repr)
+        assert len(seen) == len(jobs), "a job must not be rendered by two shards"
+
+    def test_sharded_render_merged_matches_an_unsharded_measure_grid(self):
+        """THE PROPERTY THAT MATTERS: rendering a grid in shards and merging must give the
+        identical per-axis report as rendering it in one piece. Uses a genuinely nonlinear fn
+        (Gain**2) so a real interpolation error is being pooled and compared, not a trivially
+        zero one."""
+        render = FakeRender(lambda p: p["Gain"] ** 2 + 0.1 * p["Tone"])
+        target = 0.05
+
+        whole_worst, whole_coarse, whole_over = measure_grid(render, self.KNOBS, target,
+                                                              workers=2)
+
+        jobs = build_jobs(self.KNOBS)
+        n_shards = 4
+        merged_res = []
+        for i in range(n_shards):
+            indexed, *_ = shard_select(list(enumerate(jobs)), f"{i}-{i}/{n_shards}")
+            shard_jobs = [j for _, j in indexed]
+            merged_res.extend(render_jobs(render, self.KNOBS, shard_jobs, workers=2))
+
+        merged_worst, merged_coarse, merged_over = aggregate_report(merged_res, self.KNOBS,
+                                                                     target)
+        assert merged_worst == whole_worst
+        assert (merged_coarse, merged_over) == (whole_coarse, whole_over)
+
+    def test_shard_result_json_round_trips(self, tmp_path):
+        # NaN != NaN under normal equality (some (axis, lo, hi) rows here ARE legitimately NaN
+        # -- this render function is flat in Tone, so a Tone cell probed at Gain=0 has a
+        # zero denominator, same as TestCellError.test_all_windows_failing_gives_nan) --
+        # sanitize both sides the same way (str()) before comparing rather than special-casing
+        # NaN, so the assertion still catches a real mismatch anywhere else in the row.
+        render = FakeRender(lambda p: p["Gain"])
+        jobs = build_jobs(self.KNOBS)
+        res = render_jobs(render, self.KNOBS, jobs, workers=2)
+        p = tmp_path / "shard0.json"
+        save_shard_result(p, res, n_failed=0)
+        got, n_failed = load_shard_results([p])
+        assert n_failed == 0
+        assert sorted(map(str, got)) == sorted(map(str, res))
+
+    def test_shard_result_json_carries_failure_count_through_merge(self, tmp_path):
+        """A shard that lost renders must not be silently treated as clean once merged --
+        the SAME 'MEASUREMENT INVALID' exit-2 policy an unsharded run has must still apply."""
+        p1 = tmp_path / "s1.json"
+        p2 = tmp_path / "s2.json"
+        save_shard_result(p1, [("Gain", 0.0, 0.5, 0.01)], n_failed=2)
+        save_shard_result(p2, [("Gain", 0.5, 1.0, 0.02)], n_failed=3)
+        res, n_failed = load_shard_results([p1, p2])
+        assert n_failed == 5
+        assert len(res) == 2
+
+    def test_merging_a_shard_where_every_probe_failed_still_raises(self):
+        """aggregate_report on a merged res behaves exactly like measure_grid's own guard:
+        if every row is NaN (nothing survived, e.g. every shard hit the same config typo),
+        do not print a blank table."""
+        res = [("Gain", 0.0, 0.5, float("nan")), ("Gain", 0.5, 1.0, float("nan"))]
+        with pytest.raises(RuntimeError, match="EVERY probe render failed"):
+            aggregate_report(res, {"Gain": [0.0, 0.5, 1.0]}, target=0.03)
 
 
 class TestSuggestAxis:
