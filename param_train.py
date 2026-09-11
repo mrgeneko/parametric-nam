@@ -2177,6 +2177,11 @@ def main():
     best_esr = {lbl: float("inf") for lbl in labels}    # label -> best val ESR
     best_state = {lbl: None for lbl in labels}          # label -> weights snapshot
 
+    # The capture chain the DATASET was rendered through (capture_chain.py). Recorded into
+    # every checkpoint so a resume can prove it is continuing against the same targets.
+    from capture_chain import read_dataset_chain as _cc_read, mismatch_reason as _cc_mismatch
+    _ds_capture_chain = _cc_read(args.dataset)
+
     if args.resume is not None:
         print(f"Resuming from {args.resume} ...", file=sys.stderr)
         # Load to CPU, then move to `device` ourselves in small, explicit steps -- NOT
@@ -2209,6 +2214,19 @@ def main():
                 best_esr["full"] = ckpt["best_esr"]; best_state["full"] = ckpt.get("best_state")
             if "lite" in best_esr and ckpt.get("best_lite_esr") is not None:
                 best_esr["lite"] = ckpt["best_lite_esr"]; best_state["lite"] = ckpt.get("best_lite_state")
+        # A resumed run MUST continue against the same targets it was trained on. Re-rendering
+        # a dataset with a different capture chain changes every target, so the resumed weights
+        # are fitting a different function than the checkpoint's ESR history describes -- the
+        # metrics stay superficially comparable while measuring something else. Hard-fail: this
+        # is silent and irreversible once training continues.
+        _ck_chain = ckpt.get("capture_chain", "unknown")
+        _why = _cc_mismatch(_ck_chain, _ds_capture_chain)
+        if _why:
+            sys.exit(f"capture-chain mismatch: the checkpoint was trained on a dataset whose "
+                     f"capture chain does not match {args.dataset}'s -- {_why}. Re-rendering "
+                     f"with a different chain changes every target, so this resume would "
+                     f"continue against a different function while reporting the old ESR "
+                     f"history. Re-render to match, or start a fresh run.")
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
 
@@ -2340,6 +2358,7 @@ def main():
                         "best_esr": best_esr["full"],          # back-compat scalar (full)
                         "best_esr_by_tier": dict(best_esr),
                         "args_dict": dict(vars(args)),
+                "capture_chain": _ds_capture_chain,
                     }, ckpt_dir / fname)
                 export_nam_state(model, best_state[lbl], dataset,
                                  nam_variant(args.output, f"best_{lbl}"), device)
@@ -2405,6 +2424,7 @@ def main():
                 "best_lite_esr": best_esr.get("lite", float("inf")),
                 "best_lite_state": best_state.get("lite"),
                 "args_dict": dict(vars(args)),
+                "capture_chain": _ds_capture_chain,
             }, ckpt_path)
             _watchdog_disarm()
 
@@ -2453,6 +2473,7 @@ def main():
                 "best_esr": best_esr["full"],
                 "best_state": best_state["full"],
                 "args_dict": dict(vars(args)),
+                "capture_chain": _ds_capture_chain,
             }, ckpt_dir / f"cycle_{epoch}.pt")
             _watchdog_disarm()
 
@@ -2544,6 +2565,7 @@ def main():
                 "best_esr": best_esr["full"],
                 "best_esr_by_tier": dict(best_esr),
                 "args_dict": dict(vars(args)),
+                "capture_chain": _ds_capture_chain,
             }, ckpt_dir / fname)
             print(f"  Best {lbl} model saved to {ckpt_dir / fname}", file=sys.stderr)
 

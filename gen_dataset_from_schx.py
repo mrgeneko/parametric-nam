@@ -916,11 +916,8 @@ def _capture_cfg(args):
     has to declare the capture chain it was rendered through, or a later reader cannot
     tell a chained dataset from an unchained one and will silently compare the two.
     """
-    if getattr(args, "no_capture_chain", False):
-        return None
-    import capture_chain as _ccm
-    return {"corner_hz": args.capture_hp_hz if args.capture_hp_hz is not None else _ccm.DEFAULT_CORNER_HZ,
-            "order": args.capture_order if args.capture_order is not None else _ccm.DEFAULT_ORDER}
+    from capture_chain import cfg_from_args
+    return cfg_from_args(args)
 
 
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
@@ -2761,9 +2758,12 @@ def main():
         # than its own input is worse than no gate, because it reads as confirmation.
         sample_grid = (args.transient_sample_grid if args.transient_sample_grid is not None
                        else _interior_budget(len(values_per_knob)))
+        # SAME capture chain the render below will use: this gate compares each corner's
+        # saturation onset against the excitation's transient peak, and an onset measured on
+        # the raw node is not the onset of the signal that actually becomes the target.
         result = check_coverage(schx, values_per_knob, fixed_kv,
                                 args.oversample, transient_peak, margin=args.transient_margin,
-                                sample_grid=sample_grid)
+                                sample_grid=sample_grid, capture=_capture_cfg(args))
         print()
         if not result["ok"]:
             print("Transient check FAILED -- refusing to start generation (--skip-transient-check "
@@ -2894,6 +2894,8 @@ def main():
         "gear_type": args.gear_type or "amp",
         "capture_chain": _capture_cfg(args),
     }, indent=2))
+    from capture_chain import describe as _cc_describe
+    print(f"  {_cc_describe(_capture_cfg(args))}")
 
     (out_dir / "sweep.wav").write_bytes(in_wav.read_bytes())
 

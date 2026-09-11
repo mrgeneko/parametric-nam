@@ -69,6 +69,7 @@ sys.path.insert(0, str(HERE))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
+from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
                                    findpeak_cache_key, cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -128,6 +129,7 @@ def spikes(y):
 
 
 def _build_backend(args):
+    _capture = cfg_from_args(args)
     if args.backend == "livespice":
         if not args.schx:
             sys.exit("--backend livespice needs --schx")
@@ -136,7 +138,7 @@ def _build_backend(args):
         resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
         backend = LiveSpiceBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
         identity = Path(args.schx).read_bytes()
-        cache_extra = f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+        cache_extra = f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module):
@@ -157,7 +159,7 @@ def _build_backend(args):
         # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
-        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module):
@@ -169,7 +171,7 @@ def _build_backend(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.render_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     sys.exit(f"unknown --backend {args.backend!r}")
 
@@ -235,6 +237,7 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                      help="upper bound of the --find-peak amplitude sweep -- the 40V default "
                           "suits an amp; lower it (e.g. 3-5) for a small pedal circuit")
+    _cc_add_cli_args(ap)
     ap.add_argument("--clean-probe-peak", type=float, default=None,
                      help="probe EQ/tone knobs with the input scaled to this peak voltage "
                           "instead of deriving one from --find-peak")
@@ -311,7 +314,8 @@ def main():
             def _sat_progress(done, total, elapsed):
                 print(f"    {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
             sat = find_saturation_point(backend, base, scratch, lead_silence_s=lead_silence_s,
-                                         max_v=args.peak_max_v, progress=_sat_progress)
+                                         max_v=args.peak_max_v, progress=_sat_progress,
+                                         capture=cfg_from_args(args))
             cache_findpeak(cpath, sat)
         if sat is None:
             warn.append("--find-peak: all sweep renders failed")

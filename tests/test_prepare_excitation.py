@@ -46,7 +46,7 @@ class TestWorstCaseOnset:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     def _stub_onset(self, monkeypatch, onset_fn, calls=None):
-        def fake(backend, params, tmp, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, tmp, max_v=40.0, lead_silence_s=0.0, **kw):
             if calls is not None:
                 calls.append(dict(params))
             onset = onset_fn(params)

@@ -60,6 +60,7 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
+from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -281,7 +282,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     transient_peak: float, label: str, margin: float = 1.0,
                     peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                     full_hypercube: "bool | None" = None, lead_silence_s: float = 0.0,
-                    max_corners: "int | None" = None, sample_grid: int = 0) -> dict:
+                    max_corners: "int | None" = None, sample_grid: int = 0,
+                    capture: dict = None) -> dict:
     """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
     vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
     check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
@@ -315,7 +317,7 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                 if not quiet:
                     print(f"  [{i}/{len(corners)}] {clabel} — rendering ...", flush=True)
                 sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
-                                             lead_silence_s=lead_silence_s)
+                                             lead_silence_s=lead_silence_s, capture=capture)
                 cache_findpeak(cpath, sat)
             onset = sat.get("onset_99pct_input_v") if sat else None
             if onset is None:
@@ -364,15 +366,16 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                    full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
-                   sample_grid: int = 0) -> dict:
+                   sample_grid: int = 0, capture: dict = None) -> dict:
     """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
     tool's own CLI first). See _check_corners() for the actual check."""
     backend = LiveSpiceBackend(schx, oversample=oversample, iterations=iterations)
     identity = Path(schx).read_bytes()
-    cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}"
+    cache_extra = f"os={oversample}|it={iterations}|maxv={peak_max_v}" + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           capture=capture,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
                            max_corners=max_corners, sample_grid=sample_grid)
@@ -384,7 +387,7 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
                                 peak_max_v: float = 40.0, no_cache: bool = False,
                                 quiet: bool = False, full_hypercube: "bool | None" = None,
                                 max_corners: "int | None" = None, sample_grid: int = 0,
-                                lead_silence_s: float = 3.0) -> dict:
+                                lead_silence_s: float = 3.0, capture: dict = None) -> dict:
     """[hand-written ngspice-deck path] For a device whose real component (a MOSFET, a real
     BJT) has no .schx model at all -- see render_backends.py's NgspiceBackend and
     preflight.py/prepare_excitation.py's identical --backend ngspice-deck split. `module_file`
@@ -405,8 +408,9 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     # The livespice extra is deliberately left alone: it carries "os=..|it=.." which no deck
     # backend emits, so it cannot collide with either, and changing it would invalidate every
     # cached entry in the fleet to fix a bug it does not have.
-    cache_extra = f"backend=ngspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
+    cache_extra = f"backend=ngspice-deck|maxstep={maxstep}|maxv={peak_max_v}" + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           capture=capture,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
                            max_corners=max_corners, sample_grid=sample_grid, lead_silence_s=lead_silence_s)
@@ -418,7 +422,7 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                                 out_scale: float = 0.05, peak_max_v: float = 40.0,
                                 no_cache: bool = False, quiet: bool = False,
                                 full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
-                   sample_grid: int = 0) -> dict:
+                                sample_grid: int = 0, capture: dict = None) -> dict:
     """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
     converge on real playing content at all -- see ltspice_spicelib.py's own docstring.
     `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
@@ -429,8 +433,9 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
     backend = LtspiceBackend(build_deck, tap=tap, maxstep=maxstep, parallel_sims=parallel_sims,
                              out_scale=out_scale)
     identity = Path(module_file).read_bytes()
-    cache_extra = f"backend=ltspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
+    cache_extra = f"backend=ltspice-deck|maxstep={maxstep}|maxv={peak_max_v}" + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           capture=capture,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
                            max_corners=max_corners, sample_grid=sample_grid)
@@ -448,6 +453,7 @@ def main():
     ap.add_argument("--oversample", type=int, default=None, help="default: config's own")
     ap.add_argument("--iterations", type=int, default=256)
     ap.add_argument("--peak-max-v", type=float, default=40.0)
+    _cc_add_cli_args(ap)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--sample-grid", type=int, default=0, metavar="N",
@@ -517,6 +523,7 @@ def main():
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
                                              sample_grid=args.sample_grid,
+                                             capture=cfg_from_args(args),
                                              lead_silence_s=args.lead_silence_s)
         schx_or_module = module
     elif backend_name == "ltspice-deck":
@@ -533,7 +540,8 @@ def main():
                                              no_cache=args.no_cache,
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
-                                             sample_grid=args.sample_grid)
+                                             sample_grid=args.sample_grid,
+                                             capture=cfg_from_args(args))
         schx_or_module = module
     else:
         schx = str(cfg["schx"])
@@ -543,7 +551,8 @@ def main():
                                 peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                 full_hypercube=(False if args.no_full_hypercube else None),
                                 max_corners=args.max_corners,
-                                sample_grid=args.sample_grid)
+                                sample_grid=args.sample_grid,
+                                capture=cfg_from_args(args))
         schx_or_module = schx
 
     if args.json:

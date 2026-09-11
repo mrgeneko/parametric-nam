@@ -94,3 +94,100 @@ def context_sensitivity(y_ctx_a, y_ctx_b, sr, skip_s=0.2):
     a, b = a[s:n], b[s:n]
     den = (b ** 2).sum()
     return float(((a - b) ** 2).sum() / den) if den > 0 else 0.0
+
+
+def add_cli_args(ap):
+    """Register --no-capture-chain / --capture-hp-hz / --capture-order on a parser.
+
+    Shared so the measurement tools and the renderer cannot drift apart: an onset measured
+    through a different chain than the dataset was rendered through sizes the excitation
+    against a signal that never existed.
+    """
+    ap.add_argument("--no-capture-chain", action="store_true",
+                    help="Measure the RAW node instead of through the virtual capture chain "
+                         "(see capture_chain.py). Off by default -- a measurement should see "
+                         "what the MODEL will be trained on.")
+    ap.add_argument("--capture-hp-hz", type=float, default=None,
+                    help=f"Capture-chain corner (default {DEFAULT_CORNER_HZ} Hz).")
+    ap.add_argument("--capture-order", type=int, default=None,
+                    help=f"Capture-chain filter order (default {DEFAULT_ORDER}).")
+
+
+def cfg_from_args(args):
+    """The chain's kwargs from parsed args, or None when disabled. Plain dict: picklable
+    across a worker pool and recordable verbatim in config.json."""
+    if getattr(args, "no_capture_chain", False):
+        return None
+    hz = getattr(args, "capture_hp_hz", None)
+    order = getattr(args, "capture_order", None)
+    return {"corner_hz": DEFAULT_CORNER_HZ if hz is None else hz,
+            "order": DEFAULT_ORDER if order is None else order}
+
+
+def cache_tag(capture):
+    """Cache-key fragment identifying the chain a measurement was taken through.
+
+    MUST be in every findpeak cache_extra. The key already carries os/iterations/maxv; without
+    the chain too, an onset measured on the RAW node is served to a caller asking for a chained
+    one, and vice versa. That is not hypothetical -- on 2026-09-10 a stale findpeak entry
+    silently defeated a verified fix to the sweep itself for two full runs, because a failure
+    had been cached and the key could not tell the two apart.
+    """
+    if not capture:
+        return "|cap=off"
+    return f"|cap={capture['corner_hz']:g}/{capture['order']}"
+
+
+def describe(capture):
+    """One-line, human-readable statement of the chain. Printed at render start.
+
+    Recording the chain in config.json is necessary but not sufficient: nobody reads a JSON
+    file before wondering why an ESR moved. A dataset that silently gained (or lost) a
+    capture stage is the same shape of trap as a silently cached failure -- invisible until
+    it has already cost you a day.
+    """
+    if not capture:
+        return ("capture chain: DISABLED (--no-capture-chain) -- targets keep sub-audio content "
+                "no hardware capture would contain, which a ~52 ms receptive field cannot model")
+    return (f"capture chain: {capture['order']}nd-order high-pass at {capture['corner_hz']:g} Hz "
+            f"(the audio-interface input stage a hardware NAM capture goes through)")
+
+
+def read_dataset_chain(dataset_dir):
+    """The capture chain a dataset was rendered through.
+
+    Returns the dict, or None if the dataset declares it was rendered WITHOUT one, or the
+    string "unknown" for a dataset predating the field entirely -- a distinction that matters,
+    because "rendered raw on purpose" and "rendered before this existed" warrant different
+    treatment and must not be collapsed into one falsy value.
+    """
+    import json
+    from pathlib import Path
+    p = Path(dataset_dir) / "config.json"
+    if not p.exists():
+        return "unknown"
+    try:
+        cfg = json.loads(p.read_text())
+    except Exception:
+        return "unknown"
+    return cfg.get("capture_chain", "unknown") if "capture_chain" in cfg else "unknown"
+
+
+def mismatch_reason(a, b):
+    """Why chains `a` and `b` are incomparable, or None if they agree.
+
+    "unknown" is treated as compatible with anything: a pre-2026-09-10 dataset cannot be
+    proven either way, and hard-failing every historical dataset would be a worse outcome
+    than the mismatch this guards against.
+    """
+    if a == "unknown" or b == "unknown":
+        return None
+    if bool(a) != bool(b):
+        on, off = ("first", "second") if a else ("second", "first")
+        return f"{on} has a capture chain, {off} does not"
+    if not a and not b:
+        return None
+    for k in ("corner_hz", "order"):
+        if a.get(k) != b.get(k):
+            return f"{k} differs: {a.get(k)} vs {b.get(k)}"
+    return None

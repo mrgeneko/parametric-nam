@@ -172,3 +172,148 @@ class TestRenderPathWiring:
         res = _finalize_wav(0, path, out_wav, 0, 0.0, warmup_s=1.0, capture=None)
         assert res.ok
         assert np.allclose(np.load(path), sig)
+
+
+class TestMeasurementPathsUseTheChain:
+    """A measurement characterises what the MODEL must learn, so it must see the same
+    signal the dataset stores -- otherwise find_saturation_point watches output RMS stop
+    rising while most of that RMS is sub-audio bias wander, and reports the wander's
+    behaviour as the circuit's saturation onset.
+    """
+
+    def test_find_saturation_point_measures_through_the_chain(self):
+        """Onset must be judged on audio-band content, not on a sub-audio pedestal.
+
+        The fake circuit below is a linear, NON-saturating path plus a large constant-
+        amplitude 2 Hz pedestal. Raw, the pedestal dominates RMS at every drive level, so
+        the curve looks FLAT and a bogus 'onset' is read off it. Through the chain the
+        pedestal is gone and the true linear ramp is visible -- no onset, correctly.
+        """
+        from find_saturation_point import find_saturation_point
+
+        class Pedestal:
+            def prepare_input(self, raw, sr, level_v, scratch, tag):
+                return (raw, level_v)
+
+            def render_many(self, jobs, handle, scratch):
+                raw, level = handle
+                n = len(raw)
+                t = np.arange(n) / SR
+                # gain chosen so the 2 Hz pedestal still dominates RAW rms at every
+                # level (curve looks flat) while the chained residual -- 2 Hz through
+                # a 2nd-order 11.8 Hz corner is ~31x down -- leaves clear headroom.
+                y = 0.02 * level * raw + 3.0 * np.sin(2 * np.pi * 2.0 * t)
+                return {j["tag"]: y.astype(np.float32) for j in jobs}
+
+        raw_sat = find_saturation_point(Pedestal(), {}, "/tmp/unused", dur=1.0,
+                                        npoints=8, workers=4)
+        chained = find_saturation_point(Pedestal(), {}, "/tmp/unused", dur=1.0,
+                                        npoints=8, workers=4,
+                                        capture={"corner_hz": DEFAULT_CORNER_HZ,
+                                                 "order": DEFAULT_ORDER})
+        raw_curve = [r for _, r in raw_sat["curve"]]
+        chained_curve = [r for _, r in chained["curve"]]
+        assert max(raw_curve) / min(raw_curve) < 1.10, "raw curve should be pedestal-flat"
+        assert max(chained_curve) / min(chained_curve) > 5.0, \
+            "chained curve should reveal the linear ramp the pedestal was hiding"
+
+
+class TestCacheKeyCarriesTheChain:
+    """cache_extra MUST distinguish chained from raw measurements.
+
+    On 2026-09-10 a cached FAILURE silently defeated a verified fix to the sweep for two
+    full runs because the key could not tell the two apart. A chained-vs-raw collision is
+    the same bug with a quieter symptom: a plausible onset measured on the wrong signal.
+    """
+
+    def test_tag_differs_between_on_and_off(self):
+        from capture_chain import cache_tag
+        assert cache_tag(None) != cache_tag({"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER})
+
+    def test_tag_differs_between_settings(self):
+        from capture_chain import cache_tag
+        assert cache_tag({"corner_hz": 11.8, "order": 2}) != cache_tag({"corner_hz": 5.0, "order": 2})
+        assert cache_tag({"corner_hz": 11.8, "order": 2}) != cache_tag({"corner_hz": 11.8, "order": 1})
+
+    def test_tag_is_stable_for_equal_settings(self):
+        from capture_chain import cache_tag
+        assert cache_tag({"corner_hz": 11.8, "order": 2}) == cache_tag({"corner_hz": 11.80, "order": 2})
+
+    @pytest.mark.parametrize("mod", ["preflight", "prepare_excitation", "check_transient_coverage"])
+    def test_every_cache_extra_includes_the_tag(self, mod):
+        """Guards against a new backend branch being added without the tag."""
+        import inspect, importlib, re
+        src = inspect.getsource(importlib.import_module(mod))
+        # only CONSTRUCTION sites; `a, b, cache_extra = _build_backend(args)` is a
+        # destructuring assignment, not a key being built.
+        sites = re.findall(r'cache_extra = f".*', src)
+        assert sites, f"{mod}: no cache_extra found -- did it move?"
+        for line in sites:
+            assert "cache_tag(" in line, f"{mod}: cache_extra without the chain tag: {line.strip()}"
+
+
+class TestDeclarationAndGuard:
+    """Recording the chain in config.json is necessary but not sufficient -- nobody reads a
+    JSON file before wondering why an ESR moved. It must be announced, and a resume must
+    refuse to continue against re-rendered targets.
+    """
+
+    def test_describe_names_the_settings(self):
+        from capture_chain import describe
+        d = describe({"corner_hz": 11.8, "order": 2})
+        assert "11.8" in d and "2nd-order" in d
+        assert "DISABLED" in describe(None)
+
+    def test_read_dataset_chain_roundtrips(self, tmp_path):
+        import json
+        from capture_chain import read_dataset_chain
+        (tmp_path / "config.json").write_text(json.dumps(
+            {"knobs": [], "capture_chain": {"corner_hz": 11.8, "order": 2}}))
+        assert read_dataset_chain(tmp_path) == {"corner_hz": 11.8, "order": 2}
+
+    def test_explicit_none_is_distinct_from_missing(self, tmp_path):
+        """'rendered raw on purpose' and 'predates the field' must not collapse together:
+        the first is a real mismatch against a chained run, the second is unprovable."""
+        import json
+        from capture_chain import read_dataset_chain
+        a = tmp_path / "a"; a.mkdir()
+        (a / "config.json").write_text(json.dumps({"capture_chain": None}))
+        b = tmp_path / "b"; b.mkdir()
+        (b / "config.json").write_text(json.dumps({"knobs": []}))
+        assert read_dataset_chain(a) is None
+        assert read_dataset_chain(b) == "unknown"
+
+    def test_missing_config_is_unknown_not_a_crash(self, tmp_path):
+        from capture_chain import read_dataset_chain
+        assert read_dataset_chain(tmp_path / "nope") == "unknown"
+
+    def test_corrupt_config_is_unknown_not_a_crash(self, tmp_path):
+        from capture_chain import read_dataset_chain
+        (tmp_path / "config.json").write_text("{ this is not json")
+        assert read_dataset_chain(tmp_path) == "unknown"
+
+    def test_mismatch_detects_on_vs_off(self):
+        from capture_chain import mismatch_reason
+        assert mismatch_reason({"corner_hz": 11.8, "order": 2}, None)
+        assert mismatch_reason(None, {"corner_hz": 11.8, "order": 2})
+
+    def test_mismatch_detects_different_settings(self):
+        from capture_chain import mismatch_reason
+        assert "corner_hz" in mismatch_reason({"corner_hz": 11.8, "order": 2},
+                                              {"corner_hz": 5.0, "order": 2})
+        assert "order" in mismatch_reason({"corner_hz": 11.8, "order": 2},
+                                          {"corner_hz": 11.8, "order": 1})
+
+    def test_agreement_is_not_a_mismatch(self):
+        from capture_chain import mismatch_reason
+        assert mismatch_reason({"corner_hz": 11.8, "order": 2},
+                               {"corner_hz": 11.8, "order": 2}) is None
+        assert mismatch_reason(None, None) is None
+
+    def test_unknown_is_compatible_with_anything(self):
+        """Hard-failing every pre-2026-09-10 dataset would be worse than the mismatch this
+        guards against -- absence of evidence is not evidence of mismatch."""
+        from capture_chain import mismatch_reason
+        assert mismatch_reason("unknown", {"corner_hz": 11.8, "order": 2}) is None
+        assert mismatch_reason({"corner_hz": 11.8, "order": 2}, "unknown") is None
+        assert mismatch_reason("unknown", None) is None

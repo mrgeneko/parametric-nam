@@ -54,7 +54,8 @@ def _loglog_interp(x1, y1, x2, y2, ytarget):
 
 def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silence_s=0.0,
                            start_v=0.005, max_v=40.0, npoints=20, sr=SR, workers=8,
-                           progress=None, max_extend_decades=4, min_start_v=1e-9):
+                           progress=None, max_extend_decades=4, min_start_v=1e-9,
+                           capture=None):
     """Sweep a clean `freq` Hz tone's amplitude (log-spaced, `start_v`..`max_v`, `npoints`
     points) through `backend` at fixed `params`, and find where output RMS stops rising.
 
@@ -72,6 +73,11 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
     like preflight.py --find-peak should pass one, since this sweep (up to `npoints` renders,
     each a real backend render) used to run with NO output at all -- indistinguishable from a
     hang for a stiff circuit's renders taking tens of seconds each.
+
+    `capture`, if given, is the virtual capture chain's kwargs (capture_chain.py) -- the
+    measurement is then taken through the same audio-interface input stage the dataset is
+    rendered through. Whoever passes it MUST also put capture_chain.cache_tag(capture) in
+    their findpeak cache_extra, or a raw-measured onset gets served to a chained caller.
 
     Returns None if every amplitude fails to converge.
     """
@@ -107,6 +113,15 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
         for amp, y in raw_results:
             if y is None:
                 continue
+            if capture:
+                # Measure what the MODEL will be trained on, not the raw node. Saturation is
+                # found by watching output RMS stop rising; if a large share of that RMS is
+                # sub-audio bias wander this measures the wander, not the saturation. Duke of
+                # Tone (Distortion) 2026-09-10: 64% of its output energy was below 19 Hz.
+                # Filter the WHOLE render before slicing, so the filter's own startup transient
+                # lands in the discarded region rather than inside the steady-state window.
+                from capture_chain import capture_chain as _cc
+                y = _cc(np.asarray(y, dtype=np.float64), sr, **capture)
             steady = y[tone_start + int(sr * dur * 0.5):]
             if len(steady) == 0:
                 continue

@@ -55,6 +55,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
 from check_transient_coverage import _corners, _sample_interior  # noqa: E402
+from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -62,7 +63,7 @@ from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
-                      lead_silence_s=0.0, max_corners=None, sample_grid=0):
+                      lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -95,7 +96,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
             sat = json.loads(cpath.read_text())
         else:
             sat = find_saturation_point(backend, params, tmp, max_v=peak_max_v,
-                                         lead_silence_s=lead_silence_s)
+                                         lead_silence_s=lead_silence_s, capture=capture)
             cache_findpeak(cpath, sat)
         onset = sat.get("onset_99pct_input_v") if sat else None
         if not quiet:
@@ -133,6 +134,7 @@ def _parse_fixed(fixed_str):
 
 def _setup(args):
     """Returns (backend, identity, cache_extra, knob_ranges, fixed, lead_silence_s, label)."""
+    _capture = cfg_from_args(args)
     if args.backend == "livespice":
         if args.config:
             cfg = load_config(Path(args.config))
@@ -151,7 +153,7 @@ def _setup(args):
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
         backend = LiveSpiceBackend(schx, oversample=oversample, iterations=args.iterations)
         identity = Path(schx).read_bytes()
-        cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+        cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, Path(schx).name
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -173,7 +175,7 @@ def _setup(args):
         # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
-        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -186,7 +188,7 @@ def _setup(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.ltspice_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module
@@ -251,6 +253,7 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                      help="find_saturation_point sweep ceiling -- the 40V default suits an "
                           "amp; lower it (e.g. 3-5) for a small pedal circuit")
+    _cc_add_cli_args(ap)
     ap.add_argument("--no-cache", action="store_true")
 
     # excitation-building
@@ -339,6 +342,7 @@ def main():
     tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                    capture=cfg_from_args(args),
                                     full_hypercube=(False if args.no_full_hypercube else None),
                                     max_corners=args.max_corners, sample_grid=args.sample_grid,
                                     quiet=False,

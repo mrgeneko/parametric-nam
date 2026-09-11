@@ -123,7 +123,7 @@ class TestCheckCoverage:
         self.schx.write_text("dummy circuit")
 
     def _stub_onset(self, monkeypatch, onset_fn, calls=None):
-        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw):
             if calls is not None:
                 calls.append(dict(params))
             onset = onset_fn(params)
@@ -185,7 +185,7 @@ class TestCheckCoverageNgspiceDeck:
         self.module_file.write_text("KNOB_NAMES = ['Gain']\n")
 
     def _stub_onset(self, monkeypatch, onset_fn):
-        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw):
             onset = onset_fn(params)
             if onset is None:
                 return None
@@ -213,7 +213,7 @@ class TestCheckCoverageNgspiceDeck:
         onset from before the edit -- same convention as preflight.py's _build_backend."""
         seen_identities = []
 
-        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw):
             return {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
         monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
@@ -244,7 +244,7 @@ class TestCheckCoverageLtspiceDeck:
         self.module_file.write_text("KNOB_NAMES = ['Gain']\n")
 
     def _stub_onset(self, monkeypatch, onset_fn):
-        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw):
             onset = onset_fn(params)
             if onset is None:
                 return None
@@ -270,7 +270,7 @@ class TestCheckCoverageLtspiceDeck:
     def test_identity_is_keyed_on_the_modules_own_source(self, monkeypatch):
         seen_identities = []
 
-        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0):
+        def fake(backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw):
             return {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0, "curve": []}
         monkeypatch.setattr("check_transient_coverage.find_saturation_point", fake)
 
@@ -303,7 +303,7 @@ class TestMainLtspiceDeckDispatch:
         monkeypatch.setattr("check_transient_coverage.LtspiceBackend",
                             lambda *a, **kw: object())
         monkeypatch.setattr("check_transient_coverage.find_saturation_point",
-                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0:
+                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw:
                             {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
                              "ceiling_at_input_v": 1.0, "curve": []})
 
@@ -342,7 +342,7 @@ class TestMainNgspiceDeckDispatch:
         monkeypatch.setattr("check_transient_coverage.NgspiceBackend",
                             lambda *a, **kw: object())
         monkeypatch.setattr("check_transient_coverage.find_saturation_point",
-                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0:
+                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw:
                             {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
                              "ceiling_at_input_v": 1.0, "curve": []})
 
