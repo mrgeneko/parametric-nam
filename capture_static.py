@@ -100,6 +100,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_provenance  # noqa: E402
 from param_train import _input_level_dbu, _schx_input_v0dbfs  # noqa: E402
 from find_saturation_point import find_saturation_point  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args,  # noqa: E402
+                          cfg_from_args as _cc_cfg, describe as _cc_describe)
 from render_backends import LiveSpiceBackend  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
@@ -154,7 +156,7 @@ def validate_setting_complete(schx: str, setting: dict):
 
 
 def render(schx: str, setting: dict, input_wav: str, oversample: str,
-           trunc_target: float, output_dir: Path) -> dict:
+           trunc_target: float, output_dir: Path, capture: dict = None) -> dict:
     """Shell out to gen_dataset_from_schx.py's documented single-combination workaround:
     pin every control but one via --fixed-params, sweep that one remaining control
     with a single value via --knobs/--values. Produces exactly 1 combination through
@@ -174,6 +176,15 @@ def render(schx: str, setting: dict, input_wav: str, oversample: str,
         cmd += ["--oversample", "auto", "--trunc-target", str(trunc_target)]
     else:
         cmd += ["--oversample", str(oversample)]
+    # The chain must be IDENTICAL to the one ensure_adequate_excitation probed through --
+    # a raw-measured onset sizing a chained render is the inconsistency this forwarding
+    # exists to prevent. gen_dataset_from_schx defaults it ON, so only a non-default needs
+    # passing; --no-capture-chain must be forwarded explicitly.
+    if capture is None:
+        cmd += ["--no-capture-chain"]
+    else:
+        cmd += ["--capture-hp-hz", str(capture["corner_hz"]),
+                "--capture-order", str(capture["order"])]
 
     print(f"[capture_static] rendering: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
@@ -186,7 +197,7 @@ def render(schx: str, setting: dict, input_wav: str, oversample: str,
 
 def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_dir: Path,
                                 margin: float = 1.2, probe_oversample: int = 8,
-                                probe_iterations: int = 256) -> tuple:
+                                probe_iterations: int = 256, capture: dict = None) -> tuple:
     """Check whether `input_wav` actually drives this circuit (at the exact pinned
     `setting`) past its own saturation onset -- and if not, scale it up until it does.
     See the module docstring's EXCITATION ADEQUACY section for why this exists and why
@@ -218,7 +229,13 @@ def ensure_adequate_excitation(schx: str, setting: dict, input_wav: str, work_di
         print(f"  {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
     backend = LiveSpiceBackend(schx, oversample=probe_oversample, iterations=probe_iterations)
     with tempfile.TemporaryDirectory() as scratch:
-        sat = find_saturation_point(backend, setting, scratch, progress=_progress)
+        # THROUGH THE SAME CAPTURE CHAIN THE RENDER USES. This probe finds the onset by
+        # watching output RMS stop rising; measured on the raw node, a circuit with
+        # sub-audio bias wander has that RMS dominated by the wander, so the "onset" is
+        # the wander's behaviour and the excitation gets sized against a signal that
+        # never reaches the trainer. Duke of Tone (Distortion) is exactly that circuit.
+        sat = find_saturation_point(backend, setting, scratch, progress=_progress,
+                                     capture=capture)
     report["checked"] = True
     report["excitation_peak_v"] = peak_v
 
@@ -651,6 +668,7 @@ def main():
     ap.add_argument("--setting", required=True, help="'Gain=0.7,Bass=0.5,...' -- every real control, no omissions")
     ap.add_argument("--input", required=True)
     ap.add_argument("--oversample", default="auto")
+    _cc_add_cli_args(ap)
     ap.add_argument("--trunc-target", type=float, default=1e-3)
     ap.add_argument("--output", required=True, help="working/output directory")
     ap.add_argument("--widths", default="4,8",
@@ -693,10 +711,16 @@ def main():
     setting = parse_setting(args.setting)
     validate_setting_complete(args.schx, setting)
 
-    excitation_report, effective_input = ensure_adequate_excitation(
-        args.schx, setting, args.input, out)
+    # ONE value, used for both the onset probe and the render. Deriving it twice would let
+    # them diverge silently, which is the whole failure this wiring prevents.
+    capture = _cc_cfg(args)
+    print(f"[capture_static] {_cc_describe(capture)}")
 
-    cfg = render(args.schx, setting, effective_input, args.oversample, args.trunc_target, ds_dir)
+    excitation_report, effective_input = ensure_adequate_excitation(
+        args.schx, setting, args.input, out, capture=capture)
+
+    cfg = render(args.schx, setting, effective_input, args.oversample, args.trunc_target,
+                 ds_dir, capture=capture)
 
     wet_wav = extract_wet_wav(ds_dir, out / "wet.wav")
     dry_wav = ds_dir / "sweep.wav"
@@ -727,6 +751,7 @@ def main():
         "schx": args.schx,
         "setting": setting,
         "excitation_adequacy": excitation_report,
+        "capture_chain": capture,
         "oversample_config": cfg.get("oversample"),
         "input_provenance": input_provenance(dry_wav),
         "output_scale": cfg.get("output_scale"),

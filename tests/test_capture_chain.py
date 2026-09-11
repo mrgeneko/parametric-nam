@@ -317,3 +317,71 @@ class TestDeclarationAndGuard:
         assert mismatch_reason("unknown", {"corner_hz": 11.8, "order": 2}) is None
         assert mismatch_reason({"corner_hz": 11.8, "order": 2}, "unknown") is None
         assert mismatch_reason("unknown", None) is None
+
+
+class TestCaptureStaticIsConsistent:
+    """capture_static must probe the onset through the SAME chain it renders through.
+
+    It measures a saturation onset (find_saturation_point) to decide whether the excitation
+    drives the circuit hard enough, then shells out to gen_dataset_from_schx to render. If
+    the probe sees the raw node while the render is chained, the excitation is sized against
+    a signal that never reaches the trainer -- and on a circuit with sub-audio bias wander
+    the probe is measuring the wander, not saturation.
+    """
+
+    def test_render_forwards_the_chain_to_the_renderer(self, monkeypatch, tmp_path):
+        import capture_static
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            if "--combine" not in cmd:
+                seen["cmd"] = list(cmd)
+            import types
+            return types.SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(capture_static.subprocess, "run", fake_run)
+        (tmp_path / "config.json").write_text('{"oversample": 8}')
+        capture_static.render("x.schx", {"Gain": 0.5, "Tone": 0.2}, "in.wav", "8", 1e-4,
+                              tmp_path, capture={"corner_hz": 11.8, "order": 2})
+        cmd = seen["cmd"]
+        assert "--capture-hp-hz" in cmd and cmd[cmd.index("--capture-hp-hz") + 1] == "11.8"
+        assert "--capture-order" in cmd and cmd[cmd.index("--capture-order") + 1] == "2"
+        assert "--no-capture-chain" not in cmd
+
+    def test_render_forwards_the_opt_out_explicitly(self, monkeypatch, tmp_path):
+        """gen_dataset defaults the chain ON, so 'off' must be passed, not omitted."""
+        import capture_static
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            if "--combine" not in cmd:
+                seen["cmd"] = list(cmd)
+            import types
+            return types.SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(capture_static.subprocess, "run", fake_run)
+        (tmp_path / "config.json").write_text('{"oversample": 8}')
+        capture_static.render("x.schx", {"Gain": 0.5, "Tone": 0.2}, "in.wav", "8", 1e-4,
+                              tmp_path, capture=None)
+        assert "--no-capture-chain" in seen["cmd"]
+        assert "--capture-hp-hz" not in seen["cmd"]
+
+    def test_onset_probe_receives_the_chain(self, monkeypatch, tmp_path):
+        import capture_static
+        seen = {}
+
+        def fake_fsp(backend, params, scratch, **kw):
+            seen["capture"] = kw.get("capture")
+            return {"onset_99pct_input_v": 0.5, "ceiling_rms": 1.0,
+                    "ceiling_at_input_v": 1.0, "curve": []}
+
+        monkeypatch.setattr(capture_static, "find_saturation_point", fake_fsp)
+        monkeypatch.setattr(capture_static, "_schx_input_v0dbfs", lambda p: 1.0)
+        monkeypatch.setattr(capture_static, "LiveSpiceBackend", lambda *a, **k: object())
+        import soundfile as sf
+        wav = tmp_path / "in.wav"
+        sf.write(str(wav), _tone(440.0, dur=0.2), SR, subtype="FLOAT")
+        chain = {"corner_hz": 11.8, "order": 2}
+        capture_static.ensure_adequate_excitation("x.schx", {"Gain": 0.5}, str(wav),
+                                                  tmp_path, capture=chain)
+        assert seen["capture"] == chain, "probe measured a different chain than the render"
