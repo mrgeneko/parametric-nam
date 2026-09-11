@@ -668,3 +668,107 @@ class TestRendererDiskCache:
         self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2,
                        no_disk_cache=True)({"Gain": 0.7})
         assert c2, "--no-disk-cache must force a real render"
+
+
+class TestRendererCaptureChain:
+    """grid_adequacy must probe the SAME signal the actual dataset render (and
+    prepare_excitation.py's own onset measurement) go through by default -- see
+    capture_chain.py. Without this, grid adequacy is sized against a raw-node signal that
+    never reaches training once the capture chain is on by default (2026-09-11)."""
+
+    def _schx(self, tmp_path):
+        p = tmp_path / "c.schx"
+        p.write_text('<Schematic><R Resistance="47 k"/></Schematic>', encoding="utf-8")
+        return p
+
+    def _input(self, tmp_path, sr=1000, dur_s=20):
+        inp = tmp_path / "in.wav"
+        sf.write(str(inp), np.zeros(sr * dur_s, dtype=np.float32), sr, subtype="FLOAT")
+        return inp
+
+    def _renderer(self, tmp_path, cache, schx, inp, monkeypatch, calls, **kw):
+        """A livespice Renderer whose CLI always writes a constant (DC) signal -- a
+        high-pass capture chain must drive a constant signal to ~0, an easy tell of whether
+        the chain actually ran."""
+        def fake_run(argv, **_):
+            a = {argv[i]: argv[i + 1] for i in range(0, len(argv) - 1)}
+            calls.append(1)
+            n = int(sf.info(a["--input"]).frames)
+            sf.write(a["--output"], np.full(n, 0.5, dtype=np.float32),
+                     int(sf.info(a["--input"]).samplerate), subtype="FLOAT")
+            return type("R", (), {"returncode": 0, "stderr": ""})()
+
+        monkeypatch.setattr("grid_adequacy.subprocess.run", fake_run)
+        monkeypatch.setattr("grid_adequacy.LIVESPICE_CLI", "fake-cli")
+        monkeypatch.setattr("grid_adequacy.Path.home", staticmethod(lambda: cache))
+        td = Path(tempfile.mkdtemp(dir=tmp_path))
+        return Renderer(schx=str(schx), inp=inp, oversample=2, iterations=256,
+                        fixed="", td=td, probe_s=4.0, backend="livespice", **kw)
+
+    def test_disabled_by_default_is_a_pass_through(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        out = self._renderer(tmp_path, cache, schx, inp, monkeypatch, [],
+                             capture=None)({"Gain": 0.5})
+        assert np.allclose(out[0], 0.5), "capture=None must not alter the render"
+
+    def test_enabled_high_pass_removes_dc(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        out = self._renderer(tmp_path, cache, schx, inp, monkeypatch, [],
+                             capture={"corner_hz": 18.0, "order": 3})({"Gain": 0.5})
+        assert abs(out[0][-1]) < 1e-6, \
+            "a 3rd-order 18 Hz high-pass must settle a constant probe to ~0 within 4s @ 1kHz"
+
+    def test_raw_and_chained_renders_of_the_same_point_are_not_cross_served(
+            self, tmp_path, monkeypatch):
+        """Two Renderers differing ONLY in capture-chain settings must not share a disk-cache
+        entry: serving a raw-node render to a chained caller (or vice versa) is exactly the
+        staleness capture_chain.cache_tag() exists to prevent."""
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        c1, c2 = [], []
+        raw = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c1,
+                             capture=None)({"Gain": 0.5})
+        chained = self._renderer(tmp_path, cache, schx, inp, monkeypatch, c2,
+                                 capture={"corner_hz": 18.0, "order": 3})({"Gain": 0.5})
+        assert c1 and c2, "both must be real renders, neither served from the other's cache"
+        assert np.allclose(raw[0], 0.5)
+        assert abs(chained[0][-1]) < 1e-6
+
+
+class TestShardCaptureChainConsistency:
+    """A fleet dispatch (distribute_pull.py) shards grid_adequacy across machines -- if one
+    shard ran pre-upgrade (no capture chain) and another post-upgrade, --merge pooling them
+    would silently average a raw-node measurement into a chained one. See
+    capture_chain.mismatch_reason."""
+
+    def _write_shard(self, path, capture):
+        from grid_adequacy import save_shard_result
+        save_shard_result(path, [("Gain", 0.0, 1.0, 0.01)], n_failed=0, capture=capture)
+
+    def test_matching_chains_merge_cleanly(self, tmp_path):
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        cap = {"corner_hz": 18.0, "order": 3}
+        self._write_shard(a, cap)
+        self._write_shard(b, cap)
+        res, n_failed = load_shard_results([a, b])
+        assert len(res) == 2 and n_failed == 0
+
+    def test_mismatched_chains_refuse_to_merge(self, tmp_path):
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        self._write_shard(a, {"corner_hz": 18.0, "order": 3})
+        self._write_shard(b, None)
+        with pytest.raises(SystemExit):
+            load_shard_results([a, b])
+
+    def test_unknown_chain_is_compatible_with_anything(self, tmp_path):
+        """A pre-2026-09-11 shard file has no "capture" key at all -- must not hard-fail
+        every historical shard just because it predates this field."""
+        import json
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        a.write_text(json.dumps({"rows": [{"axis": "Gain", "lo": 0.0, "hi": 1.0,
+                                           "error": 0.01}], "n_failed": 0}))  # no "capture" key
+        self._write_shard(b, {"corner_hz": 18.0, "order": 3})
+        res, n_failed = load_shard_results([a, b])
+        assert len(res) == 2 and n_failed == 0

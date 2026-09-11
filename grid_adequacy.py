@@ -106,6 +106,9 @@ from ngspice_spicelib import load_input  # noqa: E402
 import ltspice_spicelib  # noqa: E402
 from prepare_excitation import _parse_fixed  # noqa: E402
 from render_backends import NgspiceBackend, LtspiceBackend, describe_subprocess_failure  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args, cfg_from_args as _cc_cfg_from_args,  # noqa: E402
+                           cache_tag as _cc_cache_tag, capture_chain as _cc_apply,
+                           describe as _cc_describe, mismatch_reason as _cc_mismatch_reason)
 
 
 def esr(a: np.ndarray, b: np.ndarray) -> float:
@@ -202,10 +205,16 @@ class Renderer:
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
                 lead_silence_s=None, no_disk_cache=False,
                 ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
-                ltspice_out_scale=0.05, ltspice_timeout=None):
+                ltspice_out_scale=0.05, ltspice_timeout=None, capture=None):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
+        # See capture_chain.py: a probe rendered straight off the schx node is the same RAW
+        # signal a dataset render skips the audio-interface high-pass on -- if this tool
+        # measures grid adequacy against that raw signal while the actual dataset (and
+        # prepare_excitation.py's own onset measurement) go through the chain by default,
+        # the two are sized against signals that never coexist in training.
+        self.capture = capture
         self.cache: dict = {}
         # ON-DISK cache, so a re-run does not re-render probes that have not changed. The
         # in-process dict above only ever helped WITHIN one invocation, which meant
@@ -316,7 +325,8 @@ class Renderer:
             try:
                 h = hashlib.sha256()
                 h.update(Path(self.schx).read_bytes())
-                h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|".encode())
+                h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|{_cc_cache_tag(self.capture)}|"
+                        .encode())
                 for c in self.clips:
                     d, _ = sf.read(str(c), dtype="float32")
                     h.update(np.ascontiguousarray(d).tobytes())
@@ -416,6 +426,12 @@ class Renderer:
         except Exception:
             pass
 
+    def _chain(self, y: np.ndarray) -> np.ndarray:
+        """Apply the virtual capture chain (capture_chain.py) to one rendered probe window,
+        matching what the actual dataset render (and prepare_excitation.py's onset probe) do
+        to the same signal by default. A no-op when disabled (--no-capture-chain)."""
+        return _cc_apply(y, self.sr, **self.capture) if self.capture else y
+
     def _render(self, params: dict, key):
         if self.backend == "ngspice-deck":
             fixed_dict = _parse_fixed(self.fixed) if self.fixed else {}
@@ -427,7 +443,7 @@ class Renderer:
                 y = ys.get(tag)
                 if y is None:
                     self._note_fail("ngspice-deck render did not converge")
-                out.append(None if y is None else np.asarray(y, dtype=np.float64))
+                out.append(None if y is None else self._chain(np.asarray(y, dtype=np.float64)))
             with self._cache_lock:
                 self.cache[key] = out
             return out
@@ -442,7 +458,7 @@ class Renderer:
                 y = ys.get(tag)
                 if y is None:
                     self._note_fail("ltspice-deck render did not converge")
-                out.append(None if y is None else np.asarray(y, dtype=np.float64))
+                out.append(None if y is None else self._chain(np.asarray(y, dtype=np.float64)))
             with self._cache_lock:
                 self.cache[key] = out
             return out
@@ -468,7 +484,7 @@ class Renderer:
                                     nlen, 120, None, self.fixed, ngp)
                 if fail is None and w.exists():
                     d, _ = sf.read(str(w))
-                    out.append(np.asarray(d, dtype=np.float64))
+                    out.append(self._chain(np.asarray(d, dtype=np.float64)))
                 else:
                     self._note_fail(str(getattr(fail, 'error', 'no output')))
                     out.append(None)
@@ -480,7 +496,7 @@ class Renderer:
                 capture_output=True, text=True)
             if r.returncode == 0 and w.exists():
                 d, _ = sf.read(str(w))
-                out.append(np.asarray(d, dtype=np.float64))
+                out.append(self._chain(np.asarray(d, dtype=np.float64)))
             else:
                 self._note_fail(describe_subprocess_failure(r))
                 out.append(None)
@@ -668,7 +684,7 @@ def suggest_axis(values: list, worst: dict, target: float) -> list:
     return out
 
 
-def save_shard_result(path: Path, res: list[tuple], n_failed: int) -> None:
+def save_shard_result(path: Path, res: list[tuple], n_failed: int, capture=None) -> None:
     """Write one shard's raw per-job measurements to JSON, for a later --merge.
 
     Deliberately NOT the aggregated per-axis table -- a single shard only ever sees a SLICE
@@ -688,6 +704,7 @@ def save_shard_result(path: Path, res: list[tuple], n_failed: int) -> None:
         "rows": [{"axis": axis, "lo": lo, "hi": hi, "error": error}
                  for axis, lo, hi, error in res],
         "n_failed": n_failed,
+        "capture": capture,
     }
     path.write_text(json.dumps(payload))
 
@@ -700,12 +717,25 @@ def load_shard_results(paths: list[Path]) -> tuple[list[tuple], int]:
     `NaN`, which json.loads DOES accept -- Python's json module is permissive on both ends by
     default -- so this works, but is worth naming: a stricter JSON reader on the other end of
     some future tool would choke on it).
+
+    Refuses to pool shards rendered through DIFFERENT capture chains (see capture_chain.py):
+    a fleet dispatch that ran one shard pre-upgrade and another post-upgrade would otherwise
+    silently average a raw-node measurement into a chained one.
     """
     res: list[tuple] = []
     n_failed = 0
+    capture = "unknown"
     for p in paths:
         payload = json.loads(Path(p).read_text())
         n_failed += int(payload.get("n_failed", 0))
+        this_capture = payload.get("capture", "unknown")
+        reason = _cc_mismatch_reason(capture, this_capture)
+        if reason:
+            sys.exit(f"ERROR: shard {p} was rendered through a different capture chain than "
+                     f"an earlier shard ({reason}) -- re-render every shard with the same "
+                     f"--no-capture-chain/--capture-hp-hz/--capture-order settings.")
+        if capture == "unknown":
+            capture = this_capture
         for row in payload["rows"]:
             res.append((row["axis"], row["lo"], row["hi"], row["error"]))
     return res, n_failed
@@ -775,6 +805,7 @@ def main() -> None:
                     help="with --shard, write this shard's raw per-cell measurements here "
                          "(JSON) instead of printing a table. Required whenever --shard is "
                          "given.")
+    _cc_add_cli_args(ap)
     ap.add_argument("--merge", nargs="+", metavar="SHARD_JSON", default=None,
                     help="combine the --shard-out files from every shard of a run into the "
                          "same per-axis report --suggest an unsharded run would have printed, "
@@ -856,12 +887,14 @@ def main() -> None:
     else:
         oversample = int(oversample)
     check_oracle(backend)
+    capture = _cc_cfg_from_args(args)
 
     n_combos = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")
     print(f"  backend    {backend}")
     print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_combos} combinations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
+    print(f"  {_cc_describe(capture)}")
     probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck", "ltspice-deck") else args.probe_s
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
@@ -880,7 +913,7 @@ def main() -> None:
                           ngspice_deck_maxstep=args.ngspice_deck_maxstep,
                           ltspice_deck_maxstep=args.ltspice_deck_maxstep,
                           ltspice_out_scale=args.ltspice_out_scale,
-                          ltspice_timeout=args.ltspice_timeout)
+                          ltspice_timeout=args.ltspice_timeout, capture=capture)
 
         if args.shard:
             # One slice of the full job list, rendered and saved for a later --merge -- see
@@ -894,7 +927,7 @@ def main() -> None:
             res = render_jobs(render, knobs, jobs, args.workers)
             render.print_fail_summary()
             n_failed = sum(render.fail_counts.values())
-            save_shard_result(args.shard_out, res, n_failed)
+            save_shard_result(args.shard_out, res, n_failed, capture=capture)
             print(f"\n  wrote {len(res)} row(s) ({n_failed} failure(s)) -> {args.shard_out}")
             sys.exit(2 if n_failed else 0)
 
