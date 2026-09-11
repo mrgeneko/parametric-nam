@@ -543,8 +543,21 @@ def rail_bound(schx_path: str) -> "float | None":
 
 
 def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc_t=-1.0,
-                   warmup_s=1.0, rail_rms=None):
-    """Read out_wav, run integrity + crest checks, save .npy. Shared by all backends."""
+                   warmup_s=1.0, rail_rms=None, capture=None):
+    """Read out_wav, run integrity + crest checks, save .npy. Shared by all backends.
+
+    `capture`, if given, is the virtual capture chain's kwargs (see capture_chain.py) --
+    the audio-interface input stage a HARDWARE NAM capture goes through and a direct node
+    probe skips. Applied AFTER every validity check and BEFORE np.save, deliberately:
+
+      - the checks above (rail bound, crest, solver spikes, silent) ask "did the SIMULATOR
+        produce a valid render", which is a question about the raw circuit. Filtering first
+        would lower RMS -- on Duke of Tone (Distortion) by 2.2x -- and quietly make the
+        absolute rail check more permissive, masking the very divergence it exists to catch.
+      - but rms/peak are RECOMPUTED from the filtered signal afterwards, because combine()
+        normalises the dataset using `peak` from params.csv. Recording raw stats beside
+        filtered data would set output_scale from a peak the stored samples never reach.
+    """
     sig, sr = sf.read(str(out_wav))
     sig = sig.astype(np.float32)
     if not np.isfinite(sig).all():
@@ -604,6 +617,12 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
         clip_frac = float(np.mean(np.abs(stats_sig) > 0.999))
         if clip_frac > 0.01:
             warn.append(f"clipping:{clip_frac*100:.1f}%")
+    if capture:
+        from capture_chain import capture_chain as _cc
+        sig = _cc(sig, sr, **capture)
+        _st = sig[warmup_n:] if len(sig) > warmup_n else sig
+        rms = float(np.sqrt(np.mean(_st.astype(np.float64) ** 2)))
+        peak = float(np.max(np.abs(_st)))
     np.save(str(path), sig)
     out_wav.unlink(missing_ok=True)
     return Result(idx, dsp, proc_t, True, " ".join(warn), rms, peak)
@@ -888,6 +907,22 @@ def _rung_str(rung: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in sorted(rung.items()) if v not in (None, "", 0))
 
 
+
+def _capture_cfg(args):
+    """The virtual capture chain's kwargs, or None when disabled.
+
+    Returned as a plain dict (not a filter object) so it is picklable across the worker
+    pool AND so the exact settings can be recorded verbatim in config.json -- a dataset
+    has to declare the capture chain it was rendered through, or a later reader cannot
+    tell a chained dataset from an unchained one and will silently compare the two.
+    """
+    if getattr(args, "no_capture_chain", False):
+        return None
+    import capture_chain as _ccm
+    return {"corner_hz": args.capture_hp_hz if args.capture_hp_hz is not None else _ccm.DEFAULT_CORNER_HZ,
+            "order": args.capture_order if args.capture_order is not None else _ccm.DEFAULT_ORDER}
+
+
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 backend: str, circuit: str = None, schx: str = None,
                 param_map: dict = None, fixed_params: str = None,
@@ -895,7 +930,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 timeout_s: int = 1200, oversample: int = 2,
                 max_crest: float = 0.0, ng: dict = None,
                 warmup_s: float = 1.0, no_retry: bool = False, rail_rms: float = None,
-                start_rung: int = 0) -> Result:
+                start_rung: int = 0, capture: dict = None) -> Result:
     """Render one combination, ESCALATING THE SOLVER when it fails to converge.
 
     A failed combination used to record its error and be forgotten -- leaving a hole in the
@@ -925,7 +960,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         r = _render_once(idx, params, out_dir, input_wav, backend, circuit, schx,
                          param_map, fixed_params, speaker, expected_frames, timeout_s,
                          os_i, max_crest, ng_i, warmup_s,
-                         iterations=rung.get("iterations"), rail_rms=rail_rms)
+                         iterations=rung.get("iterations"), rail_rms=rail_rms, capture=capture)
         if r.ok:
             r.rung, r.settings = i, (_rung_str(rung) if i else "")
             if i and i > start:
@@ -1163,7 +1198,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                  timeout_s: int = 1200, oversample: int = 2,
                  max_crest: float = 0.0, ng: dict = None,
                  warmup_s: float = 1.0, iterations: int = None,
-                 rail_rms: float = None) -> Result:
+                 rail_rms: float = None, capture: dict = None) -> Result:
     path = sig_path(out_dir, idx)
     out_wav = path.with_suffix(".wav")
 
@@ -1172,7 +1207,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             err = _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                param_map, fixed_params, ng or {})
             return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest,
-                                        warmup_s=warmup_s, rail_rms=rail_rms)
+                                        warmup_s=warmup_s, rail_rms=rail_rms, capture=capture)
 
         if backend == "cpp":
             args = [str(HARNESS), "--input", str(input_wav), "--output", str(out_wav),
@@ -1242,7 +1277,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             with _procs_lock:
                 _active_procs.discard(proc)
         res = _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
-                            warmup_s=warmup_s, rail_rms=rail_rms)
+                            warmup_s=warmup_s, rail_rms=rail_rms, capture=capture)
         res.warnings = warned
         return res
 
@@ -2463,6 +2498,21 @@ def main():
                          "(peak/RMS) exceeds this — catches numerical divergence that "
                          "RMS/length checks miss. Clean audio is <~10; high-gain solver "
                          "runaway is tens–thousands. 0 disables. (default: %(default)s)")
+    ap.add_argument("--no-capture-chain", action="store_true",
+                    help="Skip the virtual capture chain (see capture_chain.py). A hardware "
+                         "NAM capture is recorded through an audio interface whose input stage "
+                         "rolls off below ~20 Hz; probing a simulated node directly skips that, "
+                         "so targets can carry sub-audio no real capture contains AND that NAM's "
+                         "~52 ms receptive field cannot model. Duke of Tone (Distortion) 2026-09-10: "
+                         "64%% of target energy below 19 Hz, and BOTH this repo's trainer and the "
+                         "official upstream nam-full plateaued near ESR 0.5. On by default; pass "
+                         "this only to reproduce a pre-2026-09-10 dataset bit-for-bit.")
+    ap.add_argument("--capture-hp-hz", type=float, default=None,
+                    help="Virtual capture chain corner (default: capture_chain.DEFAULT_CORNER_HZ, "
+                         "derived as -0.5 dB at 20 Hz for a typical converter spec).")
+    ap.add_argument("--capture-order", type=int, default=None,
+                    help="Virtual capture chain filter order (default: "
+                         "capture_chain.DEFAULT_ORDER).")
     ap.add_argument("--skip-warmup-s", type=float, default=1.0,
                     help="seconds of DC-solver startup transient to exclude from the "
                          "rms/peak/crest divergence-detection stats (the transient can "
@@ -2842,6 +2892,7 @@ def main():
         "gear_make": args.gear_make or circuit_label,
         "gear_model": args.gear_model or circuit_label,
         "gear_type": args.gear_type or "amp",
+        "capture_chain": _capture_cfg(args),
     }, indent=2))
 
     (out_dir / "sweep.wav").write_bytes(in_wav.read_bytes())
@@ -2942,7 +2993,8 @@ def main():
                         args.oversample, args.max_crest, ng,
                         warmup_s=args.skip_warmup_s, no_retry=args.no_retry,
                         rail_rms=(None if args.skip_rail_check else rail_bound(schx)),
-                        start_rung=max(args.start_rung, prev_rungs.get(i, 0))): i
+                        start_rung=max(args.start_rung, prev_rungs.get(i, 0)),
+                        capture=_capture_cfg(args)): i
             for i, p in to_run
         }
         for f in as_completed(futs):
