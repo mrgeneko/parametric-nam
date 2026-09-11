@@ -10,9 +10,7 @@ to wipe and regenerate, or --skip-*/--only-* for manual control.
 
 Example — full boutique dual-channel amp clean pipeline:
     python run_pipeline.py \\
-        --dataset-dir ~/work/tmp/amp_clean \\
-        --nam-output   ~/work/tmp/amp_clean.param.nam \\
-        --checkpoint-dir ~/work/tmp/amp_clean_ckpt \\
+        --workspace ~/work/tmp/amp_clean \\
         --backend livespice \\
         --schx "$HOME/work/parametric-devices/amps/Boutique Dual-Channel Amp Preamp.schx" \\
         --knobs volume,mid,treble,middle,bass,clean_master \\
@@ -743,12 +741,14 @@ def main():
                         "hyperparams). CLI flags override it. See "
                         "parametric-nam-models/<category>/<device-id>/config.toml.")
     g.add_argument("--workspace",      type=Path, default=None,
-                   help="ONE directory holding everything this run produces, instead of "
-                        "naming --dataset-dir/--checkpoint-dir/--nam-output/--release-dir/"
-                        "--log separately. See WORKSPACE_LAYOUT. A workspace is PER RUN, not "
-                        "per circuit: point a second run at a second directory and the first "
-                        "stays intact. Any of the individual flags still wins over the "
-                        "layout, so you can put the dataset on a different disk.")
+                   help="MANDATORY (on the CLI or in --config): the ONE directory holding "
+                        "everything this run produces, so nothing a run produces has no "
+                        "default home (see WORKSPACE_LAYOUT) -- the gap that once lost the "
+                        "only copy of a measured excitation's sizing to /tmp. A workspace is "
+                        "PER RUN, not per circuit: point a second run at a second directory "
+                        "and the first stays intact. Any of --dataset-dir/--checkpoint-dir/"
+                        "--nam-output/--release-dir/--log still wins over the layout "
+                        "individually, so you can put the dataset on a different disk.")
     # These three may come from --config OR the CLI; validated after parsing.
     g.add_argument("--dataset-dir",    type=Path, default=None,
                    help="Dataset directory (generation output / training input)")
@@ -1002,6 +1002,17 @@ def main():
     args.epochs_explicit  = any(a == "--epochs"  or a.startswith("--epochs=")  for a in _cli)
     args.repeats_explicit = any(a == "--repeats" or a.startswith("--repeats=") for a in _cli)
 
+
+    # --workspace is MANDATORY (2026-09-10) -- not enforced via argparse's own required=True,
+    # which checks presence in argv and would reject a workspace set via --config even though
+    # config values count as explicit everywhere else in this file (see _CONFIG_PATH_DESTS).
+    # This runs before apply_workspace() so the error names the actual missing flag rather
+    # than cascading into "missing --dataset-dir/--nam-output/--checkpoint-dir" below.
+    if args.workspace is None:
+        ap.error("missing required --workspace (set on the CLI or in --config) -- every run "
+                 "must land in one directory holding its dataset/checkpoints/release/log, so "
+                 "nothing (e.g. a measured excitation's sizing) ends up parked in a scratch "
+                 "location and lost")
 
     # --workspace fills whatever the CLI and config between them left unset, so it runs
     # before the required-args check and cannot mask an explicit path.
