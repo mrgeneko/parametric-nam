@@ -27,6 +27,7 @@ Example — full boutique dual-channel amp clean pipeline:
 """
 
 import argparse, csv, json, math, os, platform, re, shutil, subprocess, sys, time, tomllib
+from capture_chain import add_cli_args as _cc_add_cli_args, resolve as _cc_resolve
 from datetime import datetime
 from pathlib import Path
 
@@ -817,6 +818,7 @@ def main():
     g.add_argument("--max-crest",    type=float, default=50.0,
                    help="Fail combos whose output crest factor exceeds this "
                         "(catches numerical divergence; 0 disables)")
+    _cc_add_cli_args(g)
     g.add_argument("--start-rung",   type=int, default=0,
                    help="Skip straight to this solver-retry rung for every combination with no "
                         "rung memory yet, instead of always starting at rung 0. See "
@@ -1208,6 +1210,17 @@ def main():
             if args.no_anchors:    gen_cmd += ["--no-anchors"]
             if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
             if args.start_rung:    gen_cmd += ["--start-rung",   args.start_rung]
+            # Forward the capture chain EXPLICITLY. run_pipeline reads config.toml via
+            # set_defaults, so a per-device override lands in `args` here -- but the renderer
+            # is a separate process with its own defaults, so an override must be passed or it
+            # is silently dropped. --no-capture-chain likewise cannot be expressed by omission,
+            # since the renderer defaults the chain ON. See capture_chain.resolve().
+            _chain = _cc_resolve(args)
+            if _chain is None:
+                gen_cmd += ["--no-capture-chain"]
+            else:
+                gen_cmd += ["--capture-hp-hz", _chain["corner_hz"],
+                            "--capture-order",  _chain["order"]]
             for r in (args.ranges or []):
                 gen_cmd += ["--range", r]
             for b in (args.bounds or []):

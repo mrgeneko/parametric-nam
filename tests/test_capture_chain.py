@@ -438,3 +438,90 @@ def test_describe_ordinals_are_correct():
     from capture_chain import describe
     for n, want in ((1, "1st-order"), (2, "2nd-order"), (3, "3rd-order"), (4, "4th-order")):
         assert want in describe({"corner_hz": 18.0, "order": n})
+
+
+class TestConfigResolution:
+    """CLI > config.toml > default, and every tool must reach the same answer.
+
+    Before resolve(), a capture key in a config.toml was honoured by run_pipeline (which
+    uses set_defaults) and silently IGNORED by prepare_excitation, check_transient_coverage
+    and grid_adequacy, which load the config and cherry-pick individual keys. Half-honoured
+    is worse than unsupported: it looks like it works.
+    """
+
+    def _args(self, **kw):
+        import types
+        d = {"no_capture_chain": None, "capture_hp_hz": None, "capture_order": None}
+        d.update(kw)
+        return types.SimpleNamespace(**d)
+
+    def test_default_when_nothing_given(self):
+        from capture_chain import resolve
+        assert resolve(self._args()) == {"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER}
+
+    def test_config_supplies_an_override(self):
+        from capture_chain import resolve
+        assert resolve(self._args(), {"capture-hp-hz": 15.0, "capture-order": 3}) == \
+            {"corner_hz": 15.0, "order": 3}
+
+    def test_cli_beats_config(self):
+        from capture_chain import resolve
+        assert resolve(self._args(capture_hp_hz=22.0),
+                       {"capture-hp-hz": 15.0})["corner_hz"] == 22.0
+
+    def test_either_key_spelling_works(self):
+        """run_pipeline.load_config normalises to underscores; grid_adequacy loads raw TOML."""
+        from capture_chain import resolve
+        assert resolve(self._args(), {"capture_hp_hz": 12.0})["corner_hz"] == 12.0
+        assert resolve(self._args(), {"capture-hp-hz": 12.0})["corner_hz"] == 12.0
+
+    def test_config_can_disable_the_chain(self):
+        """Needs --no-capture-chain to be store_const/None: with store_true its False
+        default is indistinguishable from an explicit off, so config could never win."""
+        from capture_chain import resolve
+        assert resolve(self._args(), {"no-capture-chain": True}) is None
+
+    def test_cli_disable_beats_a_config_override(self):
+        from capture_chain import resolve
+        assert resolve(self._args(no_capture_chain=True), {"capture-hp-hz": 15.0}) is None
+
+    def test_absent_flag_is_not_a_disable(self):
+        """The regression the store_const change exists to prevent."""
+        from capture_chain import resolve
+        assert resolve(self._args()) is not None
+
+    def test_values_are_coerced(self):
+        """TOML may hand back ints or strings where floats/ints are wanted."""
+        from capture_chain import resolve
+        r = resolve(self._args(), {"capture-hp-hz": 15, "capture-order": "3"})
+        assert r == {"corner_hz": 15.0, "order": 3}
+        assert isinstance(r["corner_hz"], float) and isinstance(r["order"], int)
+
+
+class TestEveryBackendGetsAChain:
+    """prepare_excitation._setup must resolve a chain on EVERY backend branch.
+
+    Regression caught during development: initialising `_capture = None` and setting it only
+    inside the livespice branch left the ngspice-deck and ltspice-deck paths with None --
+    silently DISABLING the chain for them while the renderer still applied it.
+    """
+
+    def test_setup_returns_a_capture_for_deck_backends(self, tmp_path, monkeypatch):
+        import types, sys
+        import prepare_excitation as pe
+        mod = types.ModuleType("fake_deck")
+        mod.KNOB_NAMES = ["Gain"]
+        mod.build_deck = lambda **kw: ""
+        mod.__file__ = str(tmp_path / "fake_deck.py")
+        (tmp_path / "fake_deck.py").write_text("KNOB_NAMES=['Gain']\n")
+        monkeypatch.setitem(sys.modules, "fake_deck", mod)
+        monkeypatch.setattr(pe, "NgspiceBackend", lambda *a, **k: object())
+        args = types.SimpleNamespace(
+            backend="ngspice-deck", pedal_dir=str(tmp_path), module="fake_deck",
+            exclude_knob=[], probe_node="OUT", maxstep=3e-6, parallel_sims=8,
+            peak_max_v=40.0, lead_silence_s=3.0, range=["Gain=0,1"], fixed_params=None,
+            no_capture_chain=None, capture_hp_hz=None, capture_order=None, config=None,
+            schx=None, oversample=None, iterations=None)
+        out = pe._setup(args)
+        assert out[-1] is not None, "deck backend silently lost the capture chain"
+        assert out[-1] == {"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER}

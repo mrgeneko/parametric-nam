@@ -106,7 +106,7 @@ from ngspice_spicelib import load_input  # noqa: E402
 import ltspice_spicelib  # noqa: E402
 from prepare_excitation import _parse_fixed  # noqa: E402
 from render_backends import NgspiceBackend, LtspiceBackend, describe_subprocess_failure  # noqa: E402
-from capture_chain import (add_cli_args as _cc_add_cli_args, cfg_from_args as _cc_cfg_from_args,  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
                            cache_tag as _cc_cache_tag, capture_chain as _cc_apply,
                            describe as _cc_describe, mismatch_reason as _cc_mismatch_reason)
 
@@ -887,7 +887,7 @@ def main() -> None:
     else:
         oversample = int(oversample)
     check_oracle(backend)
-    capture = _cc_cfg_from_args(args)
+    capture = _cc_resolve(args, cfg)
 
     n_combos = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")

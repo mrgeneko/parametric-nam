@@ -123,7 +123,10 @@ def add_cli_args(ap):
     through a different chain than the dataset was rendered through sizes the excitation
     against a signal that never existed.
     """
-    ap.add_argument("--no-capture-chain", action="store_true",
+    # store_const + default=None, NOT store_true: argparse cannot distinguish "flag absent"
+    # from "flag defaulted to False", so with store_true a config.toml could never turn the
+    # chain OFF -- resolve() would read False and be unable to tell whether the user meant it.
+    ap.add_argument("--no-capture-chain", action="store_const", const=True, default=None,
                     help="Measure the RAW node instead of through the virtual capture chain "
                          "(see capture_chain.py). Off by default -- a measurement should see "
                          "what the MODEL will be trained on.")
@@ -142,6 +145,70 @@ def cfg_from_args(args):
     order = getattr(args, "capture_order", None)
     return {"corner_hz": DEFAULT_CORNER_HZ if hz is None else hz,
             "order": DEFAULT_ORDER if order is None else order}
+
+
+def _cfg_lookup(cfg, key):
+    """Read `key` from a loaded config, accepting hyphens or underscores.
+
+    run_pipeline.load_config normalises keys to argparse dests (underscores), but
+    grid_adequacy.py loads raw TOML where they stay hyphenated. Accept both rather than
+    making every caller remember which loader it used.
+    """
+    if not cfg:
+        return None
+    for k in (key, key.replace("_", "-")):
+        if k in cfg:
+            return cfg[k]
+    return None
+
+
+def resolve(args, cfg=None):
+    """The capture chain to use: CLI flag > config.toml > default. None when disabled.
+
+    WHY A RESOLVER AND NOT cfg_from_args. Four tools now honour the chain, and a per-device
+    override has to reach all of them identically or they measure signals that never
+    coexist. Before this, a capture key in a config.toml was picked up by run_pipeline
+    (which uses set_defaults) and silently IGNORED by prepare_excitation,
+    check_transient_coverage and grid_adequacy, which load the config and cherry-pick
+    individual keys. Half-honoured is worse than unsupported: it looks like it works.
+
+    Relies on --no-capture-chain being store_const/None (see add_cli_args): with store_true
+    its False default is indistinguishable from an explicit off, so config could never
+    disable the chain.
+    """
+    off = getattr(args, "no_capture_chain", None)
+    if off is None:
+        off = bool(_cfg_lookup(cfg, "no_capture_chain"))
+    if off:
+        return None
+    hz = getattr(args, "capture_hp_hz", None)
+    if hz is None:
+        hz = _cfg_lookup(cfg, "capture_hp_hz")
+    order = getattr(args, "capture_order", None)
+    if order is None:
+        order = _cfg_lookup(cfg, "capture_order")
+    return {"corner_hz": DEFAULT_CORNER_HZ if hz is None else float(hz),
+            "order": DEFAULT_ORDER if order is None else int(order)}
+
+
+def assert_dataset_match(capture, dataset_dir):
+    """Hard-fail if `dataset_dir` was rendered through a different chain than `capture`.
+
+    TWO SOURCES OF TRUTH, and which one governs depends on timing: before a render,
+    config.toml is INTENT; after it, the dataset's config.json is FACT. A tool re-probing
+    an already-rendered dataset must use what the dataset WAS rendered with. Silently
+    honouring a config.toml edited after the render re-introduces exactly the raw-vs-chained
+    mismatch this machinery exists to prevent -- so config governs what gets RENDERED, the
+    dataset governs what gets MEASURED, and a disagreement is a hard error, not a warning.
+    """
+    import sys
+    actual = read_dataset_chain(dataset_dir)
+    reason = mismatch_reason(capture, actual)
+    if reason:
+        sys.exit(f"ERROR: {dataset_dir} was rendered through a different capture chain than "
+                 f"the one resolved from the config/CLI -- {reason}. The DATASET is the "
+                 f"authority for anything measured against it; re-render it, or drop the "
+                 f"override so it matches. (capture_chain.py)")
 
 
 def cache_tag(capture):

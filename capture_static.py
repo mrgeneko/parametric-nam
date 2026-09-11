@@ -101,7 +101,7 @@ from gen_dataset_from_schx import parse_schx_controls, resolve_knobs, input_prov
 from param_train import _input_level_dbu, _schx_input_v0dbfs  # noqa: E402
 from find_saturation_point import find_saturation_point  # noqa: E402
 from capture_chain import (add_cli_args as _cc_add_cli_args,  # noqa: E402
-                          cfg_from_args as _cc_cfg, describe as _cc_describe)
+                          resolve as _cc_resolve, describe as _cc_describe)
 from render_backends import LiveSpiceBackend  # noqa: E402
 
 NAM_VENV = Path.home() / "work" / "neural-amp-modeler" / "venv"
@@ -713,7 +713,7 @@ def main():
 
     # ONE value, used for both the onset probe and the render. Deriving it twice would let
     # them diverge silently, which is the whole failure this wiring prevents.
-    capture = _cc_cfg(args)
+    capture = _cc_resolve(args)
     print(f"[capture_static] {_cc_describe(capture)}")
 
     excitation_report, effective_input = ensure_adequate_excitation(

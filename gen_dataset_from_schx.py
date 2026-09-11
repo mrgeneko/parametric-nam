@@ -916,8 +916,8 @@ def _capture_cfg(args):
     has to declare the capture chain it was rendered through, or a later reader cannot
     tell a chained dataset from an unchained one and will silently compare the two.
     """
-    from capture_chain import cfg_from_args
-    return cfg_from_args(args)
+    from capture_chain import resolve
+    return resolve(args)   # no --config here; run_pipeline forwards the flags
 
 
 def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,

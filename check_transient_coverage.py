@@ -60,7 +60,8 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config  # noqa: E402
-from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
+                           cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -486,6 +487,7 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
+    _capture = _cc_resolve(args, cfg)
     backend_name = cfg.get("backend", "livespice")
     input_wav = Path(cfg["input"]).expanduser()
 
@@ -523,7 +525,7 @@ def main():
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
                                              sample_grid=args.sample_grid,
-                                             capture=cfg_from_args(args),
+                                             capture=_capture,
                                              lead_silence_s=args.lead_silence_s)
         schx_or_module = module
     elif backend_name == "ltspice-deck":
@@ -541,7 +543,7 @@ def main():
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
                                              sample_grid=args.sample_grid,
-                                             capture=cfg_from_args(args))
+                                             capture=_capture)
         schx_or_module = module
     else:
         schx = str(cfg["schx"])
@@ -552,7 +554,7 @@ def main():
                                 full_hypercube=(False if args.no_full_hypercube else None),
                                 max_corners=args.max_corners,
                                 sample_grid=args.sample_grid,
-                                capture=cfg_from_args(args))
+                                capture=_capture)
         schx_or_module = schx
 
     if args.json:

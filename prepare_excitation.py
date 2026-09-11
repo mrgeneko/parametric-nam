@@ -55,7 +55,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
 from check_transient_coverage import _corners, _sample_interior  # noqa: E402
-from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
+                           cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -133,11 +134,16 @@ def _parse_fixed(fixed_str):
 
 
 def _setup(args):
-    """Returns (backend, identity, cache_extra, knob_ranges, fixed, lead_silence_s, label)."""
-    _capture = cfg_from_args(args)
+    """Returns (backend, identity, cache_extra, knob_ranges, fixed, lead_silence_s, label,
+    capture) -- `capture` last, resolved from CLI+config (see capture_chain.resolve)."""
+    # Resolve from CLI+defaults FIRST so every backend branch has a chain; the livespice
+    # branch re-resolves once its config is loaded. Initialising to None instead would
+    # silently DISABLE the chain on the deck backends, which never load a config.
+    _capture = _cc_resolve(args)
     if args.backend == "livespice":
         if args.config:
             cfg = load_config(Path(args.config))
+            _capture = _cc_resolve(args, cfg)
             schx = str(cfg["schx"])
             oversample = args.oversample or cfg.get("oversample", 8)
             knob_ranges = _parse_ranges(cfg.get("ranges", []))
@@ -154,7 +160,7 @@ def _setup(args):
         backend = LiveSpiceBackend(schx, oversample=oversample, iterations=args.iterations)
         identity = Path(schx).read_bytes()
         cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
-        return backend, identity, cache_extra, knob_ranges, fixed, 0.0, Path(schx).name
+        return backend, identity, cache_extra, knob_ranges, fixed, 0.0, Path(schx).name, _capture
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module and args.range):
             sys.exit("--backend ngspice-deck needs --pedal-dir, --module, and --range")
@@ -176,7 +182,7 @@ def _setup(args):
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
         cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
-        return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module
+        return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module, _capture
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module and args.range):
             sys.exit("--backend ltspice-deck needs --pedal-dir, --module, and --range")
@@ -191,7 +197,7 @@ def _setup(args):
         cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
-        return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module
+        return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module, _capture
     sys.exit(f"unknown --backend {args.backend!r}")
 
 
@@ -336,13 +342,14 @@ def main():
     elif not args.output:
         ap.error("--output is required (or pass --workspace to place it for you)")
 
-    backend, identity, cache_extra, knob_ranges, fixed, sweep_lead_silence_s, label = _setup(args)
+    (backend, identity, cache_extra, knob_ranges, fixed, sweep_lead_silence_s, label,
+     _capture) = _setup(args)
 
     print(f"finding saturation onset across the knob-grid corners of {label}...")
     tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
-                                    capture=cfg_from_args(args),
+                                    capture=_capture,
                                     full_hypercube=(False if args.no_full_hypercube else None),
                                     max_corners=args.max_corners, sample_grid=args.sample_grid,
                                     quiet=False,

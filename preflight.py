@@ -69,7 +69,8 @@ sys.path.insert(0, str(HERE))
 from gen_dataset_from_schx import parse_schx_controls, resolve_knobs  # noqa: E402
 from param_train import _schx_input_v0dbfs, _input_level_dbu  # noqa: E402
 
-from capture_chain import add_cli_args as _cc_add_cli_args, cfg_from_args, cache_tag  # noqa: E402
+from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
+                           cache_tag)
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
                                    findpeak_cache_key, cache_findpeak, scratch_dir)
 from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
@@ -129,7 +130,7 @@ def spikes(y):
 
 
 def _build_backend(args):
-    _capture = cfg_from_args(args)
+    _capture = _cc_resolve(args)
     if args.backend == "livespice":
         if not args.schx:
             sys.exit("--backend livespice needs --schx")
@@ -315,7 +316,7 @@ def main():
                 print(f"    {done}/{total} amplitude probes rendered ({elapsed:.0f}s)", flush=True)
             sat = find_saturation_point(backend, base, scratch, lead_silence_s=lead_silence_s,
                                          max_v=args.peak_max_v, progress=_sat_progress,
-                                         capture=cfg_from_args(args))
+                                         capture=_cc_resolve(args))
             cache_findpeak(cpath, sat)
         if sat is None:
             warn.append("--find-peak: all sweep renders failed")
