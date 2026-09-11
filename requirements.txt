@@ -27,3 +27,4 @@ torch==2.12.1
 numpy==2.5.0
 scipy==1.18.0        # signal.decimate (oversampling), spatial.cKDTree (coverage_report gap analysis)
 soundfile==0.14.0    # WAV I/O
+spicelib==1.6.3      # ngspice_spicelib.py: SimRunner/RawRead, for the ngspice-deck backend
