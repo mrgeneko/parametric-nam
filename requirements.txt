@@ -3,9 +3,15 @@
 #
 #   pip install -r requirements.txt
 #
-# torch note: the default PyPI wheel is CPU and (on Apple Silicon) MPS. For NVIDIA
-# CUDA, install the matching build FIRST from the PyTorch index, then this file for
-# the rest, e.g.:
+# torch note: on macOS the default PyPI wheel is CPU and (on Apple Silicon) MPS. On
+# Linux x86_64 it is a CUDA build that pulls in several GB of nvidia-* wheels; for a
+# CPU-only box (e.g. a render worker), install the CPU build FIRST, then this file:
+#   pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+# (setup.sh leaves an already-installed torch alone, so this order works with it too.)
+#
+# For NVIDIA CUDA, install the matching build FIRST from the PyTorch index, then this
+# file for the rest, e.g.:
 #   pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu124
 #   pip install -r requirements.txt
 #
