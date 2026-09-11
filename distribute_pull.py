@@ -508,7 +508,16 @@ def _combine(local_dir: Path) -> bool:
     param_train.py refuses ("outputs.npy not found"). That cost Mesa Orange and Duke of Tone
     (Overdrive) a manual step each on 2026-09-07; run_pipeline.py has had a Combine step all
     along, so only the distributed path was missing it.
+
+    local_dir is wrapped in Path() here for the same reason _collect() already does it: the
+    type hint says Path, but the real caller is main()'s args.collect, a bare argparse string
+    (no type=Path on that flag). gen_dataset_from_schx.combine() does `out_dir / "params.csv"`,
+    which TypeErrors on a str -- caught on the Duke of Tone (Distortion) 63-combo run
+    (2026-09-11): --collect succeeded (63/63 rows and .npy files, all present on disk) and only
+    the auto-combine step after it crashed, so the fix here is purely to combine() what --collect
+    already built correctly, not to re-render or re-collect anything.
     """
+    local_dir = Path(local_dir).expanduser()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from gen_dataset_from_schx import combine as _do_combine
     _do_combine(local_dir)

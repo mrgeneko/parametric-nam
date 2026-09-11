@@ -520,6 +520,23 @@ def test_collect_returns_consistency_flag(tmp_path, monkeypatch):
     assert dp._collect([], [], local) is True           # 2 rows, 2 npy
 
 
+def test_combine_accepts_the_bare_string_argparse_actually_produces(tmp_path, monkeypatch):
+    """--collect has no type=Path, so main() hands _combine a plain str -- exactly what
+    argparse produces from the command line. gen_dataset_from_schx.combine() does
+    `out_dir / "params.csv"`, which TypeErrors on a str.
+
+    Regression: this crashed the auto-combine step on the Duke of Tone (Distortion) 63-combo
+    run (2026-09-11) -- AFTER --collect had already succeeded (63/63 rows and .npy files on
+    disk), so the render and collect were both fine and only this conversion was missing.
+    """
+    import distribute_pull as dp
+    seen = []
+    monkeypatch.setattr("gen_dataset_from_schx.combine", lambda out_dir, **kw: seen.append(out_dir))
+    dp._combine(str(tmp_path / "ds"))   # str, not Path -- what args.collect actually is
+    assert seen and isinstance(seen[0], Path), \
+        "combine() must receive a Path, matching what it does with the result (out_dir / ...)"
+
+
 def test_should_combine_decision_table():
     """Regression: --collect used to stop before outputs.npy, so param_train refused the dir.
 
