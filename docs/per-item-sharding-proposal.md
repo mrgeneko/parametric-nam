@@ -4,6 +4,20 @@
 gain/master render, which was sharded by hand across three machines and needed three
 restarts.
 
+**Relationship to [fleet-deployment-proposal.md](fleet-deployment-proposal.md).** That
+document is the larger plan for running work across machines: a mesh network, a generated
+host inventory, dispatch-time version checks, and eventually pull-based agents with a durable
+queue (its §4). This is a nearer-term step inside the existing SSH controller, and it should
+be read as an elaboration of that §4 rather than an alternative to it.
+
+Two ideas here were already written down in its §4a before this document existed, and were
+re-derived independently: warming the shared `findpeak` cache across the fleet, and giving
+corner probing a `--shard i-i/N`. That section is also ahead of this one on a point that
+matters — the findpeak cache key does not include the simulator's own version, so a rebuilt
+oracle silently reuses old measurements, and that must be closed before any cross-machine
+cache sync. Its §2 (the host inventory) is the natural home for the per-host facts this
+document currently leaves to `--worker HOST:DIR:PARALLEL`.
+
 ## Summary
 
 Dispatch **one combination at a time** to each of K concurrent slots per host, where each

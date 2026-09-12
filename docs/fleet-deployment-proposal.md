@@ -104,6 +104,33 @@ A `--probe-hosts` mode should emit a reviewable file the way `scaffold_config.py
 device config: measured, annotated, and yours to correct. Requiring a hand-written file with
 no discoverability is a mistake this project has made before.
 
+**It must describe accelerators, not only cores.** Everything above is render-side, and
+rendering is CPU-bound — but the same fleet also *trains*, and that is where the per-host
+facts are least discoverable and most often rediscovered by hand. The repo already contends
+with three accelerator flavours: `checkpoint_infer.py` selects `cuda` (NVIDIA or AMD/ROCm),
+then `mps`, then CPU; `release_run.sh` assumes `mps`; and `run_pipeline.py` writes
+`HIP_VISIBLE_DEVICES=0` into every generated `reproduce.sh`. None of that is recorded
+anywhere a scheduler could read.
+
+```toml
+[hosts.linux-1]
+accelerator  = "rocm"      # "cuda" | "rocm" | "mps" | "none"
+gpus         = 1
+vram_gb      = 16
+train        = true        # may this host be given training jobs at all?
+```
+
+`train` is deliberately separate from having a GPU. A machine can own a capable GPU and still
+be a poor training host — it is someone's laptop, it sleeps, or it is the controller. And a
+CPU-only host is a perfectly good *render* worker, so `accelerator = "none"` must not exclude
+it from the fleet.
+
+The same "declare it, don't discover it the hard way" argument as `max_render_s` applies:
+"this box has 8 GB of VRAM and cannot hold the full-width tier at this batch size" is a true,
+useful, measurable thing to say about a machine, and is not the same as "broken". `vram_gb`
+plus a model's tier widths is enough to refuse a job before it OOMs several hours in rather
+than after.
+
 **Where it lives.** The loader, the flag, the docs and an `examples/fleet.example.toml` are
 public and part of this repo. *Your* inventory is per-machine state, not project content: it
 defaults to `~/.config/parametric-nam/` (mirroring `~/.cache/parametric-nam/`) and
@@ -138,6 +165,16 @@ natively, on every platform, for a fraction of the effort.
 
 ### 4. Pull-based agents, a durable queue, and a dashboard
 
+> See [per-item-sharding-proposal.md](per-item-sharding-proposal.md) for a smaller,
+> nearer-term step in this direction: keeping the SSH controller but dispatching **one
+> combination at a time** into per-slot output directories, which removes the `--chunks`
+> tuning knob and shrinks the straggler tail to a single render. It also measures the
+> per-dispatch overhead this section's design assumes away (~0.1% of a 19-minute render on
+> the livespice path) and documents a prerequisite bug: `gen_dataset` resume-skips on
+> `path.exists()` while writing `.npy` non-atomically, so any killed render — including one
+> killed by a lease expiring under the agent model below — can leave a truncated file that
+> every later run treats as complete.
+
 Invert the flow: instead of a controller pushing work over SSH, workers poll a coordinator,
 lease a chunk, heartbeat per combination, and report results. At this scale the coordinator
 can be a small HTTP service over SQLite.
@@ -164,6 +201,14 @@ single rendered combination. Unioning them before distributing work would let ev
 start warm with whatever any machine has already measured, at negligible transfer cost.
 Filenames are content-addressed, so merging is a set union with no possible conflict.
 
+Sharing measurements across machines assumes renders are reproducible, which was unverified
+when this section was written. Measured since, on one machine (Mesa Orange sag v30,
+oversample 8, five renders per level): output RMS bit-identical, spread 0.0000% at both
+0.053 V and 40 V. Cross-*machine* reproducibility is still unverified and this fleet is mixed
+ARM and x86; the circumstantial evidence is good — three machines independently reported
+`all-min 0.909 V` and `OR Gain=lo-solo 0.137 V`, agreeing to the printed precision — but a
+full-precision comparison of one cached curve across architectures should precede any sync.
+
 The prerequisite is that the key must be complete, because syncing turns a single machine's
 wrong entry into the whole fleet's wrong entry. Auditing it before proposing the sync found
 two real gaps, since fixed: the two deck backends produced identical keys for the same
@@ -174,7 +219,10 @@ version, so a rebuilt oracle silently reuses old measurements. That one is worth
 before any sync, and it invalidates existing entries when it lands.
 
 Onset measurement is also the one pipeline stage that is embarrassingly parallel and not yet
-distributed. It parallelises over *amplitudes within one corner* and runs the corners
+distributed — and the cost is larger than the estimate below suggests once a render is
+sharded, because **every worker repeats it**. In the Mesa Orange gain/master run all three
+machines independently ran the same 25-corner coverage gate before rendering, roughly 25
+minutes each, computing identical numbers. It parallelises over *amplitudes within one corner* and runs the corners
 serially; corners are the right axis, being fully independent. Adding `--shard i-i/N` with
 the same modulo convention the renderer uses would make it dispatchable by the existing
 scheduler with no new machinery — merge is `max()` for the worst-case onset and a
