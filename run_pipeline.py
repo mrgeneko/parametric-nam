@@ -1405,9 +1405,12 @@ def main():
                 log(f"  NOTE: --target-steps {args.target_steps} is deprecated; "
                     f"read as --steps-per-epoch {steps_per_epoch:.1f}. It was never a budget in "
                     f"open-ended mode -- see run_pipeline.py --steps-per-epoch.", fh)
-            if epochs == 0 and steps_per_epoch and n_combos and not args.repeats_explicit:
-                repeats, spe = _derive_repeats(steps_per_epoch, n_combos, args.batch_size,
-                                                args.val_split, fh)
+            if epochs == 0 and steps_per_epoch:
+                # param_train.py sets epoch length from --steps-per-epoch via the train
+                # sampler, independent of n_combos and repeats -- so the request is honoured
+                # EXACTLY on every grid and there is nothing to derive here any more. This
+                # used to call _derive_repeats and print a number the floor then overrode.
+                spe = int(steps_per_epoch)
                 log(f"OPEN-ENDED (epochs=0): no step budget — SGDR runs until you stop it. "
                     f"repeats {repeats} → {spe} steps/epoch, restart every "
                     f"{args.restart_period} epochs ({spe * args.restart_period:,} steps/cycle).", fh)

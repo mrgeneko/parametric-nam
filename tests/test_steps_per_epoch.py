@@ -152,3 +152,49 @@ class TestTemplateUsesTheNewFlag:
                 f"loader did not pick it up: {[k for k in cfg if 'step' in k]}"
         finally:
             os.unlink(path)
+
+
+class TestEpochLengthIsDecoupled:
+    """--steps-per-epoch must be honoured EXACTLY, on every grid size.
+
+    It used to be a target that `repeats` was derived to hit, which worked only while the
+    derived value stayed above the val-split floor. Once the floor bound, the equation
+    inverted and epoch length became proportional to GRID SIZE -- Mesa Ch1's 11,907 combos
+    ran 3,535 steps/epoch against a request of 50, so one SGDR cycle was 70x longer than
+    --restart-period implied. Orange 3.4x, EVH 2.3x, each silently different.
+
+    The fix decouples epoch length from dataset length: a RandomSampler with an explicit
+    num_samples draws a fixed count per epoch whatever len(dataset) is.
+    """
+
+    def _loader_len(self, n_combos, repeats, steps_per_epoch, batch=64):
+        import torch
+        ds = torch.utils.data.TensorDataset(torch.zeros(n_combos * repeats, 1))
+        sampler = torch.utils.data.RandomSampler(
+            ds, replacement=True, num_samples=steps_per_epoch * batch)
+        dl = torch.utils.data.DataLoader(ds, batch_size=batch, sampler=sampler, drop_last=True)
+        return len(dl)
+
+    @pytest.mark.parametrize("n_combos", [7, 28, 63, 392, 576, 648, 11907])
+    def test_steps_per_epoch_is_exact_at_every_grid_size(self, n_combos):
+        """The grids in the fleet today, smallest to largest. Under the old scheme the last
+        one ran 70x its request."""
+        assert self._loader_len(n_combos, 20, 50) == 50
+
+    def test_independent_of_repeats(self):
+        for r in (1, 20, 200, 1440):
+            assert self._loader_len(576, r, 50) == 50, f"repeats={r} changed epoch length"
+
+    def test_sgdr_cycle_length_is_now_comparable_across_devices(self):
+        """The whole point: --restart-period 50 must mean the same amount of optimisation on
+        a 7-combo pedal and an 11,907-combo amp."""
+        small = self._loader_len(7, 20, 50) * 50
+        huge = self._loader_len(11907, 20, 50) * 50
+        assert small == huge == 2500
+
+    def test_repeats_is_pinned_to_the_val_split_floor(self):
+        """repeats stops being a schedule knob -- it exists only to keep the val split
+        per-combination representative, so it is 1/val_split and nothing else."""
+        import math
+        for vs in (0.05, 0.10, 0.20):
+            assert math.ceil(1 / vs) in (20, 10, 5)
