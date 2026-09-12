@@ -72,6 +72,9 @@ from check_transient_coverage import interior_sample_budget as _interior_sample_
 
 DEFAULT_SWEEP_DUR_CAP = 150.0
 
+from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
+                           describe as _cc_describe)
+
 TEMPLATE = Path(__file__).resolve().parent / "examples" / "template.config.toml"
 
 
@@ -363,6 +366,7 @@ def main() -> None:
                     help="oversample auto-measurement only runs for livespice -- ngspice's "
                          "adaptive timestepping isn't tuned the same way (see "
                          "ngspice/README.md)")
+    _cc_add_cli_args(ap)
     ap.add_argument("--write-backend-sidecar", action="store_true",
                     help="if the chosen backend DIVERGES while measuring oversample, write the "
                          "<stem>.backends.toml recording it, instead of only reporting it. The "
@@ -433,6 +437,21 @@ def main() -> None:
         text = _replace_line(text, "oversample", f"oversample = {oversample}   # {comment}")
     # else: leave the template's placeholder oversample + comment untouched -- ngspice
     # tuning is a different question (see ngspice/README.md), not this tool's job.
+
+    # Write the RESOLVED chain, not the template's literals: a --capture-* override passed
+    # to this tool must end up in the config it generates, or the device is scaffolded with
+    # one chain and rendered with another. prepare_excitation.py is invoked below with
+    # --config pointing at this file, so writing it here is also how the onset measurement
+    # gets the same chain -- no separate forwarding needed.
+    _chain = _cc_resolve(args)
+    if _chain is None:
+        text = _replace_line(text, "capture-hp-hz", "no-capture-chain = true")
+        text = _replace_line(text, "capture-order",
+                             "# capture chain DISABLED for this device (--no-capture-chain)")
+    else:
+        text = _replace_line(text, "capture-hp-hz", f"capture-hp-hz = {_chain['corner_hz']:g}")
+        text = _replace_line(text, "capture-order", f"capture-order = {_chain['order']}")
+    print(f"  {_cc_describe(_chain)}")
 
     text = _replace_table(text, "knobs", _format_knobs(names, args.grid_points))
 

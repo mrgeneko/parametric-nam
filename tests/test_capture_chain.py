@@ -525,3 +525,79 @@ class TestEveryBackendGetsAChain:
         out = pe._setup(args)
         assert out[-1] is not None, "deck backend silently lost the capture chain"
         assert out[-1] == {"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER}
+
+
+class TestScaffoldPinsTheChain:
+    """scaffold_config must WRITE the chain into the config it generates.
+
+    Two reasons it is written rather than left to the tool default:
+      - it is part of the capture DEFINITION. Changing it changes every target, so it needs
+        a re-render and re-train. A config that does not declare it would silently change
+        meaning when the fleet default moves -- which happened on 2026-09-11 (2nd @ 11.8 Hz
+        -> 3rd @ 18 Hz), so this is a live hazard, not a hypothetical one.
+      - scaffold_config invokes prepare_excitation.py with --config pointing at this file,
+        so writing it here IS the forwarding mechanism for the onset measurement.
+    """
+
+    def _template(self):
+        from pathlib import Path
+        import scaffold_config
+        return Path(scaffold_config.TEMPLATE).read_text()
+
+    def test_template_declares_the_chain(self):
+        t = self._template()
+        assert "capture-hp-hz" in t and "capture-order" in t
+
+    def test_template_matches_the_current_default(self):
+        """If the default moves, the template must move with it -- otherwise every newly
+        scaffolded device is pinned to a stale value that no longer matches the tools."""
+        import re
+        t = self._template()
+        hz = float(re.search(r"^capture-hp-hz\s*=\s*([\d.]+)", t, re.M).group(1))
+        order = int(re.search(r"^capture-order\s*=\s*(\d+)", t, re.M).group(1))
+        assert (hz, order) == (DEFAULT_CORNER_HZ, DEFAULT_ORDER)
+
+    def test_template_value_round_trips_through_the_resolver(self):
+        """The written keys must be ones resolve() actually reads -- a typo'd key would
+        produce a config that looks pinned but silently falls back to the default."""
+        import tomllib, types
+        from capture_chain import resolve
+        cfg = tomllib.loads(self._template())
+        args = types.SimpleNamespace(no_capture_chain=None, capture_hp_hz=None,
+                                     capture_order=None)
+        assert resolve(args, cfg) == {"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER}
+
+    def test_an_override_reaches_the_generated_config(self, tmp_path):
+        """A --capture-* override must land in the written file, or the device is
+        scaffolded with one chain and rendered with another."""
+        import types, re
+        from scaffold_config import _replace_line
+        from capture_chain import resolve
+        text = self._template()
+        args = types.SimpleNamespace(no_capture_chain=None, capture_hp_hz=24.4,
+                                     capture_order=2)
+        chain = resolve(args)
+        text = _replace_line(text, "capture-hp-hz", f"capture-hp-hz = {chain['corner_hz']:g}")
+        text = _replace_line(text, "capture-order", f"capture-order = {chain['order']}")
+        import tomllib
+        cfg = tomllib.loads(text)
+        blank = types.SimpleNamespace(no_capture_chain=None, capture_hp_hz=None,
+                                      capture_order=None)
+        assert resolve(blank, cfg) == {"corner_hz": 24.4, "order": 2}
+
+
+def test_scaffold_disabled_path_round_trips(tmp_path):
+    """--no-capture-chain writes a DIFFERENT shape (a bool key plus a comment where the
+    numeric key was). It must still parse as TOML and resolve back to disabled -- a broken
+    line here would make the whole config unreadable, not just the chain."""
+    import tomllib, types
+    from pathlib import Path
+    from scaffold_config import _replace_line, TEMPLATE
+    from capture_chain import resolve
+    text = Path(TEMPLATE).read_text()
+    text = _replace_line(text, "capture-hp-hz", "no-capture-chain = true")
+    text = _replace_line(text, "capture-order",
+                         "# capture chain DISABLED for this device (--no-capture-chain)")
+    cfg = tomllib.loads(text)
+    blank = types.SimpleNamespace(no_capture_chain=None, capture_hp_hz=None, capture_order=None)
+    assert resolve(blank, cfg) is None

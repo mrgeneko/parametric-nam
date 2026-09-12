@@ -19,6 +19,17 @@ backend    = "livespice"
 # default (2) is too low for most real circuits; this is a reasonable starting point.
 oversample = 8
 
+# The audio-interface input stage this device is captured through (capture_chain.py). A
+# hardware NAM capture is recorded through an interface that rolls off below ~20 Hz; a
+# simulator probing a node directly skips that, and NAM's ~52 ms receptive field cannot
+# model content whose state evolves over seconds. Written explicitly by
+# scaffold_config.py rather than left to the tool default, because it is part of the
+# capture DEFINITION: changing it changes every target, so it requires a re-render and a
+# re-train, not just a re-run. Pinning it here also means a future change to the fleet
+# default cannot silently alter what an already-rendered device means.
+capture-hp-hz = 18.0
+capture-order = 3
+
 # widths = [4, 8]   # DEFAULT (lite + full) -- this is param_train.py's own default, so
                      # omitting this line does the same thing. Add a middle tier (e.g.
                      # [4, 5, 8]) only if you actually need a w5 intermediate.
