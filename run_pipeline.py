@@ -418,8 +418,30 @@ def portable(p) -> str:
     return s
 
 
-def reproduce_command(args):
-    """Reconstruct a one-shot run_pipeline.py command from parsed args."""
+def reproduce_command(args, repeats=None, have_config=False):
+    """Reconstruct a one-shot run_pipeline.py command from parsed args.
+
+    PREFERS --config. When the run was driven by a config.toml (copied into the release
+    beside this script), the reproduce command just points at that copy instead of
+    re-expanding it into flags. Re-expansion is where this script silently stopped
+    reproducing anything: `--target-steps` had no branch here at all, so it was dropped,
+    and `--repeats` emitted args.repeats -- the raw CLI default of 1 -- rather than the
+    value DERIVED from target-steps. Mesa Orange's published bundle records `--repeats 1`
+    for a run that actually trained at 20, and the config's own comment warns that
+    repeats=1 on a small grid gives 1-2 gradient steps per epoch and a false plateau.
+
+    `repeats` is the DERIVED value from main(); falls back to args.repeats only when a
+    caller has none to give.
+    """
+    if have_config:
+        # The config sits next to this script in the release; $0 makes it location-independent.
+        return "\n".join([
+            'HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
+            '    --config         "$(cd "$(dirname "$0")" && pwd)/config.toml" \\',
+            f'    --dataset-dir    "{portable(args.dataset_dir)}" \\',
+            f'    --nam-output     "{portable(args.nam_output)}" \\',
+            f'    --checkpoint-dir "{portable(args.checkpoint_dir)}"',
+        ])
     c = ['HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
          f'    --dataset-dir    "{portable(args.dataset_dir)}" \\',
          f'    --nam-output     "{portable(args.nam_output)}" \\',
@@ -427,7 +449,10 @@ def reproduce_command(args):
          f'    --backend {args.backend} \\']
     if args.schx:          c.append(f'    --schx "{portable(args.schx)}" \\')
     if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
-    if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
+    # QUOTED: knob names routinely contain spaces ("OR Gain", "Or Master"), so an
+    # unquoted list makes bash split one flag into five. Every published bundle with a
+    # spaced knob name carries this broken line; the --range lines below were already quoted.
+    if args.knobs:         c.append(f'    --knobs "{args.knobs}" \\')
     if args.oversample != "2": c.append(f'    --oversample {args.oversample} \\')
     if args.trunc_target != 1e-3: c.append(f'    --trunc-target {args.trunc_target} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
@@ -439,14 +464,14 @@ def reproduce_command(args):
     if getattr(args, "method", ""): c.append(f'    --method {args.method} \\')
     if getattr(args, "input_upsample", 0): c.append(f'    --input-upsample {args.input_upsample} \\')
     if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
-    if args.values:        c.append(f'    --values {args.values} \\')
+    if args.values:        c.append(f'    --values "{args.values}" \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
     for b in (args.bounds or []):  c.append(f'    --bounds "{b}" \\')
     for g in (args.gang or []):    c.append(f'    --gang "{g}" \\')
     for s in (args.steps or []):   c.append(f'    --steps "{s}" \\')
     if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
     if getattr(args, "defaults", None): c.append(f'    --defaults "{args.defaults}" \\')
-    if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
+    if args.speaker:       c.append(f'    --speaker "{args.speaker}" \\')
     if args.input:         c.append(f'    --input "{portable(args.input)}" \\')
     if args.widths:        c.append(f'    --widths {args.widths} \\')
     if not args.mmap:      c.append('    --no-mmap \\')
@@ -456,12 +481,15 @@ def reproduce_command(args):
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
-    c.append(f'    --repeats {args.repeats} {epochs_part} '
+    if getattr(args, "target_steps", 0):
+        c.append(f'    --target-steps {args.target_steps} \\')
+    eff_repeats = args.repeats if repeats is None else repeats
+    c.append(f'    --repeats {eff_repeats} {epochs_part} '
              f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
     return "\n".join(c)
 
 
-def build_release(args, fh, timings=None):
+def build_release(args, fh, timings=None, repeats=None):
     """Assemble a durable release folder next to the model: the best-full and
     best-lite .param.nam files, the schematic, the full ESR history, dataset
     params, a provenance manifest (with per-step timing + hardware), and a
@@ -615,6 +643,16 @@ Run `./reproduce.sh`.
 """
     (release_dir / "MANIFEST.md").write_text(manifest)
 
+    have_config = False
+    if getattr(args, "config", None) and Path(args.config).exists():
+        try:
+            shutil.copy(str(args.config), str(release_dir / "config.toml"))
+            have_config = True
+            log(f"  + config.toml (from {args.config})", fh)
+        except Exception as e:
+            log(f"  WARNING: could not copy config.toml ({e}); "
+                f"reproduce.sh will fall back to expanded flags", fh)
+
     repro = f"""#!/usr/bin/env bash
 # Replicate this model (generate dataset + train). Auto-generated.
 set -euo pipefail
@@ -622,8 +660,13 @@ REPO="${{PARAMETRIC_NAM:-$HOME/work/parametric-nam}}"
 PY="$REPO/.venv/bin/python"
 cd "$REPO"
 
-{reproduce_command(args)}
+{reproduce_command(args, repeats=repeats, have_config=have_config)}
 """
+    # The config belongs IN the dated bundle, not at device level. A device dir holds ONE
+    # config.toml but many runs (marshall-jcm800-2203-preamp: 6), so it can describe at most
+    # one of them and is silently wrong for the rest. Copied here it is frozen with the models
+    # it produced -- and reproduce.sh then POINTS at it rather than re-expanding it, which is
+    # what used to lose --target-steps.
     repro_path = release_dir / "reproduce.sh"
     repro_path.write_text(repro)
     repro_path.chmod(0o755)
@@ -986,6 +1029,12 @@ def main():
         ap.set_defaults(**load_config(_cfg_ns.config))
 
     args = ap.parse_args()
+    # Bound unconditionally so every downstream reader has a value. It is REASSIGNED below
+    # when target-steps derives it; without this initialiser the derived value is unbound on
+    # paths that skip that branch (--release-only, target-steps unset), and build_release
+    # would have to guess -- which is how reproduce.sh came to record args.repeats (the CLI
+    # default of 1) for runs that actually trained at 20.
+    repeats = args.repeats
 
     # LoRA training is disabled -- see param_train.py's gate and the README status note.
     # Checked here too so a pipeline run fails immediately instead of after dataset work.
@@ -1422,7 +1471,7 @@ def main():
         # training run just to re-reach this step.
         if not args.no_release:
             try:
-                build_release(args, fh, timings)
+                build_release(args, fh, timings, repeats=repeats)
             except Exception as e:
                 log(f"WARNING: release folder build failed ({e}); "
                     f"models are still in place.", fh)
