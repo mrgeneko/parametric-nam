@@ -87,19 +87,19 @@ def test_build_train_cmd_always_forwards_amp_even_when_off():
     # The 2026-07-31 incident this guards against: `if args.amp != "off"` used to silently
     # drop the flag when the caller explicitly asked for --amp off, since param_train.py's
     # own default is "fp16", not "off" -- so the omission was NOT equivalent to "off".
-    cmd = rp.build_train_cmd(_base_args(amp="off"), Path("/tmp/ds"), epochs=100, repeats=1)
+    cmd = rp.build_train_cmd(_base_args(amp="off"), Path("/tmp/ds"), epochs=100, steps_per_epoch_arg=1)
     assert "--amp" in cmd
     assert cmd[cmd.index("--amp") + 1] == "off"
 
 
 def test_build_train_cmd_forwards_amp_for_every_value_not_just_off():
     for value in ("off", "fp16", "bf16"):
-        cmd = rp.build_train_cmd(_base_args(amp=value), Path("/tmp/ds"), epochs=100, repeats=1)
+        cmd = rp.build_train_cmd(_base_args(amp=value), Path("/tmp/ds"), epochs=100, steps_per_epoch_arg=1)
         assert cmd[cmd.index("--amp") + 1] == value
 
 
 def test_build_train_cmd_omits_optional_flags_when_falsy():
-    cmd = rp.build_train_cmd(_base_args(), Path("/tmp/ds"), epochs=100, repeats=1)
+    cmd = rp.build_train_cmd(_base_args(), Path("/tmp/ds"), epochs=100, steps_per_epoch_arg=1)
     for flag in ("--widths", "--no-mmap", "--resume", "--init-from", "--param-sensitivity",
                  "--knob-boost", "--per-tier-clip", "--spectral-norm", "--lora-rank"):
         assert flag not in cmd
@@ -110,7 +110,7 @@ def test_build_train_cmd_includes_optional_flags_when_set():
                        init_from=Path("/tmp/base.pt"), param_sensitivity=True,
                        knob_boost="drive=2.0", per_tier_clip=True, spectral_norm=True,
                        lora_rank=4)
-    cmd = rp.build_train_cmd(args, Path("/tmp/ds"), epochs=100, repeats=1)
+    cmd = rp.build_train_cmd(args, Path("/tmp/ds"), epochs=100, steps_per_epoch_arg=1)
     assert cmd[cmd.index("--widths") + 1] == "3,5,8"
     assert "--no-mmap" in cmd
     assert cmd[cmd.index("--resume") + 1] == Path("/tmp/ckpt/latest.pt")
@@ -122,19 +122,20 @@ def test_build_train_cmd_includes_optional_flags_when_set():
     assert cmd[cmd.index("--lora-rank") + 1] == "4"
 
 
-def test_build_train_cmd_uses_the_passed_epochs_and_repeats_not_args_own():
-    # epochs/repeats are DERIVED (from --target-steps) and passed in separately -- they must
-    # win over anything of the same name on args, since args may not even have them for every
-    # call site.
-    cmd = rp.build_train_cmd(_base_args(), Path("/tmp/ds"), epochs=12345, repeats=7)
+def test_build_train_cmd_uses_the_passed_epochs_and_steps_not_args_own():
+    # epochs is DERIVED and passed in separately, and steps-per-epoch is forwarded so
+    # param_train.py can derive repeats itself -- both must win over anything of the same name
+    # on args, since args may not even have them for every call site.
+    cmd = rp.build_train_cmd(_base_args(), Path("/tmp/ds"), epochs=12345, steps_per_epoch_arg=7)
     assert cmd[cmd.index("--epochs") + 1] == 12345
-    assert cmd[cmd.index("--repeats") + 1] == 7
+    assert cmd[cmd.index("--steps-per-epoch") + 1] == 7
+    assert "--repeats" not in cmd, "repeats must be DERIVED by param_train, not passed"
 
 
 def test_build_train_cmd_clip_norm_only_forwarded_when_non_default():
-    cmd = rp.build_train_cmd(_base_args(clip_norm=1.0), Path("/tmp/ds"), epochs=1, repeats=1)
+    cmd = rp.build_train_cmd(_base_args(clip_norm=1.0), Path("/tmp/ds"), epochs=1, steps_per_epoch_arg=1)
     assert "--clip-norm" not in cmd
-    cmd = rp.build_train_cmd(_base_args(clip_norm=0.5), Path("/tmp/ds"), epochs=1, repeats=1)
+    cmd = rp.build_train_cmd(_base_args(clip_norm=0.5), Path("/tmp/ds"), epochs=1, steps_per_epoch_arg=1)
     assert cmd[cmd.index("--clip-norm") + 1] == 0.5
 
 
@@ -427,3 +428,22 @@ class TestSetInputLine:
         assert "onset 20.8276" not in out and "built by the scaffold" in out
         import tomllib
         assert tomllib.loads(out)["input"] == "/w/exc.wav"
+
+
+def test_explicit_repeats_is_still_forwarded():
+    """--repeats is derived by param_train.py now, but an EXPLICIT one must still win --
+    otherwise there is no escape hatch for a deliberate override."""
+    a = _base_args()
+    a.repeats, a.repeats_explicit = 99, True
+    cmd = rp.build_train_cmd(a, Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=50)
+    assert cmd[cmd.index("--repeats") + 1] == 99
+
+
+def test_repeats_not_forwarded_when_merely_defaulted():
+    """The whole point: run_pipeline must not hand param_train a repeats it did not ask for.
+    Deriving in both places is what made them disagree -- Mesa Orange was handed 6 and
+    trained at 20, so its SGDR cycles ran 3.3x longer than --restart-period implied."""
+    a = _base_args()
+    a.repeats, a.repeats_explicit = 1, False
+    cmd = rp.build_train_cmd(a, Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=50)
+    assert "--repeats" not in cmd

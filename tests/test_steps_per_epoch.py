@@ -14,32 +14,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from run_pipeline import _derive_repeats, DEFAULT_STEPS_PER_EPOCH
 
 
-class TestDefaultReproducesTheFleet:
-    """Every fleet config used --target-steps 25000, which implied 52-61 steps/epoch on every
-    grid. The default must reproduce that, not silently retune every device."""
+class TestDefaults:
+    """The default is a DELIBERATE round number, not a behaviour-preserving one.
 
-    def test_default_matches_the_old_implied_value(self):
-        assert DEFAULT_STEPS_PER_EPOCH == round(25000 / 450)
+    Every fleet config used --target-steps 25000, which through the nominal-450 formula
+    implied 55.6 steps/epoch. The default is 50 -- about 10% shorter cycles. That is a real
+    change, and it is fine because it only reaches NEW configs: every existing one specifies
+    target-steps, which takes the deprecated-alias path and is exact (below).
+    """
+
+    def test_default_is_fifty(self):
+        assert DEFAULT_STEPS_PER_EPOCH == 50
+
+    def test_default_is_within_ten_percent_of_the_fleets_implied_value(self):
+        implied = 25000 / 450
+        assert abs(DEFAULT_STEPS_PER_EPOCH - implied) / implied < 0.11
 
     @pytest.mark.parametrize("n_combos", [8, 36, 60, 165])
     def test_deprecated_alias_is_exactly_unchanged(self, n_combos):
         """--target-steps must derive EXACTLY the repeats it always did, so deprecating it
-        cannot silently retune a device. It passes target_steps/450 UNROUNDED for this
-        reason: 25000/450 = 55.56, and rounding to 56 shifts repeats by one on small grids."""
+        cannot silently retune an existing device. It passes target_steps/450 UNROUNDED for
+        this reason: rounding to an int shifts repeats on small grids."""
         old = max(1, round(25000 * 64 / max(1, 450 * n_combos * 0.95)))
         new, _ = _derive_repeats(25000 / 450.0, n_combos, 64, 0.05)
         assert new == old, f"{n_combos} combos: {new} != {old}"
-
-    @pytest.mark.parametrize("n_combos", [8, 36, 60, 165])
-    def test_integer_default_drifts_under_two_percent(self, n_combos):
-        """The integer default is a rounded 55.56, so it drifts slightly from the old implied
-        value. The bound must be RELATIVE: at 8 combos repeats is ~470, so an absolute
-        "within one repeat" test is far stricter than at 165 combos where repeats is 23.
-        Measured drift: +0.9% / +1.0% / +1.6% / 0.0%. Acceptable for a NEW flag; the
-        deprecated alias above stays exact."""
-        old = max(1, round(25000 * 64 / max(1, 450 * n_combos * 0.95)))
-        new, _ = _derive_repeats(DEFAULT_STEPS_PER_EPOCH, n_combos, 64, 0.05)
-        assert abs(new - old) / old < 0.02, f"{n_combos} combos: {new} vs {old}"
 
 
 class TestTheFloorIsReported:
@@ -81,3 +79,33 @@ class TestDerivationShape:
     def test_never_returns_zero(self):
         r, _ = _derive_repeats(1, 100000, 64, 0.05)
         assert r >= 1
+
+
+class TestParamTrainOwnsTheDerivation:
+    """repeats is derived in param_train.py and NOWHERE else.
+
+    It used to be computed in run_pipeline.py from --target-steps and then silently
+    overridden by param_train's val-split floor, so the two disagreed: Mesa Orange was
+    handed repeats 6 (52 steps/epoch) and trained at 20 (171), making every SGDR cycle
+    3.3x longer than --restart-period 50 was calibrated for. Nothing reported it.
+    """
+
+    def test_param_train_defaults_repeats_to_derive_not_one(self):
+        """The old default of 1 gave an EMPTY val split and runs that self-stopped on a
+        false plateau having barely trained (72-combo config, 2026-08-30). Running
+        param_train.py directly must no longer land there."""
+        import param_train, argparse, inspect
+        src = inspect.getsource(param_train.main) if hasattr(param_train, "main") else ""
+        # the flag itself is what matters
+        ap = argparse.ArgumentParser()
+        found = [l for l in inspect.getsource(param_train).splitlines()
+                 if '"--repeats"' in l]
+        assert found, "--repeats flag not found"
+        assert "default=None" in found[0], f"repeats must default to derive, got: {found[0]}"
+
+    def test_param_train_exposes_steps_per_epoch(self):
+        import inspect, param_train
+        src = inspect.getsource(param_train)
+        assert '"--steps-per-epoch"' in src
+        assert param_train.DEFAULT_STEPS_PER_EPOCH == DEFAULT_STEPS_PER_EPOCH, \
+            "run_pipeline and param_train must agree on the default"

@@ -130,6 +130,11 @@ def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
             f"run. Retrain it, or re-download a current model.")
     return v
 
+# Gradient steps per epoch when `repeats` is derived. 50 is a round restatement of what the
+# fleet already ran: every config used --target-steps 25000, which through run_pipeline's
+# nominal-450-epoch formula implied 52-61 steps/epoch on every grid size.
+DEFAULT_STEPS_PER_EPOCH = 50
+
 K_KERNEL_SIZES = [
     6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
     15, 15,
@@ -1781,9 +1786,18 @@ def main():
                          "dataset's config.json, not specific to any one circuit.")
     ap.add_argument("--crop-len", type=int, default=44100,
                     help="Random crop length in samples (default: %(default)s)")
-    ap.add_argument("--repeats", type=int, default=1,
-                    help="Virtual dataset multiplier — increases steps/epoch without "
-                         "changing the audio data (default: %(default)s)")
+    ap.add_argument("--steps-per-epoch", type=int, default=DEFAULT_STEPS_PER_EPOCH,
+                    help="Gradient steps per epoch; `repeats` is DERIVED to hit it "
+                         "(default: %(default)s). This is the knob to turn: with SGDR it sets "
+                         "the length of a restart cycle (steps/cycle = this x --restart-period), "
+                         "and holding it constant is what keeps cycles comparable across grids "
+                         "of different sizes.")
+    ap.add_argument("--repeats", type=int, default=None,
+                    help="Virtual dataset multiplier — increases steps/epoch without changing "
+                         "the audio data. DERIVED from --steps-per-epoch unless given. It is a "
+                         "pure multiplier with no meaning of its own, so there is rarely a "
+                         "reason to set it; its old default of 1 produced an EMPTY val split "
+                         "and self-stopping runs that had barely trained.")
     ap.add_argument("--val-split", type=float, default=0.05,
                     help="Fraction of samples for validation (default: %(default)s). Was 0.1; "
                          "val here does not measure interpolation anyway (the same knob settings "
@@ -2025,22 +2039,41 @@ def main():
     # small (exact at repeats == 1/val_split); it also happens to be what turns --repeats 1's
     # "val empty" case into a properly populated split, since the bump runs before
     # ParamDataset is constructed below.
-    if args.val_split > 0:
-        min_repeats_for_split = math.ceil(1 / args.val_split)
-        if args.repeats < min_repeats_for_split:
-            print(f"  NOTE: --repeats {args.repeats} is below the {min_repeats_for_split} "
-                  f"that keeps each combo's actual val share close to the requested "
-                  f"--val-split {args.val_split} (grouped_random_split's per-combo rounding "
-                  f"overshoots it otherwise, and at --repeats 1 specifically there is no "
-                  f"room to hold out anything per combo at all) -- raising --repeats to "
-                  f"{min_repeats_for_split}. This lengthens every epoch/SGDR cycle "
-                  f"proportionally; pass --repeats {min_repeats_for_split} explicitly to "
-                  f"silence this note.", file=sys.stderr)
-            args.repeats = min_repeats_for_split
-
+    # repeats is DERIVED here, and only here. It used to be computed in run_pipeline.py from
+    # --target-steps and then silently overridden by the floor below, so the two disagreed:
+    # Mesa Orange was handed repeats 6 (52 steps/epoch) and trained at 20 (171), making its
+    # SGDR cycles 3.3x longer than --restart-period implied. Owning it in one place -- the
+    # only one that knows BOTH n_combos and the floor -- removes that split brain, and means
+    # running param_train.py directly no longer lands on the old default of 1.
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
-    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats,
+    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=1,
                            mmap=args.mmap)
+    n_combos = len(dataset.samples)
+    floor = math.ceil(1 / args.val_split) if args.val_split > 0 else 1
+    if args.repeats is None:
+        want = args.steps_per_epoch * args.batch_size / max(1, n_combos * (1 - args.val_split))
+        args.repeats = max(1, round(want))
+        src = f"--steps-per-epoch {args.steps_per_epoch}"
+    else:
+        src = "--repeats (explicit)"
+    if args.val_split > 0 and args.repeats < floor:
+        # NOT about item count: at low repeats each combo's actual val share
+        # (ceil(repeats*val_split)/repeats) overshoots the requested --val-split badly --
+        # repeats 1 leaves no room to hold anything out per combo and degrades to val EMPTY
+        # (the Joyo American Sound run under the old flat split had 33/675 combos trained on
+        # nothing at all); repeats 2 forces a 50% split, not 5%. repeats ~ 1/val_split is
+        # where the overshoot stays small, exact at repeats == 1/val_split.
+        achieved = math.ceil(n_combos * floor * (1 - args.val_split) / args.batch_size)
+        print(f"  NOTE: {src} wants repeats {args.repeats}, below the {floor} that keeps each "
+              f"combo's val share near --val-split {args.val_split:g}. Holding repeats={floor}: "
+              f"{achieved} steps/epoch, {achieved/max(1,args.steps_per_epoch):.1f}x the request "
+              f"-- every SGDR cycle is that much longer than --restart-period implies.",
+              file=sys.stderr)
+        args.repeats = floor
+    dataset.repeats = args.repeats
+    spe = math.ceil(n_combos * args.repeats * (1 - args.val_split) / args.batch_size)
+    print(f"  {n_combos} combos x repeats {args.repeats} -> {spe} steps/epoch "
+          f"({src})", file=sys.stderr)
     if args.modeled_by:
         # Mutates dataset.config in place, so every export_nam()/export_nam_state() call below
         # (including mid-training "best" checkpoint exports) picks this up automatically --

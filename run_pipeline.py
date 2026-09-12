@@ -36,9 +36,10 @@ PYTHON  = sys.executable
 BATCH   = HERE / "gen_dataset_from_schx.py"
 
 # Every fleet config used --target-steps 25000, which via the nominal-450-epoch formula
-# implied 52-61 steps/epoch on every grid size. 25000/450 = 55.6 -> 56 reproduces that
-# behaviour exactly rather than silently retuning every device.
-DEFAULT_STEPS_PER_EPOCH = 56
+# implied 52-61 steps/epoch on every grid size; 50 is a round restatement of that.
+# param_train.py owns the derivation (it alone knows n_combos AND the val-split
+# floor); this constant only seeds the flag forwarded to it.
+DEFAULT_STEPS_PER_EPOCH = 50
 TRAIN   = HERE / "param_train.py"
 
 from gen_dataset_from_schx import check_oracle
@@ -755,7 +756,7 @@ def check_missing_combinations(dataset_dir: Path, fh, allow_missing: bool) -> No
         sys.exit(1)
 
 
-def build_train_cmd(args, dataset_dir, epochs, repeats):
+def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
     """The param_train.py invocation for the training step. Pulled out of main() so the
     flag-forwarding logic (easy to silently break when adding a new pipeline flag -- see the
     --amp comment below for a real incident) is directly testable without running an actual
@@ -773,13 +774,19 @@ def build_train_cmd(args, dataset_dir, epochs, repeats):
         "--batch-size",      args.batch_size,
         "--lr",              args.lr,
         "--crop-len",        args.crop_len,
-        "--repeats",         repeats,   # derived above — may differ from args.repeats
+        # repeats is NOT passed: param_train.py derives it from --steps-per-epoch, because it
+        # is the only component that knows both n_combos and the val-split floor. Deriving it
+        # here too is what made the two disagree (handed 6, trained at 20). An EXPLICIT
+        # --repeats is still forwarded, below.
+        "--steps-per-epoch", steps_per_epoch_arg,
         "--mrstft-weight",   args.mrstft_weight,
         "--val-split",       args.val_split,
         "--val-passes",      args.val_passes,
         "--device",          args.device,
         "--seed",            args.seed,
     ]
+    if getattr(args, "repeats_explicit", False) and args.repeats:
+        train_cmd += ["--repeats", args.repeats]   # explicit override wins over the derivation
     if args.widths:              train_cmd += ["--widths", args.widths]
     if not args.mmap:             train_cmd.append("--no-mmap")
     if args.resume:              train_cmd += ["--resume", args.resume]
@@ -1471,7 +1478,8 @@ def main():
                     log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_combos). Change the knob "
                         f"grid and this number moves silently. Prefer target-steps.", fh)
 
-            train_cmd = build_train_cmd(args, dataset_dir, epochs, repeats)
+            train_cmd = build_train_cmd(args, dataset_dir, epochs,
+                                        int(round(steps_per_epoch)))
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------
