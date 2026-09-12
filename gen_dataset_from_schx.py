@@ -31,7 +31,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_combos, N_samples])
 """
 
-import atexit, argparse, csv, fcntl, json, os, re, shutil, signal, subprocess, sys, threading, time
+import atexit, argparse, csv, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2272,8 +2272,23 @@ def acquire_generation_lock(out_dir: Path):
     flock is advisory but auto-releases when the fd closes -- process exit, crash, or kill --
     so there is no stale lock to reap. The returned handle MUST stay referenced for the whole
     run (closing/GC'ing it drops the lock); main() holds it until it returns.
+
+    THE LOCK FILE LIVES OUTSIDE out_dir, keyed on its resolved path. It used to live at
+    out_dir/.generation.lock, which made mutual exclusion depend on nobody deleting the
+    directory -- and `rm -rf out_dir` on a live run is the natural way to clear a shard for a
+    restart. flock is held on an INODE, not a path: unlinking the file releases nothing, but
+    the next process creates a FRESH inode at the same path and locks it successfully. Two
+    generations then run into one directory with no error anywhere, which is the exact silent
+    params.csv/.npy desync this function exists to prevent. Measured on the Mesa Orange
+    gain/master shard run, 2026-09-12: an orphaned renderer (ppid=1, survived a kill aimed at
+    its bash wrapper) kept its lock while `rm -rf shard1` unlinked it, and the replacement run
+    started happily alongside it. Outside out_dir, deleting or moving the output cannot release
+    a live lock -- the second process is refused, loudly, as designed.
     """
-    lock_path = out_dir / ".generation.lock"
+    resolved = str(out_dir.resolve())
+    lock_dir = Path.home() / ".cache" / "parametric-nam" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / (hashlib.sha256(resolved.encode()).hexdigest()[:16] + ".lock")
     fh = open(lock_path, "w")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2282,10 +2297,20 @@ def acquire_generation_lock(out_dir: Path):
         sys.exit(
             f"ERROR: another gen_dataset_from_schx is already generating into {out_dir}\n"
             f"       (exclusive lock held on {lock_path}). Two concurrent generations corrupt\n"
-            f"       params.csv. Wait for the running one to finish, or use a different --output."
+            f"       params.csv. Wait for the running one to finish, or use a different --output.\n"
+            f"       The holder's pid/host are in that file. Deleting {out_dir} does NOT clear\n"
+            f"       this lock (that is deliberate) -- stop the running process instead."
         )
-    fh.write(f"pid={os.getpid()}\n")
+    fh.write(f"pid={os.getpid()}\nhost={socket.gethostname()}\noutput={resolved}\n")
     fh.flush()
+    # Breadcrumb inside out_dir so anyone looking at the shard can find the real lock. Purely
+    # informational -- deleting it costs nothing, which is the whole point of moving the lock.
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / ".generation.lock.info").write_text(
+            f"lock={lock_path}\npid={os.getpid()}\nhost={socket.gethostname()}\n")
+    except OSError:
+        pass
     return fh
 
 
