@@ -109,3 +109,46 @@ class TestParamTrainOwnsTheDerivation:
         assert '"--steps-per-epoch"' in src
         assert param_train.DEFAULT_STEPS_PER_EPOCH == DEFAULT_STEPS_PER_EPOCH, \
             "run_pipeline and param_train must agree on the default"
+
+
+class TestTemplateUsesTheNewFlag:
+    """A freshly scaffolded device must not take the DEPRECATED path.
+
+    The template kept writing `target-steps = 25000`, so every newly scaffolded config
+    silently used the alias -- which rather defeats deprecating it. Caught on the Arbiter
+    Fuzz Face config, scaffolded after the rename and still carrying target-steps.
+    """
+
+    def _template(self):
+        from pathlib import Path
+        import scaffold_config
+        return Path(scaffold_config.TEMPLATE).read_text()
+
+    def test_template_sets_steps_per_epoch(self):
+        import re
+        t = self._template()
+        m = re.search(r"^steps-per-epoch\s*=\s*(\d+)", t, re.M)
+        assert m, "template must set steps-per-epoch"
+        assert int(m.group(1)) == DEFAULT_STEPS_PER_EPOCH
+
+    def test_template_no_longer_sets_target_steps(self):
+        import re
+        t = self._template()
+        assert not re.search(r"^target-steps\s*=", t, re.M), \
+            "template still emits the deprecated target-steps"
+
+    def test_template_value_round_trips_through_the_config_loader(self):
+        """The key must be one run_pipeline.load_config maps to the real argparse dest --
+        a near-miss name would look set and be silently ignored."""
+        import tomllib
+        from run_pipeline import load_config
+        import tempfile, os
+        t = self._template()
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(t); path = f.name
+        try:
+            cfg = load_config(path)
+            assert cfg.get("steps_per_epoch") == DEFAULT_STEPS_PER_EPOCH, \
+                f"loader did not pick it up: {[k for k in cfg if 'step' in k]}"
+        finally:
+            os.unlink(path)
