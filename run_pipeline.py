@@ -34,6 +34,11 @@ from pathlib import Path
 HERE    = Path(__file__).resolve().parent
 PYTHON  = sys.executable
 BATCH   = HERE / "gen_dataset_from_schx.py"
+
+# Every fleet config used --target-steps 25000, which via the nominal-450-epoch formula
+# implied 52-61 steps/epoch on every grid size. 25000/450 = 55.6 -> 56 reproduces that
+# behaviour exactly rather than silently retuning every device.
+DEFAULT_STEPS_PER_EPOCH = 56
 TRAIN   = HERE / "param_train.py"
 
 from gen_dataset_from_schx import check_oracle
@@ -416,6 +421,34 @@ def portable(p) -> str:
         if s.startswith(b + os.sep):
             return var + s[len(b):]
     return s
+
+
+def _derive_repeats(steps_per_epoch, n_combos, batch_size, val_split, fh=None):
+    """repeats needed to hit `steps_per_epoch`, floored so the val split stays per-combination.
+
+    `steps_per_epoch` may be fractional -- the deprecated --target-steps alias passes
+    target_steps/450 unrounded so existing configs derive exactly the repeats they used to.
+
+    Returns (repeats, achieved_steps_per_epoch). The two differ whenever the floor binds, and
+    the caller is told -- which is the point. The floor exists because a 5% split over a large
+    grid at low repeats holds out well under one item per combination; but it also means the
+    request CANNOT be honoured above ~165 combos at the fleet's settings, and until now that
+    divergence was silent. Mesa Orange asked for 52 steps/epoch and ran 171, so its SGDR cycles
+    were 3.3x longer than --restart-period 50 was calibrated for, and nothing said so.
+    """
+    exact = steps_per_epoch * batch_size / max(1, n_combos * (1 - val_split))
+    repeats = max(1, round(exact))
+    floor = max(1, round(1 / val_split)) if val_split > 0 else 1
+    if repeats < floor:
+        achieved = math.ceil(n_combos * floor * (1 - val_split) / batch_size)
+        if fh is not None:
+            log(f"  NOTE: --steps-per-epoch {steps_per_epoch} needs repeats "
+                f"{repeats}, below the {floor} that keeps the {val_split:g} val split "
+                f"per-combination. Holding repeats={floor}: ACHIEVED {achieved} steps/epoch, "
+                f"{achieved/steps_per_epoch:.1f}x the request (so an SGDR cycle is that much "
+                f"longer than --restart-period implies).", fh)
+        return floor, achieved
+    return repeats, math.ceil(n_combos * repeats * (1 - val_split) / batch_size)
 
 
 def reproduce_command(args, repeats=None, have_config=False):
@@ -931,12 +964,20 @@ def main():
     g.add_argument("--no-mmap",        action="store_false", dest="mmap")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
+    g.add_argument("--steps-per-epoch", type=int, default=DEFAULT_STEPS_PER_EPOCH,
+                   help="Gradient steps per epoch; `repeats` is DERIVED to hit it. This is what "
+                        "actually needs to be held constant across grids of different sizes, "
+                        "because with SGDR it sets the length of a restart cycle "
+                        "(steps/cycle = this × --restart-period). Default %(default)s — not a new "
+                        "number: every config in the fleet used --target-steps 25000, which through "
+                        "its nominal-450-epoch formula implied 52-61 steps/epoch on every grid. "
+                        "0 = off (use --repeats).")
     g.add_argument("--target-steps",   type=int, default=0,
-                   help="Ask for a TRAINING BUDGET directly and let repeats be derived from it, "
-                        "instead of backing into one. total steps = epochs × n_combos × repeats × "
-                        "(1-val_split) / batch. Because that depends on n_combos, changing the knob "
-                        "grid otherwise changes how long the model trains — regridding Large Muffin "
-                        "126→60 combos silently HALVED its budget. 0 = off (use --repeats).")
+                   help="DEPRECATED alias for --steps-per-epoch; converted as "
+                        "target_steps/450. It was never a budget in open-ended mode (epochs=0 has "
+                        "no horizon), so the 'total steps' it named did not exist -- it reached "
+                        "`repeats` through an invented 450-epoch schedule. What it really set was "
+                        "steps/epoch. Kept so existing configs behave identically.")
     g.add_argument("--skip-grid-check", action="store_true",
                    help="skip the STEP 1 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
@@ -1345,17 +1386,38 @@ def main():
             # `repeats` still has to come from somewhere. Derive it as the fixed-mode rule would with
             # a nominal 450-epoch schedule, which keeps steps/epoch (and therefore the length of an
             # SGDR cycle) the same across grids of wildly different sizes.
-            nominal_epochs = epochs if epochs > 0 else 450
-            if epochs == 0 and args.target_steps and n_combos and not args.repeats_explicit:
-                repeats = max(1, round(args.target_steps * args.batch_size
-                                       / max(1, nominal_epochs * n_combos * (1 - args.val_split))))
-                spe = math.ceil(n_combos * repeats * (1 - args.val_split) / args.batch_size)
+            # --target-steps is a DEPRECATED alias: it was never a budget in open-ended mode
+            # (epochs=0 has no horizon), and reached `repeats` through an invented 450-epoch
+            # schedule. Convert it to the quantity it was really setting.
+            steps_per_epoch = args.steps_per_epoch
+            if args.target_steps:
+                # NOT rounded: 25000/450 = 55.56, and rounding to 56 shifts repeats by one
+                # on small grids. Keeping the float makes the alias bit-identical to the old
+                # behaviour for every existing config.
+                steps_per_epoch = args.target_steps / 450.0
+                log(f"  NOTE: --target-steps {args.target_steps} is deprecated; "
+                    f"read as --steps-per-epoch {steps_per_epoch:.1f}. It was never a budget in "
+                    f"open-ended mode -- see run_pipeline.py --steps-per-epoch.", fh)
+            if epochs == 0 and steps_per_epoch and n_combos and not args.repeats_explicit:
+                repeats, spe = _derive_repeats(steps_per_epoch, n_combos, args.batch_size,
+                                                args.val_split, fh)
                 log(f"OPEN-ENDED (epochs=0): no step budget — SGDR runs until you stop it. "
                     f"repeats {repeats} → {spe} steps/epoch, restart every "
                     f"{args.restart_period} epochs ({spe * args.restart_period:,} steps/cycle).", fh)
                 log(f"  Watch the BEST val ESR PER CYCLE. When two consecutive cycles fail to "
                     f"improve it, that is the budget — measured under the loss you are ACTUALLY "
                     f"training with. Stop with: touch {args.checkpoint_dir}/STOP", fh)
+
+            if (not args.target_steps) and epochs > 0 and steps_per_epoch \
+                    and n_combos and not args.repeats_explicit:
+                # FIXED-EPOCH without a budget: derive repeats from steps/epoch the same way
+                # open-ended does. A real horizon exists here, so --target-steps still has a
+                # meaning in this branch (below) and keeps its budget logic -- but a run that
+                # only set --steps-per-epoch must not silently fall through to repeats=1.
+                repeats, spe = _derive_repeats(steps_per_epoch, n_combos, args.batch_size,
+                                                args.val_split, fh)
+                log(f"--steps-per-epoch {steps_per_epoch} → repeats {repeats} "
+                    f"({spe} steps/epoch × {epochs} epochs = {spe*epochs:,} steps)", fh)
 
             if args.target_steps and n_combos and epochs > 0:
                 # WHICH VARIABLE IS DERIVED MATTERS, and the obvious choice is wrong.
