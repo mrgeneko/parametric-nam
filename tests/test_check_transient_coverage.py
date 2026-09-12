@@ -609,7 +609,13 @@ def test_every_backend_branch_forwards_the_corner_selection_flags():
         i = src.index("result = " + entry)
         call = src[i:src.index(")\n", i) + 1]
         assert "max_corners=args.max_corners" in call, f"{entry} drops --max-corners"
-        assert "sample_grid=args.sample_grid" in call, f"{entry} drops --sample-grid"
+        # args.sample_grid is WRAPPED now -- resolved through resolve_sample_grid(), since
+        # None means AUTO interior probing (corners alone were shown insufficient twice:
+        # Mesa Orange 5-knob at 1.27x every vertex, 2-knob at 6.3x). This check's intent is
+        # "the flag is not silently dropped", so assert the arg REACHES the call rather than
+        # one literal spelling of it.
+        assert "sample_grid=" in call and "args.sample_grid" in call, \
+            f"{entry} drops --sample-grid"
 
 
 def test_the_gate_and_the_sizer_share_one_budget_definition():

@@ -55,7 +55,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
-from check_transient_coverage import _corners, _sample_interior  # noqa: E402
+from check_transient_coverage import resolve_sample_grid, _corners, _sample_interior  # noqa: E402
 from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
@@ -287,12 +287,19 @@ def main():
                           "some-knobs-low-others-high corner AT ALL -- the blind spot that shipped "
                           "the tweed blowup and, on 2026-09-04, sized Duke of Tone's excitation "
                           "short at three Gain=lo,Volume=lo corners. Warns when used.")
-    ap.add_argument("--sample-grid", type=int, default=0, metavar="N",
-                     help="ALSO probe N points from the full grid product, not just the min/max "
-                          "hypercube -- see check_transient_coverage.py's _sample_interior for "
-                          "the Mesa Orange case where the true worst onset sits 27%% above every "
-                          "vertex, at Bass=min with the other knobs CENTRED. Deterministic, so a "
-                          "later coverage check probes the same points.")
+    ap.add_argument("--sample-grid", type=int, default=None, metavar="N",
+                     help="AUTO by default (interior_sample_budget: ~1.5x the corner "
+                          "count, capped 64) -- 0 disables. Corners are a HEURISTIC and have "
+                          "been shown insufficient twice: Mesa Orange's 5-knob grid had its "
+                          "true worst onset 1.27x above every one of 32 vertices, and its "
+                          "2-knob Gain x Master grid had an interior cell at 11.18 V against "
+                          "a worst CORNER of 1.76 V -- 6.3x. Sizing from corners alone there "
+                          "produced an excitation that could not drive 2 of 25 probed cells "
+                          "into saturation at all, and the transient gate correctly refused "
+                          "the render (2026-09-12). Onset is not monotonic in the knobs, so "
+                          "its maximum over the grid need not sit at a vertex; only probing "
+                          "the interior MEASURES it. Deterministic, so a sizing run and a "
+                          "later coverage check agree.")
     ap.add_argument("--max-corners", type=int, default=None,
                      help="cap the TOTAL corner count, sampling the hypercube deterministically "
                           "when it does not all fit, instead of abandoning it. Use this rather "
@@ -399,7 +406,8 @@ def main():
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                     capture=_capture,
                                     full_hypercube=(False if args.no_full_hypercube else None),
-                                    max_corners=args.max_corners, sample_grid=args.sample_grid,
+                                    max_corners=args.max_corners,
+                                    sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                     quiet=False,
                                     lead_silence_s=sweep_lead_silence_s)
     print(f"worst-case onset: {worst:.4f} V (across {len(rows)} corners)")
