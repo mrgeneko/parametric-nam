@@ -18,6 +18,7 @@ from check_transient_coverage import (
     _corners,
     _transient_peak_from_recipe,
     check_coverage,
+    check_coverage_ngspice,
     check_coverage_ngspice_deck,
     check_coverage_ltspice_deck,
     main,
@@ -363,6 +364,56 @@ class TestMainNgspiceDeckDispatch:
         monkeypatch.setattr(_sys, "argv", ["check_transient_coverage.py", "--config", str(config),
                                           "--transient-peak", "1.0"])
         assert main() == 0
+
+
+class TestCheckCoverageNgspiceConv:
+    """check_coverage_ngspice()'s own conv threading, independent of main()'s CLI/config
+    resolution above -- a device-model override (e.g. a real transistor fit) must reach the
+    actual NgspiceSchxBackend AND the cache_extra key, or an onset measured under one --conv
+    could be served to a caller expecting a different (or no) override."""
+
+    @pytest.fixture(autouse=True)
+    def sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        self.schx = tmp_path / "device.schx"
+        self.schx.write_text("dummy circuit")
+
+    def test_conv_reaches_the_backend(self, monkeypatch):
+        seen = []
+        real_backend = __import__("render_backends").NgspiceSchxBackend
+
+        def spy(schx, oversample=2, conv=None, **kw):
+            seen.append(conv)
+            return real_backend(schx, oversample=oversample, conv=conv, **kw)
+        monkeypatch.setattr("check_transient_coverage.NgspiceSchxBackend", spy)
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point",
+                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw:
+                            {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
+                             "ceiling_at_input_v": 1.0, "curve": []})
+        check_coverage_ngspice(str(self.schx), {"Gain": [0.0, 1.0]}, {}, oversample=8,
+                               transient_peak=1.0, conv={"bjt_vaf": "102.207"})
+        assert seen and seen[0] == {"bjt_vaf": "102.207"}
+
+    def test_different_conv_produces_a_different_cache_extra(self, monkeypatch):
+        monkeypatch.setattr("check_transient_coverage.NgspiceSchxBackend",
+                            lambda *a, **kw: object())
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point",
+                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw:
+                            {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
+                             "ceiling_at_input_v": 1.0, "curve": []})
+        seen = []
+        real_key = __import__("check_transient_coverage").findpeak_cache_key
+
+        def spy_key(identity, params, cache_extra):
+            seen.append(cache_extra)
+            return real_key(identity, params, cache_extra)
+        monkeypatch.setattr("check_transient_coverage.findpeak_cache_key", spy_key)
+
+        check_coverage_ngspice(str(self.schx), {"Gain": [0.0, 1.0]}, {}, oversample=8,
+                               transient_peak=1.0, conv={"bjt_vaf": "102.207"})
+        check_coverage_ngspice(str(self.schx), {"Gain": [0.0, 1.0]}, {}, oversample=8,
+                               transient_peak=1.0, conv=None)
+        assert len(set(seen)) == 2, "different conv must not share a cache_extra"
 
 
 class TestMainNgspiceDispatch:

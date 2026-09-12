@@ -13,7 +13,50 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend, NgspiceSchxBackend
+from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,
+                             NgspiceSchxBackend, parse_conv, conv_cache_tag)
+
+
+class TestParseConv:
+    def test_parses_comma_separated_pairs(self):
+        assert parse_conv("bjt_vaf=102.207,bjt_rb=173.312") == \
+            {"bjt_vaf": "102.207", "bjt_rb": "173.312"}
+
+    def test_empty_string_returns_empty_dict(self):
+        assert parse_conv("") == {}
+
+    def test_none_returns_empty_dict(self):
+        assert parse_conv(None) == {}
+
+    def test_values_stay_strings_not_floats(self):
+        """schx_to_ngspice.py's own qty() does the unit conversion at render time -- parsing
+        here must not pre-convert (and cannot know the right convention to convert INTO
+        anyway)."""
+        d = parse_conv("bjt_ikf=9.981m")
+        assert d["bjt_ikf"] == "9.981m"
+        assert isinstance(d["bjt_ikf"], str)
+
+
+class TestConvCacheTag:
+    def test_empty_conv_is_empty_tag(self):
+        assert conv_cache_tag({}) == ""
+        assert conv_cache_tag(None) == ""
+
+    def test_nonempty_conv_produces_a_nonempty_tag(self):
+        assert conv_cache_tag({"bjt_vaf": "102.207"}) != ""
+
+    def test_key_order_does_not_change_the_tag(self):
+        """dict key order must not matter -- two conv dicts built from the same override
+        string via different code paths (e.g. re-parsed vs re-ordered) must hash identically,
+        or a cache entry misses for no real reason."""
+        a = conv_cache_tag({"bjt_vaf": "102.207", "bjt_rb": "173.312"})
+        b = conv_cache_tag({"bjt_rb": "173.312", "bjt_vaf": "102.207"})
+        assert a == b
+
+    def test_different_conv_produces_a_different_tag(self):
+        a = conv_cache_tag({"bjt_vaf": "102.207"})
+        b = conv_cache_tag({"bjt_vaf": "55"})
+        assert a != b
 
 
 class TestLiveSpiceBackendPrepareInput:
@@ -211,6 +254,27 @@ class TestNgspiceSchxBackend:
         out = backend.render_many(jobs, input_handle=handle, scratch=str(tmp_path))
         assert set(out) == {"a", "b"}
         assert np.allclose(out["a"], [0.1, 0.2, 0.3], atol=1e-4)
+
+    def test_conv_reaches_run_ngspice(self, tmp_path, monkeypatch):
+        """A device-model override (e.g. a real transistor fit's bjt_vaf/bjt_rb/...) must
+        actually reach _run_ngspice's own ng['conv'] dict, not just be accepted and silently
+        dropped -- the same regression class as ngspice_deck_maxstep/lead_silence_s elsewhere
+        in this fleet's own test history."""
+        self._fake_dump_ok(monkeypatch)
+        seen = []
+
+        def fake_run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                             param_map, fixed_params, ng):
+            seen.append(dict(ng.get("conv") or {}))
+            sf.write(str(out_wav), np.array([0.1], dtype=np.float32), 48000, subtype="FLOAT")
+            return None
+        monkeypatch.setattr("render_backends._run_ngspice", fake_run_ngspice)
+
+        backend = NgspiceSchxBackend(schx="unused.schx", conv={"bjt_vaf": "102.207"})
+        handle = backend.prepare_input(np.zeros(4, dtype=np.float32), sr=1000, level_v=1.0,
+                                       scratch=str(tmp_path), tag="lvl1")
+        backend.render_many([{"params": {"Fuzz": 0.5}, "tag": "a"}], handle, str(tmp_path))
+        assert seen == [{"bjt_vaf": "102.207"}]
 
     def test_nonconverged_render_maps_to_none(self, tmp_path, monkeypatch):
         self._fake_dump_ok(monkeypatch)

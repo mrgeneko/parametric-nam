@@ -539,6 +539,76 @@ class TestRendererLtspiceDeck:
         assert seen == [(1e-7, 0.02, 1800.0)]
 
 
+class TestRendererGenericNgspiceConv:
+    """--backend ngspice (the GENERIC schx-translated path, distinct from ngspice-deck) must
+    thread a device-model override (e.g. a real transistor fit's bjt_vaf/bjt_rb/...) into
+    _run_ngspice, and the disk cache must not serve a render made under one override to a
+    caller expecting a different (or no) override -- added 2026-09-12 for the Arbiter Fuzz
+    Face AC128 correction, mirroring capture_chain's own cache-separation requirement."""
+
+    def _schx(self, tmp_path):
+        p = tmp_path / "c.schx"
+        p.write_text('<Schematic><R Resistance="47 k"/></Schematic>', encoding="utf-8")
+        return p
+
+    def _input(self, tmp_path, sr=1000, dur_s=20):
+        inp = tmp_path / "in.wav"
+        sf.write(str(inp), np.zeros(sr * dur_s, dtype=np.float32), sr, subtype="FLOAT")
+        return inp
+
+    def _fake_netlist_dump(self, monkeypatch):
+        def fake_run(cmd, capture_output, text):
+            netlist_path = cmd[cmd.index("--netlist") + 1]
+            import json
+            with open(netlist_path, "w") as f:
+                json.dump({}, f)
+            return type("R", (), {"returncode": 0, "stderr": ""})()
+        monkeypatch.setattr("grid_adequacy.subprocess.run", fake_run)
+        monkeypatch.setattr("grid_adequacy.LIVESPICE_CLI", "fake-cli")
+
+    def test_conv_reaches_run_ngspice(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("grid_adequacy.Path.home", staticmethod(lambda: tmp_path / "home"))
+        self._fake_netlist_dump(monkeypatch)
+        seen = []
+
+        def fake_run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                             param_map, fixed_params, ng):
+            seen.append(dict(ng.get("conv") or {}))
+            sf.write(str(out_wav), np.array([0.1], dtype=np.float32), 1000, subtype="FLOAT")
+            return None
+        monkeypatch.setattr("grid_adequacy._run_ngspice", fake_run_ngspice)
+
+        td = tmp_path / "s"; td.mkdir()
+        r = Renderer(schx=str(self._schx(tmp_path)), inp=self._input(tmp_path), oversample=2,
+                    iterations=256, fixed="", td=td, probe_s=4.0, backend="ngspice",
+                    conv={"bjt_vaf": "102.207"})
+        r({"Gain": 0.5})
+        assert {"bjt_vaf": "102.207"} in seen
+
+    def test_disk_cache_separates_different_conv_overrides(self, tmp_path, monkeypatch):
+        cache, schx, inp = tmp_path / "home", self._schx(tmp_path), self._input(tmp_path)
+        monkeypatch.setattr("grid_adequacy.Path.home", staticmethod(lambda: cache))
+
+        def render_with(conv, calls, label):
+            self._fake_netlist_dump(monkeypatch)
+
+            def fake_run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                                 param_map, fixed_params, ng):
+                calls.append(1)
+                sf.write(str(out_wav), np.array([0.1], dtype=np.float32), 1000, subtype="FLOAT")
+                return None
+            monkeypatch.setattr("grid_adequacy._run_ngspice", fake_run_ngspice)
+            td = tmp_path / f"s_{label}"; td.mkdir()
+            r = Renderer(schx=str(schx), inp=inp, oversample=2, iterations=256, fixed="",
+                        td=td, probe_s=4.0, backend="ngspice", conv=conv)
+            r({"Gain": 0.5})
+
+        c1, c2 = [], []
+        render_with({"bjt_vaf": "102.207"}, c1, "a")
+        render_with({"bjt_vaf": "55"}, c2, "b")
+        assert c1 and c2, "different conv overrides must not share a cache entry"
+
+
 class TestRendererDiskCache:
     """The on-disk probe cache must be keyed on everything that changes a render's ANSWER,
     and on nothing that doesn't.

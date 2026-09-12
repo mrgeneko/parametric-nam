@@ -65,7 +65,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak)
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
-                             NgspiceSchxBackend)
+                             NgspiceSchxBackend, parse_conv, conv_cache_tag)
 
 SR = 48000
 
@@ -387,7 +387,7 @@ def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample
                           transient_peak: float, margin: float = 1.0,
                           peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                           full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
-                          sample_grid: int = 0, capture: dict = None) -> dict:
+                          sample_grid: int = 0, capture: dict = None, conv: dict = None) -> dict:
     """[.schx / GENERIC ngspice path, i.e. --backend "ngspice"] For a circuit whose .schx
     exists but whose LiveSPICE render diverges under real signal (e.g. Arbiter Fuzz Face's
     tight DC-coupled feedback loop) yet needs no hand-written deck at all -- unlike
@@ -399,9 +399,11 @@ def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample
     this tool most (LiveSPICE diverges on them). Caught 2026-09-11 while wiring generic-
     ngspice support into prepare_excitation.py for Arbiter Fuzz Face.
     """
-    backend = NgspiceSchxBackend(schx, oversample=oversample)
+    conv = conv or {}
+    backend = NgspiceSchxBackend(schx, oversample=oversample, conv=conv)
     identity = Path(schx).read_bytes()
-    cache_extra = f"backend=ngspice|os={oversample}|maxv={peak_max_v}" + cache_tag(capture)
+    cache_extra = (f"backend=ngspice|os={oversample}|maxv={peak_max_v}"
+                  + cache_tag(capture) + conv_cache_tag(conv))
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            capture=capture,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
@@ -481,6 +483,11 @@ def main():
     ap.add_argument("--oversample", type=int, default=None, help="default: config's own")
     ap.add_argument("--iterations", type=int, default=256)
     ap.add_argument("--peak-max-v", type=float, default=40.0)
+    ap.add_argument("--conv", default=None,
+                    help="[ngspice] device-model convergence/fidelity overrides key=val,... "
+                         "(same format gen_dataset_from_schx.py --conv uses; e.g. "
+                         "bjt_vaf=102.207,bjt_rb=173.312 for a real datasheet-fitted "
+                         "transistor). Default: --config's own `conv` field.")
     _cc_add_cli_args(ap)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
@@ -578,13 +585,14 @@ def main():
         # need "ngspice" (LiveSPICE diverges on them). See check_coverage_ngspice()'s docstring.
         schx = str(cfg["schx"])
         oversample = args.oversample or cfg.get("oversample", 2)
+        _conv = parse_conv(args.conv if args.conv is not None else cfg.get("conv"))
         result = check_coverage_ngspice(schx, knob_ranges, fixed, oversample, transient_peak,
                                         margin=args.margin,
                                         peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                         full_hypercube=(False if args.no_full_hypercube else None),
                                         max_corners=args.max_corners,
                                         sample_grid=args.sample_grid,
-                                        capture=_capture)
+                                        capture=_capture, conv=_conv)
         schx_or_module = schx
     else:
         schx = str(cfg["schx"])

@@ -294,6 +294,46 @@ Presence = 0.5
         assert a[a.index("--knobs") + 1] == "RD Gain,Tone"   # names with spaces survive
         assert a[a.index("--fixed-params") + 1] == "Presence=0.5"
 
+    def _cfg_with_toplevel(self, tmp_path, extra_toplevel):
+        """Like _cfg, but `extra_toplevel` lines land BEFORE [knobs]/[fixed] -- i.e. as real
+        top-level config keys, not (wrongly) inside the [fixed] table."""
+        (tmp_path / "amps").mkdir(exist_ok=True)
+        schx = tmp_path / "amps" / "My Amp (v2).schx"
+        schx.write_text("<Schematic/>", encoding="utf-8")
+        wav = tmp_path / "amps" / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        p = tmp_path / "d.config.toml"
+        p.write_text(f'''
+schx = "{schx}"
+input = "{wav}"
+backend = "livespice"
+oversample = 8
+{extra_toplevel}
+[knobs]
+"RD Gain" = [0.1, 1.0]
+Tone = [0.2, 0.8]
+[fixed]
+Presence = 0.5
+''', encoding="utf-8")
+        return p
+
+    def test_conv_and_capture_chain_overrides_are_carried(self, tmp_path):
+        """Without this, a sharded dispatch renders through the generic transistor model and
+        the default capture chain regardless of what the config declares -- silently
+        disagreeing with a single-machine run_pipeline.py render of the SAME config, which
+        forwards both explicitly (see run_pipeline.py's own gen_cmd construction and
+        capture_chain.resolve()'s docstring on why config.toml alone isn't enough)."""
+        extra = 'conv = "bjt_vaf=102.207,bjt_rb=173.312"\ncapture-hp-hz = 29\ncapture-order = 2'
+        a = dp.gen_args_from_config(self._cfg_with_toplevel(tmp_path, extra), tmp_path / "repo")
+        assert a[a.index("--conv") + 1] == "bjt_vaf=102.207,bjt_rb=173.312"
+        assert a[a.index("--capture-hp-hz") + 1] == "29"
+        assert a[a.index("--capture-order") + 1] == "2"
+
+    def test_no_capture_chain_override_is_carried(self, tmp_path):
+        a = dp.gen_args_from_config(
+            self._cfg_with_toplevel(tmp_path, "no-capture-chain = true"), tmp_path / "repo")
+        assert "--no-capture-chain" in a
+
     def test_paths_are_relative_to_the_repo_not_absolute(self, tmp_path):
         """run_chunk cds into each worker's OWN checkout, and homes differ across the fleet
         (/Users/gene, /Users/chewie, /home/gene) -- an absolute path from the controller can

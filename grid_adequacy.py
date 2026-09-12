@@ -105,7 +105,8 @@ import importlib  # noqa: E402
 from ngspice_spicelib import load_input  # noqa: E402
 import ltspice_spicelib  # noqa: E402
 from prepare_excitation import _parse_fixed  # noqa: E402
-from render_backends import NgspiceBackend, LtspiceBackend, describe_subprocess_failure  # noqa: E402
+from render_backends import (NgspiceBackend, LtspiceBackend, describe_subprocess_failure,  # noqa: E402
+                             parse_conv, conv_cache_tag)
 from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
                            cache_tag as _cc_cache_tag, capture_chain as _cc_apply,
                            describe as _cc_describe, mismatch_reason as _cc_mismatch_reason)
@@ -205,10 +206,15 @@ class Renderer:
                 backend="livespice", pedal_dir=None, module=None, probe_node="OUT",
                 lead_silence_s=None, no_disk_cache=False,
                 ngspice_deck_maxstep=3e-6, ltspice_deck_maxstep=3e-6,
-                ltspice_out_scale=0.05, ltspice_timeout=None, capture=None):
+                ltspice_out_scale=0.05, ltspice_timeout=None, capture=None, conv=None):
         self.schx, self.os_, self.it = schx, oversample, iterations
         self.fixed, self.td, self.backend = fixed, td, backend
         self.lead_silence_s = lead_silence_s
+        # --backend ngspice device-model override (e.g. a real transistor fit's bjt_vaf/
+        # bjt_rb/...) -- see render_backends.parse_conv/conv_cache_tag. Must reach the SAME
+        # signal gen_dataset_from_schx.py actually renders, or this measures grid adequacy
+        # against a different transistor response than what trains.
+        self.conv = conv or {}
         # See capture_chain.py: a probe rendered straight off the schx node is the same RAW
         # signal a dataset render skips the audio-interface high-pass on -- if this tool
         # measures grid adequacy against that raw signal while the actual dataset (and
@@ -288,7 +294,7 @@ class Renderer:
             self.ng_base = {
                 "netlist": str(netlist_path), "koren": False,
                 "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
-                "conv": {}, "method": "trap",
+                "conv": self.conv, "method": "trap",
                 "input_upsample": 1,
             }
 
@@ -325,8 +331,8 @@ class Renderer:
             try:
                 h = hashlib.sha256()
                 h.update(Path(self.schx).read_bytes())
-                h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|{_cc_cache_tag(self.capture)}|"
-                        .encode())
+                h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|{_cc_cache_tag(self.capture)}"
+                        f"{conv_cache_tag(self.conv)}|".encode())
                 for c in self.clips:
                     d, _ = sf.read(str(c), dtype="float32")
                     h.update(np.ascontiguousarray(d).tobytes())
@@ -827,6 +833,13 @@ def main() -> None:
                          "(JSON) instead of printing a table. Required whenever --shard is "
                          "given.")
     _cc_add_cli_args(ap)
+    ap.add_argument("--conv", default=None,
+                    help="[ngspice] device-model convergence/fidelity overrides key=val,... "
+                         "(same format gen_dataset_from_schx.py --conv uses -- diode_cjo/"
+                         "diode_tt/bjt_*/jfet_*/tmax/klu; e.g. bjt_vaf=102.207,bjt_rb=173.312 "
+                         "for a real datasheet-fitted transistor). Default: --config's own "
+                         "`conv` field, so this is normally unset -- pass it only to override "
+                         "what the config already declares.")
     ap.add_argument("--merge", nargs="+", metavar="SHARD_JSON", default=None,
                     help="combine the --shard-out files from every shard of a run into the "
                          "same per-axis report --suggest an unsharded run would have printed, "
@@ -909,6 +922,8 @@ def main() -> None:
         oversample = int(oversample)
     check_oracle(backend)
     capture = _cc_resolve(args, cfg)
+    # CLI > config.toml `conv` field, matching capture_chain.resolve()'s own precedence.
+    conv = parse_conv(args.conv if args.conv is not None else cfg.get("conv"))
 
     n_combos = int(np.prod([len(v) for v in knobs.values()]))
     print(f"  config     {args.config}")
@@ -916,6 +931,8 @@ def main() -> None:
     print(f"  grid       {' x '.join(str(len(v)) for v in knobs.values())} = {n_combos} combinations")
     print(f"  target ESR {args.target}   (a cell above this is the limiting factor)")
     print(f"  {_cc_describe(capture)}")
+    if conv:
+        print(f"  device-model overrides: {', '.join(f'{k}={v}' for k, v in sorted(conv.items()))}")
     probe_s = max(args.probe_s, 8.0) if backend in ("ngspice", "ngspice-deck", "ltspice-deck") else args.probe_s
     print(f"  probe      {probe_s:.0f}s @ oversample {oversample}, {args.iterations} iters"
          f"{' (bumped for ngspice -- short clips SIGSEGV, see Renderer)' if probe_s != args.probe_s else ''}\n")
@@ -934,7 +951,7 @@ def main() -> None:
                           ngspice_deck_maxstep=args.ngspice_deck_maxstep,
                           ltspice_deck_maxstep=args.ltspice_deck_maxstep,
                           ltspice_out_scale=args.ltspice_out_scale,
-                          ltspice_timeout=args.ltspice_timeout, capture=capture)
+                          ltspice_timeout=args.ltspice_timeout, capture=capture, conv=conv)
 
         if args.shard:
             # One slice of the full job list, rendered and saved for a later --merge -- see

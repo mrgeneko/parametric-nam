@@ -61,7 +61,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak, scratch_dir)
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
-                             NgspiceSchxBackend)
+                             NgspiceSchxBackend, parse_conv, conv_cache_tag)
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
@@ -213,6 +213,7 @@ def _setup(args):
             oversample = args.oversample or cfg.get("oversample", 2)
             knob_ranges = _parse_ranges(cfg.get("ranges", []))
             fixed = _parse_fixed(cfg.get("fixed_params"))
+            conv = parse_conv(args.conv if args.conv is not None else cfg.get("conv"))
         else:
             if not args.schx or not args.range:
                 sys.exit("--backend ngspice needs --config, or --schx + --range")
@@ -220,15 +221,19 @@ def _setup(args):
             oversample = args.oversample or 2
             knob_ranges = _parse_ranges(args.range)
             fixed = _parse_fixed(args.fixed_params)
+            conv = parse_conv(args.conv)
         if not knob_ranges:
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
-        backend = NgspiceSchxBackend(schx, oversample=oversample)
+        backend = NgspiceSchxBackend(schx, oversample=oversample, conv=conv)
         identity = Path(schx).read_bytes()
         # backend=ngspice in the key: without it this would share livespice's "os=..|it=.."
         # extra on the SAME schx identity, serving a raw-node livespice onset to an ngspice
         # caller (or vice versa) -- the exact hazard --backend ngspice-deck's own comment
-        # above documents for ngspice-deck vs ltspice-deck.
-        cache_extra = f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        # above documents for ngspice-deck vs ltspice-deck. conv_cache_tag guards the same
+        # hazard for a device-model override (e.g. a corrected transistor fit): an onset
+        # measured under one --conv must not be served to a caller expecting a different one.
+        cache_extra = (f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}"
+                      + cache_tag(_capture) + conv_cache_tag(conv))
         # lead_silence_s IS needed here, same as ngspice-deck: this is ngspice under the hood
         # (schx_to_ngspice.py's generated .cir, not a hand-written deck, but the same solver),
         # so it has the same cold-start settling behaviour grid_adequacy.py's own --backend
@@ -298,6 +303,11 @@ def main():
                      help="find_saturation_point sweep ceiling -- the 40V default suits an "
                           "amp; lower it (e.g. 3-5) for a small pedal circuit")
     _cc_add_cli_args(ap)
+    ap.add_argument("--conv", default=None,
+                    help="[ngspice] device-model convergence/fidelity overrides key=val,... "
+                         "(same format gen_dataset_from_schx.py --conv uses; e.g. "
+                         "bjt_vaf=102.207,bjt_rb=173.312 for a real datasheet-fitted "
+                         "transistor). Default: --config's own `conv` field.")
     ap.add_argument("--no-cache", action="store_true")
 
     # excitation-building

@@ -48,6 +48,30 @@ import ltspice_spicelib  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
 
 
+def parse_conv(s):
+    """"key=val,key2=val2,..." -> dict, the same string format gen_dataset_from_schx.py's
+    own --conv has always used. Shared here (not duplicated per-caller) so every tool that
+    can render through NgspiceSchxBackend (prepare_excitation.py, preflight.py,
+    check_transient_coverage.py, grid_adequacy.py, gen_dataset_from_schx.py, run_pipeline.py)
+    parses the same override string identically. Values stay strings -- schx_to_ngspice.py's
+    own qty() does the unit conversion at render time (and its own module docstring is the
+    unit-suffix authority: uppercase M is MEGA, lowercase m is milli -- the OPPOSITE of
+    PSpice's own convention -- so a value copied verbatim from a PSpice .MODEL card must be
+    converted to this convention, or written as plain scientific notation, before it reaches
+    here)."""
+    return dict(kv.split("=", 1) for kv in (s or "").split(",") if "=" in kv)
+
+
+def conv_cache_tag(conv):
+    """Cache-key fragment identifying a device-model override, the same role capture_chain.
+    cache_tag() plays for the capture chain: without this, an onset/probe measured under one
+    --conv (e.g. a corrected transistor fit) could be served back to a caller expecting the
+    generic default, or vice versa."""
+    if not conv:
+        return ""
+    return "|conv=" + ",".join(f"{k}={conv[k]}" for k in sorted(conv))
+
+
 def describe_subprocess_failure(r: subprocess.CompletedProcess) -> str:
     """One-line, ACTIONABLE description of why a livespice_cli render failed.
 
@@ -193,11 +217,18 @@ class NgspiceSchxBackend:
     all (see check_transient_coverage.py's check_coverage(), which was exactly that gap).
     """
 
-    def __init__(self, schx, oversample=2, fixed_params=None, param_map=None):
+    def __init__(self, schx, oversample=2, fixed_params=None, param_map=None, conv=None):
         self.schx = schx
         self.oversample = oversample
         self.fixed_params = fixed_params   # "Name=val,..." string, or None -- see _run_ngspice
         self.param_map = param_map         # knob-name -> netlist pot Name, or None (identity)
+        # Device-model convergence/fidelity overrides (key=val,... parsed to a dict by
+        # parse_conv() below) -- e.g. bjt_vaf/bjt_rb/... for a real datasheet-fitted transistor
+        # (see schx_to_ngspice.bjt_model's _BJT_OPTIONAL). MUST reach every tool that renders
+        # or measures this circuit identically, or one tool sizes/checks against a different
+        # transistor response than what the dataset actually trains on -- the same class of
+        # bug capture_chain.py's cache_tag/resolve() exist to prevent for the capture chain.
+        self.conv = conv or {}
         self.ng_base = None                # filled lazily, once, on first prepare_input
 
     def _ensure_netlist(self, scratch):
@@ -212,7 +243,7 @@ class NgspiceSchxBackend:
         self.ng_base = {
             "netlist": str(netlist_path), "koren": False,
             "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
-            "conv": {}, "method": "trap", "input_upsample": 1,
+            "conv": self.conv, "method": "trap", "input_upsample": 1,
             "oversample": self.oversample,
         }
 

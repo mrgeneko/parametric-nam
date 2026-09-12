@@ -74,7 +74,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
                                    findpeak_cache_key, cache_findpeak, scratch_dir)
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
-                             NgspiceSchxBackend)
+                             NgspiceSchxBackend, parse_conv, conv_cache_tag)
 from knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
@@ -152,12 +152,15 @@ def _build_backend(args):
         knobs = [k.strip() for k in args.knobs.split(",") if k.strip()]
         control_map = parse_schx_controls(args.schx)
         resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
-        backend = NgspiceSchxBackend(args.schx, oversample=args.oversample)
+        conv = parse_conv(args.conv)
+        backend = NgspiceSchxBackend(args.schx, oversample=args.oversample, conv=conv)
         identity = Path(args.schx).read_bytes()
         # backend=ngspice in the key: without it this shares livespice's "os=..|it=.." extra
         # on the SAME schx identity, serving a raw-node livespice probe to an ngspice caller
         # (or vice versa) -- the exact hazard ngspice-deck/ltspice-deck's own comment documents.
-        cache_extra = f"backend=ngspice|os={args.oversample}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        # conv_cache_tag guards the same hazard for a device-model override.
+        cache_extra = (f"backend=ngspice|os={args.oversample}|maxv={args.peak_max_v}"
+                      + cache_tag(_capture) + conv_cache_tag(conv))
         return backend, knobs, identity, cache_extra
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module):
@@ -257,6 +260,11 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                      help="upper bound of the --find-peak amplitude sweep -- the 40V default "
                           "suits an amp; lower it (e.g. 3-5) for a small pedal circuit")
+    ap.add_argument("--conv", default="",
+                    help="[ngspice] device-model convergence/fidelity overrides key=val,... "
+                         "(same format gen_dataset_from_schx.py --conv uses; e.g. "
+                         "bjt_vaf=102.207,bjt_rb=173.312 for a real datasheet-fitted "
+                         "transistor).")
     _cc_add_cli_args(ap)
     ap.add_argument("--clean-probe-peak", type=float, default=None,
                      help="probe EQ/tone knobs with the input scaled to this peak voltage "

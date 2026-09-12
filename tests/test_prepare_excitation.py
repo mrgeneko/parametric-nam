@@ -145,12 +145,12 @@ class TestSetupNgspiceBackend:
     unknown backend."""
 
     def _args(self, schx=None, range_=None, config=None, oversample=None, peak_max_v=40.0,
-             lead_silence_s=3.0, fixed_params=""):
+             lead_silence_s=3.0, fixed_params="", conv=None):
         import types
         return types.SimpleNamespace(backend="ngspice", schx=schx, range=range_ or [],
                                      config=config, oversample=oversample,
                                      peak_max_v=peak_max_v, lead_silence_s=lead_silence_s,
-                                     fixed_params=fixed_params)
+                                     fixed_params=fixed_params, conv=conv)
 
     def test_builds_an_ngspice_schx_backend_from_schx_and_range(self, tmp_path):
         schx = tmp_path / "fake.schx"
@@ -171,3 +171,22 @@ class TestSetupNgspiceBackend:
     def test_missing_schx_or_range_exits(self):
         with pytest.raises(SystemExit):
             _setup(self._args(schx=None, range_=[]))
+
+    def test_conv_reaches_the_backend_and_the_cache_key(self, tmp_path):
+        """A device-model override (e.g. a real transistor fit) must reach the actual
+        NgspiceSchxBackend AND the cache_extra key -- otherwise an onset measured under one
+        --conv could be served to a caller expecting a different (or no) override."""
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        backend, _, cache_extra, *_ = _setup(self._args(
+            schx=str(schx), range_=["Fuzz=0.0,1.0"], conv="bjt_vaf=102.207"))
+        assert backend.conv == {"bjt_vaf": "102.207"}
+        assert "bjt_vaf=102.207" in cache_extra
+
+    def test_different_conv_produces_a_different_cache_key(self, tmp_path):
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        _, _, a, *_ = _setup(self._args(schx=str(schx), range_=["Fuzz=0.0,1.0"],
+                                        conv="bjt_vaf=102.207"))
+        _, _, b, *_ = _setup(self._args(schx=str(schx), range_=["Fuzz=0.0,1.0"], conv=None))
+        assert a != b

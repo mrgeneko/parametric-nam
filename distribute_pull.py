@@ -329,6 +329,21 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
         out += ["--fixed-params", str(cfg["fixed_params"])]
     if cfg.get("oversample") is not None:
         out += ["--oversample", str(cfg["oversample"])]
+    # Device-model overrides (a real datasheet-fitted transistor's bjt_vaf/bjt_rb/...) --
+    # without this, a sharded dispatch renders through the generic model regardless of what
+    # the config declares, silently disagreeing with a single-machine run_pipeline.py render
+    # of the SAME config (which does forward --conv -- see its own gen_cmd construction).
+    if cfg.get("conv"):
+        out += ["--conv", str(cfg["conv"])]
+    # Same reasoning for the capture chain: run_pipeline.py forwards it explicitly (see
+    # capture_chain.resolve()'s own docstring on why config.toml alone isn't enough), but
+    # this scheduler's own config expansion never did.
+    if cfg.get("no_capture_chain"):
+        out += ["--no-capture-chain"]
+    if cfg.get("capture_hp_hz") is not None:
+        out += ["--capture-hp-hz", str(cfg["capture_hp_hz"])]
+    if cfg.get("capture_order") is not None:
+        out += ["--capture-order", str(cfg["capture_order"])]
     return out
 
 

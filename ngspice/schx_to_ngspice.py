@@ -165,13 +165,46 @@ def diode_model(p, conv):
         sp(qty(_cv(p, 'TT', conv, 'diode_tt', '5n'))))
 
 
+# Optional secondary Gummel-Poon parameters, beyond IS/BF/BR/CJE/CJC/TF above. The .schx
+# BipolarJunctionTransistor element (and LiveSPICE's own C# class behind it) carries only
+# Type/IS/BF/BR -- there is nowhere in the file format to record a real datasheet/PSpice
+# fit's VAF, IKF, RB, etc, even though ngspice's own Gummel-Poon model supports all of them
+# natively. So these are ALWAYS resolved through --conv (never a schx attribute, until the
+# format grows one) and, unlike CJE/CJC/TF, have NO forced default: a device that sets none
+# of them renders BYTE-IDENTICAL to before this existed -- ngspice's own native default
+# applies (VAF=infinite, RB=0, etc), not a guessed value.
+#
+# Excludes EG/XTI/XTB (temperature dependence) and KF/AF (flicker noise): both are inert for
+# this pipeline's isothermal (fixed Tnom, no .TEMP sweep), .tran-only (no .noise analysis)
+# renders, so wiring them through would add surface area for zero measured effect. Also
+# excludes CJS/VJS/MJS (substrate capacitance) -- not applicable to a discrete TO-18 part.
+_BJT_OPTIONAL = (
+    ('VAF', 'bjt_vaf'), ('IKF', 'bjt_ikf'), ('ISE', 'bjt_ise'), ('NE', 'bjt_ne'),
+    ('VAR', 'bjt_var'), ('IKR', 'bjt_ikr'), ('ISC', 'bjt_isc'), ('NC', 'bjt_nc'),
+    ('RB', 'bjt_rb'), ('IRB', 'bjt_irb'), ('RBM', 'bjt_rbm'),
+    ('RE', 'bjt_re'), ('RC', 'bjt_rc'),
+    ('VJE', 'bjt_vje'), ('MJE', 'bjt_mje'),
+    ('VJC', 'bjt_vjc'), ('MJC', 'bjt_mjc'), ('XCJC', 'bjt_xcjc'),
+    ('TR', 'bjt_tr'), ('XTF', 'bjt_xtf'), ('VTF', 'bjt_vtf'),
+    ('ITF', 'bjt_itf'), ('PTF', 'bjt_ptf'), ('FC', 'bjt_fc'),
+)
+
+
 def bjt_model(p, conv):
     typ = 'PNP' if str(p.get('Type', 'NPN')).upper() == 'PNP' else 'NPN'
-    return '%s(IS=%s BF=%s BR=%s CJE=%s CJC=%s TF=%s)' % (
-        typ, sp(qty(p.get('IS', '1e-16'))), sp(qty(p.get('BF', '100'))),
-        sp(qty(p.get('BR', '1'))), sp(qty(_cv(p, 'CJE', conv, 'bjt_cje', '8p'))),
-        sp(qty(_cv(p, 'CJC', conv, 'bjt_cjc', '4p'))),
-        sp(qty(_cv(p, 'TF', conv, 'bjt_tf', '0.5n'))))
+    parts = [
+        'IS=%s' % sp(qty(p.get('IS', '1e-16'))),
+        'BF=%s' % sp(qty(p.get('BF', '100'))),
+        'BR=%s' % sp(qty(p.get('BR', '1'))),
+        'CJE=%s' % sp(qty(_cv(p, 'CJE', conv, 'bjt_cje', '8p'))),
+        'CJC=%s' % sp(qty(_cv(p, 'CJC', conv, 'bjt_cjc', '4p'))),
+        'TF=%s' % sp(qty(_cv(p, 'TF', conv, 'bjt_tf', '0.5n'))),
+    ]
+    for pspice_key, ckey in _BJT_OPTIONAL:
+        v = p.get(pspice_key) or conv.get(ckey)
+        if v is not None:
+            parts.append('%s=%s' % (pspice_key, sp(qty(v))))
+    return '%s(%s)' % (typ, ' '.join(parts))
 
 
 def jfet_model(p, conv):

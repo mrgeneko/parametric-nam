@@ -789,6 +789,12 @@ def main():
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
     g.add_argument("--ot-snub",      default="10n", help="ngspice: OT snubber C")
     g.add_argument("--nfb-comp",     default=None, help="ngspice: NFB compensation cap NODE=value")
+    g.add_argument("--conv",         default="",
+                   help="ngspice: device-model convergence/fidelity overrides key=val,... "
+                        "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax/klu; e.g. bjt_vaf=102.207,"
+                        "bjt_rb=173.312 for a real datasheet-fitted transistor). Forwarded to "
+                        "gen_dataset_from_schx.py and (via --config) to grid_adequacy.py's own "
+                        "STEP 1 -- see gen_dataset_from_schx.py's own --conv help.")
     g.add_argument("--method",       default="", choices=["", "trap", "gear"],
                    help="ngspice: integration method. Auto-set per-circuit if omitted.")
     g.add_argument("--input-upsample", type=int, default=0,
@@ -1202,6 +1208,7 @@ def main():
             if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
             if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
             if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
+            if args.conv:          gen_cmd += ["--conv",        args.conv]
             if args.method:        gen_cmd += ["--method",      args.method]
             if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
             if args.oversample != "2": gen_cmd += ["--oversample", args.oversample]

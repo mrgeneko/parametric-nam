@@ -72,9 +72,9 @@ def write_empty_schx(tmp_path, name="empty.schx"):
     return p
 
 
-def ngspice_schx_args(schx=None, knobs="", oversample=8, peak_max_v=40.0):
+def ngspice_schx_args(schx=None, knobs="", oversample=8, peak_max_v=40.0, conv=""):
     return types.SimpleNamespace(backend="ngspice", schx=schx, knobs=knobs,
-                                 oversample=oversample, peak_max_v=peak_max_v)
+                                 oversample=oversample, peak_max_v=peak_max_v, conv=conv)
 
 
 class TestNgspiceSchxBackend:
@@ -108,6 +108,19 @@ class TestNgspiceSchxBackend:
     def test_missing_schx_exits(self):
         with pytest.raises(SystemExit):
             _build_backend(ngspice_schx_args(schx=None))
+
+    def test_conv_reaches_the_backend_and_the_cache_key(self, tmp_path):
+        schx = write_empty_schx(tmp_path)
+        backend, _, _, cache_extra = _build_backend(
+            ngspice_schx_args(schx=str(schx), conv="bjt_vaf=102.207"))
+        assert backend.conv == {"bjt_vaf": "102.207"}
+        assert "bjt_vaf=102.207" in cache_extra
+
+    def test_different_conv_produces_a_different_cache_key(self, tmp_path):
+        schx = write_empty_schx(tmp_path)
+        _, _, _, a = _build_backend(ngspice_schx_args(schx=str(schx), conv="bjt_vaf=102.207"))
+        _, _, _, b = _build_backend(ngspice_schx_args(schx=str(schx), conv=""))
+        assert a != b
 
 
 def ltspice_args(pedal_dir=None, module=None, exclude_knob=(), probe_node="OUT",
