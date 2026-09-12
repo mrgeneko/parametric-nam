@@ -721,14 +721,28 @@ def load_shard_results(paths: list[Path]) -> tuple[list[tuple], int]:
     Refuses to pool shards rendered through DIFFERENT capture chains (see capture_chain.py):
     a fleet dispatch that ran one shard pre-upgrade and another post-upgrade would otherwise
     silently average a raw-node measurement into a chained one.
+
+    A MIXED set (some shards "unknown", others a known chain) is a narrower case than that:
+    mismatch_reason() treats "unknown" as compatible with anything, which is right for a
+    single dataset-vs-config check (an unknown dataset genuinely cannot be proven either
+    way) but not for a shard SET -- a set is produced together in one dispatch, so an
+    all-unknown set is simply historical, while a MIXED set means one shard was re-rendered
+    after a capture_chain.py upgrade and the rest were not. That is worth a warning even
+    though it still pools (permissive, matching mismatch_reason's own "unknown" rule) --
+    caught in cross-session review (2026-09-11) of this same commit.
     """
     res: list[tuple] = []
     n_failed = 0
     capture = "unknown"
+    saw_unknown = saw_known = False
     for p in paths:
         payload = json.loads(Path(p).read_text())
         n_failed += int(payload.get("n_failed", 0))
         this_capture = payload.get("capture", "unknown")
+        if this_capture == "unknown":
+            saw_unknown = True
+        else:
+            saw_known = True
         reason = _cc_mismatch_reason(capture, this_capture)
         if reason:
             sys.exit(f"ERROR: shard {p} was rendered through a different capture chain than "
@@ -738,6 +752,13 @@ def load_shard_results(paths: list[Path]) -> tuple[list[tuple], int]:
             capture = this_capture
         for row in payload["rows"]:
             res.append((row["axis"], row["lo"], row["hi"], row["error"]))
+    if saw_unknown and saw_known:
+        print(f"WARNING: this shard set mixes 'unknown' (pre-capture-chain) provenance with a "
+             f"known chain ({_cc_describe(capture)}) -- pooling anyway, since mismatch_reason "
+             f"treats 'unknown' as compatible-by-default, but this usually means one shard was "
+             f"rendered before a capture_chain.py upgrade and never re-rendered after. Re-render "
+             f"the unknown shard(s) if you want the whole set on the same footing.",
+             file=sys.stderr)
     return res, n_failed
 
 

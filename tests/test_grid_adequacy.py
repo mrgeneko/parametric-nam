@@ -772,3 +772,47 @@ class TestShardCaptureChainConsistency:
         self._write_shard(b, {"corner_hz": 18.0, "order": 3})
         res, n_failed = load_shard_results([a, b])
         assert len(res) == 2 and n_failed == 0
+
+    def test_all_unknown_shards_merge_silently(self, tmp_path, capsys):
+        """A wholly historical shard set (every shard predates capture_chain.py) is simply
+        that -- not evidence of anything mixed -- so it must merge with NO warning."""
+        import json
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        for p in (a, b):
+            p.write_text(json.dumps({"rows": [{"axis": "Gain", "lo": 0.0, "hi": 1.0,
+                                               "error": 0.01}], "n_failed": 0}))
+        res, n_failed = load_shard_results([a, b])
+        assert len(res) == 2 and n_failed == 0
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_mixed_unknown_and_known_shards_warn_but_still_merge(self, tmp_path, capsys):
+        """The exact case cross-session review (2026-09-11) flagged: mismatch_reason treats
+        'unknown' as compatible with anything, which silently pools a genuinely raw
+        pre-upgrade shard into a set of chained ones. Still pools (permissive, matching
+        mismatch_reason's own rule) but must say so."""
+        import json
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        a.write_text(json.dumps({"rows": [{"axis": "Gain", "lo": 0.0, "hi": 1.0,
+                                           "error": 0.01}], "n_failed": 0}))  # unknown
+        self._write_shard(b, {"corner_hz": 18.0, "order": 3})               # known
+        res, n_failed = load_shard_results([a, b])
+        assert len(res) == 2 and n_failed == 0          # still pools
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "unknown" in err.lower()
+
+    def test_mixed_unknown_and_known_warns_regardless_of_order(self, tmp_path, capsys):
+        """Order must not matter: the first branch only sets `capture` while it is still
+        "unknown", so a known-then-unknown ordering could easily miss the warning if the
+        detection were keyed off that assignment instead of independent saw_unknown/saw_known
+        flags."""
+        import json
+        from grid_adequacy import load_shard_results
+        a, b = tmp_path / "a.json", tmp_path / "b.json"
+        self._write_shard(a, {"corner_hz": 18.0, "order": 3})               # known first
+        b.write_text(json.dumps({"rows": [{"axis": "Gain", "lo": 0.0, "hi": 1.0,
+                                           "error": 0.01}], "n_failed": 0}))  # unknown second
+        res, n_failed = load_shard_results([a, b])
+        assert len(res) == 2 and n_failed == 0
+        assert "WARNING" in capsys.readouterr().err
