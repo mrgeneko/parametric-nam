@@ -5,7 +5,7 @@ WHY THIS EXISTS. A standard .nam is trained on a wet file recorded through an au
 interface, whose input stage rolls off below ~20 Hz. NAM's architecture was designed
 against that distribution. Rendering a circuit in a simulator and probing a node directly
 skips that stage entirely, so our targets can carry sub-audio content no hardware capture
-would ever contain -- and NAM's ~52 ms receptive field cannot model content whose state
+would ever contain -- and NAM's ~132 ms receptive field cannot model content whose state
 evolves over seconds.
 
 Measured on Duke of Tone (Distortion), 2026-09-10: 64-74% of the rendered target's energy
@@ -38,14 +38,16 @@ bass. Measured on Duke of Tone (Distortion)'s worst corner, sub-19 Hz residual:
 Pushing the corner to 29 Hz would halve it again but takes 2.3 dB off low B, permanently and
 irreversibly, in a model meant to stay composable with the user's own amp and cab.
 
-Counter-intuitively the steeper filter is also EASIER for the model: a higher corner decays
-faster, so less of the filter's own state outlives the receptive field (tail energy beyond
-52 ms: 0.50% at 2nd @ 11.8 Hz, 0.18% at 3rd @ 18 Hz). Corner frequency dominates order here.
+The filter's OWN memory does not distinguish these: measured tail energy beyond the 132 ms
+receptive field is 0.0000% for both 2nd @ 11.8 Hz and 3rd @ 18 Hz, so neither is harder for
+the model to represent. (An earlier version of this note argued the steeper filter was
+EASIER on those grounds -- an artifact of a receptive field that was itself wrong by 2.5x.
+The case for 3rd @ 18 Hz rests solely on the frequency-response trade above.)
 
 CAUSAL, ALWAYS. sosfilt, never sosfiltfilt. A zero-phase filter makes the target depend on
 FUTURE input, so its pre-ringing is unpredictable to a causal model by construction -- a
-self-inflicted error floor in the name of removing one. The 3rd-order 18 Hz impulse
-response is ~0.18% by 52 ms, so it sits inside the receptive field and is learnable.
+self-inflicted error floor in the name of removing one. The 3rd-order 18 Hz impulse response
+dies well inside the 132 ms receptive field (measured above), so it is learnable.
 
 THIS IS NOT A UNIVERSAL SAFETY NET. It removes sub-audio, which is the SYMPTOM. A circuit
 whose multi-second state reaches into the AUDIO band is still unmodellable and this will not
@@ -86,8 +88,16 @@ def capture_chain(y, sr, corner_hz=DEFAULT_CORNER_HZ, order=DEFAULT_ORDER):
 def lf_energy_fraction(y, sr, below_hz=19.0):
     """Fraction (0-1) of `y`'s energy below `below_hz`. The cheap screen.
 
-    19 Hz is not arbitrary: it is 1/0.0517 s, the reciprocal of the A2 receptive field, so
-    it names the slowest periodicity a model could resolve within one window.
+    19 Hz is a SCREENING band, kept for continuity: every measurement recorded in this repo
+    and in the device notes uses it (fleet 0.2-9.5%, Duke of Tone Distortion 64-74%), so
+    changing the default would silently break comparison against all of them.
+
+    It was originally justified as the reciprocal of the receptive field -- and that was
+    wrong, because the receptive field was wrong. The real figure is 6332 samples /
+    131.9 ms (param_train.RECEPTIVE_FIELD_SAMPLES), making the slowest periodicity
+    resolvable within one window **7.58 Hz**, not 19 Hz. Pass below_hz=7.58 for the
+    structurally-motivated number; 19 Hz remains the comparable one, and is conservative
+    in the sense that it counts some content the model can actually resolve.
     """
     a = np.asarray(y, dtype=np.float64).ravel()
     if a.size < 2:
@@ -235,7 +245,7 @@ def describe(capture):
     """
     if not capture:
         return ("capture chain: DISABLED (--no-capture-chain) -- targets keep sub-audio content "
-                "no hardware capture would contain, which a ~52 ms receptive field cannot model")
+                "no hardware capture would contain, which a ~132 ms receptive field cannot model")
     n = capture["order"]
     suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return (f"capture chain: {n}{suffix}-order high-pass at {capture['corner_hz']:g} Hz "

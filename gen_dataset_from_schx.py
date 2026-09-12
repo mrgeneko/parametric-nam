@@ -2500,7 +2500,7 @@ def main():
                          "NAM capture is recorded through an audio interface whose input stage "
                          "rolls off below ~20 Hz; probing a simulated node directly skips that, "
                          "so targets can carry sub-audio no real capture contains AND that NAM's "
-                         "~52 ms receptive field cannot model. Duke of Tone (Distortion) 2026-09-10: "
+                         "~132 ms receptive field cannot model. Duke of Tone (Distortion) 2026-09-10: "
                          "64%% of target energy below 19 Hz, and BOTH this repo's trainer and the "
                          "official upstream nam-full plateaued near ESR 0.5. On by default; pass "
                          "this only to reproduce a pre-2026-09-10 dataset bit-for-bit.")
