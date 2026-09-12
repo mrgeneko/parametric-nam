@@ -34,6 +34,12 @@ from pathlib import Path
 HERE    = Path(__file__).resolve().parent
 PYTHON  = sys.executable
 BATCH   = HERE / "gen_dataset_from_schx.py"
+
+# Every fleet config used --target-steps 25000, which via the nominal-450-epoch formula
+# implied 52-61 steps/epoch on every grid size; 50 is a round restatement of that.
+# param_train.py owns the derivation (it alone knows n_combos AND the val-split
+# floor); this constant only seeds the flag forwarded to it.
+DEFAULT_STEPS_PER_EPOCH = 50
 TRAIN   = HERE / "param_train.py"
 
 from gen_dataset_from_schx import check_oracle
@@ -418,8 +424,58 @@ def portable(p) -> str:
     return s
 
 
-def reproduce_command(args):
-    """Reconstruct a one-shot run_pipeline.py command from parsed args."""
+def _derive_repeats(steps_per_epoch, n_combos, batch_size, val_split, fh=None):
+    """repeats needed to hit `steps_per_epoch`, floored so the val split stays per-combination.
+
+    `steps_per_epoch` may be fractional -- the deprecated --target-steps alias passes
+    target_steps/450 unrounded so existing configs derive exactly the repeats they used to.
+
+    Returns (repeats, achieved_steps_per_epoch). The two differ whenever the floor binds, and
+    the caller is told -- which is the point. The floor exists because a 5% split over a large
+    grid at low repeats holds out well under one item per combination; but it also means the
+    request CANNOT be honoured above ~165 combos at the fleet's settings, and until now that
+    divergence was silent. Mesa Orange asked for 52 steps/epoch and ran 171, so its SGDR cycles
+    were 3.3x longer than --restart-period 50 was calibrated for, and nothing said so.
+    """
+    exact = steps_per_epoch * batch_size / max(1, n_combos * (1 - val_split))
+    repeats = max(1, round(exact))
+    floor = max(1, round(1 / val_split)) if val_split > 0 else 1
+    if repeats < floor:
+        achieved = math.ceil(n_combos * floor * (1 - val_split) / batch_size)
+        if fh is not None:
+            log(f"  NOTE: --steps-per-epoch {steps_per_epoch} needs repeats "
+                f"{repeats}, below the {floor} that keeps the {val_split:g} val split "
+                f"per-combination. Holding repeats={floor}: ACHIEVED {achieved} steps/epoch, "
+                f"{achieved/steps_per_epoch:.1f}x the request (so an SGDR cycle is that much "
+                f"longer than --restart-period implies).", fh)
+        return floor, achieved
+    return repeats, math.ceil(n_combos * repeats * (1 - val_split) / batch_size)
+
+
+def reproduce_command(args, repeats=None, have_config=False):
+    """Reconstruct a one-shot run_pipeline.py command from parsed args.
+
+    PREFERS --config. When the run was driven by a config.toml (copied into the release
+    beside this script), the reproduce command just points at that copy instead of
+    re-expanding it into flags. Re-expansion is where this script silently stopped
+    reproducing anything: `--target-steps` had no branch here at all, so it was dropped,
+    and `--repeats` emitted args.repeats -- the raw CLI default of 1 -- rather than the
+    value DERIVED from target-steps. Mesa Orange's published bundle records `--repeats 1`
+    for a run that actually trained at 20, and the config's own comment warns that
+    repeats=1 on a small grid gives 1-2 gradient steps per epoch and a false plateau.
+
+    `repeats` is the DERIVED value from main(); falls back to args.repeats only when a
+    caller has none to give.
+    """
+    if have_config:
+        # The config sits next to this script in the release; $0 makes it location-independent.
+        return "\n".join([
+            'HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
+            '    --config         "$(cd "$(dirname "$0")" && pwd)/config.toml" \\',
+            f'    --dataset-dir    "{portable(args.dataset_dir)}" \\',
+            f'    --nam-output     "{portable(args.nam_output)}" \\',
+            f'    --checkpoint-dir "{portable(args.checkpoint_dir)}"',
+        ])
     c = ['HIP_VISIBLE_DEVICES=0 "$PY" run_pipeline.py \\',
          f'    --dataset-dir    "{portable(args.dataset_dir)}" \\',
          f'    --nam-output     "{portable(args.nam_output)}" \\',
@@ -427,7 +483,10 @@ def reproduce_command(args):
          f'    --backend {args.backend} \\']
     if args.schx:          c.append(f'    --schx "{portable(args.schx)}" \\')
     if args.circuit:       c.append(f'    --circuit "{args.circuit}" \\')
-    if args.knobs:         c.append(f'    --knobs {args.knobs} \\')
+    # QUOTED: knob names routinely contain spaces ("OR Gain", "Or Master"), so an
+    # unquoted list makes bash split one flag into five. Every published bundle with a
+    # spaced knob name carries this broken line; the --range lines below were already quoted.
+    if args.knobs:         c.append(f'    --knobs "{args.knobs}" \\')
     if args.oversample != "2": c.append(f'    --oversample {args.oversample} \\')
     if args.trunc_target != 1e-3: c.append(f'    --trunc-target {args.trunc_target} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
@@ -439,14 +498,14 @@ def reproduce_command(args):
     if getattr(args, "method", ""): c.append(f'    --method {args.method} \\')
     if getattr(args, "input_upsample", 0): c.append(f'    --input-upsample {args.input_upsample} \\')
     if args.max_crest != 50.0: c.append(f'    --max-crest {args.max_crest:g} \\')
-    if args.values:        c.append(f'    --values {args.values} \\')
+    if args.values:        c.append(f'    --values "{args.values}" \\')
     for r in (args.ranges or []):  c.append(f'    --range "{r}" \\')
     for b in (args.bounds or []):  c.append(f'    --bounds "{b}" \\')
     for g in (args.gang or []):    c.append(f'    --gang "{g}" \\')
     for s in (args.steps or []):   c.append(f'    --steps "{s}" \\')
     if args.fixed_params:  c.append(f'    --fixed-params "{args.fixed_params}" \\')
     if getattr(args, "defaults", None): c.append(f'    --defaults "{args.defaults}" \\')
-    if args.speaker:       c.append(f'    --speaker {args.speaker} \\')
+    if args.speaker:       c.append(f'    --speaker "{args.speaker}" \\')
     if args.input:         c.append(f'    --input "{portable(args.input)}" \\')
     if args.widths:        c.append(f'    --widths {args.widths} \\')
     if not args.mmap:      c.append('    --no-mmap \\')
@@ -456,12 +515,15 @@ def reproduce_command(args):
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
-    c.append(f'    --repeats {args.repeats} {epochs_part} '
+    if getattr(args, "target_steps", 0):
+        c.append(f'    --target-steps {args.target_steps} \\')
+    eff_repeats = args.repeats if repeats is None else repeats
+    c.append(f'    --repeats {eff_repeats} {epochs_part} '
              f'--crop-len {args.crop_len} --batch-size {args.batch_size} --lr {args.lr}')
     return "\n".join(c)
 
 
-def build_release(args, fh, timings=None):
+def build_release(args, fh, timings=None, repeats=None):
     """Assemble a durable release folder next to the model: the best-full and
     best-lite .param.nam files, the schematic, the full ESR history, dataset
     params, a provenance manifest (with per-step timing + hardware), and a
@@ -615,6 +677,16 @@ Run `./reproduce.sh`.
 """
     (release_dir / "MANIFEST.md").write_text(manifest)
 
+    have_config = False
+    if getattr(args, "config", None) and Path(args.config).exists():
+        try:
+            shutil.copy(str(args.config), str(release_dir / "config.toml"))
+            have_config = True
+            log(f"  + config.toml (from {args.config})", fh)
+        except Exception as e:
+            log(f"  WARNING: could not copy config.toml ({e}); "
+                f"reproduce.sh will fall back to expanded flags", fh)
+
     repro = f"""#!/usr/bin/env bash
 # Replicate this model (generate dataset + train). Auto-generated.
 set -euo pipefail
@@ -622,8 +694,13 @@ REPO="${{PARAMETRIC_NAM:-$HOME/work/parametric-nam}}"
 PY="$REPO/.venv/bin/python"
 cd "$REPO"
 
-{reproduce_command(args)}
+{reproduce_command(args, repeats=repeats, have_config=have_config)}
 """
+    # The config belongs IN the dated bundle, not at device level. A device dir holds ONE
+    # config.toml but many runs (marshall-jcm800-2203-preamp: 6), so it can describe at most
+    # one of them and is silently wrong for the rest. Copied here it is frozen with the models
+    # it produced -- and reproduce.sh then POINTS at it rather than re-expanding it, which is
+    # what used to lose --target-steps.
     repro_path = release_dir / "reproduce.sh"
     repro_path.write_text(repro)
     repro_path.chmod(0o755)
@@ -679,7 +756,7 @@ def check_missing_combinations(dataset_dir: Path, fh, allow_missing: bool) -> No
         sys.exit(1)
 
 
-def build_train_cmd(args, dataset_dir, epochs, repeats):
+def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
     """The param_train.py invocation for the training step. Pulled out of main() so the
     flag-forwarding logic (easy to silently break when adding a new pipeline flag -- see the
     --amp comment below for a real incident) is directly testable without running an actual
@@ -697,13 +774,19 @@ def build_train_cmd(args, dataset_dir, epochs, repeats):
         "--batch-size",      args.batch_size,
         "--lr",              args.lr,
         "--crop-len",        args.crop_len,
-        "--repeats",         repeats,   # derived above — may differ from args.repeats
+        # repeats is NOT passed: param_train.py derives it from --steps-per-epoch, because it
+        # is the only component that knows both n_combos and the val-split floor. Deriving it
+        # here too is what made the two disagree (handed 6, trained at 20). An EXPLICIT
+        # --repeats is still forwarded, below.
+        "--steps-per-epoch", steps_per_epoch_arg,
         "--mrstft-weight",   args.mrstft_weight,
         "--val-split",       args.val_split,
         "--val-passes",      args.val_passes,
         "--device",          args.device,
         "--seed",            args.seed,
     ]
+    if getattr(args, "repeats_explicit", False) and args.repeats:
+        train_cmd += ["--repeats", args.repeats]   # explicit override wins over the derivation
     if args.widths:              train_cmd += ["--widths", args.widths]
     if not args.mmap:             train_cmd.append("--no-mmap")
     if args.resume:              train_cmd += ["--resume", args.resume]
@@ -894,12 +977,20 @@ def main():
     g.add_argument("--no-mmap",        action="store_false", dest="mmap")
     g.add_argument("--resume",         type=Path,  default=None)
     g.add_argument("--device",         default="auto")
+    g.add_argument("--steps-per-epoch", type=int, default=DEFAULT_STEPS_PER_EPOCH,
+                   help="Gradient steps per epoch; `repeats` is DERIVED to hit it. This is what "
+                        "actually needs to be held constant across grids of different sizes, "
+                        "because with SGDR it sets the length of a restart cycle "
+                        "(steps/cycle = this × --restart-period). Default %(default)s — not a new "
+                        "number: every config in the fleet used --target-steps 25000, which through "
+                        "its nominal-450-epoch formula implied 52-61 steps/epoch on every grid. "
+                        "0 = off (use --repeats).")
     g.add_argument("--target-steps",   type=int, default=0,
-                   help="Ask for a TRAINING BUDGET directly and let repeats be derived from it, "
-                        "instead of backing into one. total steps = epochs × n_combos × repeats × "
-                        "(1-val_split) / batch. Because that depends on n_combos, changing the knob "
-                        "grid otherwise changes how long the model trains — regridding Large Muffin "
-                        "126→60 combos silently HALVED its budget. 0 = off (use --repeats).")
+                   help="DEPRECATED alias for --steps-per-epoch; converted as "
+                        "target_steps/450. It was never a budget in open-ended mode (epochs=0 has "
+                        "no horizon), so the 'total steps' it named did not exist -- it reached "
+                        "`repeats` through an invented 450-epoch schedule. What it really set was "
+                        "steps/epoch. Kept so existing configs behave identically.")
     g.add_argument("--skip-grid-check", action="store_true",
                    help="skip the STEP 1 grid-adequacy measurement. It renders each knob cell's "
                         "midpoint and checks whether the grid can even represent the target ESR — a "
@@ -992,6 +1083,12 @@ def main():
         ap.set_defaults(**load_config(_cfg_ns.config))
 
     args = ap.parse_args()
+    # Bound unconditionally so every downstream reader has a value. It is REASSIGNED below
+    # when target-steps derives it; without this initialiser the derived value is unbound on
+    # paths that skip that branch (--release-only, target-steps unset), and build_release
+    # would have to guess -- which is how reproduce.sh came to record args.repeats (the CLI
+    # default of 1) for runs that actually trained at 20.
+    repeats = args.repeats
 
     # LoRA training is disabled -- see param_train.py's gate and the README status note.
     # Checked here too so a pipeline run fails immediately instead of after dataset work.
@@ -1303,17 +1400,41 @@ def main():
             # `repeats` still has to come from somewhere. Derive it as the fixed-mode rule would with
             # a nominal 450-epoch schedule, which keeps steps/epoch (and therefore the length of an
             # SGDR cycle) the same across grids of wildly different sizes.
-            nominal_epochs = epochs if epochs > 0 else 450
-            if epochs == 0 and args.target_steps and n_combos and not args.repeats_explicit:
-                repeats = max(1, round(args.target_steps * args.batch_size
-                                       / max(1, nominal_epochs * n_combos * (1 - args.val_split))))
-                spe = math.ceil(n_combos * repeats * (1 - args.val_split) / args.batch_size)
+            # --target-steps is a DEPRECATED alias: it was never a budget in open-ended mode
+            # (epochs=0 has no horizon), and reached `repeats` through an invented 450-epoch
+            # schedule. Convert it to the quantity it was really setting.
+            steps_per_epoch = args.steps_per_epoch
+            if args.target_steps:
+                # NOT rounded: 25000/450 = 55.56, and rounding to 56 shifts repeats by one
+                # on small grids. Keeping the float makes the alias bit-identical to the old
+                # behaviour for every existing config.
+                steps_per_epoch = args.target_steps / 450.0
+                log(f"  NOTE: --target-steps {args.target_steps} is deprecated; "
+                    f"read as --steps-per-epoch {steps_per_epoch:.1f}. It was never a budget in "
+                    f"open-ended mode -- see run_pipeline.py --steps-per-epoch.", fh)
+            if epochs == 0 and steps_per_epoch:
+                # param_train.py sets epoch length from --steps-per-epoch via the train
+                # sampler, independent of n_combos and repeats -- so the request is honoured
+                # EXACTLY on every grid and there is nothing to derive here any more. This
+                # used to call _derive_repeats and print a number the floor then overrode.
+                spe = int(steps_per_epoch)
                 log(f"OPEN-ENDED (epochs=0): no step budget — SGDR runs until you stop it. "
                     f"repeats {repeats} → {spe} steps/epoch, restart every "
                     f"{args.restart_period} epochs ({spe * args.restart_period:,} steps/cycle).", fh)
                 log(f"  Watch the BEST val ESR PER CYCLE. When two consecutive cycles fail to "
                     f"improve it, that is the budget — measured under the loss you are ACTUALLY "
                     f"training with. Stop with: touch {args.checkpoint_dir}/STOP", fh)
+
+            if (not args.target_steps) and epochs > 0 and steps_per_epoch \
+                    and n_combos and not args.repeats_explicit:
+                # FIXED-EPOCH without a budget: derive repeats from steps/epoch the same way
+                # open-ended does. A real horizon exists here, so --target-steps still has a
+                # meaning in this branch (below) and keeps its budget logic -- but a run that
+                # only set --steps-per-epoch must not silently fall through to repeats=1.
+                repeats, spe = _derive_repeats(steps_per_epoch, n_combos, args.batch_size,
+                                                args.val_split, fh)
+                log(f"--steps-per-epoch {steps_per_epoch} → repeats {repeats} "
+                    f"({spe} steps/epoch × {epochs} epochs = {spe*epochs:,} steps)", fh)
 
             if args.target_steps and n_combos and epochs > 0:
                 # WHICH VARIABLE IS DERIVED MATTERS, and the obvious choice is wrong.
@@ -1367,7 +1488,8 @@ def main():
                     log(f"  NOTE: the budget DEPENDS ON THE GRID (steps ∝ n_combos). Change the knob "
                         f"grid and this number moves silently. Prefer target-steps.", fh)
 
-            train_cmd = build_train_cmd(args, dataset_dir, epochs, repeats)
+            train_cmd = build_train_cmd(args, dataset_dir, epochs,
+                                        int(round(steps_per_epoch)))
             timings["train"] = stream_run(train_cmd, fh, "Training")
 
         # ------------------------------------------------------------------
@@ -1429,7 +1551,7 @@ def main():
         # training run just to re-reach this step.
         if not args.no_release:
             try:
-                build_release(args, fh, timings)
+                build_release(args, fh, timings, repeats=repeats)
             except Exception as e:
                 log(f"WARNING: release folder build failed ({e}); "
                     f"models are still in place.", fh)

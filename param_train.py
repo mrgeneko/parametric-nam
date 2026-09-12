@@ -130,6 +130,11 @@ def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
             f"run. Retrain it, or re-download a current model.")
     return v
 
+# Gradient steps per epoch when `repeats` is derived. 50 is a round restatement of what the
+# fleet already ran: every config used --target-steps 25000, which through run_pipeline's
+# nominal-450-epoch formula implied 52-61 steps/epoch on every grid size.
+DEFAULT_STEPS_PER_EPOCH = 50
+
 K_KERNEL_SIZES = [
     6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
     15, 15,
@@ -1781,9 +1786,18 @@ def main():
                          "dataset's config.json, not specific to any one circuit.")
     ap.add_argument("--crop-len", type=int, default=44100,
                     help="Random crop length in samples (default: %(default)s)")
-    ap.add_argument("--repeats", type=int, default=1,
-                    help="Virtual dataset multiplier — increases steps/epoch without "
-                         "changing the audio data (default: %(default)s)")
+    ap.add_argument("--steps-per-epoch", type=int, default=DEFAULT_STEPS_PER_EPOCH,
+                    help="Gradient steps per epoch; `repeats` is DERIVED to hit it "
+                         "(default: %(default)s). This is the knob to turn: with SGDR it sets "
+                         "the length of a restart cycle (steps/cycle = this x --restart-period), "
+                         "and holding it constant is what keeps cycles comparable across grids "
+                         "of different sizes.")
+    ap.add_argument("--repeats", type=int, default=None,
+                    help="Virtual dataset multiplier — increases steps/epoch without changing "
+                         "the audio data. DERIVED from --steps-per-epoch unless given. It is a "
+                         "pure multiplier with no meaning of its own, so there is rarely a "
+                         "reason to set it; its old default of 1 produced an EMPTY val split "
+                         "and self-stopping runs that had barely trained.")
     ap.add_argument("--val-split", type=float, default=0.05,
                     help="Fraction of samples for validation (default: %(default)s). Was 0.1; "
                          "val here does not measure interpolation anyway (the same knob settings "
@@ -2025,22 +2039,38 @@ def main():
     # small (exact at repeats == 1/val_split); it also happens to be what turns --repeats 1's
     # "val empty" case into a properly populated split, since the bump runs before
     # ParamDataset is constructed below.
-    if args.val_split > 0:
-        min_repeats_for_split = math.ceil(1 / args.val_split)
-        if args.repeats < min_repeats_for_split:
-            print(f"  NOTE: --repeats {args.repeats} is below the {min_repeats_for_split} "
-                  f"that keeps each combo's actual val share close to the requested "
-                  f"--val-split {args.val_split} (grouped_random_split's per-combo rounding "
-                  f"overshoots it otherwise, and at --repeats 1 specifically there is no "
-                  f"room to hold out anything per combo at all) -- raising --repeats to "
-                  f"{min_repeats_for_split}. This lengthens every epoch/SGDR cycle "
-                  f"proportionally; pass --repeats {min_repeats_for_split} explicitly to "
-                  f"silence this note.", file=sys.stderr)
-            args.repeats = min_repeats_for_split
-
+    # `repeats` NO LONGER SETS EPOCH LENGTH -- the train sampler does (see below). Its only
+    # remaining job is keeping the val split per-combination representative, so it is pinned at
+    # the floor rather than derived from anything. At low repeats each combo's actual val share
+    # (ceil(repeats*val_split)/repeats) overshoots the requested --val-split badly: repeats 1
+    # leaves no room to hold anything out per combo and degrades to val EMPTY (the Joyo American
+    # Sound run under the old flat split had 33/675 combos trained on nothing at all), and
+    # repeats 2 forces a 50% split, not 5%. repeats ~ 1/val_split is where the overshoot stays
+    # small, exact at repeats == 1/val_split.
+    #
+    # It used to be derived from a step target in run_pipeline.py AND overridden by this floor,
+    # so the two disagreed (Mesa Orange was handed 6 and trained at 20). Now nothing derives it.
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
-    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=args.repeats,
+    dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=1,
                            mmap=args.mmap)
+    n_combos = len(dataset.samples)
+    floor = math.ceil(1 / args.val_split) if args.val_split > 0 else 1
+    if args.repeats is None:
+        args.repeats = floor
+        src = f"pinned at 1/val_split={args.val_split:g}"
+    else:
+        src = "explicit --repeats"
+        if args.val_split > 0 and args.repeats < floor:
+            print(f"  NOTE: --repeats {args.repeats} is below the {floor} that keeps each combo's "
+                  f"val share near --val-split {args.val_split:g}; raising to {floor}. It no "
+                  f"longer affects epoch length -- use --steps-per-epoch for that.",
+                  file=sys.stderr)
+            args.repeats = floor
+    dataset.repeats = args.repeats
+    print(f"  {n_combos} combos x repeats {args.repeats} ({src}) = {len(dataset)} crops drawn from; "
+          f"epoch length is set by --steps-per-epoch {args.steps_per_epoch}, independent of both",
+          file=sys.stderr)
+
     if args.modeled_by:
         # Mutates dataset.config in place, so every export_nam()/export_nam_state() call below
         # (including mid-training "best" checkpoint exports) picks this up automatically --
@@ -2080,8 +2110,30 @@ def main():
     if not val_drop:
         print(f"  NOTE: val split ({n_val}) < batch size ({args.batch_size}) -- keeping the "
               f"partial batch, else validation would be empty.", file=sys.stderr)
+    # EPOCH LENGTH IS DECOUPLED FROM DATASET LENGTH.
+    #
+    # shuffle=True makes one epoch exactly one pass over the dataset, so epoch length was
+    # welded to len(dataset) = n_combos * repeats. That defeated the thing --steps-per-epoch
+    # exists to do. Deriving `repeats` hits the target only while it stays above the
+    # val-split floor; once the floor binds, the equation inverts and steps/epoch becomes
+    # proportional to GRID SIZE: Mesa Ch1's 11,907 combos ran 3,535 steps/epoch against a
+    # request of 50, so one SGDR cycle was 70x longer than --restart-period implied. Mesa
+    # Orange 3.4x, EVH 5150 2.3x. Silently, and differently for every device.
+    #
+    # A sampler with an explicit num_samples draws a FIXED number of items per epoch
+    # whatever the dataset's size, so the request is honoured exactly on every grid and
+    # `repeats` stops being a schedule knob at all -- it exists only to keep the val split
+    # per-combination representative, and is pinned at the floor.
+    #
+    # replacement=True is not a compromise here: ParamDataset.__getitem__ picks a RANDOM CROP
+    # POSITION on every call, so drawing the same index twice yields different audio. There is
+    # no "seeing the same example twice" in the sense replacement usually implies.
+    steps_per_epoch = max(1, int(args.steps_per_epoch))
+    train_sampler = torch.utils.data.RandomSampler(
+        train_ds, replacement=True, num_samples=steps_per_epoch * args.batch_size)
     train_loader = torch.utils.data.DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=train_drop)
+        train_ds, batch_size=args.batch_size, sampler=train_sampler,
+        num_workers=0, drop_last=train_drop)
     val_loader = torch.utils.data.DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=val_drop)
     print(f"  {n_total} total samples ({n_train} train, {n_val} val)",
