@@ -45,6 +45,9 @@ import numpy as np
 SR = 48000
 
 
+ONSET_METHOD = "knee+sat95-v1"   # in the findpeak cache key: bump to invalidate every cached onset
+
+
 def _loglog_interp(x1, y1, x2, y2, ytarget):
     lx1, ly1 = math.log(x1), math.log(y1)
     lx2, ly2 = math.log(x2), math.log(y2)
@@ -142,9 +145,17 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
     # change) because its real onset is 2.08 mV, below start_v. So when the lowest point is
     # already at the plateau, extend DOWNWARD a decade at a time until it isn't.
     for _ in range(max_extend_decades):
-        ceiling_now = max(r for _, r in curve)
-        if curve[0][1] < 0.99 * ceiling_now:
-            break  # lowest point is off the plateau -- a crossing is in range
+        # TRIGGER IS THE SAME TEST THAT DEFINES ONSET (_linear_region_top), deliberately.
+        # It used to be "lowest point is within 1% of the ceiling", while onset was DEFINED as
+        # the 99%-of-ceiling crossing -- two different questions sharing one threshold, and a
+        # soft-compressing circuit defeats both at once. Mesa Orange (sag v30), 2026-09-12: at
+        # OR Gain=0.95 the 5 mV floor already sat at 85% of ceiling with gain falling
+        # monotonically from the first point (585 -> 70 out/in over six points), so it was
+        # plainly past its knee -- but 0.85 < 0.99 read as "off the plateau" and the sweep
+        # never extended down. Asking instead "is the knee still AT the floor?" makes the
+        # trigger and the definition agree by construction.
+        if _linear_region_top(curve) != curve[0][0]:
+            break  # a linear region is resolved inside the sweep -- the knee is in range
         lo = curve[0][0]
         if lo <= min_start_v:
             break
@@ -154,8 +165,10 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
         # made the extension silent in exactly the pipeline that depends on it -- Ch1's 2026-09-10
         # run extended down on real corners and reported nothing. It fires rarely (only when the
         # floor is on the plateau), so it cannot flood even a 200-corner run.
-        print(f"    sweep started above the saturation onset (out flat at "
-              f"{ceiling_now:.4g} V from {lo:.4g} V up) -- extending down to {new_lo:.3g} V",
+        g0 = curve[0][1] / curve[0][0] if curve[0][0] > 0 else float("nan")
+        g1 = curve[1][1] / curve[1][0] if len(curve) > 1 and curve[1][0] > 0 else float("nan")
+        print(f"    sweep started above the saturation onset (gain already falling at "
+              f"{lo:.4g} V: {g0:.4g} -> {g1:.4g} out/in) -- extending down to {new_lo:.3g} V",
               flush=True)
         extra = _sweep(new_lo, lo, max(4, npoints // 2))
         if not extra:
@@ -165,16 +178,73 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
         curve.sort()
 
     ceiling_a, ceiling = max(curve, key=lambda p: p[1])
-    target = 0.99 * ceiling
-    onset = None
-    for j in range(1, len(curve)):
-        a0, r0 = curve[j - 1]
-        a1, r1 = curve[j]
-        if r0 < target <= r1:
-            onset = _loglog_interp(a0, r0, a1, r1, target)
-            break
+
+    # ONSET IS A GAIN MEASUREMENT, NOT A LEVEL ONE. The old rule -- first input reaching 99%
+    # of max(out_rms) -- anchors on a single point of a curve that, on a compressing amp, is
+    # flat to within a few percent over four decades. Which point happens to BE the max is
+    # then decided by ripple, and the answer swings wildly for no physical reason. Measured on
+    # Mesa Orange (sag v30) 2026-09-12, two adjacent cells, freshly rendered:
+    #
+    #   OR Gain=0.95 Or Master=0.15   out_rms 2.93..3.70   max at 0.053 V  ->  onset  0.043 V
+    #   OR Gain=0.95 Or Master=0.20   out_rms 3.94..4.83   max at 40.0  V  ->  onset 21.239 V
+    #
+    # Same circuit, same shape, both ~97% of final by 0.053 V; a 0.05 change in a master volume
+    # "moved" the onset 490x. Across the 72-cell grid the rule produced a required drive that
+    # rose MONOTONICALLY with gain (13.7 V at Gain=0.1 up to 24.6 V at Gain=1.0) -- backwards,
+    # since more gain must saturate on less input -- and sized an excitation at 49.26 V peak,
+    # a level no guitar produces.
+    #
+    # Reading the small-signal slope and finding where it departs is immune to all of that:
+    # whatever sag does to the level at 10 V is simply not part of the question. Taking the
+    # FIRST point past the knee (rather than the last one still linear) keeps the figure on
+    # the conservative side for excitation sizing -- it is a level known to be saturating.
+    lin_top = _linear_region_top(curve)
+    knee = None
+    if lin_top is not None and lin_top < curve[-1][0]:
+        for a, _r in curve:
+            if a > lin_top:
+                knee = a
+                break
+
+    # KNEE AND SIZING ARE DIFFERENT QUESTIONS, and conflating them is how the old rule went
+    # wrong in BOTH directions. Measured on Mesa Orange (sag v30) at OR Gain=0.1/Or Master=0.15:
+    # small-signal gain is 52.3 out/in and dead flat to 0.033 V, the knee is at 0.053 V, and the
+    # cell does not reach its ceiling until ~1.46 V -- knee and full saturation are 27x apart.
+    # An excitation sized at 2x the KNEE would leave that cell at ~80% of ceiling, never actually
+    # clipping, so callers sizing against this need the saturated level, not the departure point.
+    #
+    # The ceiling here is the MEDIAN over the top half-decade of inputs, not max(): a single
+    # ripple point decided max(), which is what let a 0.05 change in a master volume move the
+    # old answer 490x. 95% (not 99%) of it, because the last 1% of an asymptotic approach costs
+    # decades of input on a circuit with sag and carries no audible meaning.
+    # Window the ceiling to levels ABOVE the knee. A top-decade-of-input window looks right on
+    # a 20-point sweep but silently includes still-linear points on a coarse one, dragging the
+    # median down until a level where the circuit is provably linear gets called saturated.
+    hi = [r for a, r in curve if knee is not None and a > knee] or [curve[-1][1]]
+    robust_ceiling = float(np.median(hi))
+    # Saturation REQUIRES a departure from linear. Without this guard a perfectly linear
+    # circuit gets a bogus onset: the median of a rising straight line is just a mid-sweep
+    # value, and "95% of it" is crossed halfway up. That is the same defect as the old rule --
+    # a number manufactured out of the swept range rather than measured -- so gate on the knee.
+    sat = None
+    if knee is not None:
+        for a, r in curve:
+            if r >= 0.95 * robust_ceiling:
+                sat = a
+                break
+    onset = sat
+    # onset=None still means "never departs from linear across the swept range", the signal
+    # callers already treat as a hard stop -- unchanged, only now it is honest about why.
     return {"ceiling_rms": ceiling, "ceiling_at_input_v": ceiling_a,
-            "onset_99pct_input_v": onset, "curve": curve}
+            "robust_ceiling_rms": robust_ceiling,
+            "knee_v": knee,                 # where gain departs -- drives the extension logic
+            "onset_v": onset,               # where the cell is SATURATED -- what sizing wants
+            "onset_method": ONSET_METHOD,
+            # Name retained because five call sites and the findpeak cache read it; it is no
+            # longer a 99%-of-ceiling figure. ONSET_METHOD is in the cache key, so an entry
+            # written by the old rule can never be served to this code.
+            "onset_99pct_input_v": onset,
+            "curve": curve}
 
 
 def _linear_region_top(curve, tol=0.05):
@@ -230,6 +300,7 @@ def findpeak_cache_key(identity_bytes, params, extra):
     (e.g. a .schx file's own bytes, or a gen_*_ngspice.py module's source bytes) plus the
     sweep-defining parameters -- so an edited circuit re-sweeps automatically."""
     h = hashlib.sha256()
+    h.update(ONSET_METHOD.encode())
     h.update(identity_bytes)
     h.update(repr(sorted((str(k), str(v)) for k, v in params.items())).encode())
     h.update(extra.encode())

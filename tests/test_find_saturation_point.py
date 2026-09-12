@@ -83,30 +83,42 @@ class TestFindSaturationPointCurveAndCeiling:
         assert result["ceiling_at_input_v"] == pytest.approx(min(plateau_amps))
         assert result["ceiling_at_input_v"] != pytest.approx(max(plateau_amps))
 
-    def test_onset_is_interpolated_from_the_straddling_segment(self, tmp_path):
+    def test_onset_is_the_first_swept_level_past_the_gain_knee(self, tmp_path):
+        """Onset is where incremental gain DEPARTS from the small-signal slope -- not where
+        output reaches some fraction of its maximum. A hard clipper makes the two agree; a
+        compressing amp does not, which is why the rule changed (see find_saturation_point's
+        own comment, and Mesa Orange sag v30 2026-09-12)."""
         gain, ceiling = 1.0, 2.0
         backend = FakeBackend(rms_fn=lambda amp: min(gain * amp, ceiling))
         start_v, max_v, npoints = 0.1, 3.0, 4
         result = find_saturation_point(backend, {}, tmp=str(tmp_path), dur=0.01, start_v=start_v,
                                         max_v=max_v, npoints=npoints, sr=200, workers=4)
 
-        amps = np.geomspace(start_v, max_v, npoints)
-        curve = sorted((float(a), min(gain * a, ceiling)) for a in amps)
-        target = 0.99 * ceiling
-        a0, r0 = next(p for p in reversed(curve) if p[1] < target)
-        a1, r1 = next(p for p in curve if p[1] >= target)
-        expected_onset = _loglog_interp(a0, r0, a1, r1, target)
+        amps = [float(a) for a in np.geomspace(start_v, max_v, npoints)]
+        # out/in is exactly `gain` until the clip bites; only the last point is compressed.
+        assert [round(min(gain * a, ceiling) / a, 6) for a in amps] == [1.0, 1.0, 1.0,
+                                                                        round(2.0 / 3.0, 6)]
+        # knee: the first swept level past the departure from constant gain.
+        assert result["knee_v"] == pytest.approx(amps[-1])
+        # onset: the level at which the cell is SATURATED -- for a hard clipper with a coarse
+        # sweep these coincide, which is exactly why a hard clipper never exposed the old bug.
+        assert result["onset_v"] == pytest.approx(amps[-1])
+        assert result["onset_99pct_input_v"] == pytest.approx(amps[-1])   # compat alias
+        assert result["onset_method"] == "knee+sat95-v1"
 
-        assert result["onset_99pct_input_v"] == pytest.approx(expected_onset)
+    def test_no_saturation_in_swept_range_reports_no_onset(self, tmp_path):
+        """A perfectly linear circuit has NO saturation onset, and must say so.
 
-    def test_no_saturation_in_swept_range_still_finds_a_ceiling_and_onset(self, tmp_path):
-        # A circuit that never saturates across the swept range: the "ceiling" is just the
-        # loudest point tried, and onset still resolves against 99% of THAT.
+        The old 99%-of-max rule always produced a number here -- 99% of the loudest point
+        merely TRIED -- so "never saturates" was indistinguishable from a real measurement and
+        the swept range silently defined the answer. onset=None is the signal callers already
+        treat as a hard stop (prepare_excitation refuses to build against it)."""
         backend = FakeBackend(rms_fn=lambda amp: 2.0 * amp)
         result = find_saturation_point(backend, {}, tmp=str(tmp_path), dur=0.01, start_v=0.1, max_v=1.0,
                                         npoints=5, sr=200, workers=4)
         assert result["ceiling_rms"] == pytest.approx(2.0)
-        assert result["onset_99pct_input_v"] is not None
+        assert result["onset_v"] is None
+        assert result["onset_99pct_input_v"] is None
 
     def test_params_are_forwarded_to_every_render(self, tmp_path):
         seen = []
