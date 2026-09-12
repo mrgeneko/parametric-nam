@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pre-generation sanity gate for a device dataset -- backend-agnostic (--backend
-{livespice,ngspice-deck,ltspice-deck}, see render_backends.py). Run this BEFORE rendering a (slow, large)
+{livespice,ngspice,ngspice-deck,ltspice-deck}, see render_backends.py). Run this BEFORE rendering a (slow, large)
 training dataset. It renders a handful of short probe points through the oracle and refuses
 generation when a knob is dead, moves the WRONG WAY, or the input-level calibration is
 implausible -- the three failure modes that have each cost a full render + train cycle:
@@ -73,7 +73,8 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
                                    findpeak_cache_key, cache_findpeak, scratch_dir)
-from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+                             NgspiceSchxBackend)
 from knob_classify import classify as _classify_by_name  # noqa: E402
 
 SR = 48000
@@ -141,6 +142,23 @@ def _build_backend(args):
         identity = Path(args.schx).read_bytes()
         cache_extra = f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
+    if args.backend == "ngspice":
+        # The GENERIC schx-translated path (ngspice/schx_to_ngspice.py via NgspiceSchxBackend),
+        # for a .schx circuit whose LiveSPICE render diverges under real signal (e.g. Arbiter
+        # Fuzz Face's tight DC-coupled feedback loop) but that needs no hand-written deck at
+        # all -- unlike ngspice-deck below, which is for a device with NO .schx counterpart.
+        if not args.schx:
+            sys.exit("--backend ngspice needs --schx")
+        knobs = [k.strip() for k in args.knobs.split(",") if k.strip()]
+        control_map = parse_schx_controls(args.schx)
+        resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
+        backend = NgspiceSchxBackend(args.schx, oversample=args.oversample)
+        identity = Path(args.schx).read_bytes()
+        # backend=ngspice in the key: without it this shares livespice's "os=..|it=.." extra
+        # on the SAME schx identity, serving a raw-node livespice probe to an ngspice caller
+        # (or vice versa) -- the exact hazard ngspice-deck/ltspice-deck's own comment documents.
+        cache_extra = f"backend=ngspice|os={args.oversample}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        return backend, knobs, identity, cache_extra
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module):
             sys.exit("--backend ngspice-deck needs --pedal-dir and --module")
@@ -179,7 +197,8 @@ def _build_backend(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck", "ltspice-deck"])
+    ap.add_argument("--backend", required=True,
+                    choices=["livespice", "ngspice", "ngspice-deck", "ltspice-deck"])
 
     # livespice-only
     ap.add_argument("--schx", help="[livespice] path to .schx file")

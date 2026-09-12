@@ -41,7 +41,7 @@ import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from gen_dataset_from_schx import LIVESPICE_CLI  # noqa: E402
+from gen_dataset_from_schx import LIVESPICE_CLI, _run_ngspice  # noqa: E402
 
 from ngspice_spicelib import load_input, render_grid  # noqa: E402
 import ltspice_spicelib  # noqa: E402
@@ -174,6 +174,80 @@ class NgspiceBackend:
                 _, y16 = wavfile.read(outfiles[j["tag"]])
                 # undo render_grid's peak-normalized int16 write -> raw voltage-scale float
                 out[j["tag"]] = y16.astype(np.float64) / (0.9 * 32767.0) * pk
+        return out
+
+
+class NgspiceSchxBackend:
+    """Renders a .schx circuit through the GENERIC schx-to-ngspice translation path
+    (ngspice/schx_to_ngspice.py), for a circuit LiveSPICE's fixed-timestep solver cannot hold
+    under real signal (typically a tight, DC-coupled feedback loop -- see e.g. the Arbiter Fuzz
+    Face and BD-2/MT-2 docs) but that needs no hand-written deck at all, unlike NgspiceBackend/
+    LtspiceBackend above (which exist for a device with NO .schx counterpart, e.g. a real
+    MOSFET/BJT LiveSPICE has no model for).
+
+    This is the exact machinery grid_adequacy.py's own --backend "ngspice" already used
+    inline (one netlist dump via LIVESPICE_CLI at construction, then gen_dataset_from_schx.
+    _run_ngspice per render) -- factored out here so prepare_excitation.py/preflight.py/
+    check_transient_coverage.py can share it too, instead of each needing their own copy or,
+    worse, silently falling back to LiveSpiceBackend for a circuit LiveSpice cannot render at
+    all (see check_transient_coverage.py's check_coverage(), which was exactly that gap).
+    """
+
+    def __init__(self, schx, oversample=2, fixed_params=None, param_map=None):
+        self.schx = schx
+        self.oversample = oversample
+        self.fixed_params = fixed_params   # "Name=val,..." string, or None -- see _run_ngspice
+        self.param_map = param_map         # knob-name -> netlist pot Name, or None (identity)
+        self.ng_base = None                # filled lazily, once, on first prepare_input
+
+    def _ensure_netlist(self, scratch):
+        if self.ng_base is not None:
+            return
+        netlist_path = Path(scratch) / "netlist.json"
+        r = subprocess.run([str(LIVESPICE_CLI), "--circuit", str(self.schx),
+                            "--netlist", str(netlist_path)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not netlist_path.exists():
+            sys.exit(f"netlist dump failed for {self.schx}: {r.stderr[:300]}")
+        self.ng_base = {
+            "netlist": str(netlist_path), "koren": False,
+            "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
+            "conv": {}, "method": "trap", "input_upsample": 1,
+            "oversample": self.oversample,
+        }
+
+    def prepare_input(self, raw, sr, level_v, scratch, tag):
+        self._ensure_netlist(scratch)
+        peak = float(np.abs(raw).max()) + 1e-12
+        scaled = (raw / peak * level_v).astype(np.float32)
+        path = f"{scratch}/rawinput_{tag}.wav"
+        sf.write(path, scaled, sr, subtype="FLOAT")  # FLOAT: values >1.0 (>1V drive) must survive
+        return {"input_raw": path, "n": len(scaled)}
+
+    def _render_one(self, params, handle, scratch, tag):
+        ngp = dict(self.ng_base)
+        # keyed per-tag, like grid_adequacy's own choose_oversample precedent -- _filesource
+        # caches by upsample factor only, so a shared dir would serve one job's filesource
+        # back for a different one.
+        ngp.update({"input_raw": handle["input_raw"], "fsrc_dir": f"{scratch}/fs_{tag}"})
+        out_wav = Path(scratch) / f"ns_{tag}.wav"
+        fail = _run_ngspice(0, params, Path(scratch) / f"ng_{tag}", out_wav, handle["n"],
+                            120, self.param_map, self.fixed_params, ngp)
+        if fail is not None or not out_wav.exists():
+            return None
+        y, _ = sf.read(str(out_wav), dtype="float64")
+        return y
+
+    def render_many(self, jobs, input_handle, scratch):
+        if not jobs:
+            return {}
+        out = {}
+        workers = max(1, min(os.cpu_count() or 4, len(jobs)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(self._render_one, j["params"], input_handle, scratch, j["tag"]): j["tag"]
+                    for j in jobs}
+            for f in futs:
+                out[futs[f]] = f.result()
         return out
 
 

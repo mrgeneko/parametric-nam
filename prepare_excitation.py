@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Wire measured saturation onset directly to excitation building -- backend-agnostic
-(--backend {livespice,ngspice-deck}, see render_backends.py). Closes the manual human-in-the-loop
+(--backend {livespice,ngspice,ngspice-deck,ltspice-deck}, see render_backends.py). Closes the
+manual human-in-the-loop
 gap that's existed between find_saturation_point.py and build_excitation.py: until now,
 someone had to read an onset number by hand and pick --sweep-peak/--chirp-levels themselves
 (this is literally how every existing config's excitation was sized, e.g. the non-midpoint-default pedal's "peak sized
@@ -59,7 +60,8 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak, scratch_dir)
-from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+                             NgspiceSchxBackend)
 
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
@@ -198,12 +200,48 @@ def _setup(args):
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module, _capture
+    if args.backend == "ngspice":
+        # Same schx/--config convention as livespice -- this is the GENERIC schx-translated
+        # path (ngspice/schx_to_ngspice.py via NgspiceSchxBackend), for a circuit whose .schx
+        # exists but whose LiveSPICE render diverges under real signal (e.g. Arbiter Fuzz
+        # Face's tight DC-coupled feedback loop -- see its own .md/.backends.toml). Not to be
+        # confused with ngspice-deck, which is for a device with NO .schx counterpart at all.
+        if args.config:
+            cfg = load_config(Path(args.config))
+            _capture = _cc_resolve(args, cfg)
+            schx = str(cfg["schx"])
+            oversample = args.oversample or cfg.get("oversample", 2)
+            knob_ranges = _parse_ranges(cfg.get("ranges", []))
+            fixed = _parse_fixed(cfg.get("fixed_params"))
+        else:
+            if not args.schx or not args.range:
+                sys.exit("--backend ngspice needs --config, or --schx + --range")
+            schx = args.schx
+            oversample = args.oversample or 2
+            knob_ranges = _parse_ranges(args.range)
+            fixed = _parse_fixed(args.fixed_params)
+        if not knob_ranges:
+            sys.exit("no [knobs]/--range entries -- nothing to check corners over")
+        backend = NgspiceSchxBackend(schx, oversample=oversample)
+        identity = Path(schx).read_bytes()
+        # backend=ngspice in the key: without it this would share livespice's "os=..|it=.."
+        # extra on the SAME schx identity, serving a raw-node livespice onset to an ngspice
+        # caller (or vice versa) -- the exact hazard --backend ngspice-deck's own comment
+        # above documents for ngspice-deck vs ltspice-deck.
+        cache_extra = f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        # lead_silence_s IS needed here, same as ngspice-deck: this is ngspice under the hood
+        # (schx_to_ngspice.py's generated .cir, not a hand-written deck, but the same solver),
+        # so it has the same cold-start settling behaviour grid_adequacy.py's own --backend
+        # ngspice already applies uniformly regardless of which ngspice path it is.
+        return (backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s,
+               Path(schx).name, _capture)
     sys.exit(f"unknown --backend {args.backend!r}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", required=True, choices=["livespice", "ngspice-deck", "ltspice-deck"])
+    ap.add_argument("--backend", required=True,
+                    choices=["livespice", "ngspice", "ngspice-deck", "ltspice-deck"])
 
     # livespice
     ap.add_argument("--config", help="[livespice] per-circuit TOML (same as run_pipeline.py --config)")

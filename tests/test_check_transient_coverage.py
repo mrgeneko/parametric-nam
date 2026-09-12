@@ -365,6 +365,58 @@ class TestMainNgspiceDeckDispatch:
         assert main() == 0
 
 
+class TestMainNgspiceDispatch:
+    """A wiring-level check on main() itself: does a "ngspice" (generic, .schx-translated,
+    non-deck) config.toml actually reach check_coverage_ngspice() / NgspiceSchxBackend, not
+    silently fall through to the plain .schx path's hardcoded LiveSpiceBackend.
+
+    Regression: before this, backend_name == "ngspice" had NO branch in main() at all -- it
+    fell into the final `else`, which is check_coverage()'s LiveSPICE-only path. That silently
+    checked transient coverage against the WRONG solver for exactly the circuits "ngspice"
+    exists for (a .schx whose LiveSPICE render diverges under real signal, e.g. Arbiter Fuzz
+    Face). Caught 2026-09-11 while wiring generic-ngspice support into prepare_excitation.py.
+    """
+
+    def _config(self, tmp_path, schx, wav):
+        config = tmp_path / "config.toml"
+        config.write_text(
+            f'input = "{wav}"\n'
+            'backend = "ngspice"\n'
+            f'schx = "{schx}"\n'
+            "\n[knobs]\nFuzz = [0.0, 1.0]\n"
+        )
+        return config
+
+    def test_ngspice_config_is_dispatched_to_the_ngspice_backend_not_livespice(
+            self, tmp_path, monkeypatch):
+        import sys as _sys
+
+        import numpy as np
+        import soundfile as sf
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        def boom(*a, **kw):
+            raise AssertionError("LiveSpiceBackend must not be constructed for backend=ngspice")
+        monkeypatch.setattr("check_transient_coverage.LiveSpiceBackend", boom)
+        monkeypatch.setattr("check_transient_coverage.NgspiceSchxBackend",
+                            lambda *a, **kw: object())
+        monkeypatch.setattr("check_transient_coverage.find_saturation_point",
+                            lambda backend, params, scratch, max_v=40.0, lead_silence_s=0.0, **kw:
+                            {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
+                             "ceiling_at_input_v": 1.0, "curve": []})
+
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic/>")
+        wav = tmp_path / "input.wav"
+        sf.write(str(wav), np.zeros(100, dtype=np.float32), 48000)
+
+        config = self._config(tmp_path, schx, wav)
+        monkeypatch.setattr(_sys, "argv", ["check_transient_coverage.py", "--config", str(config),
+                                          "--transient-peak", "1.0"])
+        assert main() == 0
+
+
 # ----------------------------------------------------------------- corner-set budget
 #
 # The structural-only set (--no-full-hypercube) holds every OTHER knob at CENTER while moving

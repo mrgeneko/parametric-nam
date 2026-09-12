@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from preflight import _build_backend
-from render_backends import NgspiceBackend, LtspiceBackend
+from render_backends import NgspiceBackend, LtspiceBackend, NgspiceSchxBackend
 
 
 def write_fake_pedal_module(tmp_path, name, knob_names=("Gain", "Tone", "Volume")):
@@ -64,6 +64,50 @@ class TestNgspiceDeckBackend:
     def test_missing_pedal_dir_or_module_exits(self):
         with pytest.raises(SystemExit):
             _build_backend(ngspice_args(pedal_dir=None, module=None))
+
+
+def write_empty_schx(tmp_path, name="empty.schx"):
+    p = tmp_path / name
+    p.write_text("<Schematic></Schematic>")
+    return p
+
+
+def ngspice_schx_args(schx=None, knobs="", oversample=8, peak_max_v=40.0):
+    return types.SimpleNamespace(backend="ngspice", schx=schx, knobs=knobs,
+                                 oversample=oversample, peak_max_v=peak_max_v)
+
+
+class TestNgspiceSchxBackend:
+    """The GENERIC schx-translated ngspice path (--backend ngspice, distinct from
+    ngspice-deck), added 2026-09-11 for a .schx circuit whose LiveSPICE render diverges
+    under real signal (e.g. Arbiter Fuzz Face) but needs no hand-written deck."""
+
+    def test_builds_an_ngspice_schx_backend(self, tmp_path):
+        schx = write_empty_schx(tmp_path)
+        backend, knobs, identity, cache_extra = _build_backend(
+            ngspice_schx_args(schx=str(schx)))
+        assert isinstance(backend, NgspiceSchxBackend)
+        assert knobs == []
+        assert identity == schx.read_bytes()
+
+    def test_cache_extra_names_the_backend_and_reflects_peak_max_v(self, tmp_path):
+        schx = write_empty_schx(tmp_path)
+        _, _, _, cache_extra = _build_backend(
+            ngspice_schx_args(schx=str(schx), peak_max_v=5.0))
+        assert "backend=ngspice" in cache_extra
+        assert "maxv=5.0" in cache_extra
+
+    def test_cache_extra_does_not_collide_with_livespices(self, tmp_path):
+        """Without "backend=ngspice" in the key, this would share livespice's bare
+        "os=..|it=.." extra on the SAME .schx identity -- serving a raw-node livespice probe
+        to an ngspice caller, or vice versa."""
+        schx = write_empty_schx(tmp_path)
+        _, _, _, cache_extra = _build_backend(ngspice_schx_args(schx=str(schx)))
+        assert "backend=ngspice" in cache_extra and "it=" not in cache_extra
+
+    def test_missing_schx_exits(self):
+        with pytest.raises(SystemExit):
+            _build_backend(ngspice_schx_args(schx=None))
 
 
 def ltspice_args(pedal_dir=None, module=None, exclude_knob=(), probe_node="OUT",

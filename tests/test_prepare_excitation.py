@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from prepare_excitation import _parse_fixed, _parse_ranges, main, worst_case_onset
+from prepare_excitation import _parse_fixed, _parse_ranges, _setup, main, worst_case_onset
+from render_backends import NgspiceSchxBackend
 
 
 class TestParseRanges:
@@ -135,3 +136,38 @@ class TestMainSweepPeakVsCheckTransientCoverage:
         cmd = self._run_main_and_capture_cmd(tmp_path, monkeypatch, worst_onset=5.0,
                                              extra_argv=["--sweep-peak-frac", "2.0"])
         assert self._sweep_peak_from_cmd(cmd) == pytest.approx(10.0)
+
+
+class TestSetupNgspiceBackend:
+    """--backend ngspice (the GENERIC schx-translated path, added 2026-09-11 for a .schx
+    circuit whose LiveSPICE render diverges under real signal, e.g. Arbiter Fuzz Face) must
+    build an NgspiceSchxBackend, not silently fall through to LiveSpiceBackend or exit as an
+    unknown backend."""
+
+    def _args(self, schx=None, range_=None, config=None, oversample=None, peak_max_v=40.0,
+             lead_silence_s=3.0, fixed_params=""):
+        import types
+        return types.SimpleNamespace(backend="ngspice", schx=schx, range=range_ or [],
+                                     config=config, oversample=oversample,
+                                     peak_max_v=peak_max_v, lead_silence_s=lead_silence_s,
+                                     fixed_params=fixed_params)
+
+    def test_builds_an_ngspice_schx_backend_from_schx_and_range(self, tmp_path):
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        (backend, identity, cache_extra, knob_ranges, fixed, lead_silence_s, label,
+         capture) = _setup(self._args(schx=str(schx), range_=["Fuzz=0.0,1.0"]))
+        assert isinstance(backend, NgspiceSchxBackend)
+        assert identity == schx.read_bytes()
+        assert knob_ranges == {"Fuzz": [0.0, 1.0]}
+        assert label == "fake.schx"
+
+    def test_cache_extra_names_the_backend_so_it_cannot_collide_with_livespice(self, tmp_path):
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        _, _, cache_extra, *_ = _setup(self._args(schx=str(schx), range_=["Fuzz=0.0,1.0"]))
+        assert "backend=ngspice" in cache_extra
+
+    def test_missing_schx_or_range_exits(self):
+        with pytest.raises(SystemExit):
+            _setup(self._args(schx=None, range_=[]))

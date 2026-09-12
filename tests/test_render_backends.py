@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend
+from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend, NgspiceSchxBackend
 
 
 class TestLiveSpiceBackendPrepareInput:
@@ -124,6 +124,110 @@ class TestNgspiceBackendRenderMany:
         out = backend.render_many(jobs, input_handle=(1000, np.zeros(1), ("", "")), scratch="/s")
         assert out["a"][0] == pytest.approx(1.0, rel=1e-3)
         assert out["b"][0] == pytest.approx(2.0, rel=1e-3)
+
+
+class TestNgspiceSchxBackend:
+    """The GENERIC schx-to-ngspice path (Arbiter Fuzz Face and any other .schx circuit
+    LiveSPICE's solver diverges on but that translates through schx_to_ngspice.py with no
+    hand-written deck). grid_adequacy.py's own --backend "ngspice" already exercises the
+    underlying _run_ngspice/netlist-dump machinery in production; these tests pin the adapter
+    contract (prepare_input/render_many) prepare_excitation.py/preflight.py/
+    check_transient_coverage.py now share it through."""
+
+    def _fake_dump_ok(self, monkeypatch):
+        def fake_run(cmd, capture_output, text):
+            netlist_path = cmd[cmd.index("--netlist") + 1]
+            import json
+            with open(netlist_path, "w") as f:
+                json.dump({}, f)
+            class R:
+                returncode = 0
+                stderr = ""
+            return R()
+        monkeypatch.setattr("render_backends.subprocess.run", fake_run)
+
+    def test_prepare_input_scales_raw_so_its_peak_hits_level_v(self, tmp_path, monkeypatch):
+        self._fake_dump_ok(monkeypatch)
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        raw = np.array([0.0, 0.5, -0.25, 0.1], dtype=np.float32)
+        handle = backend.prepare_input(raw, sr=1000, level_v=2.0, scratch=str(tmp_path), tag="t1")
+        y, sr = sf.read(handle["input_raw"], dtype="float32")
+        assert sr == 1000
+        assert np.abs(y).max() == pytest.approx(2.0, rel=1e-4)
+        assert handle["n"] == len(raw)
+
+    def test_netlist_is_dumped_only_once_across_multiple_prepare_input_calls(self, tmp_path, monkeypatch):
+        calls = []
+        def fake_run(cmd, capture_output, text):
+            calls.append(cmd)
+            netlist_path = cmd[cmd.index("--netlist") + 1]
+            import json
+            with open(netlist_path, "w") as f:
+                json.dump({}, f)
+            class R:
+                returncode = 0
+                stderr = ""
+            return R()
+        monkeypatch.setattr("render_backends.subprocess.run", fake_run)
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        raw = np.array([0.0, 0.5], dtype=np.float32)
+        backend.prepare_input(raw, sr=1000, level_v=1.0, scratch=str(tmp_path), tag="t1")
+        backend.prepare_input(raw, sr=1000, level_v=2.0, scratch=str(tmp_path), tag="t2")
+        assert len(calls) == 1, "netlist dump must be cached, not repeated per level"
+
+    def test_netlist_dump_failure_exits_loudly(self, tmp_path, monkeypatch):
+        def fake_run(cmd, capture_output, text):
+            class R:
+                returncode = 1
+                stderr = "livespice_cli: bad circuit"
+            return R()
+        monkeypatch.setattr("render_backends.subprocess.run", fake_run)
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        raw = np.array([0.0, 0.5], dtype=np.float32)
+        with pytest.raises(SystemExit):
+            backend.prepare_input(raw, sr=1000, level_v=1.0, scratch=str(tmp_path), tag="t1")
+
+    def test_render_many_empty_jobs_returns_empty_dict(self, tmp_path, monkeypatch):
+        self._fake_dump_ok(monkeypatch)
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        handle = backend.prepare_input(np.zeros(4, dtype=np.float32), sr=1000, level_v=1.0,
+                                       scratch=str(tmp_path), tag="t1")
+        assert backend.render_many([], input_handle=handle, scratch=str(tmp_path)) == {}
+
+    def test_successful_render_returns_audio_keyed_by_tag(self, tmp_path, monkeypatch):
+        self._fake_dump_ok(monkeypatch)
+
+        def fake_run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
+                             param_map, fixed_params, ng):
+            sf.write(str(out_wav), np.array([0.1, 0.2, 0.3], dtype=np.float32), 48000,
+                     subtype="FLOAT")
+            return None   # success
+        monkeypatch.setattr("render_backends._run_ngspice", fake_run_ngspice)
+
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        handle = backend.prepare_input(np.zeros(4, dtype=np.float32), sr=1000, level_v=1.0,
+                                       scratch=str(tmp_path), tag="lvl1")
+        jobs = [{"params": {"Fuzz": 0.5}, "tag": "a"}, {"params": {"Fuzz": 0.9}, "tag": "b"}]
+        out = backend.render_many(jobs, input_handle=handle, scratch=str(tmp_path))
+        assert set(out) == {"a", "b"}
+        assert np.allclose(out["a"], [0.1, 0.2, 0.3], atol=1e-4)
+
+    def test_nonconverged_render_maps_to_none(self, tmp_path, monkeypatch):
+        self._fake_dump_ok(monkeypatch)
+
+        class Fail:
+            error = "diverged"
+
+        def fake_run_ngspice(*a, **kw):
+            return Fail()   # non-None -> failure, output never written
+        monkeypatch.setattr("render_backends._run_ngspice", fake_run_ngspice)
+
+        backend = NgspiceSchxBackend(schx="unused.schx")
+        handle = backend.prepare_input(np.zeros(4, dtype=np.float32), sr=1000, level_v=1.0,
+                                       scratch=str(tmp_path), tag="lvl1")
+        out = backend.render_many([{"params": {}, "tag": "a"}], input_handle=handle,
+                                  scratch=str(tmp_path))
+        assert out == {"a": None}
 
 
 class TestLtspiceBackendPrepareInput:

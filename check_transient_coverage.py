@@ -64,7 +64,8 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak)
-from render_backends import LiveSpiceBackend, NgspiceBackend, LtspiceBackend  # noqa: E402
+from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+                             NgspiceSchxBackend)
 
 SR = 48000
 
@@ -382,6 +383,32 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                            max_corners=max_corners, sample_grid=sample_grid)
 
 
+def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
+                          transient_peak: float, margin: float = 1.0,
+                          peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
+                          full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
+                          sample_grid: int = 0, capture: dict = None) -> dict:
+    """[.schx / GENERIC ngspice path, i.e. --backend "ngspice"] For a circuit whose .schx
+    exists but whose LiveSPICE render diverges under real signal (e.g. Arbiter Fuzz Face's
+    tight DC-coupled feedback loop) yet needs no hand-written deck at all -- unlike
+    check_coverage_ngspice_deck below, which is for a device with NO .schx counterpart.
+
+    Before this, main()'s backend_name dispatch had NO branch for "ngspice" at all: it fell
+    through to check_coverage() below, which hardcodes LiveSpiceBackend -- silently checking
+    transient coverage against the WRONG solver's render for exactly the circuits that need
+    this tool most (LiveSPICE diverges on them). Caught 2026-09-11 while wiring generic-
+    ngspice support into prepare_excitation.py for Arbiter Fuzz Face.
+    """
+    backend = NgspiceSchxBackend(schx, oversample=oversample)
+    identity = Path(schx).read_bytes()
+    cache_extra = f"backend=ngspice|os={oversample}|maxv={peak_max_v}" + cache_tag(capture)
+    return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           capture=capture,
+                           label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
+                           max_corners=max_corners, sample_grid=sample_grid)
+
+
 def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, knob_ranges: dict,
                                 fixed: dict, transient_peak: float, margin: float = 1.0,
                                 maxstep: float = 3e-6, parallel_sims: int = 8,
@@ -545,6 +572,20 @@ def main():
                                              sample_grid=args.sample_grid,
                                              capture=_capture)
         schx_or_module = module
+    elif backend_name == "ngspice":
+        # Previously fell into the `else` branch below, which hardcodes LiveSpiceBackend --
+        # silently checking coverage against the wrong solver for exactly the circuits that
+        # need "ngspice" (LiveSPICE diverges on them). See check_coverage_ngspice()'s docstring.
+        schx = str(cfg["schx"])
+        oversample = args.oversample or cfg.get("oversample", 2)
+        result = check_coverage_ngspice(schx, knob_ranges, fixed, oversample, transient_peak,
+                                        margin=args.margin,
+                                        peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                        full_hypercube=(False if args.no_full_hypercube else None),
+                                        max_corners=args.max_corners,
+                                        sample_grid=args.sample_grid,
+                                        capture=_capture)
+        schx_or_module = schx
     else:
         schx = str(cfg["schx"])
         oversample = args.oversample or cfg.get("oversample", 8)
