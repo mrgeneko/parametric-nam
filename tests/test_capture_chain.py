@@ -1,7 +1,7 @@
 """Properties the virtual capture chain must have.
 
 Context: Duke of Tone (Distortion), 2026-09-10. 64-74% of its rendered target energy sat
-below 19 Hz -- real bias-rail wander (tau 2.0-2.35 s) that a ~52 ms receptive field cannot
+below 19 Hz -- real bias-rail wander (tau 2.0-2.35 s) that a ~132 ms receptive field cannot
 model. Both our trainer and the official upstream nam-full plateaued at the same ESR.
 A hardware capture never contains this: the interface rolls it off first.
 """
@@ -108,11 +108,18 @@ class TestCausality:
         assert np.abs(out[:SR // 2]).max() == 0.0, "output moved BEFORE the impulse"
 
     def test_impulse_response_fits_inside_the_receptive_field(self):
-        """~2483 samples (51.7 ms). If the filter rang longer, it would itself be
-        unlearnable -- removing one error floor by adding another."""
+        """If the filter rang longer than the receptive field it would itself be
+        unlearnable -- removing one error floor by adding another.
+
+        The bound is IMPORTED, not written down. It was written down once as "2483
+        samples / 52 ms" and was wrong by 2.5x (the real figure is 6332 / 131.9 ms),
+        which reached the template config, the docs and this assertion before anyone
+        recomputed it. See param_train.RECEPTIVE_FIELD_SAMPLES.
+        """
+        from param_train import RECEPTIVE_FIELD_SAMPLES as RF
         y = np.zeros(SR); y[0] = 1.0
         out = np.abs(capture_chain(y, SR))
-        assert out[2483:].max() < 0.01 * out.max()
+        assert out[RF:].max() < 0.01 * out.max()
 
 
 class TestShape:
@@ -601,3 +608,17 @@ def test_scaffold_disabled_path_round_trips(tmp_path):
     cfg = tomllib.loads(text)
     blank = types.SimpleNamespace(no_capture_chain=None, capture_hp_hz=None, capture_order=None)
     assert resolve(blank, cfg) is None
+
+
+def test_receptive_field_is_computed_not_asserted():
+    """Guard the figure itself against drift.
+
+    A dilated stack's receptive field is 1 + sum((kernel-1) * dilation). If someone edits
+    K_KERNEL_SIZES/K_DILATIONS, the constant must follow automatically -- and any doc that
+    quotes a number must be re-checked. 6332 samples / 131.9 ms / a 7.58 Hz floor at 48 kHz.
+    """
+    from param_train import (K_KERNEL_SIZES, K_DILATIONS, RECEPTIVE_FIELD_SAMPLES)
+    assert RECEPTIVE_FIELD_SAMPLES == 1 + sum((k - 1) * d
+                                              for k, d in zip(K_KERNEL_SIZES, K_DILATIONS))
+    assert RECEPTIVE_FIELD_SAMPLES == 6332, "geometry changed -- update the docs that quote it"
+    assert abs(1000 * RECEPTIVE_FIELD_SAMPLES / 48000 - 131.9) < 0.1

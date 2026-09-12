@@ -21,7 +21,7 @@ oversample = 8
 
 # The audio-interface input stage this device is captured through (capture_chain.py). A
 # hardware NAM capture is recorded through an interface that rolls off below ~20 Hz; a
-# simulator probing a node directly skips that, and NAM's ~52 ms receptive field cannot
+# simulator probing a node directly skips that, and NAM's ~132 ms receptive field cannot
 # model content whose state evolves over seconds. Written explicitly by
 # scaffold_config.py rather than left to the tool default, because it is part of the
 # capture DEFINITION: changing it changes every target, so it requires a re-render and a
@@ -40,7 +40,7 @@ epochs     = 0       # open-ended: trains with SGDR warm restarts until you `tou
                       # schedule's real length for the production run.
 batch-size = 64
 lr         = 3e-4
-crop-len   = 48000    # must EXCEED the receptive field (2483 samples / 52 ms @ 48 kHz
+crop-len   = 48000    # must EXCEED the receptive field (6332 samples / 132 ms @ 48 kHz
                         # for the standard A2 stack) -- 48000 (1 s) is comfortable.
 
 # `repeats` (how many random crops-per-combination each epoch draws) is DERIVED from

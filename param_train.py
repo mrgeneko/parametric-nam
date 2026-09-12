@@ -143,6 +143,17 @@ K_DILATIONS = [
     1, 3, 7, 17, 41, 101, 239,
 ]
 
+# The A2 stack's receptive field, COMPUTED from the layer geometry above rather than
+# written down. It was written down once, as "2483 samples / 52 ms", and that number was
+# wrong by 2.5x -- it reached the template config, this repo's docs and a test assertion,
+# and every piece of analysis that reasoned from it (2026-09-11). A dilated stack's
+# receptive field is 1 + sum((kernel-1) * dilation), which is 6332 samples / 131.9 ms at
+# 48 kHz. The slowest periodicity resolvable inside one window is sr/RF ~ 7.6 Hz: content
+# whose state evolves more slowly than that is structurally invisible to the model, which
+# is the premise capture_chain.py rests on.
+RECEPTIVE_FIELD_SAMPLES = 1 + sum((k - 1) * d for k, d in zip(K_KERNEL_SIZES, K_DILATIONS))
+
+
 # ---------------------------------------------------------------------------
 # Model components
 # ---------------------------------------------------------------------------
