@@ -101,3 +101,38 @@ class TestShardCtl:
         with pytest.raises(ProcessLookupError):
             os.kill(child_pid, 0)          # the CHILD must be gone, not orphaned to init
         assert out.exists(), "stop must not delete the output directory"
+
+
+class TestShardCtlOutputIsObservable:
+    """A detached run's log must be readable WHILE it runs, not after it exits.
+
+    stdout to a file is block-buffered. On 2026-09-12 all three Mesa Orange workers sat with
+    one-line logs while 20 of 24 combinations completed, and the empty log was misread as the
+    coverage gate passing from cache. A launcher for detached work cannot withhold its output.
+    """
+
+    def test_renderer_is_launched_unbuffered(self, tmp_path):
+        out = tmp_path / "shard5"
+        r = _run("start", "--output", str(out), "--", "--help")
+        assert r.returncode == 0, r.stderr
+        argv = json.loads((out / ".run.json").read_text())["argv"]
+        assert "-u" in argv, f"renderer must be launched unbuffered: {argv}"
+        assert argv.index("-u") < argv.index(str(HERE / "gen_dataset_from_schx.py")), \
+            "-u is an interpreter flag and must precede the script"
+        time.sleep(2)
+
+    def test_output_appears_in_the_log_before_the_process_exits(self, tmp_path):
+        """The behaviour, not just the flag: write slowly, read mid-run."""
+        out = tmp_path / "shard6"; out.mkdir()
+        log = tmp_path / "slow.log"
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "-c",
+                 "import time\nfor i in range(20): print('line', i); time.sleep(0.4)"],
+                stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            time.sleep(2.5)
+            assert log.read_text().strip(), "unbuffered output must be visible mid-run"
+            assert proc.poll() is None, "process should still be running when we read it"
+        finally:
+            proc.kill(); proc.wait(timeout=10)

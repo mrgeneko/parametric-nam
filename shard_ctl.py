@@ -113,12 +113,21 @@ def cmd_start(args, passthrough):
     log = out_dir.parent / f"{out_dir.name}-{socket.gethostname().split('.')[0]}-{stamp}.log"
 
     renderer = str(HERE / "gen_dataset_from_schx.py")
-    cmd = [sys.executable, renderer, "--output", str(out_dir), *passthrough]
+    # -u (and PYTHONUNBUFFERED for any child) because stdout to a FILE is block-buffered, not
+    # line-buffered. Without it a shard can be 20 of 24 combinations in with a one-line log:
+    # the coverage gate's verdict and every progress line sit in an 8 KB buffer, invisible.
+    # Observed on all three workers of the Mesa Orange run, 2026-09-12, and it actively misled
+    # the diagnosis -- an empty log was read as "the gate passed from cache" when the gate had
+    # simply not flushed. A launcher whose job is making a detached run observable cannot ship
+    # with its output withheld until the process exits. FAILED lines go to stderr and appear
+    # promptly either way, which is why failures still showed up while progress did not.
+    cmd = [sys.executable, "-u", renderer, "--output", str(out_dir), *passthrough]
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
     with open(log, "wb") as fh:
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL,
                                 start_new_session=True,   # own process group: kill(-pgid) works
-                                cwd=str(HERE))
+                                cwd=str(HERE), env=env)
     rf.write_text(json.dumps({
         "pid": proc.pid, "pgid": os.getpgid(proc.pid), "host": socket.gethostname(),
         "started": datetime.now().isoformat(timespec="seconds"), "log": str(log),
