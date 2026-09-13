@@ -253,6 +253,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `pick_dynamic_window.py` | Cut the most-dynamic N-second window out of a long real-playing clip |
 | `apply_output_limiter.py` | Opt-in: soft-limit a rendered training-target WAV so the trainer sees an explicit output ceiling |
 | `gen_dataset_from_schx.py` | Generate the dataset from a `.schx` |
+| `shard_ctl.py` | Start / status / stop one dataset-generation shard, addressed by its output directory rather than a pid |
 | `render_ngspice_deck.py` | Render a hand-written ngspice deck's knob sweep |
 | `render_ltspice_deck.py` | Render an LTspice deck's knob sweep |
 | `gen_dataset_from_captures.py` | Build a dataset from real hardware captures, no `.schx` needed |
