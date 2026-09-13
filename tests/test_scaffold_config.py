@@ -51,7 +51,7 @@ class TestGainVolumeKnobGrid:
     @pytest.mark.parametrize("kind", ["drive", "rms"])
     def test_required_anchors_present(self, kind):
         pts = _grid_for_kind(kind, 3)
-        for anchor in (0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0):
+        for anchor in (0.1, 0.15, 0.25, 0.50, 0.75, 0.90, 1.0):
             assert anchor in pts, f"{kind} grid missing required anchor {anchor}: {pts}"
 
     @pytest.mark.parametrize("kind", ["drive", "rms"])
@@ -77,7 +77,7 @@ class TestGainVolumeKnobGrid:
         """At or below DEFAULT_GRID_POINTS, drive/rms returns exactly its 7 fixed anchors --
         no baseline linspace point gets unioned in. Denser than the old 6-point default now
         that --shard makes a denser default grid affordable (see _grid_for_kind's docstring)."""
-        expected = [0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0]
+        expected = [0.1, 0.15, 0.25, 0.50, 0.75, 0.90, 1.0]
         assert _grid_for_kind("drive", 3) == expected
         assert _grid_for_kind("drive", DEFAULT_GRID_POINTS) == expected
         assert _grid_for_kind("drive", 2) == expected, "below-default should still be exactly the anchors"
@@ -101,7 +101,7 @@ class TestFormatKnobs:
     def test_one_line_per_knob_with_correct_grid(self):
         lines = _format_knobs(["Gain", "Treble"], 3)
         assert len(lines) == 2
-        assert "Gain" in lines[0] and "[0.1, 0.15, 0.25, 0.5, 0.75, 0.95, 1.0]" in lines[0]
+        assert "Gain" in lines[0] and "[0.1, 0.15, 0.25, 0.5, 0.75, 0.9, 1.0]" in lines[0]
         assert "Treble" in lines[1] and "[0.2, 0.5, 0.8]" in lines[1]
 
     def test_names_aligned_to_widest(self):

@@ -132,11 +132,11 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
         stack's interesting behavior, so a naive [0,1] grid wastes render budget there.
 
       drive/rms (gain/volume knob): NOT evenly spaced, and denser than the 6-point default
-        this used to be -- now [0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0], 7 fixed anchor
+        this used to be -- now [0.1, 0.15, 0.25, 0.50, 0.75, 0.90, 1.0], 7 fixed anchor
         points. A gain-type knob's audible character changes fastest near the bottom of its
         range, so 0.1 (not 0.0 -- a knob truly at zero is often a degenerate/dead corner
         anyway) gets two extra points just above it (+0.05, +0.15); the top gets one extra
-        point just below max (-0.05) to "stabilize" the max grid point; 0.50 and 0.75 fill
+        point just below max (-0.10) to "stabilize" the max grid point; 0.50 and 0.75 fill
         the middle instead of leaving it to a single linspace-derived point. Raised from 5
         anchors (+1 incidental baseline midpoint) to these 7 fixed points now that
         gen_dataset_from_schx.py's --shard makes a denser default grid affordable -- dataset
@@ -156,7 +156,7 @@ def _grid_for_kind(kind: "str | None", n_points: int) -> list:
         return [round(float(v), 4) for v in np.linspace(lo, hi, max(2, n_points))]
     if kind in ("drive", "rms"):
         lo, hi = 0.1, 1.0
-        anchors = [0.1, 0.15, 0.25, 0.50, 0.75, 0.95, 1.0]
+        anchors = [0.1, 0.15, 0.25, 0.50, 0.75, 0.90, 1.0]
         if n_points <= DEFAULT_GRID_POINTS:
             return anchors
         baseline = list(np.linspace(lo, hi, n_points))
