@@ -622,3 +622,47 @@ def test_receptive_field_is_computed_not_asserted():
                                               for k, d in zip(K_KERNEL_SIZES, K_DILATIONS))
     assert RECEPTIVE_FIELD_SAMPLES == 6332, "geometry changed -- update the docs that quote it"
     assert abs(1000 * RECEPTIVE_FIELD_SAMPLES / 48000 - 131.9) < 0.1
+
+
+class TestSampleGridDefaultsToAuto:
+    """--sample-grid must probe the grid INTERIOR by default, not just corners.
+
+    Corners are a heuristic, and have now been shown insufficient TWICE:
+      - Mesa Orange 5-knob: true worst onset 1.27x above every one of 32 vertices.
+      - Mesa Orange 2-knob Gain x Master: an interior cell at 11.18 V against a worst
+        CORNER of 1.76 V -- 6.3x. Sizing from corners produced an excitation that could not
+        drive 2 of 25 probed cells into saturation, and the transient gate refused the
+        render (2026-09-12).
+
+    The footgun was the DEFAULT: scaffold_config.py passed a budget explicitly, so a
+    scaffolded device got interior probing while calling prepare_excitation.py BY HAND
+    silently got corners only.
+    """
+
+    def test_none_resolves_to_the_auto_budget(self):
+        from check_transient_coverage import resolve_sample_grid as _resolve_sample_grid
+        from check_transient_coverage import interior_sample_budget
+        for n in (1, 2, 3, 5, 7):
+            ranges = dict.fromkeys("abcdefg"[:n], [0.0, 1.0])
+            assert _resolve_sample_grid(None, ranges) == interior_sample_budget(n)
+
+    def test_auto_is_nonzero_for_any_real_grid(self):
+        """The whole bug was silently getting 0."""
+        from check_transient_coverage import resolve_sample_grid as _resolve_sample_grid
+        for n in (1, 2, 3, 5, 7):
+            ranges = dict.fromkeys("abcdefg"[:n], [0.0, 1.0])
+            assert _resolve_sample_grid(None, ranges) > 0
+
+    def test_explicit_zero_still_disables(self):
+        """Needed to reproduce an older sizing exactly -- 0 must not be overridden."""
+        from check_transient_coverage import resolve_sample_grid as _resolve_sample_grid
+        assert _resolve_sample_grid(0, {"a": [0.0, 1.0], "b": [0.0, 1.0]}) == 0
+
+    def test_explicit_value_wins(self):
+        from check_transient_coverage import resolve_sample_grid as _resolve_sample_grid
+        assert _resolve_sample_grid(72, {"a": [0.0, 1.0], "b": [0.0, 1.0]}) == 72
+
+    def test_no_knobs_is_zero_not_a_crash(self):
+        from check_transient_coverage import resolve_sample_grid as _resolve_sample_grid
+        assert _resolve_sample_grid(None, {}) == 0
+        assert _resolve_sample_grid(None, None) == 0

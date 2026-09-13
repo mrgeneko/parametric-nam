@@ -247,6 +247,24 @@ def _sample_interior(knob_ranges: dict, corners: list, n_points: int) -> list:
     return corners
 
 
+def resolve_sample_grid(requested, knob_ranges):
+    """--sample-grid, with None meaning AUTO (interior_sample_budget from the knob count).
+
+    Defaulting this to 0 was a live footgun: scaffold_config.py passed a budget explicitly,
+    so a scaffolded device got interior probing, while calling this tool BY HAND silently got
+    corners only. That is how the Mesa Orange 2-knob grid came to be sized from 9 corners
+    (worst onset 1.76 V) when an interior cell needed 11.18 V -- 6.3x -- and the transient
+    gate then correctly refused the render. Corners are a heuristic; onset is not monotonic
+    in the knobs, so the grid maximum need not sit at a vertex.
+
+    Explicit 0 still disables it, for reproducing an older sizing exactly.
+    """
+    if requested is not None:
+        return requested
+    n = len(knob_ranges or {})
+    return interior_sample_budget(n)
+
+
 def _transient_peak_from_recipe(input_wav: Path) -> "float | None":
     recipe_path = input_wav.with_suffix(".recipe.json")
     if not recipe_path.exists():
@@ -491,14 +509,19 @@ def main():
     _cc_add_cli_args(ap)
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true")
-    ap.add_argument("--sample-grid", type=int, default=0, metavar="N",
-                    help="ALSO probe N points drawn from the full grid product, not just the "
-                         "min/max hypercube. Corners are a heuristic: Mesa Orange's highest "
-                         "onset sits at Bass=min with every other knob CENTRED, 27%% above the "
-                         "best of all 32 vertices, because onset is not monotonic in the knobs. "
-                         "Deterministic, so a sizing run and a later check agree. Costs about "
-                         "one render-sweep per point -- budget it, do not probe the whole grid "
-                         "(648 points is ~9h on a full amp, for one scalar).")
+    ap.add_argument("--sample-grid", type=int, default=None, metavar="N",
+                    help="AUTO by default (interior_sample_budget: ~1.5x the corner "
+                          "count, capped 64) -- 0 disables. Corners are a HEURISTIC and have "
+                          "been shown insufficient twice: Mesa Orange's 5-knob grid had its "
+                          "true worst onset 1.27x above every one of 32 vertices, and its "
+                          "2-knob Gain x Master grid had an interior cell at 11.18 V against "
+                          "a worst CORNER of 1.76 V -- 6.3x. Sizing from corners alone there "
+                          "produced an excitation that could not drive 2 of 25 probed cells "
+                          "into saturation at all, and the transient gate correctly refused "
+                          "the render (2026-09-12). Onset is not monotonic in the knobs, so "
+                          "its maximum over the grid need not sit at a vertex; only probing "
+                          "the interior MEASURES it. Deterministic, so a sizing run and a "
+                          "later coverage check agree.")
     ap.add_argument("--max-corners", type=int, default=None,
                      help="cap the TOTAL corner count, deterministically sampling the hypercube "
                           "when it does not all fit, instead of abandoning it. Prefer this to "
@@ -558,7 +581,7 @@ def main():
                                              no_cache=args.no_cache,
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
-                                             sample_grid=args.sample_grid,
+                                             sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                              capture=_capture,
                                              lead_silence_s=args.lead_silence_s)
         schx_or_module = module
@@ -576,7 +599,7 @@ def main():
                                              no_cache=args.no_cache,
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
-                                             sample_grid=args.sample_grid,
+                                             sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                              capture=_capture)
         schx_or_module = module
     elif backend_name == "ngspice":
@@ -591,7 +614,7 @@ def main():
                                         peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                         full_hypercube=(False if args.no_full_hypercube else None),
                                         max_corners=args.max_corners,
-                                        sample_grid=args.sample_grid,
+                                        sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                         capture=_capture, conv=_conv)
         schx_or_module = schx
     else:
@@ -602,7 +625,7 @@ def main():
                                 peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                 full_hypercube=(False if args.no_full_hypercube else None),
                                 max_corners=args.max_corners,
-                                sample_grid=args.sample_grid,
+                                sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                 capture=_capture)
         schx_or_module = schx
 
