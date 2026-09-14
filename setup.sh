@@ -98,6 +98,18 @@ fi
 echo "    installed into .venv:"
 "$REPO/.venv/bin/python" -c "import torch,numpy,scipy,soundfile as sf; print(f'      torch {torch.__version__}, numpy {numpy.__version__}, scipy {scipy.__version__}, soundfile {sf.__version__}')"
 
+# ngspice is a SYSTEM binary, not a pip package. requirements.txt installs spicelib, the Python
+# wrapper that drives it, and spicelib imports fine without the simulator -- so setup used to look
+# complete and the first --backend ngspice render was what failed (found on a fresh Ubuntu render
+# worker). Warn, don't fail: the default livespice backend never needs it.
+if command -v ngspice >/dev/null 2>&1; then
+  NGSPICE_VER="$( { ngspice -v </dev/null 2>&1 || true; } | grep -oE 'ngspice-[0-9][0-9.]*' | head -n 1 || true)"
+  echo "    ngspice: $(command -v ngspice) (${NGSPICE_VER:-version unknown})"
+else
+  echo "    WARNING: 'ngspice' not found on PATH -- only needed for --backend ngspice / ngspice-deck." >&2
+  echo "             Linux: sudo apt-get install ngspice   |   macOS: brew install ngspice" >&2
+fi
+
 say "done. Activate with:  . .venv/bin/activate"
 if [ "$BUILD_CLI" -eq 1 ]; then
   "$REPO/.venv/bin/python" -c "

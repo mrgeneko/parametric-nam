@@ -451,8 +451,11 @@ submodule (a sign the pin points somewhere other than pristine upstream).
 
 ### ngspice (only for `--backend ngspice`)
 ```bash
-apt install ngspice        # Linux;  macOS: brew install ngspice
+sudo apt-get install ngspice   # Linux;  macOS: brew install ngspice
 ```
+`spicelib` (in `requirements.txt`) is only the Python driver: it installs and imports without the
+simulator, so a working `.venv` says nothing about whether ngspice renders will run. The
+simulator is a system package pip can't install; `setup.sh` warns if `ngspice` isn't on `PATH`.
 
 ### LTspice on macOS (only for `--backend ltspice-deck`)
 
