@@ -207,8 +207,19 @@ if [ "${#SYNC_FILES[@]}" -gt 0 ]; then
       # preserve the relative directory structure under REMOTE_DIR so a --schx/--input path
       # that's relative to the repo root resolves the same way on the worker as it does here.
       dest_dir="$(dirname "$f")"
-      ssh "${SSH_OPTS[@]}" "$w" "mkdir -p $REMOTE_DIR/$dest_dir"
-      rsync -az "$HERE/$f" "$w:$REMOTE_DIR/$f"
+      # %q-escape only the FILE-DERIVED portion, not $REMOTE_DIR -- ssh "$w" "cmd string" and
+      # rsync's own host:path syntax both build a remote command line re-parsed by the remote
+      # shell, so a device name with parens or spaces (common in this fleet: "Duke of Tone
+      # (Overdrive).schx", "... (sag v30).schx") otherwise splits into multiple tokens with an
+      # unmatched '(' -- caught 2026-09-13 launching a real shard: "bash: -c: line 1: syntax
+      # error near unexpected token `('". REMOTE_DIR itself must stay UNESCAPED: its default is
+      # the literal, deliberately-unexpanded string "$HOME/work/parametric-nam" (expanded by
+      # the remote shell, not here) -- %q-ing the combined path would also escape that '$',
+      # producing "\$HOME" on the remote end, which is a literal directory name, not $HOME.
+      printf -v _dest_dir_q '%q' "$dest_dir"
+      printf -v _f_q '%q' "$f"
+      ssh "${SSH_OPTS[@]}" "$w" "mkdir -p $REMOTE_DIR/$_dest_dir_q"
+      rsync -az "$HERE/$f" "$w:$REMOTE_DIR/$_f_q"
     done
   done
 fi
