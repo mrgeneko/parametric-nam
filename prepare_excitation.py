@@ -64,6 +64,22 @@ from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 
 
+PRE_FIX_METHOD = "pre-2026-09-12/99pct-of-max"
+
+
+def method_summary(rows) -> str:
+    """How this run's onsets were derived, across every probed corner.
+
+    A sizing pass can mix freshly measured corners with cache hits written by older code, so
+    this reports a MIXTURE rather than collapsing to the first method found -- claiming an
+    internal consistency the run does not have is worse than no field at all. An absent method
+    is not "unknown": it identifies the pre-2026-09-12 99%-of-max rule, which is the thing a
+    reader most needs to spot.
+    """
+    seen = sorted({(r.get("method") or PRE_FIX_METHOD) for r in rows}) or [PRE_FIX_METHOD]
+    return seen[0] if len(seen) == 1 else "MIXED: " + ", ".join(seen)
+
+
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
                       lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None):
@@ -105,7 +121,13 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
         if not quiet:
             onset_str = "NONE (not reached)" if onset is None else f"{onset:.3f} V"
             print(f"  {label:16} onset={onset_str:>10}")
-        rows.append({"corner": label, "params": params, "onset_v": onset})
+        rows.append({"corner": label, "params": params, "onset_v": onset,
+                     # Recorded per corner, not once per run: a sizing pass can mix freshly
+                     # measured corners with cache hits, and if those were written by different
+                     # code the run is not internally consistent. Better to see the mixture in
+                     # the artifact than to infer it later from build dates and plausibility.
+                     "knee_v": (sat or {}).get("knee_v"),
+                     "method": (sat or {}).get("onset_method")})
     missing = [r for r in rows if r["onset_v"] is None]
     if missing:
         raise RuntimeError(
@@ -456,6 +478,13 @@ def main():
             recipe = json.loads(recipe_path.read_text())
             recipe["sizing"] = {
                 "tool": "prepare_excitation.py",
+                # HOW the onsets were derived, not just what they were. Without this the only
+                # way to tell a stale excitation from a current one is build date plus a guess
+                # at whether the peak looks plausible -- which is exactly the forensics a scan
+                # of nine devices needed on 2026-09-12, after find_saturation_point's onset rule
+                # changed and every recipe on disk looked identical to a current one. A run that
+                # mixes methods is reported as such rather than collapsed to the first.
+                "onset_method": method_summary(rows),
                 "worst_case_onset_v": round(float(worst), 4),
                 "corner_count": len(rows),
                 "corner_set": ("structural-only (DEPRECATED --no-full-hypercube: cannot represent "
@@ -467,6 +496,13 @@ def main():
                 "peak_max_v": args.peak_max_v,
                 "onsets_v": {r["corner"]: (None if r["onset_v"] is None else round(float(r["onset_v"]), 4))
                              for r in rows},
+                # The knee (departure from small-signal gain) is a different quantity from the
+                # onset (level at which the cell is saturated) -- at Mesa Orange's quietest
+                # corner they are 27x apart, 0.053 V against 1.46 V. Recording both makes that
+                # visible instead of leaving a future reader to assume one number means the
+                # other, which is the conflation that produced the broken rule in the first place.
+                "knees_v": {r["corner"]: (None if r.get("knee_v") is None else round(float(r["knee_v"]), 5))
+                            for r in rows},
             }
             recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
             print(f"recorded sizing provenance into {recipe_path.name} "

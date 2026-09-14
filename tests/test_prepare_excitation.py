@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from prepare_excitation import _parse_fixed, _parse_ranges, _setup, main, worst_case_onset
+from prepare_excitation import method_summary, _parse_fixed, _parse_ranges, _setup, main, worst_case_onset
 from render_backends import NgspiceSchxBackend
 
 
@@ -190,3 +190,62 @@ class TestSetupNgspiceBackend:
                                         conv="bjt_vaf=102.207"))
         _, _, b, *_ = _setup(self._args(schx=str(schx), range_=["Fuzz=0.0,1.0"], conv=None))
         assert a != b
+
+
+class TestSizingProvenance:
+    """The recipe must record HOW onsets were derived, not only what they were.
+
+    On 2026-09-12 find_saturation_point's onset rule changed, and every recipe already on disk
+    looked identical to a freshly-correct one -- no field distinguished them. Auditing nine
+    devices came down to build dates plus a judgement about whether each peak looked physically
+    plausible. That is forensics, not provenance.
+    """
+
+    @pytest.fixture(autouse=True)
+    def sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def _stub(self, monkeypatch, sat_fn):
+        def fake(backend, params, tmp, max_v=40.0, lead_silence_s=0.0, **kw):
+            return sat_fn(params)
+        monkeypatch.setattr("prepare_excitation.find_saturation_point", fake)
+
+    def test_rows_carry_the_method_and_knee_from_each_measurement(self, monkeypatch, tmp_path):
+        self._stub(monkeypatch, lambda p: {"onset_99pct_input_v": 0.9, "knee_v": 0.053,
+                                            "onset_method": "knee+sat95-v1",
+                                            "ceiling_rms": 1.0, "ceiling_at_input_v": 1.0,
+                                            "curve": []})
+        _worst, rows = worst_case_onset(backend=object(), identity=b"x", cache_extra="e",
+                                         knob_ranges={"Gain": [0.0, 1.0]}, fixed={},
+                                         tmp=str(tmp_path), quiet=True)
+        assert rows and all(r["method"] == "knee+sat95-v1" for r in rows)
+        # knee and onset are DIFFERENT quantities and both must survive into the artifact
+        assert all(r["knee_v"] == 0.053 and r["onset_v"] == 0.9 for r in rows)
+        assert method_summary(rows) == "knee+sat95-v1"
+
+    def test_a_pre_fix_measurement_is_named_not_left_blank(self, monkeypatch, tmp_path):
+        """An old cache entry has no method field. Absence is not 'unknown' -- it identifies
+        the 99%-of-max rule, which is exactly what a reader needs to see."""
+        self._stub(monkeypatch, lambda p: {"onset_99pct_input_v": 21.24, "ceiling_rms": 1.0,
+                                            "ceiling_at_input_v": 1.0, "curve": []})
+        _worst, rows = worst_case_onset(backend=object(), identity=b"x", cache_extra="e",
+                                         knob_ranges={"Gain": [0.0, 1.0]}, fixed={},
+                                         tmp=str(tmp_path), quiet=True)
+        assert all(r["method"] is None and r["knee_v"] is None for r in rows)
+        assert method_summary(rows) == "pre-2026-09-12/99pct-of-max"
+
+    def test_a_run_mixing_methods_is_reported_as_mixed(self):
+        """Fresh measurements alongside cache hits from older code. Collapsing that to one
+        method would assert a consistency the run does not have."""
+        rows = [{"method": "knee+sat95-v1"}, {"method": None}]
+        out = method_summary(rows)
+        assert out.startswith("MIXED: ")
+        assert "knee+sat95-v1" in out and "pre-2026-09-12/99pct-of-max" in out
+
+    def test_summary_is_stable_regardless_of_corner_order(self):
+        a = method_summary([{"method": None}, {"method": "knee+sat95-v1"}])
+        b = method_summary([{"method": "knee+sat95-v1"}, {"method": None}])
+        assert a == b, "provenance must not depend on which corner happened to be probed first"
+
+    def test_empty_rows_do_not_crash_the_recipe_write(self):
+        assert method_summary([]) == "pre-2026-09-12/99pct-of-max"

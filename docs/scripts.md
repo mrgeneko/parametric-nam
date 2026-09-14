@@ -440,6 +440,47 @@ For the full, every-corner, hard-gate version of this same question, use
 `prepare_excitation.py`/`check_transient_coverage.py` above instead — this script is a cheap
 automatic tripwire, not a substitute for them.
 
+## `shard_ctl.py` — start / status / stop one shard, addressed by its output directory
+
+A dataset generation is normally launched and forgotten, then needs to be stopped hours
+later — often from a different shell, on a machine reached over ssh. Naming it by pid does
+not survive that. This names it by its **output directory** and keeps the mapping itself.
+
+```bash
+./shard_ctl.py start  --output ~/runs/dev/shard1 -- --backend livespice --schx ... --shard 1-1/3
+./shard_ctl.py status --output ~/runs/dev/shard1
+./shard_ctl.py stop   --output ~/runs/dev/shard1
+```
+
+Everything after `--` is forwarded to `gen_dataset_from_schx.py` verbatim; `--output` is
+supplied for you.
+
+**Why not `nohup ... &`.** That leaves a shell wrapper holding the renderer. Killing the
+wrapper re-parents the renderer to init and it keeps going — with whatever code it started
+with, still holding its generation lock, still writing to its log. During the Mesa Orange
+gain/master run an orphan like that spent twelve minutes writing stale-metric results into
+a log a replacement run had already truncated, and the interleaved output read convincingly
+like a caching bug. `start` uses `start_new_session=True` and records the pgid, so `stop`
+signals the **group** and children die with the parent.
+
+- **`stop` verifies.** SIGTERM to the group, wait `--grace` (default 30 s), escalate to
+  SIGKILL, then confirm no survivors. It never deletes the output directory: a re-run
+  resume-skips what finished, so there is usually nothing to clean.
+- **pid-reuse guard.** A recorded pgid can be recycled — most likely after the reboot that
+  ended the original run. Before signalling anything, the target's cmdline is checked
+  against a recorded marker; a recycled number reports "gone or recycled" and is left alone.
+- **Logs are never reused.** Each run writes `<shard>-<host>-<timestamp>.log`, *beside* the
+  output directory rather than inside it, so clearing a shard does not destroy the record of
+  why you cleared it.
+- **Unbuffered.** The renderer is launched with `-u`. stdout to a file is block-buffered, so
+  without it a shard can be 20 of 24 combinations in with a one-line log — the coverage
+  gate's verdict and all progress invisible until exit. (`FAILED` goes to stderr and always
+  appeared, which is why this hid for a while.)
+
+Single-machine. For fanning one grid across several hosts see `distribute_pull.py` below;
+[per-item-sharding-proposal.md](per-item-sharding-proposal.md) proposes making that use this
+per slot.
+
 ## `distribute_pull.py` — hand rendering chunks out as workers free up
 
 > Where this is heading — mesh SSH, a generated fleet inventory, a pull-based queue and a
@@ -517,8 +558,14 @@ Four things that are easy to get wrong:
   against, and neither exists until `--slow-min-samples` worker-chunks have contributed.
   Abandoning a chunk **kills the renderer on the worker**, matched on its unique `--shard`
   argument, and clears the lock — killing only the local ssh client leaves the remote process
-  reparented to init, still holding the renderer's exclusive `.generation.lock`, so every
-  later chunk on that host fails instantly and quarantines it. `--slow-mult 0` disables the
+  reparented to init, still holding the renderer's exclusive generation lock, so every
+  later chunk on that host fails instantly and quarantines it. (That lock lives in
+  `~/.cache/parametric-nam/locks/`, keyed on the resolved output path, **not** inside the
+  output directory: `flock` is held on an inode, so when the file lived in the output dir
+  a `rm -rf` to clear a shard for restart unlinked it without releasing anything, and the
+  next process locked a fresh inode at the same path and ran alongside the first. A
+  `.generation.lock.info` breadcrumb inside the output dir points at the real one and is
+  safe to delete.) `shard_ctl.py stop` does this correctly for a local run. `--slow-mult 0` disables the
   whole check.
 
 - **`--collect LOCAL_DIR` — use it.** The scheduler renders; gathering is the other half. `sig/`
