@@ -37,7 +37,7 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 # --- 1. the oracle ---------------------------------------------------------
 if [ "$BUILD_CLI" -eq 1 ]; then
-  say "1/2  the oracle (livespice_cli)"
+  say "1/3  the oracle (livespice_cli)"
 
   if [ -n "${LIVESPICE_CLI:-}" ]; then
     if [ ! -x "$LIVESPICE_CLI" ]; then
@@ -70,7 +70,7 @@ else
 fi
 
 # --- 2. python venv + deps -------------------------------------------------
-say "2/2  Python venv + deps"
+say "2/3  Python venv + deps"
 # Debian/Ubuntu split venv's ensurepip into a separate apt package. Without it `python3 -m venv`
 # fails AFTER creating .venv (no pip inside), and the `[ -d .venv ]` guard below then skips the
 # broken venv on every re-run. Check first so nothing half-made is left behind.
@@ -108,6 +108,61 @@ if command -v ngspice >/dev/null 2>&1; then
 else
   echo "    WARNING: 'ngspice' not found on PATH -- only needed for --backend ngspice / ngspice-deck." >&2
   echo "             Linux: sudo apt-get install ngspice   |   macOS: brew install ngspice" >&2
+fi
+
+# --- 3. the product path (render_parametric) -------------------------------
+# WHY THIS EXISTS. Two checks run the model through the REAL C++ product path rather than the
+# Python forward pass: ab_realtime_playback.py (FiLM parity) and plot_tone_response.py (the
+# release tone chart). Both need the `render_parametric` binary from NeuralAmpModelerCore, and
+# until now NOTHING in this repo located, built, or even mentioned how to obtain it -- setup.sh
+# provisioned the oracle only.
+#
+# That gap is how ab_realtime_playback.py stayed broken for months: it raised TypeError on every
+# invocation from parametric-nam@19b9f57 until @2076305, no test covers it (it needs this binary
+# to run at all), and release_run.sh treats the tone chart as best-effort and exits 0 when the
+# binary is missing. A check nobody can run is indistinguishable from a check that passes.
+#
+# WARN, DO NOT FAIL: the binary is a nice-to-have for training and dataset work, and is only
+# required to validate a release. Same policy as ngspice above.
+say "3/3  the product path (render_parametric)"
+RP=""
+if [ -n "${RENDER_PARAMETRIC:-}" ]; then
+  if [ -x "$RENDER_PARAMETRIC" ]; then RP="$RENDER_PARAMETRIC"; echo "    using \$RENDER_PARAMETRIC: $RP"
+  else echo "    WARNING: \$RENDER_PARAMETRIC is set but not executable: $RENDER_PARAMETRIC" >&2; fi
+elif command -v render_parametric >/dev/null 2>&1; then
+  RP="$(command -v render_parametric)"; echo "    found on PATH: $RP"
+else
+  # Look for a NeuralAmpModelerCore checkout as a sibling, or one directory up alongside other
+  # products that vendor it. First hit wins; a built binary is preferred over an unbuilt source.
+  for cand in "$REPO/../NeuralAmpModelerCore" "$REPO"/../*/NeuralAmpModelerCore; do
+    [ -d "$cand" ] || continue
+    if [ -x "$cand/build/tools/render_parametric" ]; then RP="$cand/build/tools/render_parametric"; break; fi
+    [ -z "$NAMCORE_SRC" ] && NAMCORE_SRC="$cand"
+  done
+  if [ -n "$RP" ]; then
+    echo "    already built: $RP"
+  elif [ -n "${NAMCORE_SRC:-}" ]; then
+    if command -v cmake >/dev/null 2>&1; then
+      echo "    building render_parametric in $NAMCORE_SRC ..."
+      if cmake -S "$NAMCORE_SRC" -B "$NAMCORE_SRC/build" >/dev/null 2>&1 \
+         && cmake --build "$NAMCORE_SRC/build" --target render_parametric >/dev/null 2>&1 \
+         && [ -x "$NAMCORE_SRC/build/tools/render_parametric" ]; then
+        RP="$NAMCORE_SRC/build/tools/render_parametric"; echo "    built: $RP"
+      else
+        echo "    WARNING: build failed in $NAMCORE_SRC -- build it by hand and set \$RENDER_PARAMETRIC." >&2
+      fi
+    else
+      echo "    WARNING: 'cmake' not found; cannot build render_parametric from $NAMCORE_SRC." >&2
+    fi
+  fi
+fi
+if [ -z "$RP" ]; then
+  echo "    WARNING: 'render_parametric' not found -- Python<->C++ parity (ab_realtime_playback.py)" >&2
+  echo "             and the release tone chart (plot_tone_response.py) CANNOT RUN without it." >&2
+  echo "             Clone NeuralAmpModelerCore as a sibling of this repo and re-run setup, or" >&2
+  echo "             point \$RENDER_PARAMETRIC at an existing build." >&2
+else
+  echo "    export RENDER_PARAMETRIC=$RP   # release_run.sh and plot_tone_response.py read this"
 fi
 
 say "done. Activate with:  . .venv/bin/activate"

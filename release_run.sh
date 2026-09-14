@@ -36,7 +36,16 @@ MODELS="${MODELS:-$HOME/work/parametric-nam-models}"
 CATEGORY="${CATEGORY:-pedals}"
 CIRCUIT="${CIRCUIT:-large-muffin}"
 PREFIX="${PREFIX:-large_muffin}"
-CONFIG="${CONFIG:-$MODELS/$CATEGORY/$CIRCUIT/config.toml}"   # training config, for reproduce.sh -- lives in parametric-nam-models, not here
+# training config, for reproduce.sh -- lives in parametric-nam-models, not here.
+# VARIANT-AWARE, and deliberately refuses to fall back to the bare config.toml: for a
+# variant-keyed circuit that file describes the PARENT device. Mesa Orange, 2026-09-14: staging
+# the 2-knob gain-master variant produced a reproduce.sh pointing at the 5-knob config, which
+# would have regenerated a 576-combination dataset for a different device. It is a silent
+# wrong-value, not an error -- the file exists, so the -f guard below passes.
+# config.toml.<variant> is an existing convention (dumble-ots-183-full carries four).
+CONFIG_DEFAULT="$MODELS/$CATEGORY/$CIRCUIT/config.toml"
+[ -n "${VARIANT:-}" ] && CONFIG_DEFAULT="$MODELS/$CATEGORY/$CIRCUIT/config.toml.$VARIANT"
+CONFIG="${CONFIG:-$CONFIG_DEFAULT}"
 PY_BIN="${PY_BIN:-$HERE/.venv/bin/python}"
 STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
 # Moved up from the args-construction site (its only other use) so PRIOR_STATE detection below
@@ -52,7 +61,16 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
-[ -f "$CONFIG" ] || { echo "no training config at $CONFIG (set CONFIG=)" >&2; exit 1; }
+if [ ! -f "$CONFIG" ]; then
+  echo "no training config at $CONFIG (set CONFIG=)" >&2
+  if [ -n "${VARIANT:-}" ] && [ -f "$MODELS/$CATEGORY/$CIRCUIT/config.toml" ]; then
+    echo "  NOTE: $MODELS/$CATEGORY/$CIRCUIT/config.toml exists, but it is the PARENT circuit's" >&2
+    echo "        config, not variant '$VARIANT'. Using it would publish a reproduce.sh that" >&2
+    echo "        rebuilds a different device, so it is not used as a fallback. Pass CONFIG=" >&2
+    echo "        explicitly, or add config.toml.$VARIANT beside it." >&2
+  fi
+  exit 1
+fi
 [ -f "$CKPT/metrics.csv" ] || { echo "no metrics.csv in $CKPT" >&2; exit 1; }
 [ -f "$CKPT/best.pt" ]     || { echo "no best.pt in $CKPT" >&2; exit 1; }
 
@@ -326,6 +344,16 @@ for t in "${TIERS[@]}"; do
 done
 cp "$RUN.optimal.param.nam" "$STAGE/${PREFIX}_optimal.param.nam"
 cp "$CKPT/metrics.csv" "$STAGE/metrics.csv"
+# BUNDLE THE CONFIG. reproduce.sh used to embed an absolute path to a file outside the bundle,
+# so a published run was not self-contained -- add-run.sh warns about exactly this, and the
+# 5-knob Mesa Orange release had its config copied in BY HAND afterwards without the generator
+# ever being fixed. Of eight variant-keyed releases audited on 2026-09-14, seven referenced a
+# config by a path that does not resolve on another machine (one pointed into another machine's
+# home directory).
+cp "$CONFIG" "$STAGE/config.toml"
+# Per-combination ESR: written by param_train into $CKPT, carried by the 5-knob release, but
+# never copied by this script -- so it too was being added by hand.
+for f in "$CKPT"/per_combo_esr_*.csv; do [ -f "$f" ] && cp "$f" "$STAGE/"; done
 cp "$DS/config.json"   "$STAGE/dataset_config.json"
 cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
 # Capture-sourced runs (IS_CAPTURE=1, see facts.py) have no .schx to bundle -- config.json's own
@@ -572,6 +600,22 @@ EOF
 [ -n "$BLURB" ] && { echo; echo "## Circuit notes"; echo; cat "$BLURB"; }
 } > "$STAGE/MANIFEST.md"
 
+# RECORD THE ABSENCE, NOT JUST THE PRESENCE. The tone chart is best-effort and exits 0 when
+# render_parametric is missing, so a release could ship with the C++ product path unexercised
+# and nothing in the artifact saying so -- visible only in console scrollback nobody keeps.
+# That is the same shape as ab_realtime_playback.py being dead for months: a check nobody can
+# run looks exactly like a check that passed. setup.sh now locates/builds the binary.
+if [ "$TONE_CHART" -eq 0 ]; then
+  {
+    echo
+    echo "## Tone response — NOT GENERATED"
+    echo
+    echo "\`render_parametric\` was unavailable when this bundle was staged, so the C++ product"
+    echo "path was not exercised for this release. Set \`\$RENDER_PARAMETRIC\` (or run"
+    echo "\`setup.sh\`, which locates or builds it) and re-stage to produce the chart."
+  } >> "$STAGE/MANIFEST.md"
+fi
+
 # Tone-response section (only if the chart was generated above).
 if [ "$TONE_CHART" -eq 1 ]; then
   {
@@ -636,8 +680,11 @@ SPICE_TO_NAM="\${SPICE_TO_NAM:-\$HOME/work/parametric-nam}"
 OUT="\${OUT:-\$HOME/work/tmp/${PREFIX}_rerun}"
 cd "\$SPICE_TO_NAM"
 
-python run_pipeline.py --config "$CONFIG" \\
-  --dataset-dir "$DS" \\
+# --config resolves against THIS script's directory: the config is bundled beside it, so the
+# command works from any checkout on any machine. --dataset-dir is overridable for the same
+# reason -- the original absolute path is recorded in MANIFEST.md, not baked in here.
+python run_pipeline.py --config "\$(cd "\$(dirname "\$0")" && pwd)/config.toml" \\
+  --dataset-dir "\${DATASET:-\$HOME/work/tmp/${PREFIX}_ds}" \\
   --nam-output  "\$OUT.param.nam" \\
   --checkpoint-dir "\${OUT}_ckpt" \\
   --widths $WIDTHS_CSV \\
