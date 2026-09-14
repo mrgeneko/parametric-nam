@@ -37,7 +37,7 @@ from param_train import ParametricA2, check_parametric_schema
 
 
 def load_parametric(nam_path: Path, width: int | None = None):
-    """Rebuild the model from a .param.nam, honoring its declared head_mode."""
+    """Rebuild the model from a .param.nam, checking its declared head_mode is one we can run."""
     d = json.loads(nam_path.read_text())
     entries = ([s["model"] for s in d["config"]["submodels"]]
                if d.get("architecture") == "SlimmableContainer" else [d])
@@ -47,9 +47,19 @@ def load_parametric(nam_path: Path, width: int | None = None):
     cfg = m["config"]
     par = cfg["parametric"]
     check_parametric_schema(par, source=str(nam_path))
+    # Python is SKIP-ONLY since "skip-only: remove the residual head from the Python side"
+    # (19b9f57), which dropped head_mode from ParametricA2's signature. This tool kept passing
+    # it and has raised TypeError on every invocation since -- unnoticed because it needs a
+    # built render_parametric to run at all, so no test covers it. Read the tag to REFUSE a
+    # model we cannot reproduce, rather than to configure anything.
     head_mode = par.get("head_mode", "residual")
+    if head_mode != "skip":
+        raise SystemExit(
+            f"{nam_path}: head_mode={head_mode!r}, but the Python side builds skip-only models.\n"
+            f"       An A/B against it would compare two different architectures and the\n"
+            f"       correlation would be meaningless. Re-export from a current checkpoint.")
     names = [p["name"] for p in par["parameters"]]
-    model = ParametricA2(int(cfg["layers"]), len(names), head_mode=head_mode)
+    model = ParametricA2(int(cfg["layers"]), len(names))
     model.load_weights(m["weights"])
     model.eval()
     return model, names, head_mode
