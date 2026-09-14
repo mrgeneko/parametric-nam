@@ -633,3 +633,38 @@ def test_the_gate_and_the_sizer_share_one_budget_definition():
     import scaffold_config
     import check_transient_coverage as ctc
     assert scaffold_config._interior_sample_budget is ctc.interior_sample_budget
+
+
+class TestWorkersIsPlumbedThrough:
+    """--workers must actually reach find_saturation_point, not just be accepted.
+
+    A render killed by the OS reports "KILLED BY SIGNAL SIGABRT ... Lower --workers before
+    assuming the circuit is broken". This tool had no such flag, so on Mesa RED with tube
+    capacitance (2026-09-14) all 25 corners died recommending a flag that did not exist.
+    An accepted-but-ignored flag would be worse than none: it would look like the advice was
+    followed. Pin the whole chain, not the argparse entry.
+    """
+
+    def test_every_layer_accepts_workers(self):
+        import inspect
+        import check_transient_coverage as c
+        for fn in (c._check_corners, c.check_coverage):
+            assert "workers" in inspect.signature(fn).parameters, f"{fn.__name__} drops workers"
+
+    def test_workers_reaches_find_saturation_point(self, monkeypatch, tmp_path):
+        """The value must arrive at the renderer, which is the only place it does anything."""
+        import check_transient_coverage as c
+        seen = {}
+
+        def fake_find(backend, params, tmp, **kw):
+            seen["workers"] = kw.get("workers")
+            return {"onset_99pct_input_v": 0.1, "ceiling_rms": 1.0,
+                    "ceiling_at_input_v": 1.0, "curve": []}
+
+        monkeypatch.setattr(c, "find_saturation_point", fake_find)
+        monkeypatch.setattr(c, "cache_findpeak", lambda *a, **k: False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        c._check_corners(backend=object(), identity=b"x", cache_extra="e",
+                         knob_ranges={"G": [0.0, 1.0]}, fixed={}, transient_peak=1.0,
+                         label="t", quiet=True, workers=3)
+        assert seen["workers"] == 3, "workers never reached the renderer"

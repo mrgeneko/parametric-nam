@@ -28,6 +28,7 @@ Each row was measured on a 12 s reproduction clip, not inferred:
 | **topology defect** | eliminated — `preflight.py` PASSES all five knobs, no generator drift, `.schx` is the post-fix build |
 | **near-Nyquist content** | eliminated — the documented false-positive class needs ~12 kHz; this is 20–150 Hz |
 | **capture-sweep single-sample impulses** | eliminated — only 21% of flagged samples coincide, and not the ones that trip the gate |
+| **missing grid capacitance** | **NOT eliminated — this FIXES it.** See "Capacitance" below (2026-09-14) |
 | **a previously-resolved wiring defect** at the opposite Master extreme | eliminated — that corner now renders clean |
 
 The flat runtime across a 512x iteration range is the decisive one: the loop is **breaking out
@@ -87,6 +88,104 @@ corrupting the convergence test -- it makes no difference).
 The useful residue: the whole loop is testable in ~90 s per configuration against an exact
 control, and a wrongly-damped solve fails LOUDLY (`inf`), which `gen_dataset_from_schx.py:550`
 already rejects via `np.isfinite`. Getting this wrong is safe, not silent.
+
+## Capacitance: a circuit-side fix that works (2026-09-14)
+
+Reproduced on a second circuit and a different corner: Mesa RED (sag v30) at
+`RD Gain=0.1 / Red Master=0.2` — the grid's QUIETEST cell, where the 2026-08-30 Orange
+incident was its LOUDEST. Same signature:
+
+```
+oversample   8   worst |12| at sample 890319, neighbours <= 3.0, p99 5.7
+oversample  64   worst |12| at sample 890319, neighbours <= 3.3, p99 5.7
+oversample 128   worst |12| at sample 890319, neighbours <= 3.4, p99 5.7
+```
+
+Identical sample, identical magnitude, 16x range of timestep. (`gen_dataset_from_schx.py`'s
+escalation ceiling has since been dropped from 256 to 128 on this evidence.)
+
+**Enabling interelectrode capacitance on the triodes fixes it.** `SimulateCapacitances="true"`
+with `Cgp=1.7pF Cgk=2.3pF Cpk=0.5pF` — the 12AX7 values the Soldano and Tweed builds already
+carry — renders the same cell clean at oversample 8: rms 1.179 / peak 14.355, sitting
+monotonically between its neighbours (0.965/10.670 and 2.150/20.393), so it is the physically
+correct value and not a render that merely dodged the detector.
+
+This is consistent with the wrong-root diagnosis rather than contrary to it. Grid capacitance
+adds state at exactly the nodes carrying the nonlinear device curves, bounding dV/dt per
+timestep, which keeps the Newton iterate inside the correct basin. It is a **conditioning fix
+at the circuit level**, which is why it succeeds where both timestep refinement and global
+damping fail.
+
+It costs about **5.5x render time**, and it is not free of side effects: Tweed, the one circuit
+here that has always had it, escalates rungs on 97.8% of combinations against 0-3% for the
+Mesa builds. Capacitance buys correctness with time.
+
+**Preferred over damping for accuracy reasons.** Damping alters the numerics everywhere to
+rescue one timestep (measured: 19.3% of samples changed by >10% of peak). Capacitance adds a
+real physical effect the model was missing. One changes the answer; the other changes the
+circuit to be the circuit.
+
+## The solver revision is not a nice-to-have (2026-09-14)
+
+The Prerequisite section below was written as a precaution. It is now a measured incident.
+
+The same capacitance-enabled `.schx`, the same excitation, the same Python, rendered on two
+machines: clean on one, 500 x SIGABRT on the other. The cause was the **solver binary**:
+
+```
+blackbox   livespice_cli built 2026-09-09   -> renders clean
+this Mac   livespice_cli built 2026-09-02   -> hard crash on every render
+ed5613f "Carry upstream 5398a63 (capacitor current unknown)"   committed 2026-09-06
+```
+
+`ed5613f` adds capacitor currents as system variables — "we don't need to solve for
+differentials before discretization" — which removes the exact elimination step that throws
+`Failed to eliminate differentials from system of equations`. The Mac's binary was four days
+older than its own repo HEAD, so it was still running the pre-patch solver.
+
+Three consequences worth stating:
+
+* A circuit-level finding recorded in `gen_mesa_dualrec_solo_full.py` on 2026-07-30 — *"enabling
+  it makes this circuit's system of equations unsolvable ... do not re-attempt"* — was correct
+  when written and correct on any machine that has not rebuilt. **It did not expire; the fleet
+  diverged.** Nothing connected the note to the dependency that invalidated it.
+* Had the render been sharded across both machines, half the dataset would have come from one
+  solver and half from another, with nothing in the artifact recording it. `findpeak_cache_key`
+  covers circuit bytes, params, oversample and iterations — not the solver.
+* Rebuilding invalidates every cached onset on that machine, silently, because the cache cannot
+  tell that the thing which produced its entries has changed.
+
+## Enhancement: a continuity detector inside the solver
+
+The detect-and-retry design below is worth building even without the conditional damping, and
+is best sequenced in that order.
+
+**A retry alone does nothing.** The solve is deterministic: re-running the same timestep from
+the same starting point with the same solver reproduces the identical wrong root. A retry is
+only meaningful if something changes, and there are exactly two candidates.
+
+**1. A different initial guess — try this first.** Newton converges to whichever root's basin
+it starts in. Linear extrapolation from the last two accepted timesteps starts near the true
+solution by construction, because the true solution is continuous with them. When this
+succeeds it does not alter the solve at all: the answer is ordinary undamped Newton, reached
+from a better start. Whether it is *sufficient* depends on whether the bad step is caused by
+where the iterate starts or by how far the first step throws it. Untested.
+
+**2. Damp that re-solve — the fallback.** Bounds how far the iterate can move, which is the
+mechanism that keeps it in-basin. Known to work in the crude global form (damping 0.01 gave
+0 spikes); conditional application is what removes the collateral damage.
+
+**The detector pays for itself before either repair exists.** Today the failure is caught
+*after* rendering ~9.8M samples, the whole render is discarded, and the ladder re-renders it up
+to four more times at rising cost — over 2.5 h on a single cell before it was killed. Detecting
+at the offending timestep turns that into seconds, even if the response is only to fail
+honestly. That alone justifies the work.
+
+**Where it goes.** `Circuit/Simulation/Simulation.cs`, in the emitted Newton loop — the same
+three lines quoted above. Note this is expression-compiler emit, built once per circuit and run
+for every timestep, so "re-solve this timestep" means emitting a retry path rather than editing
+a loop. It is on the path every circuit takes, which is why the cost is validation rather than
+code.
 
 ## What to change
 

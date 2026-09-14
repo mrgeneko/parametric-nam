@@ -303,7 +303,7 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                     full_hypercube: "bool | None" = None, lead_silence_s: float = 0.0,
                     max_corners: "int | None" = None, sample_grid: int = 0,
-                    capture: dict = None) -> dict:
+                    capture: dict = None, workers: int = 8) -> dict:
     """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
     vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
     check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
@@ -337,7 +337,8 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                 if not quiet:
                     print(f"  [{i}/{len(corners)}] {clabel} — rendering ...", flush=True)
                 sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
-                                             lead_silence_s=lead_silence_s, capture=capture)
+                                             lead_silence_s=lead_silence_s, capture=capture,
+                                             workers=workers)
                 cache_findpeak(cpath, sat)
             onset = sat.get("onset_99pct_input_v") if sat else None
             if onset is None:
@@ -386,7 +387,7 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    transient_peak: float, margin: float = 1.0, iterations: int = 256,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                    full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
-                   sample_grid: int = 0, capture: dict = None) -> dict:
+                   sample_grid: int = 0, capture: dict = None, workers: int = 8) -> dict:
     """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
@@ -398,7 +399,7 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                            capture=capture,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, sample_grid=sample_grid)
+                           max_corners=max_corners, sample_grid=sample_grid, workers=workers)
 
 
 def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
@@ -501,6 +502,16 @@ def main():
     ap.add_argument("--oversample", type=int, default=None, help="default: config's own")
     ap.add_argument("--iterations", type=int, default=256)
     ap.add_argument("--peak-max-v", type=float, default=40.0)
+    # EXPOSED BECAUSE THE FAILURE MESSAGE ALREADY TELLS YOU TO USE IT. A render killed by the OS
+    # reports "KILLED BY SIGNAL SIGABRT ... Lower --workers before assuming the circuit is
+    # broken" -- advice this tool could not take, having no such flag. Hit on Mesa RED with tube
+    # capacitance enabled (2026-09-14): capacitance adds state per triode, 8 concurrent sweeps
+    # exhausted memory, and all 25 corners died with the message recommending a flag that did
+    # not exist. The default matches find_saturation_point's own.
+    ap.add_argument("--workers", type=int, default=8,
+                    help="concurrent renders within one corner's amplitude sweep. Lower it if "
+                         "renders are killed by the OS (SIGABRT/SIGKILL) -- a memory-pressure "
+                         "symptom, not a circuit fault.")
     ap.add_argument("--conv", default=None,
                     help="[ngspice] device-model convergence/fidelity overrides key=val,... "
                          "(same format gen_dataset_from_schx.py --conv uses; e.g. "
@@ -626,7 +637,7 @@ def main():
                                 full_hypercube=(False if args.no_full_hypercube else None),
                                 max_corners=args.max_corners,
                                 sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
-                                capture=_capture)
+                                capture=_capture, workers=args.workers)
         schx_or_module = schx
 
     if args.json:
