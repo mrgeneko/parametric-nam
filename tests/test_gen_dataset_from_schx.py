@@ -70,10 +70,26 @@ def test_rung_str_empty_dict_is_empty_string():
 
 # --------------------------------------------------------------------------- _rungs: livespice
 
-def test_livespice_rungs_double_oversample_up_to_256_ceiling():
+def test_livespice_rungs_double_oversample_up_to_128_ceiling():
+    """The ceiling is 128, not 256.
+
+    It was 256 from 2026-08-30, raised to find out whether more oversample would rescue a
+    rectifier amp corner that exhausted os=8/16/32 with identical spikes. Measured on Mesa RED
+    at RD Gain=0.1/Red Master=0.2 (2026-09-14), the answer is no: the same cell spikes at
+    |12| on sample 890319 at oversample 8, 64 AND 128 -- same sample, same magnitude, 16x range
+    of timestep. The top rung costs ~32x a normal render and cannot fix the one failure class
+    that reaches it."""
     rungs = g._rungs("livespice", oversample=2, ng=None)
     oversamples = [r["oversample"] for r in rungs]
-    assert oversamples == [2, 4, 8, 16, 32, 64, 128, 256]
+    assert oversamples == [2, 4, 8, 16, 32, 64, 128]
+    assert 256 not in oversamples, "the rung that provably cannot help is back"
+
+
+def test_livespice_rungs_keep_the_lower_ones_that_do_work():
+    """Only the top rung was removed. The rungs below it genuinely rescue ordinary stiffness --
+    the published 5-knob Orange escalated 18 of 576 combinations and every one landed by rung 2."""
+    rungs = g._rungs("livespice", oversample=8, ng=None)
+    assert [r["oversample"] for r in rungs] == [8, 16, 32, 64, 128]
 
 
 def test_livespice_rungs_always_carry_256_iterations():

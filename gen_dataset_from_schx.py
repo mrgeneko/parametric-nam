@@ -826,16 +826,39 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # An under-converged dataset is worse than a failed one. A failed combination is a hole
         # you can see; an under-converged one is a lie you cannot.
         #
-        # ESCALATION CEILING: 256. Used to stop at os_*4 -- the modern high-gain rectifier-style
-        # amp's Orange channel's Master=1.0 corner (max output into the reactive V30 load + sag)
-        # exhausted os=8/16/32 identically as isolated Newton-overshoot spikes (2026-08-30
-        # incident), needing a manual re-run past the old ceiling to find out whether more
-        # oversample would even help. Doubling on to 256 by default makes that escalation
-        # automatic instead of a manual re-run per circuit that hits the same wall.
+        # ESCALATION CEILING: 128. It was raised to 256 on 2026-08-30 to find out whether more
+        # oversample would rescue the rectifier amp's Orange Master=1.0 corner, which exhausted
+        # os=8/16/32 with identical spikes. That question is now ANSWERED, and the answer is no.
+        #
+        # Measured on Mesa RED (sag v30) at RD Gain=0.1/Red Master=0.2, 2026-09-14, rendering the
+        # same cell at three timesteps:
+        #
+        #   oversample   8   worst |12| at sample 890319, neighbours <= 3.0, p99 5.7
+        #   oversample  64   worst |12| at sample 890319, neighbours <= 3.3, p99 5.7
+        #   oversample 128   worst |12| at sample 890319, neighbours <= 3.4, p99 5.7
+        #
+        # Same sample index, same magnitude, across a 16x range of timestep. This failure class
+        # is INVARIANT to oversample, so the upper rungs cannot fix it -- they only cost time:
+        # rung 5 alone runs ~32x a normal render, and the ladder burned >2.5 h on that one cell
+        # before being killed. docs/livespice-newton-damping-proposal.md reached the same
+        # conclusion independently ("oversample 8/16/32 identical; ladder to 256 cannot help")
+        # and identifies the cause: the undamped Newton step converges to a DIFFERENT ROOT, which
+        # a finer timestep does not address.
+        #
+        # 128 is kept rather than dropping to 32 because the rungs below it do genuinely rescue
+        # ordinary stiffness (the published Orange escalated 18/576 combinations and all of them
+        # landed by rung 2). What is removed is only the rung that this measurement shows cannot
+        # help, and which costs the most.
+        #
+        # THE REAL FIX IS CIRCUIT-SIDE. The same cell renders CLEAN at oversample 8 when the
+        # triodes carry grid capacitance (SimulateCapacitances + Cgp/Cgk/Cpk, as Soldano and
+        # Tweed already do): rms 1.179 / peak 14.355, sitting monotonically between its
+        # neighbours (0.965/10.670 and 2.150/20.393). Bounding dV/dt at the grid nodes keeps the
+        # Newton iterate in the correct basin. It costs ~5.5x render time.
         rungs, o = [], os_
         while True:
             rungs.append(dict(oversample=o, iterations=256))
-            if o >= 256:
+            if o >= 128:
                 break
             o *= 2
         return rungs
