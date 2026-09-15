@@ -316,6 +316,15 @@ else
     if [ "$first" -eq 1 ]; then
       rsync -az "$w:${REMOTE_OUT[$i]}/params.csv" "$LOCAL_DIR/params.csv"
       rsync -az "$w:${REMOTE_OUT[$i]}/config.json" "$LOCAL_DIR/config.json"
+      # Every shard's own sweep.wav is byte-identical (gen_dataset_from_schx.py copies the same
+      # --input verbatim into each shard's output dir) -- pull it from whichever shard happens
+      # to be first, same as params.csv/config.json. Without this, the merged dataset directory
+      # is missing sweep.wav entirely and param_train.py's ParamDataset fails to even load it
+      # (LibsndfileError: Error opening '.../sweep.wav') -- caught 2026-09-15 on a real merged
+      # Duke of Tone Overdrive dataset, worked around by hand before this fix landed.
+      if ssh "${SSH_OPTS[@]}" "$w" "[ -f ${REMOTE_OUT[$i]}/sweep.wav ]"; then
+        rsync -az "$w:${REMOTE_OUT[$i]}/sweep.wav" "$LOCAL_DIR/sweep.wav"
+      fi
       first=0
     else
       # params.csv must be CONCATENATED, never overwritten -- every shard has its own file with
