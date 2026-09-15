@@ -73,7 +73,8 @@ def test_portable_accepts_a_path_object_or_a_string_identically():
 def _base_args(**overrides):
     defaults = dict(
         nam_output=Path("/tmp/out.param.nam"), checkpoint_dir=Path("/tmp/ckpt"),
-        restart_period=2000, restart_mult=2, restart_decay=0.97, stale_cycles=3, batch_size=32, lr=1e-3,
+        restart_period=2000, restart_mult=2, restart_decay=0.97, restart_max_period=None,
+        stale_cycles=3, batch_size=32, lr=1e-3,
         crop_len=48000, mrstft_weight=0.5, val_split=0.1, val_passes=1, device="cpu",
         seed=0, widths=None, mmap=True, resume=None, amp="fp16", init_from=None,
         param_sensitivity=False, knob_boost=None, per_tier_clip=False, clip_norm=1.0,
@@ -447,3 +448,25 @@ def test_repeats_not_forwarded_when_merely_defaulted():
     a.repeats, a.repeats_explicit = 1, False
     cmd = rp.build_train_cmd(a, Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=50)
     assert "--repeats" not in cmd
+
+
+def test_build_train_cmd_omits_restart_max_period_unless_explicitly_set():
+    """Omitting it lets param_train.py's own default cap (and its auto-disable rule) apply.
+    Mirroring the number here is how two sources of truth drift apart."""
+    cmd = rp.build_train_cmd(_base_args(), Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=1)
+    assert "--restart-max-period" not in [str(x) for x in cmd]
+
+
+def test_build_train_cmd_forwards_restart_max_period_zero_as_an_opt_out():
+    """0 is a meaningful explicit value (opt out of the cap), so a truthiness test here
+    would silently swallow it -- the exact bug --restart-decay's help documents."""
+    cmd = [str(x) for x in rp.build_train_cmd(
+        _base_args(restart_max_period=0), Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=1)]
+    assert "--restart-max-period" in cmd
+    assert cmd[cmd.index("--restart-max-period") + 1] == "0"
+
+
+def test_build_train_cmd_forwards_an_explicit_restart_max_period():
+    cmd = [str(x) for x in rp.build_train_cmd(
+        _base_args(restart_max_period=800), Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=1)]
+    assert cmd[cmd.index("--restart-max-period") + 1] == "800"

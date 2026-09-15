@@ -1608,7 +1608,92 @@ def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
 # Main
 # ---------------------------------------------------------------------------
 
-def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler):
+#: Default ceiling for SGDR cycle growth under --restart-mult > 1, in epochs. 1200 is the
+#: largest cycle length that still showed a live tail when every mult=2 run's metrics.csv
+#: was replayed (2026-09-15, 7 runs / 29 cycles) -- see --restart-max-period's help text
+#: and docs/scaling-training.md for the measurement and for why capping tighter is wrong.
+DEFAULT_RESTART_MAX_PERIOD = 1200
+
+
+def resolve_restart_max_period(requested, restart_period, restart_mult):
+    """Resolve --restart-max-period's effective value. Returns (value, notice, error).
+
+    `requested` is None when the flag was not passed (take the default) and an int when it
+    was (honor it exactly, 0 meaning opt out). Distinguishing those two matters for both
+    branches below: neither should fire on a config the user did not actually ask for.
+
+    The default is ON (1200) because uncapped geometric growth has a measured failure mode
+    -- cycles of 2400/4800 epochs wasting up to 30%% of their length -- and because it
+    bounds --stale-cycles, whose patience is otherwise unbounded in epoch terms under
+    mult>1. `0` opts out and restores the historical uncapped behavior exactly.
+    """
+    if requested is None:
+        # Not passed. A default ceiling at or below the user's own starting period would
+        # silently pin T_i at that period and turn an explicitly requested --restart-mult
+        # into a no-op. Refuse to do that from a default: disable the cap and say so. The
+        # user asked for those cycle lengths; a value they never typed should not override
+        # that, only an explicit --restart-max-period should.
+        if restart_period >= DEFAULT_RESTART_MAX_PERIOD:
+            return 0, (f"--restart-period {restart_period} is at or above the default "
+                       f"--restart-max-period ceiling ({DEFAULT_RESTART_MAX_PERIOD}), which "
+                       f"would pin every cycle to {restart_period} epochs and make "
+                       f"--restart-mult {restart_mult} a no-op. Leaving cycle growth "
+                       f"UNCAPPED. Pass --restart-max-period explicitly to set one."), None
+        return DEFAULT_RESTART_MAX_PERIOD, None, None
+    if requested == 0:
+        return 0, None, None                      # explicit opt-out
+    if requested < restart_period:
+        return None, None, (
+            f"--restart-max-period ({requested}) is below --restart-period "
+            f"({restart_period}): the cap can only stop cycle GROWTH, not shrink the "
+            f"starting cycle. Lower --restart-period instead.")
+    # Explicitly set at mult=1 is harmless but certainly not what the caller intended;
+    # only say so when they actually typed it (the default must stay silent here, since
+    # --restart-mult itself defaults to 1 and that is the overwhelmingly common run).
+    if restart_mult == 1:
+        return requested, (f"--restart-max-period {requested} is a no-op at --restart-mult 1 "
+                           f"(cycles never grow past --restart-period {restart_period})."), None
+    return requested, None, None
+
+
+def cap_sgdr_cycle(scheduler, max_period):
+    """Clamp a CosineAnnealingWarmRestarts cycle length (T_i) to `max_period` epochs.
+
+    Implements --restart-max-period: stops --restart-mult's geometric growth at a fixed
+    ceiling, after which every cycle stays that length (mult effectively reverts to 1).
+
+    Direct assignment to T_i is safe because the bare scheduler.step() branch -- the ONLY
+    one this file ever reaches, see restore_scheduler_on_resume's docstring -- is purely
+    incremental (T_cur += 1; on wrap, T_cur %= T_i and T_i *= T_mult). It never re-derives
+    T_i from last_epoch, so a clamped T_i is stable and self-perpetuating. torch's OTHER
+    branch, step(epoch), DOES recompute T_i as T_0 * T_mult**n with no knowledge of any
+    cap and would silently undo this -- which is why this is a clamp applied at known
+    points rather than a constructor argument.
+
+    The max(T_cur + 1, ...) floor is NOT optional. get_lr() computes
+    eta_min + (base_lr - eta_min) * (1 + cos(pi * T_cur / T_i)) / 2, so a T_i clamped
+    BELOW a mid-cycle T_cur pushes the cosine argument past pi and drives LR below
+    eta_min -- outright negative for T_cur/T_i in (1, 2), which ascends the loss instead
+    of descending it. Callers that clamp at a cycle boundary (T_cur == 0) can never hit
+    that; a --resume that newly introduces or lowers the cap mid-cycle can, and the floor
+    gives it the same behavior restore_scheduler_on_resume already chose for a changed
+    --restart-mult: the in-flight cycle keeps its length, the cap applies at the next
+    boundary.
+
+    Returns True if T_i actually changed (callers on the resume path must then refresh the
+    LR already pushed into the param groups).
+    """
+    if max_period <= 0 or getattr(scheduler, "T_i", None) is None:
+        return False
+    capped = max(scheduler.T_cur + 1, min(scheduler.T_i, max_period))
+    if capped == scheduler.T_i:
+        return False
+    scheduler.T_i = capped
+    return True
+
+
+def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler,
+                                max_period=0):
     """Reconstruct `scheduler` to match a resumed checkpoint's true position.
 
     CosineAnnealingLR (fixed --epochs > 0) -- unchanged from before this fix. Direct
@@ -1657,6 +1742,11 @@ def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_sch
         scheduler.T_cur = ckpt["scheduler_T_cur"]
         scheduler.T_i = ckpt["scheduler_T_i"]
         scheduler.last_epoch = ckpt["scheduler_last_epoch"]
+        # --restart-max-period applied to a checkpoint saved before the cap existed, or by
+        # a run that had it off / set higher. No LR refresh needed here: get_lr() below
+        # runs after this, off the already-capped T_i. See cap_sgdr_cycle() for why the
+        # mid-cycle case keeps the in-flight cycle's length rather than clamping into it.
+        cap_sgdr_cycle(scheduler, max_period)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")   # get_lr() outside step() is intentional here
             lrs = scheduler.get_lr()
@@ -1666,6 +1756,18 @@ def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_sch
         return scheduler
     scheduler = make_scheduler(-1)
     scheduler.step(ckpt["scheduler_last_epoch"])
+    # Old-format checkpoint: the line above deliberately uses torch's step(epoch) branch
+    # for its exact closed-form re-derivation -- which is also the one branch that
+    # RECOMPUTES T_i (as T_0 * T_mult**n) with no knowledge of the cap, so re-apply it
+    # here. Unlike the new-format path, this one must also re-run get_lr(): step(epoch)
+    # has already pushed an uncapped-T_i LR into the param groups.
+    if cap_sgdr_cycle(scheduler, max_period):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")   # get_lr() outside step() is intentional here
+            lrs = scheduler.get_lr()
+        for group, lr in zip(optimizer.param_groups, lrs):
+            group["lr"] = lr
+        scheduler._last_lr = lrs
     return scheduler
 
 
@@ -1705,10 +1807,46 @@ def main():
                          "back to the same eta_max, undoing some of what the low-LR trough just "
                          "built). CAVEAT: --stale-cycles counts CYCLES, not epochs, so mult=2's "
                          "geometrically growing cycles make that auto-stop rule geometrically "
-                         "slower to fire at its default patience -- lower --stale-cycles "
-                         "(2-3), pair it with --stale-epochs as an epoch-counted backstop, or "
-                         "set an explicit epoch/step budget instead of relying on --stale-cycles "
-                         "alone when using mult > 1.")
+                         "slower to fire at its default patience. --restart-max-period (ON by "
+                         "default) now bounds this: once cycles stop growing, --stale-cycles is "
+                         "a fixed epoch budget again (at the 1200 default, --stale-cycles 3 = "
+                         "3,600 epochs). If you opt out of the cap with --restart-max-period 0, "
+                         "the old advice applies -- lower --stale-cycles (2-3), pair it with "
+                         "--stale-epochs as an epoch-counted backstop, or set an explicit "
+                         "epoch/step budget rather than relying on --stale-cycles alone.")
+    ap.add_argument("--restart-max-period", type=int, default=None,
+                    help=f"Open-ended mode: stop --restart-mult's geometric growth once a cycle "
+                         f"reaches this many epochs; every later cycle stays this length (i.e. "
+                         f"mult reverts to 1 from that point on). Default: "
+                         f"{DEFAULT_RESTART_MAX_PERIOD}. **0 opts out** and restores the "
+                         f"historical uncapped behavior exactly. Ignored when --restart-mult is "
+                         f"1, which never grows -- so this default changes nothing for the "
+                         f"default mult=1 run, and is only load-bearing under mult>1. Also "
+                         f"auto-disables (with a notice) if --restart-period is itself >= "
+                         f"{DEFAULT_RESTART_MAX_PERIOD}, rather than silently pinning cycles to "
+                         f"the period you asked for. Applies at the next cycle BOUNDARY, never "
+                         f"mid-cycle, so enabling it on a --resume cannot disturb an in-flight "
+                         f"cycle. Rationale, from replaying every mult=2 run's metrics.csv "
+                         "(2026-09-15, 7 runs / 29 cycles): doubling keeps earning its keep far "
+                         "longer than expected -- the SECOND HALF of each cycle delivers a "
+                         "near-constant ~1.2x ESR improvement whether that half is 50 epochs or "
+                         "674 (one dual-rectifier run's second halves: 1.21/1.24/1.22/1.19/1.13x "
+                         "across cycles of 100/200/400/800/1347), and the final new global best "
+                         "lands at >=90%% of cycle length in 19 of 23 amp/pedal cycles. If cycles "
+                         "were too long that second-half figure would decay toward 1.00x; it does "
+                         "not, so do NOT cap tighter than the evidence supports. What DOES fail is "
+                         "the far end: the one run that reached cycles of 2400 and 4800 epochs (a "
+                         "4-knob EQ-ish pedal, already at its knob-count ESR ceiling) spent 2400 "
+                         "epochs for 1.10x and then wasted the last 30%% of its 4800-epoch cycle "
+                         "-- last new best at 70%% of the cycle. 1200 is the largest cycle length "
+                         "in the dataset that still showed a live tail, hence the default. "
+                         "SIDE BENEFIT, and arguably the bigger one: this bounds --stale-cycles, "
+                         "whose patience is otherwise unbounded in epoch terms under mult>1 (see "
+                         "--restart-mult's CAVEAT) -- capped at 1200, --stale-cycles 3 is a hard "
+                         "3,600-epoch budget, which is what --stale-epochs currently exists to "
+                         "approximate. Persists across --resume (via the checkpoint's "
+                         "scheduler_T_i); turning it on mid-run applies at the next cycle "
+                         "boundary, never mid-cycle.")
     ap.add_argument("--restart-decay", type=float, default=0.97,
                     help="Open-ended mode: multiply the SGDR restart ceiling (eta_max, for "
                          "every param group incl. the FiLM group) by this factor at every "
@@ -1751,7 +1889,12 @@ def main():
                          "grows unbounded in epoch terms (see --restart-mult's own CAVEAT): "
                          "cycles double each restart (150, 300, 600, 1200, 2400, ...), so "
                          "by cycle 6 --stale-cycles needs ~9,600 epochs of no improvement to "
-                         "fire at all. Measured real cost of not having this: a mult=2 run "
+                         "fire at all. LARGELY SUPERSEDED by --restart-max-period, which is ON "
+                         "by default and bounds cycle length directly, making --stale-cycles a "
+                         "fixed epoch budget again -- this flag remains useful as a hard ceiling, "
+                         "and is the backstop of choice if you opt out with "
+                         "--restart-max-period 0. Measured real cost of having neither, before "
+                         "the cap existed: a mult=2 run "
                          "plateaued 1,665 epochs before its cycle-based patience would have "
                          "triggered and had to be stopped by hand; left alone it would have "
                          "ground ~8 further hours (docs/scaling-training.md). Unlike "
@@ -1992,6 +2135,20 @@ def main():
             "Existing LoRA models still load, export and infer normally; only NEW LoRA training\n"
             "is gated. To run the width-matched ablation that would settle this, re-run with\n"
             "PARAMETRIC_NAM_ALLOW_LORA=1.")
+
+    # Resolve --restart-max-period (default ON at DEFAULT_RESTART_MAX_PERIOD; 0 opts out).
+    # An explicit cap below the starting period would mean "cap" is really "shrink the very
+    # first cycle", which --restart-period already expresses directly and which no caller
+    # can have meant -- rejected rather than silently clamping T_i below T_cur later (that
+    # would push get_lr()'s cosine argument past pi and drive LR negative; see the guard in
+    # cap_sgdr_cycle). args.restart_max_period is an int from here on, so everything
+    # downstream can treat it as a plain value.
+    args.restart_max_period, _cap_notice, _cap_error = resolve_restart_max_period(
+        args.restart_max_period, args.restart_period, args.restart_mult)
+    if _cap_error:
+        ap.error(_cap_error)
+    if _cap_notice:
+        print(f"  {_cap_notice}", file=sys.stderr)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -2307,7 +2464,8 @@ def main():
 
     scheduler = make_scheduler(start_epoch - 2)
     if args.resume:
-        scheduler = restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler)
+        scheduler = restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler,
+                                                max_period=args.restart_max_period)
     criterion = ParamLoss(mrstft_weight=args.mrstft_weight, kind=args.loss,
                           pre_emph=args.pre_emph, floor=args.esr_floor)
     print(f"  Loss: {args.loss}" + (f" (pre-emph {args.pre_emph})" if args.loss == 'esr' else
@@ -2515,6 +2673,19 @@ def main():
                 group["initial_lr"] *= args.restart_decay
             scheduler.base_lrs = [group["initial_lr"] for group in optimizer.param_groups]
 
+        # SGDR cycle-length cap (--restart-max-period > 0): stop --restart-mult's geometric
+        # growth at a fixed ceiling. See cap_sgdr_cycle() for why assigning T_i directly is
+        # safe and self-perpetuating here.
+        #
+        # Ordering/lag: cycle_ended is T_cur == 0 evaluated AFTER step() already grew T_i,
+        # so this clamps post-growth, before any epoch's get_lr() consumes the new T_i.
+        # The one-epoch lag that --restart-decay documents above does not apply: at
+        # T_cur == 0 get_lr() returns eta_max regardless of T_i (cos(0) == 1), so the peak
+        # epoch is identical either way and the cap takes full effect from the cycle's
+        # second epoch, which is the first one whose LR depends on T_i at all.
+        if cycle_ended:
+            cap_sgdr_cycle(scheduler, args.restart_max_period)
+
         # Periodic checkpoint retention: latest.pt/best*.pt are overwritten in place every
         # epoch/new-best, so neither can answer "what did this tier look like N cycles ago" --
         # e.g. investigating a corner instability that appeared partway through a long run,
@@ -2550,9 +2721,19 @@ def main():
                 stale_cycles = 0
             else:
                 stale_cycles += 1
+            # Next cycle's length (T_i, post-growth and post-cap) is printed because it is
+            # otherwise invisible: reconstructing cycle boundaries after the fact meant
+            # re-deriving them from LR resets in metrics.csv. "(capped)" marks where
+            # --restart-max-period has taken over from --restart-mult.
+            _next_len = getattr(scheduler, "T_i", None)
+            _len_note = ""
+            if _next_len is not None:
+                _capped = args.restart_max_period > 0 and _next_len >= args.restart_max_period
+                _len_note = f" — next cycle {_next_len} ep{' (capped)' if _capped else ''}"
             print(f"  [cycle end @ epoch {epoch}] "
                   + ("new best(s) this cycle" if cycle_improved
-                     else f"no improvement — {stale_cycles}/{args.stale_cycles} stale cycles"),
+                     else f"no improvement — {stale_cycles}/{args.stale_cycles} stale cycles")
+                  + _len_note,
                   file=sys.stderr, flush=True)
             cycle_improved = False
             if stale_cycles >= args.stale_cycles:

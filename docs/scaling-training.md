@@ -100,19 +100,56 @@ keep a working auto-stop, which `mult=2` does not (see below).
 three arms on three machines costs the same as three arms serially on the M3 Max — no saving.
 Two arms sequentially on the M3 Max plus one on the M4 Pro is ~20 h against ~30 h serial.
 
-### Known defect in `--restart-mult 2`
+### Known defect in `--restart-mult 2` — fixed by `--restart-max-period` (2026-09-15)
 
 `--stale-cycles` counts **cycles**, and `mult=2` grows them geometrically (150, 300, 600, 1200,
 2400, 4800). By cycle 6 the auto-stop needs ~9,600 epochs of no improvement to fire. The EQ-test
 run plateaued 1,665 epochs before it would have triggered and had to be stopped by hand via the
-`STOP` file; left alone it would have ground ~8 further hours. Pair `mult>1` with a low
-`--stale-cycles` (2-3) or an explicit epoch budget.
+`STOP` file; left alone it would have ground ~8 further hours.
 
-A fractional `--restart-mult` (e.g. 1.5) would give the amortisation without unbounded cycles,
-but **PyTorch rejects it**: `CosineAnnealingWarmRestarts` raises
-`Expected integer T_mult >= 1`. It would need a custom scheduler, and `--resume` reconstructs
-schedule position from `scheduler_last_epoch`, so that arithmetic has to stay reproducible.
-Test the long-equal arm first — if it matches geometric, fractional `T_mult` is unnecessary.
+**`--restart-max-period N` caps cycle growth at N epochs**; every later cycle stays that length
+(mult effectively reverts to 1 from there). **It defaults to 1200 — on.** At that ceiling
+`--stale-cycles 3` becomes a hard 3,600-epoch budget instead of an unbounded one. Pass
+`--restart-max-period 0` to opt out and restore the historical uncapped behavior exactly.
+
+Two deliberate properties of the default, both so it can't surprise an existing config:
+
+- It is **inert at `--restart-mult 1`** (the default), which never grows cycles — so the
+  default run is unaffected, and the cap only becomes load-bearing under `mult>1`.
+- If `--restart-period` is itself ≥ 1200, the default **disables itself with a notice** rather
+  than pinning every cycle to the period you asked for, which would silently turn your
+  `--restart-mult` into a no-op. An explicit `--restart-max-period` still wins there.
+
+It applies at the next cycle **boundary**, never mid-cycle, so enabling it on a `--resume`
+cannot disturb an in-flight cycle.
+
+A fractional `--restart-mult` (e.g. 1.5) was the previously proposed fix for the same problem,
+but **PyTorch rejects it**: `CosineAnnealingWarmRestarts` raises `Expected integer T_mult >= 1`,
+so it would need a custom scheduler whose resume arithmetic stays reproducible. The cap gets the
+same bounded-cycle property with no custom scheduler — it clamps `T_i` at each cycle boundary,
+which is stable because the bare `step()` branch is purely incremental and never re-derives `T_i`.
+
+#### Why 1200, and why not tighter
+
+Replaying every `mult=2` run's `metrics.csv` (7 runs / 29 cycles) says **doubling earns its keep
+far longer than expected** — do not cap tighter on intuition:
+
+- The **second half** of each cycle delivers a near-constant ~1.2x ESR gain regardless of how
+  long that half is. One dual-rectifier run's second halves: 1.21 / 1.24 / 1.22 / 1.19 / 1.13x
+  across cycles of 100 / 200 / 400 / 800 / 1347 epochs. If cycles were too long this figure
+  would decay toward 1.00x. It doesn't.
+- The final new global best lands at **≥90% of cycle length in 19 of 23** amp/pedal cycles;
+  tail waste after the last improvement is typically 2–10%.
+
+What does fail is the far end. The one run that reached cycles of 2400 and 4800 (a 4-knob
+EQ-ish pedal already at its knob-count ESR ceiling) spent 2400 epochs for 1.10x, then wasted
+the last **30%** of its 4800-epoch cycle — last new best at 70% of it. 1200 is the largest
+cycle length in the dataset that still showed a live tail.
+
+Caveat on the evidence: "improvements arrive late in a cycle" is partly intrinsic to cosine
+annealing (a best always tends to land near a trough), so the within-cycle profile alone can't
+prove a length is optimal. The second-half-gain-vs-length figures are the part that actually
+discriminates.
 
 ## Option B — data-parallel training (~1 day of work, ~1.5x)
 
