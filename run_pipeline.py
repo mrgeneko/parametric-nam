@@ -515,6 +515,8 @@ def reproduce_command(args, repeats=None, have_config=False):
     epochs_part = f'--epochs {args.epochs}'
     if args.epochs == 0:
         epochs_part += f' --restart-period {args.restart_period} --restart-mult {args.restart_mult}'
+        if getattr(args, "restart_max_period", None) is not None:
+            epochs_part += f' --restart-max-period {args.restart_max_period}'
     if getattr(args, "target_steps", 0):
         c.append(f'    --target-steps {args.target_steps} \\')
     eff_repeats = args.repeats if repeats is None else repeats
@@ -787,6 +789,11 @@ def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
     ]
     if getattr(args, "repeats_explicit", False) and args.repeats:
         train_cmd += ["--repeats", args.repeats]   # explicit override wins over the derivation
+    # Only when explicitly passed -- omitting it lets param_train.py apply its own default
+    # cap and its own auto-disable rule, which is the single source of truth. `0` is a
+    # meaningful explicit value (opt out), so test against None, not truthiness.
+    if getattr(args, "restart_max_period", None) is not None:
+        train_cmd += ["--restart-max-period", args.restart_max_period]
     if args.widths:              train_cmd += ["--widths", args.widths]
     if not args.mmap:             train_cmd.append("--no-mmap")
     if args.resume:              train_cmd += ["--resume", args.resume]
@@ -951,6 +958,15 @@ def main():
                    help="Open-ended SGDR restart period in epochs")
     g.add_argument("--restart-mult",   type=int,   default=1,
                    help="Open-ended SGDR period multiplier per restart")
+    g.add_argument("--restart-max-period", type=int, default=None,
+                   help="Open-ended SGDR cycle-length ceiling in epochs, forwarded to "
+                        "param_train.py. Pass 0 to opt out of its default cap (1200) and get "
+                        "uncapped geometric growth. Deliberately default=None rather than "
+                        "mirroring 1200 here: param_train.py's default is the single source of "
+                        "truth, including its auto-disable when --restart-period is itself >= "
+                        "the ceiling, and duplicating the number in two files is how those two "
+                        "drift apart. Only forwarded when explicitly passed. See param_train.py "
+                        "--help for why the cap exists and why 1200.")
     g.add_argument("--restart-decay", type=float, default=0.97,
                    help="Open-ended SGDR restart-ceiling decay, forwarded to param_train.py "
                         "(whose own default this mirrors). Was NOT forwarded at all before "

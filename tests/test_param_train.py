@@ -198,3 +198,198 @@ def test_grouped_split_is_reproducible_for_a_fixed_seed():
     a = pt.grouped_random_split(40 * 8, 40, 0.05, seed=42)
     b = pt.grouped_random_split(40 * 8, 40, 0.05, seed=42)
     assert a == b
+
+
+# ------------------------------------------------- --restart-max-period (cap_sgdr_cycle)
+#
+# Motivated by replaying every --restart-mult=2 run's metrics.csv (2026-09-15, 7 runs /
+# 29 cycles): doubling keeps paying off much longer than expected -- the second half of
+# each cycle delivers a near-constant ~1.2x ESR gain whether that half is 50 or 674
+# epochs -- but the run that reached cycles of 2400 and 4800 epochs wasted the last 30%
+# of its final cycle (last new best at 70% of it). The cap stops growth at the largest
+# cycle length still observed to have a live tail. See --restart-max-period's help text.
+
+
+def _drive(scheduler, n_epochs, max_period):
+    """Run the real training-loop sequence: bare step(), then cap at each cycle end."""
+    lengths, lrs = [], []
+    for _ in range(n_epochs):
+        scheduler.step()
+        lrs.append(scheduler.get_last_lr()[0])
+        if scheduler.T_cur == 0:                      # cycle boundary, as main() detects it
+            pt.cap_sgdr_cycle(scheduler, max_period)
+            lengths.append(scheduler.T_i)
+    return lengths, lrs
+
+
+def test_cap_stops_geometric_growth_and_holds_the_ceiling():
+    """50, 100, 200, 400, 800, then 1200 forever -- not 1600, 3200, ..."""
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    lengths, _ = _drive(sched, 5000, max_period=1200)
+    assert lengths[:7] == [100, 200, 400, 800, 1200, 1200, 1200]
+    assert all(v == 1200 for v in lengths[4:]), "cap must hold, not decay or re-grow"
+
+
+def test_uncapped_behavior_is_unchanged_when_opted_out():
+    """--restart-max-period 0 is the opt-out and must reproduce pre-cap lengths exactly."""
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    lengths, _ = _drive(sched, 5000, max_period=0)
+    assert lengths[:6] == [100, 200, 400, 800, 1600, 3200]
+
+
+def test_capped_run_never_produces_a_nonpositive_lr():
+    """The failure mode the max(T_cur + 1, ...) floor exists to prevent: a T_i clamped
+    below T_cur pushes get_lr()'s cosine argument past pi and drives LR negative."""
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    _, lrs = _drive(sched, 5000, max_period=1200)
+    assert min(lrs) > 0.0
+    assert max(lrs) <= 3e-4 + 1e-12
+
+
+def test_cap_is_a_noop_below_the_ceiling_and_at_mult_1():
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=1)
+    lengths, _ = _drive(sched, 600, max_period=1200)
+    assert set(lengths) == {50}, "mult=1 never grows, so the cap can never engage"
+
+
+def test_cap_survives_a_checkpoint_roundtrip():
+    """T_i is already persisted (scheduler_T_i) and restored verbatim, so a capped cycle
+    length needs no separate persistence mechanism -- this pins that."""
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    _drive(sched, 1600, max_period=1200)
+    assert sched.T_i == 1200
+    ckpt = {"scheduler_last_epoch": sched.last_epoch,
+            "scheduler_T_cur": sched.T_cur, "scheduler_T_i": sched.T_i}
+
+    opt2 = _make_optimizer()
+    fresh = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt2, T_0=50, T_mult=2)
+    restored = pt.restore_scheduler_on_resume(
+        fresh, opt2, ckpt, True, _make_scheduler_factory(opt2), max_period=1200)
+    assert restored.T_i == 1200
+    assert restored.T_cur == sched.T_cur
+
+
+def test_turning_the_cap_on_mid_cycle_defers_to_the_next_boundary():
+    """Matches what restore_scheduler_on_resume already does for a changed --restart-mult:
+    the in-flight cycle keeps its length; the cap applies once it completes. Clamping into
+    a live cycle instead would be the negative-LR bug above."""
+    opt = _make_optimizer()
+    # Mid-way through an uncapped 1600-epoch cycle, as a pre-cap run would have saved it.
+    ckpt = {"scheduler_last_epoch": 2350, "scheduler_T_cur": 800, "scheduler_T_i": 1600}
+    fresh = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    restored = pt.restore_scheduler_on_resume(
+        fresh, opt, ckpt, True, _make_scheduler_factory(opt), max_period=1200)
+    assert restored.T_i == 1200, "cap applies, but only down to a length that still holds T_cur"
+    assert restored.T_cur == 800
+    assert restored.get_last_lr()[0] > 0.0
+
+    # And a cap BELOW the live T_cur must not invert the cosine.
+    opt3 = _make_optimizer()
+    fresh3 = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt3, T_0=50, T_mult=2)
+    tight = pt.restore_scheduler_on_resume(
+        fresh3, opt3, dict(ckpt), True, _make_scheduler_factory(opt3), max_period=400)
+    assert tight.T_i == 801, "floored at T_cur + 1, never below"
+    assert tight.get_last_lr()[0] > 0.0
+
+
+def test_old_format_checkpoint_gets_the_cap_reapplied():
+    """The old-format path uses torch's step(epoch) branch, the one that recomputes T_i as
+    T_0 * T_mult**n with no knowledge of the cap -- so the cap must be re-applied after it,
+    along with a get_lr() refresh (step(epoch) already pushed an uncapped-T_i LR)."""
+    # last_epoch=1700 re-derives to T_cur=150, T_i=1600 -- an over-ceiling cycle whose
+    # position is still low enough that the cap can engage immediately.
+    opt = _make_optimizer()
+    ckpt = {"scheduler_last_epoch": 1700}             # no scheduler_T_cur/T_i => old format
+    fresh = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    restored = pt.restore_scheduler_on_resume(
+        fresh, opt, ckpt, True, _make_scheduler_factory(opt), max_period=1200)
+    assert restored.T_i == 1200
+    assert restored.get_last_lr()[0] > 0.0
+    assert opt.param_groups[0]["lr"] == restored.get_last_lr()[0], "param groups refreshed"
+
+    # last_epoch=3000 re-derives to T_cur=1450, T_i=1600 -- already PAST the ceiling, so
+    # the floor defers the cap to the next boundary rather than inverting the cosine.
+    opt2 = _make_optimizer()
+    fresh2 = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt2, T_0=50, T_mult=2)
+    late = pt.restore_scheduler_on_resume(
+        fresh2, opt2, {"scheduler_last_epoch": 3000}, True,
+        _make_scheduler_factory(opt2), max_period=1200)
+    assert late.T_cur == 1450 and late.T_i == 1451, "floored at T_cur + 1"
+    assert late.get_last_lr()[0] > 0.0
+    late.step()                                        # completes the deferred cycle
+    assert late.T_cur == 0
+    pt.cap_sgdr_cycle(late, 1200)                      # what the training loop then does
+    assert late.T_i == 1200, "cap engages at the next boundary"
+
+
+def test_cap_bounds_stale_cycles_patience_in_epoch_terms():
+    """The side benefit --restart-max-period's help text claims: uncapped mult=2 makes
+    --stale-cycles' patience grow without bound in epochs; capped, it is a fixed budget."""
+    opt = _make_optimizer()
+    sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50, T_mult=2)
+    lengths, _ = _drive(sched, 20000, max_period=1200)
+    worst_case_3_cycles = sum(sorted(lengths)[-3:])
+    assert worst_case_3_cycles == 3600
+
+
+# ---------------------------------------- --restart-max-period default resolution
+#
+# The cap is ON by default (DEFAULT_RESTART_MAX_PERIOD); 0 opts out. Two ways a default
+# could misbehave that these pin down: it must not nag on the default mult=1 run, and it
+# must not silently override a --restart-period the user chose deliberately.
+
+
+def test_default_is_on_at_the_documented_ceiling():
+    value, notice, error = pt.resolve_restart_max_period(None, restart_period=50, restart_mult=2)
+    assert value == pt.DEFAULT_RESTART_MAX_PERIOD == 1200
+    assert error is None and notice is None
+
+
+def test_zero_opts_out_silently():
+    value, notice, error = pt.resolve_restart_max_period(0, restart_period=50, restart_mult=2)
+    assert value == 0
+    assert error is None and notice is None, "the documented opt-out must be quiet"
+
+
+def test_default_does_not_nag_on_the_common_mult1_run():
+    """--restart-mult defaults to 1, so a default cap that warned 'no-op at mult 1' would
+    print on essentially every ordinary run. Only an EXPLICIT cap may say that."""
+    _, notice, error = pt.resolve_restart_max_period(None, restart_period=50, restart_mult=1)
+    assert notice is None and error is None
+
+    _, explicit_notice, _ = pt.resolve_restart_max_period(1200, restart_period=50, restart_mult=1)
+    assert explicit_notice is not None and "no-op" in explicit_notice
+
+
+def test_default_defers_to_a_larger_user_chosen_restart_period():
+    """A default ceiling at or below the user's own --restart-period would pin every cycle
+    to that period and silently turn their --restart-mult 2 into a no-op. The default must
+    disable itself and say so rather than override a value they typed."""
+    value, notice, error = pt.resolve_restart_max_period(None, restart_period=2000, restart_mult=2)
+    assert value == 0, "default cap disables itself rather than neutering --restart-mult"
+    assert error is None
+    assert notice is not None and "UNCAPPED" in notice
+
+    # Exactly at the ceiling is the same situation (cap == period => no growth at all).
+    value, notice, _ = pt.resolve_restart_max_period(None, restart_period=1200, restart_mult=2)
+    assert value == 0 and notice is not None
+
+
+def test_explicit_cap_below_restart_period_is_an_error():
+    """Explicit is different from default: if the user types a cap below their period they
+    have asked for something incoherent, so say so instead of quietly disabling it."""
+    value, _, error = pt.resolve_restart_max_period(20, restart_period=50, restart_mult=2)
+    assert value is None
+    assert error is not None and "below --restart-period" in error
+
+
+def test_explicit_cap_equal_to_restart_period_is_allowed():
+    """cap == period pins cycles at the period. Incoherent as a silent default, but a
+    legitimate explicit request ('grow no further than where I started')."""
+    value, _, error = pt.resolve_restart_max_period(50, restart_period=50, restart_mult=2)
+    assert value == 50 and error is None
