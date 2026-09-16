@@ -108,9 +108,11 @@ run plateaued 1,665 epochs before it would have triggered and had to be stopped 
 `STOP` file; left alone it would have ground ~8 further hours.
 
 **`--restart-max-period N` caps cycle growth at N epochs**; every later cycle stays that length
-(mult effectively reverts to 1 from there). **It defaults to 1200 — on.** At that ceiling
-`--stale-cycles 3` becomes a hard 3,600-epoch budget instead of an unbounded one. Pass
+(mult effectively reverts to 1 from there). **It defaults to 1200 — on.** Pass
 `--restart-max-period 0` to opt out and restore the historical uncapped behavior exactly.
+
+The cap also made it possible to fix the plateau-stop rule outright — see
+[The plateau rule](#the-plateau-rule-stale-epochs-replaced-stale-cycles) below.
 
 Two deliberate properties of the default, both so it can't surprise an existing config:
 
@@ -150,6 +152,67 @@ Caveat on the evidence: "improvements arrive late in a cycle" is partly intrinsi
 annealing (a best always tends to land near a trough), so the within-cycle profile alone can't
 prove a length is optimal. The second-half-gain-vs-length figures are the part that actually
 discriminates.
+
+### The plateau rule: `--stale-epochs` replaced `--stale-cycles` (2026-09-16)
+
+`--stale-cycles 3` was the default stopping rule. Simulating both rules against **41 distinct
+real runs**' own cycle structures and improvement timelines showed it is not merely wasteful but
+**unsafe**:
+
+| rule | fired early | worst ESR forfeited |
+|---|---|---|
+| `--stale-cycles 3` | **14 of 41 runs** | **2.615x** |
+| `--stale-epochs 1500` | 0 of 41 | 1.000x (nothing) |
+
+Worst case: a distortion-pedal run where the cycle rule fires at epoch 3198, but the run kept
+minting new bests until **9321**. Others forfeited 1.69x, 1.59x, 1.52x, 1.45x.
+
+**Defaults now** (both gated on the cap being active): `--stale-epochs` = `max(1500, 1.25 × cap)`
+= 1500, and `--stale-cycles` = 0. With `--restart-max-period 0` the old pairing (`--stale-cycles
+3`, `--stale-epochs 0`) is kept instead.
+
+Two things make this work, neither of which was true before:
+
+1. **The cap defuses the cosine-tail objection.** `--stale-epochs` was documented as a blunt
+   instrument because a best tends to land near each LR trough, so an epoch counter can fire
+   mid-cycle during a high-LR stretch. With every cycle ≤ the cap and patience > the cap, any
+   window of that many epochs necessarily spans a complete cycle, trough included. Hence the
+   `1.25 ×` coupling rather than a bare constant.
+2. **1500 is measured, not guessed.** The longest drought ever *followed by* further improvement
+   was 1164 epochs (the 4-knob Joyo run at its knob-count ESR ceiling); next worst 664,
+   everything else ≤303. 1500 clears the worst case with 1.29x margin. The `max(1500, …)` floor
+   stops a lowered cap from dropping patience under that.
+
+Note the rules are OR'd, so enabling the epoch rule *without* disabling the cycle rule would
+change nothing in precisely the 14 dangerous cases — the cycle rule fires first. It had to be a
+replacement. For the same reason `run_pipeline.py` no longer forwards either flag unless
+explicitly passed; it used to forward `--stale-cycles 3` unconditionally, which would have
+overridden the new per-run choice.
+
+#### Trend-based rules were tried and lost
+
+A rate-based rule is the obvious improvement — any patience rule wastes exactly X epochs by
+construction. Measured against the same 41 runs, every variant was **worse than flat patience**:
+
+| rule | fired early | worst forfeited |
+|---|---|---|
+| per-cycle gain < 1.02, 2 consecutive | 30 of 41 | 6.878x |
+| normalised per-100-epoch gain, best of 16 threshold/K/warmup combos | 15 of 41 | 2.615x |
+| adaptive patience (2.5 × longest rewarded drought, floor 500) | **0 of 41** | 1.000x |
+| `--stale-epochs 1500` | **0 of 41** | 1.000x |
+
+The adaptive variant matches flat patience on safety but not on cost — total waste across the
+fleet was 6,929 epochs against 6,752 for the flat rule, i.e. slightly worse for real added
+complexity.
+
+The reason is structural: **improvement in these runs is bursty, and long droughts are routinely
+rewarded.** A flat stretch of no progress looks identical whether it precedes a 2x gain or
+nothing at all, so a rule that infers "the trend has gone flat" is reading exactly the signal a
+rewarded drought also produces. There is no separating statistic in the data. Dumb patience wins
+because it does not try to predict — it just waits long enough that a rewarded drought cannot be
+mistaken for a plateau. A trend rule would need a feature that actually distinguishes the two
+(per-combo ESR structure, or gradient/loss-landscape signal), not a smarter function of the same
+val-ESR series.
 
 ## Option B — data-parallel training (~1 day of work, ~1.5x)
 

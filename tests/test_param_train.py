@@ -393,3 +393,53 @@ def test_explicit_cap_equal_to_restart_period_is_allowed():
     legitimate explicit request ('grow no further than where I started')."""
     value, _, error = pt.resolve_restart_max_period(50, restart_period=50, restart_mult=2)
     assert value == 50 and error is None
+
+
+# ------------------------------------------- plateau-stop defaults (resolve_stale_rules)
+#
+# The 2026-09-16 default flip: --stale-epochs (was 0) becomes the plateau rule at
+# max(1500, 1.25 * cap), and --stale-cycles (was 3) goes to 0, whenever the cycle cap is
+# active. Simulating both rules against 41 distinct real runs showed --stale-cycles 3
+# would have fired early on 14 of them (worst: stopping at epoch 3198 a run that kept
+# improving to 9321, a 2.615x better model), while the epoch rule fired early on none.
+
+
+def test_capped_run_uses_the_epoch_rule_and_disables_the_cycle_rule():
+    sc, se, _ = pt.resolve_stale_rules(None, None, max_period=1200)
+    assert (sc, se) == (0, 1500)
+
+
+def test_uncapped_run_keeps_the_historical_cycle_rule():
+    """With no cap, cycles grow without bound, so a fixed epoch counter has no guarantee of
+    spanning an LR trough -- the cosine-tail artifact the cycle rule exists to avoid."""
+    sc, se, notice = pt.resolve_stale_rules(None, None, max_period=0)
+    assert (sc, se) == (3, 0)
+    assert notice is not None and "uncapped" in notice
+
+
+def test_patience_scales_with_a_raised_cap_to_keep_trough_coverage():
+    """Patience must stay > cap so any window spans a complete cycle."""
+    _, se, _ = pt.resolve_stale_rules(None, None, max_period=4000)
+    assert se == 5000 == int(1.25 * 4000)
+    assert se > 4000
+
+
+def test_patience_never_drops_below_the_validated_floor_on_a_lowered_cap():
+    """1.25 * 400 = 500 would sit under the 664-epoch rewarded drought one real run needed,
+    so the empirical floor wins."""
+    _, se, _ = pt.resolve_stale_rules(None, None, max_period=400)
+    assert se == pt.DEFAULT_STALE_EPOCHS == 1500
+
+
+def test_explicit_values_are_honored_including_zero():
+    assert pt.resolve_stale_rules(5, 900, max_period=1200)[:2] == (5, 900)
+    assert pt.resolve_stale_rules(0, 900, max_period=1200)[:2] == (0, 900)
+    # Explicitly re-enabling the cycle rule alongside the epoch rule is allowed; the loop
+    # ORs them, so the cycle rule would fire first -- the caller's business, not ours.
+    assert pt.resolve_stale_rules(3, None, max_period=1200)[:2] == (3, 1500)
+
+
+def test_warns_when_both_rules_end_up_disabled():
+    sc, se, notice = pt.resolve_stale_rules(0, 0, max_period=1200)
+    assert (sc, se) == (0, 0)
+    assert notice is not None and "STOP file" in notice

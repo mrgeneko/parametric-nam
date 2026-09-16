@@ -1656,6 +1656,72 @@ def resolve_restart_max_period(requested, restart_period, restart_mult):
     return requested, None, None
 
 
+#: Epoch-counted plateau patience used when SGDR cycle length is capped. Validated by
+#: simulating both stopping rules against 41 distinct real runs (2026-09-16): the longest
+#: drought that was ever FOLLOWED by further improvement was 1164 epochs (the 4-knob Joyo
+#: run, at its knob-count ESR ceiling); next worst 664, and everything else <= 303. 1500
+#: clears the worst case with 1.29x margin, and fired early on zero runs.
+DEFAULT_STALE_EPOCHS = 1500
+
+
+def resolve_stale_rules(stale_cycles, stale_epochs, max_period):
+    """Resolve the two plateau-stop defaults. Returns (stale_cycles, stale_epochs, notice).
+
+    Either argument is None when not passed (take the default) and an int when passed
+    (honor it exactly, 0 meaning disabled).
+
+    WHY THE DEFAULT FLIPPED (2026-09-16). --stale-cycles 3 was the default and
+    --stale-epochs 0 (off). Simulating both rules against 41 distinct runs' own cycle
+    structures and improvement timelines showed the cycle rule is not merely wasteful but
+    UNSAFE: it would have fired early on 14 of 41 runs, in the worst case (a distortion
+    pedal run, 2026-07-19) stopping at epoch 3198 when that run went on minting new bests
+    until 9321 -- forfeiting a 2.615x better model. --stale-epochs 1500 fired early on
+    none of them. The old default was not wrong so much as under-sampled: it generalised
+    from a single replayed run, and the cycle rule's patience in EPOCH terms swings wildly
+    with --restart-period x --restart-mult, which is exactly what makes it hard to reason
+    about. An epoch count is directly interpretable.
+
+    Note the two rules are OR'd (whichever fires first stops the run), so simply switching
+    --stale-epochs on while leaving --stale-cycles at 3 would change nothing in precisely
+    those 14 dangerous cases -- the cycle rule still fires first. The epoch rule has to
+    REPLACE it, which is why this disables --stale-cycles rather than merely adding to it.
+
+    The swap is gated on the cycle cap being active. --stale-epochs' own help warns it is
+    not immune to the cosine-tail artifact (a new best tends to land near each LR trough,
+    so a pure epoch counter can fire mid-cycle during a high-LR stretch that would have
+    found a best at the next trough). A cap makes that impossible: with every cycle
+    <= max_period and patience > max_period, any window of `stale_epochs` consecutive
+    epochs necessarily spans at least one complete cycle, trough included. With no cap,
+    cycles grow without bound, the guarantee is gone, and the historical cycle-counted
+    default is still the safer rule -- so keep it.
+
+    Patience is max(DEFAULT_STALE_EPOCHS, 1.25 * max_period) rather than either alone:
+    the 1.25x factor preserves the trough-coverage guarantee for a caller who raises the
+    cap, and the floor keeps a caller who LOWERS it from dropping under the empirically
+    validated 1500 (e.g. --restart-max-period 400 would otherwise give 500, below the
+    664-epoch rewarded drought one real run needed).
+    """
+    notice = None
+    if max_period > 0:
+        if stale_epochs is None:
+            stale_epochs = max(DEFAULT_STALE_EPOCHS, int(round(1.25 * max_period)))
+        if stale_cycles is None:
+            stale_cycles = 0
+    else:
+        # Uncapped: no trough-coverage guarantee, so keep the historical rule.
+        if stale_epochs is None:
+            stale_epochs = 0
+        if stale_cycles is None:
+            stale_cycles = 3
+            notice = ("cycle growth is uncapped, so --stale-cycles 3 stays the plateau rule "
+                      "(an epoch-counted stop can fire mid-cycle without a cap to guarantee "
+                      "it spans an LR trough). Pass --stale-epochs explicitly to add one.")
+    if stale_cycles == 0 and stale_epochs == 0:
+        notice = ("both plateau rules are disabled (--stale-cycles 0 --stale-epochs 0) -- this "
+                  "run will train until you touch the STOP file or it is killed.")
+    return stale_cycles, stale_epochs, notice
+
+
 def cap_sgdr_cycle(scheduler, max_period):
     """Clamp a CosineAnnealingWarmRestarts cycle length (T_i) to `max_period` epochs.
 
@@ -1866,48 +1932,55 @@ def main():
                          "through a nominally open-ended mult=1 run, not just narrowing later-"
                          "cycle exploration). Persists correctly across --resume (baked into the "
                          "optimizer's per-group 'initial_lr', not the scheduler object).")
-    ap.add_argument("--stale-cycles", type=int, default=3,
+    ap.add_argument("--stale-cycles", type=int, default=None,
                     help="Open-ended mode: stop automatically after this many consecutive "
-                         "SGDR cycles in which NO tier minted a new best val ESR — the "
-                         "stopping rule internal engineering notes specifies, which until now "
-                         "was executed by a human watching the log (the stiff amp head's run burned "
-                         "~2.5h past its plateau waiting for one). Compared at CYCLE "
-                         "granularity, i.e. at matched LR phase, so the cosine-tail "
-                         "artifact that killed per-epoch patience (a best always lands "
-                         "near each trough) cannot fire. Default 3, not the doc's 2: "
-                         "replaying the mid-boost overdrive pedal's run's metrics.csv showed improvements arrive "
-                         "in bursts with 100+-epoch droughts — 2 would have stopped at "
-                         "ep 1150 and forfeited a further 16-23%% ESR that landed by 1689. "
-                         "Sparse-capture datasets (whose val metric is noisiest) may want "
-                         "4+, or 0 to disable (the old manual behavior). The counter "
-                         "resets on --resume. (default: %(default)s)")
-    ap.add_argument("--stale-epochs", type=int, default=0,
+                         "SGDR cycles in which NO tier minted a new best val ESR. Compared at "
+                         "CYCLE granularity, i.e. at matched LR phase, so the cosine-tail "
+                         "artifact that killed per-epoch patience (a best always lands near "
+                         "each trough) cannot fire. NO LONGER THE DEFAULT RULE: it is 0 "
+                         "(disabled) whenever --restart-max-period is active, and 3 only when "
+                         "cycle growth is uncapped -- see --stale-epochs for the measurement "
+                         "that flipped this. It was the default at 3 until 2026-09-16, chosen "
+                         "by replaying ONE run where patience 2 stopped early; across 41 runs "
+                         "that generalised badly, because this rule's patience in EPOCH terms "
+                         "swings with --restart-period x --restart-mult and is hard to reason "
+                         "about. Still the right rule for an UNCAPPED run, where cycles grow "
+                         "without bound and an epoch counter has no guarantee of spanning an "
+                         "LR trough. Sparse-capture datasets (whose val metric is noisiest) may "
+                         "want 4+. The counter resets on --resume. (default: 0 when capped, "
+                         "3 when uncapped)")
+    ap.add_argument("--stale-epochs", type=int, default=None,
                     help="Open-ended mode: stop automatically after this many CONSECUTIVE "
-                         "epochs (not cycles) with NO tier minting a new best val ESR, "
-                         "checked every epoch independent of cycle boundaries -- a coarse "
-                         "backstop for --restart-mult>1, whose --stale-cycles patience "
-                         "grows unbounded in epoch terms (see --restart-mult's own CAVEAT): "
-                         "cycles double each restart (150, 300, 600, 1200, 2400, ...), so "
-                         "by cycle 6 --stale-cycles needs ~9,600 epochs of no improvement to "
-                         "fire at all. LARGELY SUPERSEDED by --restart-max-period, which is ON "
-                         "by default and bounds cycle length directly, making --stale-cycles a "
-                         "fixed epoch budget again -- this flag remains useful as a hard ceiling, "
-                         "and is the backstop of choice if you opt out with "
-                         "--restart-max-period 0. Measured real cost of having neither, before "
-                         "the cap existed: a mult=2 run "
-                         "plateaued 1,665 epochs before its cycle-based patience would have "
-                         "triggered and had to be stopped by hand; left alone it would have "
-                         "ground ~8 further hours (docs/scaling-training.md). Unlike "
-                         "--stale-cycles, this is NOT immune to the cosine-tail artifact "
-                         "(a best tends to land near each trough, so this can fire mid-cycle "
-                         "during a noisy high-LR stretch that would have found a new best at "
-                         "the next trough) -- it is a blunt ceiling, not a precise plateau "
-                         "detector, so set it well above a few cycles' worth of epochs (e.g. "
-                         "several times --restart-period) rather than tight. Whichever of "
-                         "--stale-cycles/--stale-epochs fires first stops the run; either or "
-                         "both may be 0 (disabled). Counter resets on --resume, same as "
-                         "--stale-cycles. 0 = disabled (default, matches historical "
-                         "behavior).")
+                         "epochs (not cycles) with NO tier minting a new best val ESR, checked "
+                         "every epoch independent of cycle boundaries. THIS IS NOW THE DEFAULT "
+                         "PLATEAU RULE (since 2026-09-16), replacing --stale-cycles whenever "
+                         "--restart-max-period is active; default is max(1500, 1.25 * the cycle "
+                         "cap), i.e. 1500 at the 1200 default. 0 disables it. "
+                         "WHY: simulating both rules against 41 distinct real runs' own cycle "
+                         "structures and improvement timelines showed --stale-cycles 3 would "
+                         "have fired early on 14 of them, worst case stopping a distortion-pedal "
+                         "run at epoch 3198 when it went on minting new bests until 9321 -- a "
+                         "2.615x better model thrown away. This rule fired early on none. "
+                         "WHY 1500: the longest drought ever FOLLOWED by further improvement was "
+                         "1164 epochs (the 4-knob Joyo run at its knob-count ESR ceiling); next "
+                         "worst 664, everything else <=303. 1500 clears the worst case with "
+                         "1.29x margin. WHY IT IS SAFE NOW when its own older help called it a "
+                         "blunt instrument: the objection was the cosine-tail artifact (a best "
+                         "tends to land near each LR trough, so an epoch counter can fire "
+                         "mid-cycle during a high-LR stretch that would have found a best at the "
+                         "next trough). --restart-max-period removes that -- with every cycle "
+                         "<= the cap and patience > the cap, any window of this many epochs "
+                         "necessarily spans a complete cycle, trough included. That guarantee is "
+                         "why the default is tied to the cap rather than being a bare constant, "
+                         "and why it does NOT apply when you pass --restart-max-period 0 (there "
+                         "--stale-cycles 3 stays the default instead). "
+                         "Note both rules are OR'd -- whichever fires first stops the run -- so "
+                         "enabling this WITHOUT disabling --stale-cycles would change nothing in "
+                         "exactly the dangerous cases, since the cycle rule fires first. "
+                         "Caveat inherent to any patience rule: it wastes exactly this many "
+                         "epochs by construction (~22h at 54s/epoch). Counter resets on "
+                         "--resume. (default: max(1500, 1.25 * --restart-max-period) when "
+                         "capped, else 0)")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,
@@ -2149,6 +2222,14 @@ def main():
         ap.error(_cap_error)
     if _cap_notice:
         print(f"  {_cap_notice}", file=sys.stderr)
+
+    # Plateau-stop defaults, resolved AFTER the cap because they are gated on it: the
+    # epoch-counted rule is only safe from the cosine-tail artifact when cycle length is
+    # bounded. See resolve_stale_rules() for the 41-run measurement behind the flip.
+    args.stale_cycles, args.stale_epochs, _stale_notice = resolve_stale_rules(
+        args.stale_cycles, args.stale_epochs, args.restart_max_period)
+    if _stale_notice:
+        print(f"  {_stale_notice}", file=sys.stderr)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -2716,27 +2797,33 @@ def main():
         # instead of a human watching the log. Cycle-to-cycle comparisons happen at matched
         # LR phase, which is what makes this rule immune to the cosine-tail artifact that
         # broke per-epoch patience.
-        if open_ended and args.stale_cycles > 0 and cycle_ended:
+        # The LOGGING here is deliberately NOT gated on --stale-cycles: since 2026-09-16 that
+        # rule defaults to 0 (disabled) whenever the cycle cap is active, and leaving the log
+        # line inside its guard would silence cycle-boundary reporting on every default run --
+        # exactly the visibility that made reconstructing cycle structure from LR resets in
+        # metrics.csv necessary in the first place.
+        if open_ended and cycle_ended:
             if cycle_improved:
                 stale_cycles = 0
             else:
                 stale_cycles += 1
             # Next cycle's length (T_i, post-growth and post-cap) is printed because it is
-            # otherwise invisible: reconstructing cycle boundaries after the fact meant
-            # re-deriving them from LR resets in metrics.csv. "(capped)" marks where
-            # --restart-max-period has taken over from --restart-mult.
+            # otherwise invisible. "(capped)" marks where --restart-max-period has taken over
+            # from --restart-mult.
             _next_len = getattr(scheduler, "T_i", None)
             _len_note = ""
             if _next_len is not None:
                 _capped = args.restart_max_period > 0 and _next_len >= args.restart_max_period
                 _len_note = f" — next cycle {_next_len} ep{' (capped)' if _capped else ''}"
-            print(f"  [cycle end @ epoch {epoch}] "
-                  + ("new best(s) this cycle" if cycle_improved
-                     else f"no improvement — {stale_cycles}/{args.stale_cycles} stale cycles")
-                  + _len_note,
+            _stale_note = ("new best(s) this cycle" if cycle_improved else
+                           (f"no improvement — {stale_cycles}/{args.stale_cycles} stale cycles"
+                            if args.stale_cycles > 0 else
+                            f"no improvement — {stale_epochs}/{args.stale_epochs} stale epochs"
+                            if args.stale_epochs > 0 else "no improvement"))
+            print(f"  [cycle end @ epoch {epoch}] " + _stale_note + _len_note,
                   file=sys.stderr, flush=True)
             cycle_improved = False
-            if stale_cycles >= args.stale_cycles:
+            if args.stale_cycles > 0 and stale_cycles >= args.stale_cycles:
                 print(f"[stop] {args.stale_cycles} consecutive SGDR cycles without a new best "
                       f"on any tier — plateau reached, stopping (disable with --stale-cycles 0).",
                       file=sys.stderr, flush=True)
