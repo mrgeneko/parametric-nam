@@ -74,7 +74,7 @@ def _base_args(**overrides):
     defaults = dict(
         nam_output=Path("/tmp/out.param.nam"), checkpoint_dir=Path("/tmp/ckpt"),
         restart_period=2000, restart_mult=2, restart_decay=0.97, restart_max_period=None,
-        stale_cycles=3, batch_size=32, lr=1e-3,
+        stale_cycles=None, stale_epochs=None, batch_size=32, lr=1e-3,
         crop_len=48000, mrstft_weight=0.5, val_split=0.1, val_passes=1, device="cpu",
         seed=0, widths=None, mmap=True, resume=None, amp="fp16", init_from=None,
         param_sensitivity=False, knob_boost=None, per_tier_clip=False, clip_norm=1.0,
@@ -470,3 +470,22 @@ def test_build_train_cmd_forwards_an_explicit_restart_max_period():
     cmd = [str(x) for x in rp.build_train_cmd(
         _base_args(restart_max_period=800), Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=1)]
     assert cmd[cmd.index("--restart-max-period") + 1] == "800"
+
+
+def test_build_train_cmd_omits_stale_rules_unless_explicitly_set():
+    """param_train.py chooses BETWEEN the two plateau rules based on whether the cycle cap
+    is active. Forwarding either unconditionally (as --stale-cycles was until 2026-09-16)
+    overrides that choice and reinstates the rule that would have stopped 14 of 41 real
+    runs early -- one of them forfeiting a 2.615x better model."""
+    cmd = [str(x) for x in rp.build_train_cmd(
+        _base_args(), Path("/tmp/ds"), epochs=0, steps_per_epoch_arg=1)]
+    assert "--stale-cycles" not in cmd
+    assert "--stale-epochs" not in cmd
+
+
+def test_build_train_cmd_forwards_explicit_stale_rules_including_zero():
+    cmd = [str(x) for x in rp.build_train_cmd(
+        _base_args(stale_cycles=0, stale_epochs=900), Path("/tmp/ds"), epochs=0,
+        steps_per_epoch_arg=1)]
+    assert cmd[cmd.index("--stale-cycles") + 1] == "0"
+    assert cmd[cmd.index("--stale-epochs") + 1] == "900"

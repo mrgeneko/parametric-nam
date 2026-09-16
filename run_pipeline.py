@@ -772,7 +772,6 @@ def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
         "--restart-period",  args.restart_period,
         "--restart-mult",    args.restart_mult,
         "--restart-decay",   args.restart_decay,
-        "--stale-cycles",    args.stale_cycles,
         "--batch-size",      args.batch_size,
         "--lr",              args.lr,
         "--crop-len",        args.crop_len,
@@ -794,6 +793,14 @@ def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
     # meaningful explicit value (opt out), so test against None, not truthiness.
     if getattr(args, "restart_max_period", None) is not None:
         train_cmd += ["--restart-max-period", args.restart_max_period]
+    # Same pass-through rule, and for a sharper reason: param_train.py chooses BETWEEN these
+    # two rules based on whether the cap is active, so forwarding either unconditionally
+    # (as --stale-cycles was until 2026-09-16) overrides that choice and reinstates the rule
+    # that would have stopped 14 of 41 real runs early.
+    if getattr(args, "stale_cycles", None) is not None:
+        train_cmd += ["--stale-cycles", args.stale_cycles]
+    if getattr(args, "stale_epochs", None) is not None:
+        train_cmd += ["--stale-epochs", args.stale_epochs]
     if args.widths:              train_cmd += ["--widths", args.widths]
     if not args.mmap:             train_cmd.append("--no-mmap")
     if args.resume:              train_cmd += ["--resume", args.resume]
@@ -975,11 +982,22 @@ def main():
                         "param_train.py directly -- which loses this script's post-training "
                         "FiLM-runaway scan and release packaging. See param_train.py --help for "
                         "why the default is 0.97 rather than 1.0.")
-    g.add_argument("--stale-cycles",   type=int,   default=3,
+    g.add_argument("--stale-cycles",   type=int,   default=None,
                    help="Open-ended auto-stop: stop after this many consecutive SGDR cycles "
-                        "with no new best on any tier (0 = manual STOP-file only; see "
-                        "param_train.py --help for why the default is 3, not the doc's 2). "
-                        "Forwarded to param_train.py.")
+                        "with no new best on any tier (0 = disabled). Default=None and "
+                        "forwarded ONLY when explicitly passed: since 2026-09-16 param_train.py "
+                        "picks this per-run (0 when the cycle cap is active, 3 when not), and "
+                        "a default mirrored here would override that and silently restore the "
+                        "rule the flip exists to retire -- it would have stopped 14 of 41 real "
+                        "runs early, one of them forfeiting a 2.615x better model. See "
+                        "param_train.py --help for --stale-epochs.")
+    g.add_argument("--stale-epochs",   type=int,   default=None,
+                   help="Open-ended auto-stop: stop after this many consecutive epochs with no "
+                        "new best on any tier (0 = disabled). This is param_train.py's default "
+                        "plateau rule when the cycle cap is active. Same default=None "
+                        "pass-through rule as --stale-cycles: param_train.py computes it as "
+                        "max(1500, 1.25 * --restart-max-period), and duplicating that formula "
+                        "here is how the two drift apart.")
     g.add_argument("--batch-size",     type=int,   default=16)
     g.add_argument("--lr",             type=float, default=3e-4)
     g.add_argument("--crop-len",       type=int,   default=44100)
