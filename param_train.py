@@ -1308,7 +1308,12 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
             for m in model.submodels:
                 loss = (criterion(fwd(m, inp, params), out, cache) if can_cache
                         else criterion(fwd(m, inp, params), out))
-                bwd(loss)
+                # --freeze-tiers: a fully-frozen tier's loss has no grad_fn (every
+                # input is a non-trainable leaf), so .backward() would raise "does
+                # not require grad". Still scored (visible in step_loss/logging)
+                # for monitoring, just not backpropagated.
+                if any(p.requires_grad for p in m.parameters()):
+                    bwd(loss)
                 step_loss += loss.detach()
         else:
             loss = criterion(fwd(model, inp, params), out)
@@ -2096,6 +2101,19 @@ def main():
                          "--resume. CAVEAT (internal engineering notes): checkpoints trained under "
                          "the old MSE loss carry the loud-combo bias the ESR loss removed -- "
                          "gate acceptance on level_band_esr.py bands, not headline ESR.")
+    ap.add_argument("--freeze-tiers", type=str, default=None,
+                    help="Slimmable only: comma list of tier labels (model.tier_labels(), "
+                         "e.g. 'full' or 'lite,w4') to exclude from the optimizer entirely -- "
+                         "requires_grad_(False) on every param, applied after --init-from/"
+                         "--spectral-norm so a frozen tier's weights are exactly what was "
+                         "loaded. Motivated by a real case: one tier (not the other) developed "
+                         "an out-of-distribution FiLM/LeakyReLU runaway (see "
+                         "scan_film_runaway.py) traced partly to JOINT grad clipping letting a "
+                         "wider tier's larger gradient norm set a narrower tier's effective "
+                         "step size (see train_epoch's per-tier-clip docstring) -- freezing the "
+                         "clean tier lets a --init-from fine-tune target only the broken one, "
+                         "with zero risk of regressing the tier that already ships fine. "
+                         "Refuses to freeze every tier (nothing left to train).")
     ap.add_argument("--log-csv", type=Path, default=None,
                     help="Path for metrics CSV (default: --checkpoint-dir/metrics.csv)")
     ap.add_argument("--mmap", action="store_true", default=True,
@@ -2366,6 +2384,30 @@ def main():
                   f"from here fine-tunes the whole model to adapt to the constraint, not just "
                   f"the clipped layers.", file=sys.stderr)
             model.to(device)
+
+    # --freeze-tiers: exclude named tiers from the optimizer entirely. Placed here --
+    # after --init-from/--spectral-norm, before film_params/other_params are built --
+    # so a frozen tier's requires_grad=False is what those filters actually see, and
+    # so a frozen tier's weights are exactly whatever was just loaded (untouched by
+    # spectral_norm's clip if it came from --init-from, since that only rescales
+    # weights AFTER wrapping, not before).
+    if args.freeze_tiers:
+        if not isinstance(model, SlimmableParametricA2):
+            sys.exit("--freeze-tiers requires a slimmable model (--widths with >1 entry)")
+        labels = model.tier_labels()
+        by_label = dict(zip(labels, model.submodels))
+        freeze = [t.strip() for t in args.freeze_tiers.split(",") if t.strip()]
+        unknown = [t for t in freeze if t not in by_label]
+        if unknown:
+            sys.exit(f"--freeze-tiers: unknown tier(s) {unknown} -- this model's tiers are "
+                     f"{labels}")
+        if set(freeze) == set(labels):
+            sys.exit(f"--freeze-tiers names every tier ({labels}) -- nothing left to train")
+        for t in freeze:
+            for p in by_label[t].parameters():
+                p.requires_grad_(False)
+        print(f"  Frozen tier(s): {freeze} (excluded from optimizer; trainable: "
+              f"{[l for l in labels if l not in freeze]})", file=sys.stderr)
 
     # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
     # small (knob effects are subtle vs the overall signal), so at the shared LR

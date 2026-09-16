@@ -393,3 +393,68 @@ def test_explicit_cap_equal_to_restart_period_is_allowed():
     legitimate explicit request ('grow no further than where I started')."""
     value, _, error = pt.resolve_restart_max_period(50, restart_period=50, restart_mult=2)
     assert value == 50 and error is None
+
+
+# ---------------------------------------------------------------------------
+# --freeze-tiers (train_epoch's per-tier frozen-loss guard)
+#
+# Motivated by a real case: scan_film_runaway.py's full-grid scan found a FiLM/
+# LeakyReLU runaway in the tweed-5f6-a-full-sag-ac w4 (lite) tier only -- w8
+# (full) was clean on the same grid/reference. A targeted fine-tune needs to
+# update lite without disturbing full, which requires excluding full's params
+# from the optimizer entirely. train_epoch's per-tier loop always called
+# .backward() on every tier's loss; a fully-frozen tier's loss has no grad_fn
+# (every input a non-trainable leaf), so that raises "does not require grad"
+# unless the loop skips backward for tiers with nothing trainable.
+# ---------------------------------------------------------------------------
+
+def _tiny_slimmable_batch(n=4, t=480):
+    inp = torch.randn(n, 1, t)
+    out = torch.randn(n, 1, t)
+    params = torch.rand(n, 1)
+    return inp, out, params
+
+
+def test_freeze_tier_does_not_crash_and_leaves_its_weights_untouched():
+    torch.manual_seed(0)
+    model = pt.SlimmableParametricA2(num_params=1, widths=[2, 3])
+    for p in model.lite.parameters():
+        p.requires_grad_(False)
+
+    before_lite = [p.clone() for p in model.lite.parameters()]
+    before_full = [p.clone() for p in model.full.parameters()]
+
+    inp, out, params = _tiny_slimmable_batch()
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(inp, out, params), batch_size=2)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=1e-2)
+
+    pt.train_epoch(model, loader, optimizer, torch.nn.MSELoss(), device="cpu",
+                   epoch=1, total_epochs=1, log_interval=0)
+
+    for before, after in zip(before_lite, model.lite.parameters()):
+        assert torch.equal(before, after), "frozen tier's weights changed"
+    assert any(not torch.equal(before, after)
+              for before, after in zip(before_full, model.full.parameters())), \
+        "trainable tier never updated -- test isn't exercising anything"
+
+
+def test_freeze_tier_joint_clip_does_not_crash_on_frozen_tier_with_no_grad():
+    """clip_grad_norm_ over ALL model.parameters() (the default, non-per-tier-clip
+    path) must tolerate a frozen tier whose .grad stays None the whole epoch."""
+    torch.manual_seed(1)
+    model = pt.SlimmableParametricA2(num_params=1, widths=[2, 3])
+    for p in model.full.parameters():
+        p.requires_grad_(False)
+
+    inp, out, params = _tiny_slimmable_batch()
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(inp, out, params), batch_size=2)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=1e-2)
+
+    # per_tier_clip=False is the default -- joint clip_grad_norm_ over every
+    # param, frozen ones included.
+    pt.train_epoch(model, loader, optimizer, torch.nn.MSELoss(), device="cpu",
+                   epoch=1, total_epochs=1, log_interval=0, per_tier_clip=False)
