@@ -59,6 +59,34 @@ Both newer chips also **beat what their GPU core count predicted** against the M
 across generations. Core count is a starting guess, not a substitute for a benchmark —
 `profile_step.py`-style timing takes minutes.
 
+## Measurement 3 — a Linux/ROCm desktop is a render arm, not a training arm
+
+Measured on 2026-09-16 on `blackbox` (Ryzen 5 9600X, 6c/12t, + AMD RX 9070 XT), against the real
+`klon_ds` dataset (36 combinations), `--widths 4,8`, batch 32, `--crop-len 48000`, 50 steps —
+close to but not identical to the Mac fleet's widths 5,9 / batch 38 above, so treat the
+cross-machine ratios as directional, not exact:
+
+| device | s/step |
+|---|---:|
+| RX 9070 XT (ROCm 7.2, `--amp fp16`) | 7.69 |
+| Ryzen 5 9600X (CPU, `--amp off`) | 7.15 |
+
+**The GPU is slower than its own CPU on this box.** This repo's models are tiny (the
+SlimmableContainer trained here has 3.7k–13k weights) — too little compute per step to amortize
+ROCm/HIP's per-kernel dispatch overhead, so a fast desktop CPU keeps up with or beats the GPU.
+This matches a real production run (the Klon Centaur release, same dataset/widths/batch,
+`--device auto` picked the GPU): 414.6 s/epoch, i.e. 7.4 s/step — consistent with the measurement
+above, not a fluke.
+
+Against the Mac fleet from Measurement 2, blackbox's best mode (CPU, 7.15 s/step) is still
+**3.0x slower than the M5 Air** (2.390), 5.4x slower than the M4 Pro mini, and 7.9x slower than
+the M3 Max. Even the fleet's slowest, fanless, thermally-throttled machine beats blackbox at
+training by 3x.
+
+**Conclusion: blackbox is a render worker, not a training candidate.** Rendering (SPICE
+simulation) is CPU-bound and its 12 threads help there (see `distribute_gen.sh`); training does
+not benefit from adding it to the fleet's training rotation.
+
 ## Option A — parallel schedule search (no code changes)
 
 Run the same dataset on several machines with **different schedules**, same seed and same step
