@@ -375,7 +375,8 @@ Then:
 - **Play it in a stock plugin** — `bake_nam.py` bakes one knob position into a static `.nam`
   that any standard NAM loader opens. One `.nam` per tone; ship a pack for a set of them.
 - **Check it does not blow up** — `scan_film_runaway.py` looks for knob corners where the
-  model explodes on a hard attack. It needs a genuinely real playing clip as its reference,
-  not the training excitation.
+  model explodes on a hard attack. It needs a reference clip distinct from the training
+  excitation, with varied, hard transient dynamics — a real recording or a synthesized
+  capture sweep both work.
 
 All three are documented in [scripts.md](scripts.md).

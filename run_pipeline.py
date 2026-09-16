@@ -1039,9 +1039,11 @@ def main():
                         "--backend livespice today: preflight.py has no mode for the schx-translated "
                         "ngspice path or the cpp backend, so this step is a silent no-op for those.")
     g.add_argument("--film-reference", type=Path, default=None,
-                   help="a real-playing (not synthetic-sweep) reference WAV, used ONLY for the "
+                   help="a reference WAV, distinct from the training excitation, used ONLY for the "
                         "post-training FiLM/LeakyReLU runaway scan (scan_film_runaway.py) run right "
-                        "after training. Optional: with no reference clip, this check is skipped "
+                        "after training -- a real recording or a synthesized capture sweep (e.g. "
+                        "T3K-sweep-v3.wav) both work; what matters is varied, hard transient "
+                        "dynamics. Optional: with no reference clip, this check is skipped "
                         "with a note -- it is not derivable from the training excitation, which is "
                         "exactly the gap that let two published models ship with an 80-260x runaway "
                         "nobody had checked for.")
@@ -1515,10 +1517,12 @@ def main():
         # checks whatever is currently at args.nam_output, whether it was just trained or is being
         # re-released from a prior run. Cannot run any earlier -- it needs the exported model.
         #
-        # Needs a REAL-PLAYING reference clip, not the synthetic training excitation -- that is
-        # exactly the gap that let two published models ship with an 80-260x runaway nobody had
-        # checked for (see scan_film_runaway.py). Skipped with a note, not a WARN, when no
-        # --film-reference is configured: this is an unconfigured optional check, not a failure.
+        # Needs a reference clip DISTINCT from the training excitation (real recording or
+        # synthesized capture sweep, either works -- what matters is varied, hard transient
+        # dynamics) -- that is exactly the gap that let two published models ship with an
+        # 80-260x runaway nobody had checked for (see scan_film_runaway.py). Skipped with a
+        # note, not a WARN, when no --film-reference is configured: this is an unconfigured
+        # optional check, not a failure.
         #
         # WARN, don't abort: training is already finished and the compute already spent, so this
         # is a loud flag to look before you ship, not something to throw away a completed run over.
@@ -1526,7 +1530,7 @@ def main():
         if args.nam_output and not args.skip_film_runaway_check:
             if not args.film_reference:
                 log("Skipping post-training FiLM-runaway scan: no --film-reference configured "
-                    "(a real-playing clip, not the training excitation -- see scan_film_runaway.py).",
+                    "(a clip distinct from the training excitation -- see scan_film_runaway.py).",
                     fh)
             elif not Path(args.nam_output).exists():
                 log(f"Skipping post-training FiLM-runaway scan: {args.nam_output} does not exist.",
@@ -1534,7 +1538,7 @@ def main():
             else:
                 section("Post-training — FiLM Runaway Scan", fh)
                 log("Scanning the exported model for the FiLM/LeakyReLU runaway instability "
-                    "against a real-playing reference. Pass --skip-film-runaway-check to skip.", fh)
+                    "against the reference clip. Pass --skip-film-runaway-check to skip.", fh)
                 cmd = [PYTHON, str(HERE / "scan_film_runaway.py"),
                        "--nam", str(args.nam_output), "--reference", str(args.film_reference)]
                 if args.config:

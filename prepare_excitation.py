@@ -41,7 +41,7 @@ Usage:
   ngspice:   python prepare_excitation.py --backend ngspice-deck \\
       --pedal-dir ~/work/parametric-devices/pedals --module gen_ocd_ngspice \\
       --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \\
-      --sweep-file ~/work/parametric-devices/pedals/ocd_realistic_clip.wav \\
+      --sweep-file ~/Downloads/T3K-sweep-v3.wav \\
       --output ~/work/tmp/ocd_excitation.wav
 """
 import argparse
@@ -399,6 +399,19 @@ def main():
                           "further into saturation, so do not inflate it beyond what the "
                           "non-monotonicity actually demands.")
     ap.add_argument("--sweep-dur", type=float, default=None)
+    ap.add_argument("--chirp-f0", type=float, default=None,
+                    help="passed through to build_excitation.py (default there: 40 Hz). Lower "
+                         "this to extend the chirp's frequency floor -- e.g. the tweed-style "
+                         "amp's excitation never chirped below 40 Hz, so its trained models had "
+                         "zero supervision for sustained near-DC (<20 Hz) input and blew up "
+                         "8x on a real capture sweep's own infrasonic segment at a corner no "
+                         "amount of amplitude-only sizing would have caught (see "
+                         "scan_film_runaway.py). Sizing (--chirp-levels/--sweep-peak, both "
+                         "amplitude-only) is unaffected by this -- confirmed empirically: "
+                         "rebuilding at chirp-f0=15 changed output duration/peak/rms by "
+                         "rounding error only.")
+    ap.add_argument("--chirp-f1", type=float, default=None,
+                    help="passed through to build_excitation.py (default there: 12000 Hz)")
     ap.add_argument("--synth-burst-peaks", default=None,
                     help="passed through to build_excitation.py. 'auto' uses the derived "
                          "--chirp-levels, so a broadband instant-attack burst is inserted at "
@@ -451,6 +464,10 @@ def main():
            "--lead-silence-s", str(args.excitation_lead_silence_s)]
     if args.sweep_dur is not None:
         cmd += ["--sweep-dur", str(args.sweep_dur)]
+    if args.chirp_f0 is not None:
+        cmd += ["--chirp-f0", str(args.chirp_f0)]
+    if args.chirp_f1 is not None:
+        cmd += ["--chirp-f1", str(args.chirp_f1)]
     if args.synth_burst_peaks:
         # "auto" mirrors the derived chirp levels, which is what build_excitation.py's own
         # help recommends ("Typically the same list as --chirp-levels") -- so saturation-onset

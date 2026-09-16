@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Cut the most-dynamic N-second window out of a long real-playing clip.
+"""Cut the most-dynamic N-second window out of a long clip -- real recording or synthesized
+sweep, either works.
 
 Formalizes a pattern that had been hand-rolled ad hoc (a throwaway "python -" one-liner,
 never committed) at least three times in this codebase's history -- the tweed-style amp's 17s
@@ -9,10 +10,10 @@ config-comment sentence like "picked by sliding a 95s window and taking the high
 peak/rms".
 
 WHY RMS, NOT PEAK OR CREST: build_excitation.py's own docstring notes that a high-crest
-real-playing clip "samples its own loud region essentially never" -- a single loud transient
+clip "samples its own loud region essentially never" -- a single loud transient
 in an otherwise-quiet clip has high peak and high crest but is exactly the WRONG kind of
 window (little sustained loud content). RMS (energy density) favors windows with genuinely
-more loud/dynamic playing throughout, which is what "most dynamic" has meant in practice
+more dynamic content throughout, which is what "most dynamic" has meant in practice
 across the prior ad hoc uses. Peak is still reported for the chosen window so it's auditable
 either way; --metric lets you rank by peak or peak*rms instead if a future case wants that.
 

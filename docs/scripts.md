@@ -339,7 +339,7 @@ python prepare_excitation.py --backend livespice \
 python prepare_excitation.py --backend ngspice-deck \
     --pedal-dir ~/work/parametric-devices/pedals --module gen_device_ngspice \
     --range "Gain=0.1,0.5,0.9" --range "Tone=0.2,0.5,0.8" --fixed-params "Volume=1.0" \
-    --sweep-file ~/work/parametric-devices/pedals/device_realistic_clip.wav \
+    --sweep-file ~/Downloads/T3K-sweep-v3.wav \
     --output ~/work/tmp/device_excitation.wav
 ```
 
