@@ -150,9 +150,23 @@ def main():
                          "render-time multiplier across the whole combination grid.")
     ap.add_argument("--chirp-levels", default="0.5,1.0,1.5,2.0",
                     help="comma list of sine-chirp peak amplitudes (V); last = training max drive")
-    ap.add_argument("--chirp-f0", type=float, default=40.0)
+    ap.add_argument("--chirp-f0", type=float, default=15.0,
+                    help="sweep floor (Hz). Was 40 -- raised to 15 (2026-09-16) after a "
+                         "tweed-style amp's excitation never chirping below 40 Hz left its "
+                         "trained model with zero supervision for sustained near-DC (<20 Hz) "
+                         "input, which blew up 8x on a real capture sweep's own infrasonic "
+                         "segment at a corner no amount of amplitude-only sizing would have "
+                         "caught (see scan_film_runaway.py). Sizing is unaffected by this knob "
+                         "-- it comes from a separate onset probe, not the chirp itself.")
     ap.add_argument("--chirp-f1", type=float, default=12000.0)
-    ap.add_argument("--chirp-dur", type=float, default=3.0, help="seconds per amplitude step")
+    ap.add_argument("--chirp-dur", type=float, default=6.0,
+                    help="seconds per amplitude step. Was 3 -- raised to 6 (2026-09-16) "
+                         "alongside the --chirp-f0 floor drop so time-per-octave doesn't "
+                         "shrink: a log sweep spends time per OCTAVE, not per Hz, so widening "
+                         "the sweep (40-12000 Hz, 8.23 octaves) to (15-12000 Hz, 9.64 octaves) "
+                         "at the old 3s would have cut density from 0.365 to 0.311 s/octave "
+                         "fleet-wide, not just at the new low end. 6s instead raises it to "
+                         "0.622 s/octave -- denser than before, not just not-worse.")
     ap.add_argument("--noise-burst-src", default=None,
                     help="source WAV to pull a broadband white-noise burst staircase from -- "
                          "default: same file as --sweep-file. A sine chirp only tests ONE "

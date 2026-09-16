@@ -400,16 +400,17 @@ def main():
                           "non-monotonicity actually demands.")
     ap.add_argument("--sweep-dur", type=float, default=None)
     ap.add_argument("--chirp-f0", type=float, default=None,
-                    help="passed through to build_excitation.py (default there: 40 Hz). Lower "
-                         "this to extend the chirp's frequency floor -- e.g. the tweed-style "
-                         "amp's excitation never chirped below 40 Hz, so its trained models had "
-                         "zero supervision for sustained near-DC (<20 Hz) input and blew up "
-                         "8x on a real capture sweep's own infrasonic segment at a corner no "
-                         "amount of amplitude-only sizing would have caught (see "
-                         "scan_film_runaway.py). Sizing (--chirp-levels/--sweep-peak, both "
-                         "amplitude-only) is unaffected by this -- confirmed empirically: "
-                         "rebuilding at chirp-f0=15 changed output duration/peak/rms by "
-                         "rounding error only.")
+                    help="passed through to build_excitation.py (default there: 15 Hz, was "
+                         "40 until 2026-09-16). Lower this to extend the chirp's frequency "
+                         "floor further -- the tweed-style amp's excitation never chirped "
+                         "below 40 Hz, so its trained models had zero supervision for "
+                         "sustained near-DC (<20 Hz) input and blew up 8x on a real capture "
+                         "sweep's own infrasonic segment at a corner no amount of "
+                         "amplitude-only sizing would have caught (see scan_film_runaway.py). "
+                         "Sizing (--chirp-levels/--sweep-peak, both amplitude-only) is "
+                         "unaffected by this -- confirmed empirically: rebuilding at "
+                         "chirp-f0=15 changed output duration/peak/rms by rounding error "
+                         "only.")
     ap.add_argument("--chirp-f1", type=float, default=None,
                     help="passed through to build_excitation.py (default there: 12000 Hz)")
     ap.add_argument("--synth-burst-peaks", default=None,
