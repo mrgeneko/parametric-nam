@@ -18,9 +18,13 @@
 # Two things it refuses to pass as valid, because both have already bitten us:
 #   * NAM version != 0.7.0   -> the host app rejects the file as "A1"
 #   * head_mode != "skip"    -> legacy residual head; renders the wrong function
+#   * anomalous output at a TRAINED knob combination (the stability gate, step 5.5) -> a
+#     published Mesa RED bundle passed every other check here and still produced 17,671x
+#     peaks on 9 of its 72 trained combinations. ESR gave no warning. --skip-stability
+#     overrides deliberately.
 #
 # Usage:
-#   ./release_run.sh [--skip-verify] [--blurb FILE]
+#   ./release_run.sh [--skip-verify] [--skip-stability] [--blurb FILE]
 #
 # Override via env: RUN, CKPT, DS, SCHX, CATEGORY, CIRCUIT, PREFIX, MODELS, PY_BIN
 #
@@ -53,10 +57,11 @@ STAGE="${STAGE:-$HOME/work/tmp/${PREFIX}_release}"
 # the bare CURRENT, and PRIOR_STATE needs to run before this var existed to find it.
 VARIANT="${VARIANT:-}"
 
-verify=1 BLURB=""
+verify=1 BLURB="" stability=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-verify) verify=0; shift;;
+    --skip-stability) stability=0; shift;;
     --blurb)       BLURB="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -691,6 +696,65 @@ python run_pipeline.py --config "\$(cd "\$(dirname "\$0")" && pwd)/config.toml" 
   --epochs $PLANNED
 EOF
 chmod +x "$STAGE/reproduce.sh"
+
+# ---------------------------------------------------------------------------
+# 5.5 STABILITY GATE. Refuse to release a model that blows up on its OWN trained grid.
+#
+# WHY THIS EXISTS (2026-09-17). Until today this script validated NAM version and head_mode
+# and nothing about what the model actually DOES. A Mesa RED gain-master bundle published
+# that morning passed every check here and then produced peaks of 17,671 -- roughly 19,600x
+# the loudest content it was trained on -- on 9 of its 72 TRAINED knob combinations, against
+# a real guitar DI. Its ESR was excellent and gave no hint: in a matched pair, the arm with
+# the BEST accuracy (0.0289 per-combo) was also the WORST for stability (13/72), so training
+# metrics carry no information about this failure mode. Only a scan finds it.
+#
+# HARD FAIL, not a warning. "Warn and continue" is functionally what existed before (nothing),
+# and the broken bundle shipped anyway. --skip-stability is the deliberate override for when
+# a human has looked at the finding and decided to publish regardless; it prints what it is
+# skipping so the decision is recorded rather than silent.
+#
+# Scans the staged bundle, not the run directory, so it sees exactly what will be published --
+# and so scan_film_runaway.py picks up dataset_params.csv (the exact trained combinations) and
+# dataset_config.json (this device's own input.peak) from beside the .nam. Both were staged in
+# step 5 above. Without them the scan falls back to a 0/1 hypercube at raw clip level, which
+# probes knob values and amplitudes the model was never trained on and reports EXTRAPOLATION
+# as instability -- that produced three false alarms in one afternoon's fleet scan.
+# ---------------------------------------------------------------------------
+STABILITY_REF="${STABILITY_REF:-$HERE/reference/film_runaway_reference.wav}"
+if [ "$stability" -eq 0 ]; then
+  echo "==> STABILITY GATE SKIPPED (--skip-stability) -- this bundle is NOT known to be stable"
+  STABILITY_NOTE="not run (--skip-stability)"
+elif [ ! -f "$STABILITY_REF" ]; then
+  echo "==> stability gate: no reference clip at $STABILITY_REF (set STABILITY_REF=)" >&2
+  echo "    Refusing to pass a bundle as stable without scanning it. Use --skip-stability to" >&2
+  echo "    publish anyway, deliberately." >&2
+  exit 1
+else
+  echo "==> stability gate: scanning the staged bundle against $(basename "$STABILITY_REF") ..."
+  SCAN_OUT="$TMPD/stability.txt"
+  if ! "$PY_BIN" "$HERE/scan_film_runaway.py" --nam "$STAGE/${PREFIX}_optimal.param.nam" \
+        --reference "$STABILITY_REF" --freq-probe 1 > "$SCAN_OUT" 2>&1; then
+    : # non-zero exit just means flagged windows; the parse below decides
+  fi
+  sed 's/^/    /' "$SCAN_OUT" | tail -25
+  if grep -q "EXTRAPOLATION" "$SCAN_OUT"; then
+    echo "==> STABILITY GATE FAILED: the scan could not use this device's trained grid," >&2
+    echo "    so its findings would be extrapolation rather than a verdict on the model." >&2
+    echo "    Expected dataset_params.csv in the staged bundle -- step 5 should have copied it." >&2
+    exit 1
+  fi
+  if grep -q "total flagged window" "$SCAN_OUT"; then
+    echo "==> STABILITY GATE FAILED: this model produces anomalous output at combinations it" >&2
+    echo "    was TRAINED on (see the scan above, and the frequency probe for whether it is" >&2
+    echo "    transient-triggered or broadband)." >&2
+    echo "    Remedy: retrain the affected tier with --spectral-norm (param_train.py), keeping" >&2
+    echo "    clean tiers via --freeze-tiers + merge_tiers.py, then re-stage." >&2
+    echo "    To publish regardless, re-run with --skip-stability." >&2
+    exit 1
+  fi
+  echo "==> stability gate PASSED -- clean on every trained combination"
+  STABILITY_NOTE="scanned clean against $(basename "$STABILITY_REF") on every trained combination"
+fi
 
 echo "==> bundle ready at $STAGE:"
 ls -1 "$STAGE" | sed 's/^/      /'
