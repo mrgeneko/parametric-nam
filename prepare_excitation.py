@@ -80,10 +80,95 @@ def method_summary(rows) -> str:
     return seen[0] if len(seen) == 1 else "MIXED: " + ", ".join(seen)
 
 
+
+def solver_identity(backend_name: str) -> str:
+    """A fingerprint of the RENDERER BINARY, so onsets measured on different machines can be
+    proven comparable before they are merged.
+
+    Why this matters more for sizing than for datasets: a shard merge picks ONE number -- the
+    worst-case onset -- out of every corner measured anywhere, and that number sets the
+    excitation peak for the whole device. A single corner measured by a divergent solver build
+    therefore mis-sizes everything downstream, silently. This repo has already seen a solver
+    revision change behaviour outright: enabling SimulateCapacitances was unsolvable
+    ("Failed to eliminate differentials from system of equations") until livespice-cli's
+    LiveSPICE submodule moved to 134d5c0, which adds capacitor currents as system variables.
+    Machines that had not rebuilt kept failing; two of five in this fleet had not.
+
+    livespice_cli has no --version, so hash the executable. Falls back to a marker string
+    rather than raising: an unidentifiable backend should make the merge REFUSE, not crash
+    mid-render after hours of work.
+    """
+    import hashlib
+    if backend_name != "livespice":
+        return f"{backend_name}:unhashed"
+    for cand in (Path.home() / "work/livespice-cli/publish/livespice_cli",
+                 Path("/usr/local/bin/livespice_cli")):
+        if cand.exists():
+            h = hashlib.sha256()
+            with open(cand, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return f"livespice:{h.hexdigest()[:16]}"
+    return "livespice:UNKNOWN"
+
+
+def shard_corners(corners, spec):
+    """The [LOW, HIGH] slice of `corners` by index modulo TOTAL -- shard.py's shared contract.
+
+    Deliberately the same modulo striping gen_dataset_from_schx.py uses rather than
+    contiguous blocks: corner cost here is wildly uneven (a corner whose sweep starts above
+    the saturation onset re-sweeps over a 100x extended range), so contiguous blocks would
+    hand one machine a run of slow corners. Striping mixes fast and slow across shards.
+    """
+    from shard import parse_shard
+    low, high, total = parse_shard(spec)
+    return [(i, c) for i, c in enumerate(corners) if low <= (i % total) <= high]
+
+
+def merge_onset_shards(paths):
+    """Combine per-shard onset files into one ordered row list, refusing anything incomplete.
+
+    Three assertions, each guarding a way a distributed sizing run goes wrong SILENTLY:
+      * solver identity must agree across shards -- see solver_identity().
+      * every corner index 0..N-1 must appear EXACTLY once. A missing index means a shard
+        died and the worst-case onset is computed from a hole; a duplicate means two shards
+        overlapped and the run is not what it claims.
+      * the corner TOTAL must agree across shards, so shards from two different grids (a
+        config edited mid-run) cannot be stitched together.
+    """
+    rows, seen, totals, solvers = {}, set(), set(), set()
+    for p in paths:
+        d = json.loads(Path(p).read_text())
+        totals.add(d["corner_total"]); solvers.add(d["solver"])
+        for r in d["rows"]:
+            i = r["index"]
+            if i in seen:
+                raise SystemExit(f"corner index {i} appears in more than one shard -- shards "
+                                 f"overlap; re-dispatch with disjoint --shard specs")
+            seen.add(i); rows[i] = r
+    if len(solvers) > 1:
+        raise SystemExit(f"shards were measured by DIFFERENT renderer builds ({sorted(solvers)}) "
+                         f"-- onsets are not comparable and the worst-case pick would be "
+                         f"meaningless. Rebuild every worker to the same revision and re-run.")
+    if "livespice:UNKNOWN" in solvers:
+        raise SystemExit("could not fingerprint the renderer binary on at least one worker -- "
+                         "refusing to merge onsets that cannot be proven comparable.")
+    if len(totals) > 1:
+        raise SystemExit(f"shards disagree on the corner count ({sorted(totals)}) -- they were "
+                         f"measured against different grids; re-dispatch from one config.")
+    total = totals.pop()
+    gaps = sorted(set(range(total)) - seen)
+    if gaps:
+        raise SystemExit(f"{len(gaps)} corner(s) missing from the merge (first: {gaps[:8]}) -- "
+                         f"a shard did not finish. The worst-case onset would be computed from "
+                         f"an incomplete set; re-run the missing shard(s).")
+    return [rows[i] for i in range(total)]
+
+
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
                       lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None,
-                      corner_workers=1):
+                      corner_workers=1, shard=None, emit_onsets=None, backend_name="livespice"):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -93,6 +178,17 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     docstring's "refuse to guess"."""
     corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners)
     corners = _sample_interior(knob_ranges, corners, sample_grid)
+    corner_total = len(corners)
+    # SHARDED MODE: measure only this slice and write it out; do NOT size. The worst-case
+    # onset is a max over EVERY corner, so a shard sizing from its own slice would produce a
+    # confidently wrong peak. Sizing happens once, after --merge-onsets proves the set complete.
+    shard_index = None
+    if shard:
+        picked = shard_corners(corners, shard)
+        shard_index = [i for i, _ in picked]
+        corners = [c for _, c in picked]
+        if not quiet:
+            print(f"  shard {shard}: {len(corners)} of {corner_total} corners")
     if not quiet:
         # full_hypercube is now TRI-STATE (None = default/full, False = the deprecated
         # structural-only set, True = legacy callers), so a bare truthiness test mislabels the
@@ -180,6 +276,16 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                      # the artifact than to infer it later from build dates and plausibility.
                      "knee_v": (sat or {}).get("knee_v"),
                      "method": (sat or {}).get("onset_method")})
+    if emit_onsets:
+        for n, r in enumerate(rows):
+            r["index"] = shard_index[n] if shard_index is not None else n
+        Path(emit_onsets).write_text(json.dumps(
+            {"corner_total": corner_total, "solver": solver_identity(backend_name),
+             "shard": shard, "rows": rows}, indent=2))
+        print(f"wrote {len(rows)} onset row(s) to {emit_onsets} "
+              f"(solver {solver_identity(backend_name)}) -- NOT sized; merge with "
+              f"--merge-onsets to size once across every shard")
+        return None, rows
     missing = [r for r in rows if r["onset_v"] is None]
     if missing:
         raise RuntimeError(
@@ -389,6 +495,25 @@ def main():
                          "(same format gen_dataset_from_schx.py --conv uses; e.g. "
                          "bjt_vaf=102.207,bjt_rb=173.312 for a real datasheet-fitted "
                          "transistor). Default: --config's own `conv` field.")
+    ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL",
+                    help="measure only the corners whose index modulo TOTAL falls in "
+                         "[LOW, HIGH] -- shard.py's shared contract, same as "
+                         "gen_dataset_from_schx.py. Requires --emit-onsets and SKIPS sizing: "
+                         "the worst-case onset is a max over EVERY corner, so a shard that "
+                         "sized from its own slice would produce a confidently wrong "
+                         "excitation peak. Striping (modulo), not contiguous blocks, because "
+                         "corner cost is wildly uneven -- a corner whose sweep starts above "
+                         "the onset re-sweeps over a 100x extended range.")
+    ap.add_argument("--emit-onsets", metavar="PATH",
+                    help="write this run's measured onsets as JSON instead of sizing. Carries "
+                         "the corner total, each row's GLOBAL corner index, and a fingerprint "
+                         "of the renderer binary so --merge-onsets can refuse mismatched work.")
+    ap.add_argument("--merge-onsets", nargs="+", metavar="PATH",
+                    help="combine --emit-onsets files from every shard, verify completeness "
+                         "and solver agreement, then size ONCE from the full set. Refuses on a "
+                         "missing or duplicated corner index, a solver-build mismatch, or a "
+                         "corner-count disagreement -- each of which would otherwise yield a "
+                         "silently mis-sized excitation.")
     ap.add_argument("--corner-workers", type=int, default=None, metavar="N",
                     help="measure this many knob corners concurrently (default: auto, "
                          "cpu_count//4 capped at 6). Corners are independent, so this is the "
@@ -497,18 +622,36 @@ def main():
     (backend, identity, cache_extra, knob_ranges, fixed, sweep_lead_silence_s, label,
      _capture) = _setup(args)
 
-    print(f"finding saturation onset across the knob-grid corners of {label}...")
-    tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
-    worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
-                                    peak_max_v=args.peak_max_v, no_cache=args.no_cache,
-                                    capture=_capture,
-                                    corner_workers=(args.corner_workers if args.corner_workers
-                                                    else max(1, min(6, (os.cpu_count() or 4) // 4))),
-                                    full_hypercube=(False if args.no_full_hypercube else None),
-                                    max_corners=args.max_corners,
-                                    sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
-                                    quiet=False,
-                                    lead_silence_s=sweep_lead_silence_s)
+    if args.merge_onsets:
+        # MERGE MODE: every corner was already measured elsewhere. Skip rendering entirely and
+        # size from the verified union -- merge_onset_shards() refuses anything incomplete or
+        # measured by a divergent solver build, so reaching here means the set is trustworthy.
+        rows = merge_onset_shards(args.merge_onsets)
+        missing = [r for r in rows if r.get("onset_v") is None]
+        if missing:
+            raise SystemExit(f"{len(missing)} merged corner(s) have no onset (first: "
+                             f"{missing[0].get('corner')}) -- refusing to size around a corner "
+                             f"whose saturation was never determined.")
+        worst = max(r["onset_v"] for r in rows)
+        print(f"merged {len(rows)} corner(s) from {len(args.merge_onsets)} shard file(s); "
+              f"worst-case onset: {worst:.4f} V")
+    else:
+        print(f"finding saturation onset across the knob-grid corners of {label}...")
+        tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
+        worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
+                                        peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                        capture=_capture,
+                                        corner_workers=(args.corner_workers if args.corner_workers
+                                                        else max(1, min(6, (os.cpu_count() or 4) // 4))),
+                                        shard=args.shard, emit_onsets=args.emit_onsets,
+                                        backend_name=args.backend,
+                                        full_hypercube=(False if args.no_full_hypercube else None),
+                                        max_corners=args.max_corners,
+                                        sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
+                                        quiet=False,
+                                        lead_silence_s=sweep_lead_silence_s)
+    if worst is None:      # --emit-onsets: this shard's work is written, sizing is not ours
+        return 0
     print(f"worst-case onset: {worst:.4f} V (across {len(rows)} corners)")
 
     chirp_max = worst * args.margin
