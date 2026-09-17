@@ -140,9 +140,12 @@ def test_no_auto_config_forces_reduced_set_even_with_config_toml_present(tmp_pat
 
 
 def test_no_config_anywhere_falls_back_to_reduced_set_with_warning(tmp_path, monkeypatch, capsys):
-    """No config.toml next to --nam at all -- the genuinely config-less case. Must still
-    work (the reduced set is a legitimate fallback), but must warn loudly: this is
-    exactly the path that silently missed a real defect before."""
+    """No trained grid discoverable at all -- no dataset_params.csv, no config.toml next to
+    --nam. Must still work (the reduced set is a legitimate last resort), but must warn
+    loudly: this is exactly the path that silently missed a real defect before, and it is
+    also the path that reports EXTRAPOLATION beyond the trained range as if it were
+    instability (2026-09-17: 47,461x and 43x readings on two models that are 0/576 and
+    0/16 across their real grids)."""
     path, _ = _write_nam(tmp_path, lora_rank=0)
     ref = _write_reference(tmp_path)
     corner = ("knob0=0.5,knob1=0.5", [0.5, 0.5])
@@ -154,7 +157,8 @@ def test_no_config_anywhere_falls_back_to_reduced_set_with_warning(tmp_path, mon
     assert calls == {"full": 0, "hyper": 1}
     out = capsys.readouterr().out
     assert "WARNING" in out
-    assert "reduced hypercube corner set" in out
+    assert "hypercube" in out           # wording covers the 3-source discovery chain
+    assert "EXTRAPOLATION" in out       # the fallback must say findings are not a verdict
     assert "[reduced hypercube]" in out
 
 

@@ -480,7 +480,7 @@ def main():
     n_batches = -(-len(corners) // args.batch_size)  # ceil
     print(f"  {len(corners)} corners x {n_chunks} chunks each "
           f"({n_batches} corner-batches/chunk, batch-size={args.batch_size}, workers={workers})"
-          f"{' [full grid]' if config else ' [reduced hypercube]'}")
+          f"{' [reduced hypercube]' if 'hypercube' in grid_source else ' [full grid]'}")
 
     def make_score(model):
         def score(job):
