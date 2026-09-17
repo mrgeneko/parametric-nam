@@ -158,3 +158,66 @@ class TestMainEndToEnd:
         monkeypatch.setattr("sys.argv", ["merge_tiers.py", str(w3), "--out", str(tmp_path / "out.nam")])
         with pytest.raises(SystemExit):
             main()
+
+
+class TestParseInput:
+    def test_bare_path_has_no_width_filter(self):
+        from merge_tiers import parse_input
+        assert parse_input("model.param.nam") == ("model.param.nam", None)
+
+    def test_colon_width_suffix_is_parsed(self):
+        from merge_tiers import parse_input
+        assert parse_input("model.param.nam:8") == ("model.param.nam", 8)
+
+    def test_colon_suffix_only_matches_trailing_digits(self):
+        from merge_tiers import parse_input
+        # a path with a non-numeric trailing segment is NOT treated as having a selector
+        assert parse_input("weird:path/model.param.nam") == ("weird:path/model.param.nam", None)
+
+
+class TestMixedMerge:
+    """The actual motivating case: two multi-tier containers that both offer the same
+    widths, needing ONE specific tier taken from each -- exactly what --replace alone
+    cannot express (it would take EVERY width the later input offers, not just one)."""
+
+    def _write_container(self, path, tiers):
+        """tiers: {width: metadata_tag}"""
+        subs = [{"max_value": (i + 1) / len(tiers),
+                 "model": make_bare_nam(w, metadata={"tag": tag})}
+                for i, (w, tag) in enumerate(sorted(tiers.items()))]
+        write_nam(path, {"architecture": "SlimmableContainer",
+                         "config": {"submodels": subs}})
+
+    def test_width_selector_takes_only_that_tier_from_a_multi_tier_file(self, tmp_path, monkeypatch):
+        old = tmp_path / "old.nam"     # offers w4=old, w8=old
+        new = tmp_path / "new.nam"     # offers w4=new, w8=new (e.g. w8 damaged by a wrap bug)
+        out = tmp_path / "out.nam"
+        self._write_container(old, {4: "old", 8: "old"})
+        self._write_container(new, {4: "new", 8: "new"})
+
+        monkeypatch.setattr("sys.argv", ["merge_tiers.py", f"{old}:8", f"{new}:4", "--out", str(out)])
+        assert main() == 0
+
+        subs = json.loads(out.read_text())["config"]["submodels"]
+        by_width = {s["model"]["config"]["layers"]: s["model"]["metadata"]["tag"] for s in subs}
+        assert by_width == {4: "new", 8: "old"}, \
+            "must take w4 from the NEW file and w8 from the OLD file, not everything from one"
+
+    def test_width_selector_with_no_matching_width_errors(self, tmp_path, monkeypatch):
+        old = tmp_path / "old.nam"
+        self._write_container(old, {4: "old", 8: "old"})
+        monkeypatch.setattr("sys.argv", ["merge_tiers.py", f"{old}:5",
+                                         "--out", str(tmp_path / "out.nam")])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_without_selector_both_widths_still_collide_as_before(self, tmp_path, monkeypatch):
+        """Regression guard: adding the selector must not change bare-path behavior."""
+        old = tmp_path / "old.nam"
+        new = tmp_path / "new.nam"
+        self._write_container(old, {4: "old", 8: "old"})
+        self._write_container(new, {4: "new", 8: "new"})
+        monkeypatch.setattr("sys.argv", ["merge_tiers.py", str(old), str(new),
+                                         "--out", str(tmp_path / "out.nam")])
+        with pytest.raises(SystemExit):
+            main()

@@ -21,8 +21,23 @@ Inputs are read left to right; a later input offering a width already seen is an
 error unless --replace is given (then it overrides — e.g. to swap in a better
 tier). All tiers must be the same product (version, sample rate, head_mode, param
 set) differing only in channel width; mismatches are refused.
+
+MIXED MERGE (path:width): a bare path contributes EVERY submodel it has, so two
+multi-tier containers that both offer the same widths can't be combined into "w4
+from A, w8 from B" via file order + --replace alone -- with --replace, B's LATER
+input simply overrides EVERY width it also offers, not just the one you wanted (a
+real sharp edge, found 2026-09-17 fixing a --freeze-tiers case where the "kept"
+tier needed to come from the ORIGINAL checkpoint, not the one that just trained
+alongside it). Suffix a path with :<width> to take ONLY that one submodel from it:
+
+  # w4 from the just-trained fix, w8 unchanged from the original shipped model
+  python merge_tiers.py \
+      original.best_full.param.nam:8  fixed.best_lite.param.nam:4 \
+      --out patched.param.nam
+
+A bare path (no suffix) still contributes every submodel it has, as before.
 """
-import argparse, json, sys
+import argparse, json, re, sys
 from pathlib import Path
 
 
@@ -55,23 +70,44 @@ def signature(sub: dict):
             p.get("schema_version"), json.dumps(p.get("parameters"), sort_keys=True))
 
 
+_INPUT_RE = re.compile(r"^(.*):(\d+)$")
+
+
+def parse_input(arg: str) -> tuple[str, int | None]:
+    """'path' -> (path, None) [every submodel]; 'path:8' -> (path, 8) [only that width]."""
+    m = _INPUT_RE.match(arg)
+    return (m.group(1), int(m.group(2))) if m else (arg, None)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Merge .param.nam tiers into one SlimmableContainer")
-    ap.add_argument("inputs", nargs="+", help=".param.nam files (containers or bare ParametricWaveNet)")
+    ap.add_argument("inputs", nargs="+",
+                    help=".param.nam files (containers or bare ParametricWaveNet). Suffix "
+                         "with :<width> (e.g. model.param.nam:8) to take only that one "
+                         "submodel from a multi-tier file -- see module docstring's MIXED "
+                         "MERGE section for why bare paths can't express this alone.")
     ap.add_argument("--out", required=True, help="output .param.nam")
     ap.add_argument("--replace", action="store_true",
                     help="let a later input override an earlier same-width tier (default: error)")
     args = ap.parse_args()
 
     by_width: dict[int, tuple] = {}          # width -> (submodel, source path)
-    for path in args.inputs:
+    for raw in args.inputs:
+        path, only_width = parse_input(raw)
         nam = json.loads(Path(path).read_text())
-        for sub in submodels_of(nam, path):
+        subs = submodels_of(nam, path)
+        if only_width is not None:
+            subs = [s for s in subs if width_of(s) == only_width]
+            if not subs:
+                raise SystemExit(f"{path}: no width-{only_width} submodel found "
+                                 f"(has: {sorted(width_of(s) for s in submodels_of(nam, path))})")
+        for sub in subs:
             w = width_of(sub)
             if w in by_width:
                 if not args.replace:
                     raise SystemExit(f"width {w} appears in both {by_width[w][1]} and {path}; "
-                                     f"pass --replace to let the later input override")
+                                     f"pass --replace to let the later input override, or suffix "
+                                     f"an input with :<width> to pick just one tier from it")
                 print(f"  replacing width-{w} tier: {by_width[w][1]} -> {path}", file=sys.stderr)
             by_width[w] = (sub, path)
 
