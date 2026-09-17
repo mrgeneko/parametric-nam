@@ -126,6 +126,13 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
     return corners
 
 
+#: Assumed sweep floor when a bundle carries no excitation recipe to derive one from. 40 Hz
+#: is the value 13 of the 15 recipe-carrying bundles record (the other two record 80). Chosen
+#: over "no filter" because the committed reference is built at 15 Hz on the assumption the
+#: scan narrows it per device -- leaving it unfiltered probes below anything in the fleet.
+FALLBACK_SWEEP_FLOOR_HZ = 40.0
+
+
 def device_sweep_floor(nam_path):
     """The lowest frequency this device's excitation deliberately covers, in Hz.
 
@@ -474,10 +481,18 @@ def main():
         x = sosfilt(butter(4, floor, "highpass", fs=SR, output="sos"), x).astype(np.float32)
         print(f"  sweep floor: high-passed at {floor:g} Hz ({floor_src})")
     elif args.sweep_floor is None:
-        print("  WARNING: no excitation recipe found beside the .nam -- reference NOT high-passed. "
-              "If it\n           carries content below this device's own chirp floor, findings "
-              "there are absence of\n           training signal, not instability. Pass "
-              "--sweep-floor to set it explicitly.")
+        # NO recipe to derive from. Do NOT fall through unfiltered: the committed clip is built
+        # at build_excitation.py's most permissive floor (15 Hz) precisely because the scan is
+        # expected to narrow it per device, so "no floor" probes lower than ANY device is
+        # trained for. Assume the fleet's most common recorded floor instead, and say so --
+        # over-filtering costs coverage, under-filtering manufactures findings.
+        floor = FALLBACK_SWEEP_FLOOR_HZ
+        from scipy.signal import butter, sosfilt
+        x = sosfilt(butter(4, floor, "highpass", fs=SR, output="sos"), x).astype(np.float32)
+        print(f"  WARNING: no excitation recipe beside the .nam -- ASSUMING a {floor:g} Hz sweep "
+              f"floor (the fleet's\n           most common recorded value). If this device was "
+              f"trained lower, that costs coverage;\n           if higher, findings near the "
+              f"floor may be absence of training signal. Pass --sweep-floor.")
 
     # PER-DEVICE INPUT SCALING -- see device_input_level() for why a fixed absolute level
     # makes this check meaningless across a fleet whose excitations span 122x.
