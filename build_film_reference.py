@@ -44,11 +44,13 @@ Usage:
   python build_film_reference.py --output reference/film_runaway_reference.wav
 """
 import argparse
+import sys
 
 import numpy as np
 import soundfile as sf
 
 from build_excitation import _log_sweep, _transient_burst, SR
+from param_train import RECEPTIVE_FIELD_SAMPLES as RF_SAMPLES   # derive the floor, never hardcode it
 
 DEFAULT_LEVELS = [0.1, 0.3, 0.6, 1.0, 1.5]
 NOISE_SEED = 20260916
@@ -114,9 +116,23 @@ def main():
     ap.add_argument("--noise-dur", type=float, default=1.5,
                     help="seconds per level's white-noise segment")
     ap.add_argument("--burst-decay-tau", type=float, default=0.03)
-    ap.add_argument("--f0", type=float, default=3.0,
-                    help="sweep floor, Hz -- deliberately below any current device's own "
-                         "chirp floor so this stays a genuine stress test")
+    ap.add_argument("--f0", type=float, default=20.0,
+                    help=f"sweep floor, Hz (default: %(default)s). RAISED FROM 3.0 ON "
+                         f"2026-09-17. The old value was chosen to sit below any device's own "
+                         f"chirp floor so this stayed a genuine stress test -- but a stress "
+                         f"test has to probe something the model can REPRESENT. The A2 stack's "
+                         f"receptive field is {RF_SAMPLES} samples / {1000.0*RF_SAMPLES/SR:.1f} ms, "
+                         f"so the slowest periodicity resolvable inside one window is "
+                         f"SR/RF = {SR/RF_SAMPLES:.2f} Hz; below that the input completes less "
+                         f"than one cycle and is structurally indistinguishable from a slow DC "
+                         f"drift. Probing there measures undefined behaviour, not instability. "
+                         f"Measured cost of the old default: 12.5%% of the clip's energy sat "
+                         f"below that floor and produced a 47x excursion in a published Mesa "
+                         f"Orange that is CLEAN on real playing (0/576 across its trained grid) "
+                         f"-- a phantom defect that cost a fleet-wide false alarm. 20 Hz keeps "
+                         f"the clip a stress test (every device's own chirp floor is 40 Hz, and "
+                         f"the capture chain high-passes at 18 Hz) while staying inside what the "
+                         f"architecture can actually model.")
     ap.add_argument("--f1", type=float, default=20000.0)
     ap.add_argument("--lead-silence-s", type=float, default=1.0)
     ap.add_argument("--gap-s", type=float, default=0.2, help="short silence between segments")
@@ -124,6 +140,13 @@ def main():
                     help="dedicated longer silence inserted every other level")
     args = ap.parse_args()
 
+    rf_floor = SR / RF_SAMPLES
+    if args.f0 < rf_floor:
+        print(f"WARNING: --f0 {args.f0} Hz is below the A2 receptive-field floor "
+              f"({rf_floor:.2f} Hz = SR/{RF_SAMPLES}).\n"
+              f"         Content there completes <1 cycle in the model's window and is "
+              f"indistinguishable from a\n         slow DC drift -- anything it provokes is "
+              f"undefined behaviour, not instability.", file=sys.stderr)
     levels = [float(v) for v in args.levels.split(",") if v.strip()]
     y = build(levels, args.sweep_dur, args.burst_dur, args.noise_dur, args.burst_decay_tau,
               args.f0, args.f1, args.lead_silence_s, args.gap_s, args.long_silence_s)
