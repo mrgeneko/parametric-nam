@@ -184,7 +184,7 @@ def main():
     ap.add_argument("--noise-dur", type=float, default=1.5,
                     help="seconds per level's white-noise segment")
     ap.add_argument("--burst-decay-tau", type=float, default=0.03)
-    ap.add_argument("--f0", type=float, default=40.0,
+    ap.add_argument("--f0", type=float, default=15.0,
                     help=f"sweep floor, Hz (default: %(default)s). RAISED FROM 3.0 ON "
                          f"2026-09-17. The old value was chosen to sit below any device's own "
                          f"chirp floor so this stayed a genuine stress test -- but a stress "
@@ -198,7 +198,20 @@ def main():
                          f"below that floor and produced a 47x excursion in a published Mesa "
                          f"Orange that is CLEAN on real playing (0/576 across its trained grid) "
                          f"-- a phantom defect that cost a fleet-wide false alarm. 20 Hz keeps "
-                         f"the clip a stress test while staying inside what the architecture can "
+                         f"15 Hz matches build_excitation.py's own --chirp-f0 default (98cbb16), i.e. "
+                         f"the LOWEST floor any device in the fleet is trained to. That is "
+                         f"deliberate: scan_film_runaway.py now high-passes this clip UP to each "
+                         f"device's own recorded floor (device_sweep_floor()), so the committed "
+                         f"clip should be as permissive as the most permissive device and get "
+                         f"narrowed per scan. Building it at 40 would silently cap every future "
+                         f"15 Hz-trained device at 40. Do not lower below the receptive-field "
+                         f"floor regardless. Earlier attempts at a fixed floor, kept as history: "
+                         f"3 Hz put 12.5%% of the clip's energy below what the model can "
+                         f"represent; 20 Hz landed in the 18 Hz capture high-pass transition band "
+                         f"and read 341 on a sustained tone from a model that is clean on real "
+                         f"playing; 40 Hz was right for most of the fleet but wrong for the two "
+                         f"devices trained from 80 Hz and for anything trained from 15. "
+                         f"Keeps the clip a stress test while staying inside what the architecture can "
                          f"model AND what training actually covered. 20 Hz was tried first and "
                          f"was still too low: it sits in the transition band of the 18 Hz "
                          f"3rd-order capture-chain high-pass every build pins, where the model's "

@@ -126,6 +126,49 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
     return corners
 
 
+def device_sweep_floor(nam_path):
+    """The lowest frequency this device's excitation deliberately covers, in Hz.
+
+    Returns (floor_hz, source) or (None, None).
+
+    WHY THE PROBE MUST BE HIGH-PASSED PER DEVICE (2026-09-17). build_excitation.py sweeps its
+    amplitude-stepped chirps from --chirp-f0 upward; below that the excitation carries only
+    whatever incidental content the --sweep-file segment happens to have, at whatever level it
+    happens to be. So chirp_f0 is the bottom of the band training deliberately covers, and a
+    reference clip reaching below it probes a band the model was never taught -- which reads as
+    instability but is just absence of training signal.
+
+    That is not hypothetical: a fixed 20 Hz probe floor made a published Mesa Orange w4 read 341
+    on a SUSTAINED 20 Hz tone while being clean from 45 Hz up and clean on real playing, because
+    20 Hz sits in the transition band of the 18 Hz capture-chain high-pass. Raising the clip's own
+    floor to 40 Hz fixed that -- but 40 is not right either: this fleet already records floors of
+    40 AND 80 Hz (marshall-the-guv-nor, proco-rat), and build_excitation.py's default moved to 15
+    in 98cbb16. Any single hardcoded number is wrong for part of the fleet in one direction or the
+    other, so derive it.
+
+    Reads the bundle's dataset_config.json recipe. Accepts both key spellings: `chirp_f0` (current)
+    and `sweep_f0` (pre-c03f54b rename), since published bundles carry a mix.
+    """
+    cfg_path = Path(nam_path).parent / "dataset_config.json"
+    if not cfg_path.exists():
+        return None, None
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, ValueError):
+        return None, None
+    args = ((cfg.get("input") or {}).get("build_recipe") or {}).get("args") or {}
+    for key in ("chirp_f0", "sweep_f0"):
+        v = args.get(key)
+        if v:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                return f, f"bundle recipe {key}={f:g} Hz"
+    return None, None
+
+
 def device_input_level(nam_path):
     """The peak input level this device was TRAINED at, in volts. Returns (level, source).
 
@@ -355,6 +398,16 @@ def main():
                          "which climbed unboundedly past 34GB on the exact same machine/model. "
                          "Raise this only if you have headroom to spare -- workers x batch_size "
                          "is the number that matters, not either alone.")
+    ap.add_argument("--sweep-floor", type=float, default=None, metavar="HZ",
+                    help="high-pass the reference to this frequency before scanning. Default: "
+                         "derived from the bundle's own excitation recipe (chirp_f0/sweep_f0) -- "
+                         "the lowest frequency training deliberately covers. Probing below it "
+                         "measures a band the model was never taught, which reads as instability "
+                         "but is absence of training signal: a 20 Hz probe made a published Mesa "
+                         "Orange w4 read 341 on a sustained tone while clean from 45 Hz up and "
+                         "clean on real playing. No single constant is right -- this fleet records "
+                         "floors of 40 AND 80 Hz, and build_excitation.py's default moved to 15 -- "
+                         "so it is derived, not hardcoded. 0 disables the high-pass.")
     ap.add_argument("--headroom", type=float, default=1.0,
                     help="scale the reference to (this device's trained peak x HEADROOM). "
                          "Default 1.0 = drive it exactly as hard as training did. Raising this "
@@ -411,6 +464,20 @@ def main():
     if x.ndim > 1: x = x[:, 0]
     if sr != SR:
         raise SystemExit(f"reference sr {sr} != {SR}")
+
+    # PER-DEVICE SWEEP FLOOR -- see device_sweep_floor() for why this cannot be a constant.
+    # Applied BEFORE scaling so the level is measured on the band actually being scanned.
+    floor, floor_src = ((args.sweep_floor, "--sweep-floor") if args.sweep_floor is not None
+                        else device_sweep_floor(args.nam))
+    if floor:
+        from scipy.signal import butter, sosfilt
+        x = sosfilt(butter(4, floor, "highpass", fs=SR, output="sos"), x).astype(np.float32)
+        print(f"  sweep floor: high-passed at {floor:g} Hz ({floor_src})")
+    elif args.sweep_floor is None:
+        print("  WARNING: no excitation recipe found beside the .nam -- reference NOT high-passed. "
+              "If it\n           carries content below this device's own chirp floor, findings "
+              "there are absence of\n           training signal, not instability. Pass "
+              "--sweep-floor to set it explicitly.")
 
     # PER-DEVICE INPUT SCALING -- see device_input_level() for why a fixed absolute level
     # makes this check meaningless across a fleet whose excitations span 122x.
