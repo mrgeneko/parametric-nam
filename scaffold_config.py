@@ -298,7 +298,7 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
 
 
 def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
-                        sweep_dur_cap: float, n_knobs: int = 0) -> bool:
+                        sweep_dur_cap: float, n_knobs: int = 0, workers: int = 4) -> bool:
     """Build a properly-calibrated excitation via prepare_excitation.py (which measures
     this circuit's REAL saturation onset across the knob grid's corners, rather than
     pointing `input` at a raw downloaded sweep with no calibration behind it at all --
@@ -331,6 +331,12 @@ def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
            "--backend", "livespice", "--config", str(config_path),
            "--sweep-file", str(sweep_file), "--output", str(output_wav)]
+    # Pass our own --workers through. This was missing: scaffold used --workers for its
+    # truncation phase (12 concurrent renders) and then handed prepare_excitation.py nothing,
+    # so onset measurement -- by far the longer phase on a many-knob circuit -- ran serially
+    # on the same machine. Divided by 4 because find_saturation_point() fans out its own
+    # amplitude sweep underneath; see --corner-workers' help for the product argument.
+    cmd += ["--corner-workers", str(max(1, min(6, workers // 4)))]
     # Probe the grid INTERIOR too, not just corners -- see _interior_sample_budget.
     budget = _interior_sample_budget(n_knobs)
     if budget:
@@ -478,7 +484,7 @@ def main() -> None:
     elif args.backend == "livespice" and not args.skip_prepare_excitation:
         excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
         ok = _prepare_excitation(output, Path(args.input), excitation_wav,
-                                 args.sweep_dur_cap, n_knobs=len(names))
+                                 args.sweep_dur_cap, n_knobs=len(names), workers=args.workers)
         if ok and excitation_wav.exists():
             # prepare_excitation.py already pointed `input` here, and its line carries the
             # measured worst-case onset and corner count that this function does not have.

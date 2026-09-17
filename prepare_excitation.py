@@ -82,7 +82,8 @@ def method_summary(rows) -> str:
 
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
-                      lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None):
+                      lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None,
+                      corner_workers=1):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -107,20 +108,71 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
         else:
             kind = "full binary hypercube"
         print(f"  {len(corners)} corners ({kind} set)")
-    rows = []
-    for label, vals in corners:
+    # CORNER-LEVEL PARALLELISM (2026-09-17). Corners are independent -- the adaptive
+    # range-extension inside find_saturation_point() is per-corner and never reads another
+    # corner's result -- so they parallelise cleanly. Previously this loop was strictly
+    # serial: scaffold_config.py passes --workers to its truncation phase (12 renders at
+    # once) and then nothing here, so onset measurement ran ~2 renders deep on a machine
+    # with 12 cores. On a 141-corner device (6 knobs: 77 corner + 64 interior) whose every
+    # corner needed the 100x range extension, that was ~2 hours.
+    #
+    # PER-CORNER TMP IS MANDATORY, not tidiness. find_saturation_point()'s sweep names its
+    # render files `fp_{i}` from a counter created fresh per call, so two concurrent corners
+    # both write fp_0, fp_1, ... If they shared `tmp` they would silently overwrite each
+    # other's renders and return onsets measured from the wrong audio -- a wrong EXCITATION
+    # PEAK for the device, with nothing failing. Each corner therefore gets its own subdir.
+    #
+    # Concurrency is a PRODUCT, not a sum: find_saturation_point already fans out its
+    # amplitude points (workers=8 by default), so corner_workers x that must stay near the
+    # core count or the machine thrashes -- the same workers x batch-size pathology
+    # scan_film_runaway.py's --batch-size help documents. Hence sweep workers are divided
+    # down as corner_workers rises, keeping the product roughly constant.
+    sweep_workers = max(1, 8 // max(1, corner_workers))
+
+    def _measure(idx_label_vals):
+        idx, (label, vals) = idx_label_vals
         params = dict(vals); params.update(fixed)
         cpath = findpeak_cache_key(identity, params, cache_extra)
         if cpath.exists() and not no_cache:
             sat = json.loads(cpath.read_text())
         else:
-            sat = find_saturation_point(backend, params, tmp, max_v=peak_max_v,
-                                         lead_silence_s=lead_silence_s, capture=capture)
+            ctmp = Path(tmp) / f"corner_{idx:04d}" if corner_workers > 1 else tmp
+            if corner_workers > 1:
+                Path(ctmp).mkdir(parents=True, exist_ok=True)
+            sat = find_saturation_point(backend, params, str(ctmp), max_v=peak_max_v,
+                                         lead_silence_s=lead_silence_s, capture=capture,
+                                         workers=sweep_workers)
             cache_findpeak(cpath, sat)
+        return label, params, sat
+
+    def _report(label, sat, done, total):
         onset = sat.get("onset_99pct_input_v") if sat else None
         if not quiet:
             onset_str = "NONE (not reached)" if onset is None else f"{onset:.3f} V"
-            print(f"  {label:16} onset={onset_str:>10}")
+            prefix = f"  [{done}/{total}]" if corner_workers > 1 else "  "
+            print(f"{prefix} {label:16} onset={onset_str:>10}", flush=True)
+        return onset
+
+    # Results are REPORTED as they land but STORED by index. Printing on completion keeps a
+    # long run legible -- an earlier version collected everything before printing a line,
+    # which on a 141-corner device meant no output at all for over an hour. Storing by index
+    # keeps `rows` in corner order regardless of completion order, so the artifact and the
+    # worst-case pick do not depend on scheduling.
+    results = [None] * len(corners)
+    if corner_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=corner_workers) as ex:
+            futs = {ex.submit(_measure, (i, c)): i for i, c in enumerate(corners)}
+            for n, fut in enumerate(as_completed(futs), 1):
+                label, params, sat = fut.result()
+                results[futs[fut]] = (label, params, sat, _report(label, sat, n, len(corners)))
+    else:
+        for i, c in enumerate(corners):
+            label, params, sat = _measure((i, c))
+            results[i] = (label, params, sat, _report(label, sat, i + 1, len(corners)))
+
+    rows = []
+    for label, params, sat, onset in results:
         rows.append({"corner": label, "params": params, "onset_v": onset,
                      # Recorded per corner, not once per run: a sizing pass can mix freshly
                      # measured corners with cache hits, and if those were written by different
@@ -337,6 +389,15 @@ def main():
                          "(same format gen_dataset_from_schx.py --conv uses; e.g. "
                          "bjt_vaf=102.207,bjt_rb=173.312 for a real datasheet-fitted "
                          "transistor). Default: --config's own `conv` field.")
+    ap.add_argument("--corner-workers", type=int, default=None, metavar="N",
+                    help="measure this many knob corners concurrently (default: auto, "
+                         "cpu_count//4 capped at 6). Corners are independent, so this is the "
+                         "main lever on sizing wall-clock: the loop was serial until "
+                         "2026-09-17, which left onset measurement ~2 renders deep on a "
+                         "12-core machine and cost ~2h on a 141-corner device. Concurrency is "
+                         "a PRODUCT -- find_saturation_point() already fans out its amplitude "
+                         "points -- so raising this divides the per-sweep workers down to keep "
+                         "the total near the core count. 1 restores the old serial behaviour.")
     ap.add_argument("--no-cache", action="store_true")
 
     # excitation-building
@@ -441,6 +502,8 @@ def main():
     worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                     peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                     capture=_capture,
+                                    corner_workers=(args.corner_workers if args.corner_workers
+                                                    else max(1, min(6, (os.cpu_count() or 4) // 4))),
                                     full_hypercube=(False if args.no_full_hypercube else None),
                                     max_corners=args.max_corners,
                                     sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
