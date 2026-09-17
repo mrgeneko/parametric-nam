@@ -24,6 +24,7 @@ Two modes:
    tier of the model must be covered. Widths are inferred from the checkpoints.
 """
 import argparse
+import sys
 import json
 from pathlib import Path
 
@@ -139,11 +140,27 @@ def main():
         loaded = {t: model_state(ck) for t, ck in raw.items()}
         widths = infer_widths(next(iter(loaded.values())))
         sn_per_tier = {t: detect_spectral_norm(s) for t, s in loaded.items()}
-        spectral_norm = require_tier_agreement(sn_per_tier, "spectral_norm")
         lora_per_tier = {t: detect_lora_rank(s) for t, s in loaded.items()}
         lora_rank = require_tier_agreement(lora_per_tier, "LoRA rank")
-        model = SlimmableParametricA2(ds.num_params, widths=widths, spectral_norm=spectral_norm,
+        # MIXED spectral_norm IS NOW LEGITIMATE (2026-09-17), where it previously raised.
+        # The motivating case is the standard one-tier fix: a FiLM runaway is isolated to ONE
+        # tier, that tier is retrained with --spectral-norm, and the clean tier must be carried
+        # over UNCHANGED. Requiring agreement forced that merge out to the .nam level
+        # (merge_tiers.py) purely because the constructor took spectral_norm model-wide.
+        # enable_spectral_norm(skip_tiers=...) removed that limitation, so build unconstrained
+        # and wrap only the tiers whose checkpoints actually carry the parametrization.
+        # LoRA rank still requires agreement: it changes each layer's weight SHAPES, so mixed
+        # ranks genuinely cannot be spliced into one container.
+        sn_tiers = sorted(t for t, v in sn_per_tier.items() if v)
+        mixed_sn = 0 < len(sn_tiers) < len(sn_per_tier)
+        model = SlimmableParametricA2(ds.num_params, widths=widths,
+                                      spectral_norm=(not mixed_sn) and all(sn_per_tier.values()),
                                       lora_rank=lora_rank)
+        if mixed_sn:
+            plain = sorted(t for t, v in sn_per_tier.items() if not v)
+            model.enable_spectral_norm(skip_tiers=plain)
+            print(f"  mixed spectral_norm: wrapping {sn_tiers}, leaving {plain} unconstrained "
+                  f"(detected per tier: {sn_per_tier})", file=sys.stderr)
         labels = model.tier_labels()
         missing = [l for l in labels if l not in specs]
         if missing:
