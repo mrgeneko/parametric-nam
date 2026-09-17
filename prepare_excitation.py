@@ -82,33 +82,51 @@ def method_summary(rows) -> str:
 
 
 def solver_identity(backend_name: str) -> str:
-    """A fingerprint of the RENDERER BINARY, so onsets measured on different machines can be
-    proven comparable before they are merged.
+    """A fingerprint of the RENDERER SOURCE REVISION, so onsets measured on different machines
+    can be proven comparable before they are merged.
 
-    Why this matters more for sizing than for datasets: a shard merge picks ONE number -- the
-    worst-case onset -- out of every corner measured anywhere, and that number sets the
-    excitation peak for the whole device. A single corner measured by a divergent solver build
-    therefore mis-sizes everything downstream, silently. This repo has already seen a solver
-    revision change behaviour outright: enabling SimulateCapacitances was unsolvable
-    ("Failed to eliminate differentials from system of equations") until livespice-cli's
-    LiveSPICE submodule moved to 134d5c0, which adds capacitor currents as system variables.
-    Machines that had not rebuilt kept failing; two of five in this fleet had not.
+    WHY SOURCE REVISION AND NOT A BINARY HASH. The first version of this hashed the
+    livespice_cli executable, which is wrong on a heterogeneous fleet and wrong in a way that
+    makes distributed sizing unusable: measured 2026-09-17 across four workers all built from
+    the SAME source (livespice-cli 7234f0c, submodule 134d5c07), the binaries hashed to four
+    different values -- b39e8050, b6fb0e60, 41bd0bb8, 0bda53ab -- because arm64 Macs and x86
+    Linux boxes do not produce identical executables from identical code. A merge gated on
+    binary equality would have refused every cross-architecture run, i.e. exactly the runs
+    sharding exists for.
 
-    livespice_cli has no --version, so hash the executable. Falls back to a marker string
-    rather than raising: an unidentifiable backend should make the merge REFUSE, not crash
-    mid-render after hours of work.
+    What actually needs to agree is the SOLVER, and that is the git revision of livespice-cli
+    plus its LiveSPICE submodule. The submodule is the load-bearing half: enabling
+    SimulateCapacitances was unsolvable ("Failed to eliminate differentials from system of
+    equations") until it moved to 134d5c0, which adds capacitor currents as system variables.
+    Two of five machines in this fleet were on an older build as recently as this month, and a
+    single corner measured by such a build silently mis-sizes the whole device -- the merge
+    picks ONE number, the worst-case onset, out of every corner measured anywhere.
+
+    Returns a marker rather than raising when the revision cannot be read, so the merge
+    REFUSES rather than crashing mid-render after hours of work.
     """
-    import hashlib
     if backend_name != "livespice":
-        return f"{backend_name}:unhashed"
-    for cand in (Path.home() / "work/livespice-cli/publish/livespice_cli",
-                 Path("/usr/local/bin/livespice_cli")):
-        if cand.exists():
-            h = hashlib.sha256()
-            with open(cand, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-            return f"livespice:{h.hexdigest()[:16]}"
+        return f"{backend_name}:unidentified"
+    import subprocess
+    for repo in (Path.home() / "work/livespice-cli", Path("/opt/livespice-cli")):
+        if not (repo / ".git").exists():
+            continue
+        try:
+            head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, timeout=10)
+            sub = subprocess.run(["git", "-C", str(repo), "submodule", "status"],
+                                 capture_output=True, text=True, timeout=10)
+            if head.returncode == 0:
+                h = head.stdout.strip()[:12]
+                subrev = ""
+                for line in sub.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and "LiveSPICE" in parts[1]:
+                        subrev = parts[0].lstrip("+-U")[:12]
+                        break
+                return f"livespice:{h}+{subrev or 'nosub'}"
+        except (OSError, subprocess.SubprocessError):
+            continue
     return "livespice:UNKNOWN"
 
 
