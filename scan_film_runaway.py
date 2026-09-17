@@ -42,6 +42,7 @@ import argparse
 import csv
 import itertools
 import json
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
@@ -123,6 +124,47 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
             corners.append((",".join(f"{nm}={'1' if b else '0'}"
                                      for nm, b in zip(param_names, bits)), vals))
     return corners
+
+
+def device_input_level(nam_path):
+    """The peak input level this device was TRAINED at, in volts. Returns (level, source).
+
+    WHY THE SCAN MUST SCALE PER DEVICE (2026-09-17). A reference clip has one absolute
+    amplitude, but this fleet's excitations are sized per circuit by the knee+sat95 onset
+    metric and span 122x -- 0.44 V for a Mesa RED gain-master, 53.8 V for a 5-knob Orange.
+    Running every model against the same raw clip therefore over-drives some and barely
+    tickles others. Measured: the bundled 1.5 V reference is 3.4x hot for the RED, whose w4
+    median peak reads 2291 instead of 0.569 -- a ~4000x artefact of out-of-distribution level,
+    not a property of the model -- while for a 53.8 V device the same clip is 36x too QUIET.
+    Scaling restored the check's discrimination: 8 flagged windows vs 222.
+
+    Source order, most authoritative first:
+      1. the bundle's dataset_config.json `input.peak` -- the actual excitation the model was
+         fit to. Authoritative, and present in every release_run.sh bundle.
+      2. the .nam's own metadata.input_level_dbu -> V0dBFS. Works for a bare .nam, but it is a
+         DIFFERENT QUANTITY (volts per digital full-scale, read off the .schx's Circuit.Input)
+         and param_train._input_level_dbu's own docstring calls it an assumption rather than a
+         measurement -- so it is a fallback that warns, not a peer.
+    Returns (None, None) when neither is available; the caller then leaves the clip alone.
+    """
+    cfg_path = Path(nam_path).parent / "dataset_config.json"
+    if cfg_path.exists():
+        try:
+            peak = (json.loads(cfg_path.read_text()).get("input") or {}).get("peak")
+            if peak and float(peak) > 0:
+                return float(peak), "bundle dataset_config.json input.peak"
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    try:
+        meta = json.loads(Path(nam_path).read_text()).get("metadata") or {}
+        dbu = meta.get("input_level_dbu")
+        if dbu is not None:
+            v0dbfs = (0.7746 * (10.0 ** (float(dbu) / 20.0))) * math.sqrt(2.0)
+            if v0dbfs > 0:
+                return v0dbfs, "metadata.input_level_dbu (ASSUMED nominal, not the training level)"
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return None, None
 
 
 def bundle_grid_corners(nam_path, param_names):
@@ -313,6 +355,18 @@ def main():
                          "which climbed unboundedly past 34GB on the exact same machine/model. "
                          "Raise this only if you have headroom to spare -- workers x batch_size "
                          "is the number that matters, not either alone.")
+    ap.add_argument("--headroom", type=float, default=1.0,
+                    help="scale the reference to (this device's trained peak x HEADROOM). "
+                         "Default 1.0 = drive it exactly as hard as training did. Raising this "
+                         "probes margin beyond the trained range, but do NOT go far: the "
+                         "flag-abs test implicitly assumes the circuit saturates, so on a "
+                         "NON-saturating device (output still growing past typical input -- "
+                         "a clean channel, a high-onset amp) a correct, perfectly linear model "
+                         "trips --flag-abs by construction somewhere above ~3x. 0 disables "
+                         "scaling and uses the clip as-is.")
+    ap.add_argument("--input-level", type=float, default=None, metavar="VOLTS",
+                    help="override the detected per-device training peak (see --headroom). "
+                         "Use when scanning a bare .nam whose bundle isn't to hand.")
     ap.add_argument("--freq-probe", type=int, default=0, metavar="N",
                     help="after scanning, run a sine-sweep probe on the N worst-flagged corners "
                          "of each tier (0 = off). Reports, per frequency, the peak under a "
@@ -357,6 +411,32 @@ def main():
     if x.ndim > 1: x = x[:, 0]
     if sr != SR:
         raise SystemExit(f"reference sr {sr} != {SR}")
+
+    # PER-DEVICE INPUT SCALING -- see device_input_level() for why a fixed absolute level
+    # makes this check meaningless across a fleet whose excitations span 122x.
+    ref_peak = float(np.abs(x).max())
+    if args.headroom and ref_peak > 0:
+        level, src = ((args.input_level, "--input-level") if args.input_level
+                      else device_input_level(args.nam))
+        if level:
+            target = level * args.headroom
+            x = (x / ref_peak * target).astype(np.float32)
+            note = "" if args.headroom == 1.0 else f" x{args.headroom:g} headroom"
+            print(f"  input level: {ref_peak:.4g} -> {target:.4g} V peak ({src}{note})")
+            if src and src.startswith("metadata."):
+                print("           NOTE: that is a volts-per-full-scale ASSUMPTION from the .schx, "
+                      "not the level\n           this model was trained at. Prefer scanning the "
+                      "bundle, or pass --input-level.")
+        else:
+            print(f"  WARNING: no per-device input level found (no bundle dataset_config.json, no "
+                  f"metadata.input_level_dbu)\n           -- using the clip as-is at {ref_peak:.4g} "
+                  f"V peak. If that is far from what this device\n           was trained at, both "
+                  f"the peaks and the flag counts below are unreliable.")
+    else:
+        print(f"  input level: clip as-is, {ref_peak:.4g} V peak (scaling disabled)")
+
+    # Corner-set selection, most authoritative first. See bundle_grid_corners() for why the
+    # hypercube is a LAST resort rather than the default it used to be.
 
     # CORNER-SET SELECTION, most authoritative first. Merged from two independent fixes to
     # the same problem (74af6c5 auto-discovered config.toml; d80e5c8 read dataset_params.csv):
