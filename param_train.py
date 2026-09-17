@@ -810,14 +810,28 @@ class SlimmableParametricA2(nn.Module):
         if spectral_norm:
             self.enable_spectral_norm()
 
-    def enable_spectral_norm(self):
+    def enable_spectral_norm(self, skip_tiers=None):
         """Wrap every tier's conv/mixin/l1x1 with spectral_norm. Call only after every raw
         module across every tier already exists -- see A2Layer.enable_spectral_norm(). Also
         the entry point for the --init-from clip-then-fine-tune retrofit path: apply this
         AFTER loading an old (unconstrained) checkpoint's weights, not before, so the initial
         clip uses the trained weights rather than requiring load_state_dict() to match an
-        already-wrapped (and therefore differently-keyed) state dict."""
-        for m in self.submodels:
+        already-wrapped (and therefore differently-keyed) state dict.
+
+        skip_tiers: labels (from tier_labels()) to leave COMPLETELY untouched -- not just
+        excluded from later gradient updates (that's --freeze-tiers' job), but never
+        reparametrized at all. The bug this closes: spectral_norm's parametrization clips
+        a layer's weight the moment it is wrapped, using the just-loaded values as input --
+        that happens regardless of requires_grad, so a tier meant to stay bit-identical to a
+        shipped checkpoint (--freeze-tiers) was silently being clipped anyway, before a
+        single training step. Measured on a real case: a 'frozen' tier's peak output moved
+        -9% to +30% across knob corners from the wrap alone, all before training began, on a
+        SEPARATE case up to ~4000x. requires_grad_(False) alone never catches this since the
+        parameter tensors it protects don't exist until wrapping already happened."""
+        skip = set(skip_tiers or ())
+        for label, m in zip(self.tier_labels(), self.submodels):
+            if label in skip:
+                continue
             m.enable_spectral_norm()
 
     @property
@@ -2176,10 +2190,15 @@ def main():
                          "gate acceptance on level_band_esr.py bands, not headline ESR.")
     ap.add_argument("--freeze-tiers", type=str, default=None,
                     help="Slimmable only: comma list of tier labels (model.tier_labels(), "
-                         "e.g. 'full' or 'lite,w4') to exclude from the optimizer entirely -- "
-                         "requires_grad_(False) on every param, applied after --init-from/"
-                         "--spectral-norm so a frozen tier's weights are exactly what was "
-                         "loaded. Motivated by a real case: one tier (not the other) developed "
+                         "e.g. 'full' or 'lite,w4') to leave untouched -- requires_grad_(False) "
+                         "on every param (excluded from the optimizer), AND excluded from "
+                         "--init-from's --spectral-norm wrap (that reparametrization clips a "
+                         "layer's weight the moment it is wrapped, regardless of requires_grad "
+                         "-- a frozen tier that still got wrapped was silently clipped anyway, "
+                         "before a single training step; see SlimmableParametricA2."
+                         "enable_spectral_norm()'s skip_tiers docstring). Together these make a "
+                         "frozen tier's weights exactly what was loaded, unconditionally. "
+                         "Motivated by a real case: one tier (not the other) developed "
                          "an out-of-distribution FiLM/LeakyReLU runaway (see "
                          "scan_film_runaway.py) traced partly to JOINT grad clipping letting a "
                          "wider tier's larger gradient norm set a narrower tier's effective "
@@ -2425,6 +2444,26 @@ def main():
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
     model.to(device)
 
+    # --freeze-tiers labels, parsed HERE (before --init-from's enable_spectral_norm() call
+    # below) so a frozen tier can be excluded from spectral_norm wrapping entirely, not just
+    # from later gradient updates -- see SlimmableParametricA2.enable_spectral_norm()'s
+    # skip_tiers docstring for why requires_grad_(False) alone doesn't protect a tier from
+    # the wrap-time clip. Validated now (not lazily where it used to live) so a typo'd tier
+    # name fails before an expensive dataset load, same "fail before doing the paid-for
+    # work" convention as this file's other early-exit sys.exit()s.
+    freeze_tiers = []
+    if args.freeze_tiers:
+        if not isinstance(model, SlimmableParametricA2):
+            sys.exit("--freeze-tiers requires a slimmable model (--widths with >1 entry)")
+        tier_labels = model.tier_labels()
+        freeze_tiers = [t.strip() for t in args.freeze_tiers.split(",") if t.strip()]
+        unknown = [t for t in freeze_tiers if t not in tier_labels]
+        if unknown:
+            sys.exit(f"--freeze-tiers: unknown tier(s) {unknown} -- this model's tiers are "
+                     f"{tier_labels}")
+        if set(freeze_tiers) == set(tier_labels):
+            sys.exit(f"--freeze-tiers names every tier ({tier_labels}) -- nothing left to train")
+
     # --init-from MUST run (including its enable_spectral_norm() call) BEFORE film_params/
     # other_params/optimizer are built below -- not just before the load, which was the
     # original bug's near-miss fix. Reason: nn.Module.named_parameters()'s ENUMERATION ORDER
@@ -2458,37 +2497,28 @@ def main():
               f"{ {k: round(v, 6) for k, v in src_best.items() if v is not None} }). "
               f"Optimizer, schedule, and best-ESR tracking start FRESH.", file=sys.stderr)
         if args.spectral_norm:
-            model.enable_spectral_norm()
+            model.enable_spectral_norm(skip_tiers=freeze_tiers)
+            skip_note = f" (skipping frozen tier(s) {freeze_tiers})" if freeze_tiers else ""
             print(f"  Applied --spectral-norm AFTER loading (clip-then-fine-tune retrofit, "
-                  f"internal engineering notes 'A2') -- any conv/mixin/l1x1 layer whose "
-                  f"spectral norm exceeded 1 in the loaded weights is now clipped to 1; training "
-                  f"from here fine-tunes the whole model to adapt to the constraint, not just "
-                  f"the clipped layers.", file=sys.stderr)
+                  f"internal engineering notes 'A2'){skip_note} -- any conv/mixin/l1x1 layer "
+                  f"whose spectral norm exceeded 1 in the loaded weights is now clipped to 1; "
+                  f"training from here fine-tunes the whole model to adapt to the constraint, "
+                  f"not just the clipped layers.", file=sys.stderr)
             model.to(device)
 
     # --freeze-tiers: exclude named tiers from the optimizer entirely. Placed here --
-    # after --init-from/--spectral-norm, before film_params/other_params are built --
-    # so a frozen tier's requires_grad=False is what those filters actually see, and
-    # so a frozen tier's weights are exactly whatever was just loaded (untouched by
-    # spectral_norm's clip if it came from --init-from, since that only rescales
-    # weights AFTER wrapping, not before).
-    if args.freeze_tiers:
-        if not isinstance(model, SlimmableParametricA2):
-            sys.exit("--freeze-tiers requires a slimmable model (--widths with >1 entry)")
-        labels = model.tier_labels()
-        by_label = dict(zip(labels, model.submodels))
-        freeze = [t.strip() for t in args.freeze_tiers.split(",") if t.strip()]
-        unknown = [t for t in freeze if t not in by_label]
-        if unknown:
-            sys.exit(f"--freeze-tiers: unknown tier(s) {unknown} -- this model's tiers are "
-                     f"{labels}")
-        if set(freeze) == set(labels):
-            sys.exit(f"--freeze-tiers names every tier ({labels}) -- nothing left to train")
-        for t in freeze:
+    # after --init-from/--spectral-norm, before film_params/other_params are built -- so a
+    # frozen tier's requires_grad=False is what those filters actually see. The tier itself
+    # was already excluded from spectral_norm's wrap above (skip_tiers=freeze_tiers), so its
+    # weights are exactly whatever was just loaded -- requires_grad_(False) alone does NOT
+    # achieve that (it protects against gradients, not against wrap-time reparametrization).
+    if freeze_tiers:
+        by_label = dict(zip(model.tier_labels(), model.submodels))
+        for t in freeze_tiers:
             for p in by_label[t].parameters():
                 p.requires_grad_(False)
-        print(f"  Frozen tier(s): {freeze} (excluded from optimizer; trainable: "
-              f"{[l for l in labels if l not in freeze]})", file=sys.stderr)
+        print(f"  Frozen tier(s): {freeze_tiers} (excluded from optimizer; trainable: "
+              f"{[l for l in tier_labels if l not in freeze_tiers]})", file=sys.stderr)
 
     # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
     # small (knob effects are subtle vs the overall signal), so at the shared LR

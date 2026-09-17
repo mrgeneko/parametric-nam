@@ -508,3 +508,53 @@ def test_warns_when_both_rules_end_up_disabled():
     sc, se, notice = pt.resolve_stale_rules(0, 0, max_period=1200)
     assert (sc, se) == (0, 0)
     assert notice is not None and "STOP file" in notice
+
+
+# ---------------------------------------------------------------------------
+# SlimmableParametricA2.enable_spectral_norm(skip_tiers=...)
+#
+# Real bug found by a peer session (2026-09-17), independently confirmed here: the
+# reparametrization spectral_norm applies CLIPS a layer's weight the moment it is wrapped,
+# using whatever values are already loaded -- that happens regardless of requires_grad, so
+# --freeze-tiers (which only sets requires_grad_(False)) did NOT protect a "frozen" tier from
+# this: it still got wrapped and clipped, just never trained further after that. Measured on
+# a real --init-from + --freeze-tiers full + --spectral-norm run: the "frozen" full tier's
+# peak output moved -9% to +30% across knob corners from the wrap alone, before a single
+# training step. skip_tiers makes a named tier's weights exactly what was loaded, period.
+# ---------------------------------------------------------------------------
+
+def test_enable_spectral_norm_skip_tiers_leaves_named_tier_completely_unwrapped():
+    torch.manual_seed(0)
+    model = pt.SlimmableParametricA2(num_params=2, widths=[4, 8])
+    before_full = [p.clone() for p in model.full.parameters()]
+
+    model.enable_spectral_norm(skip_tiers=["full"])
+
+    after_full = list(model.full.parameters())
+    assert all(torch.equal(b, a) for b, a in zip(before_full, after_full)), \
+        "skip_tiers must leave the named tier's weights byte-identical"
+    assert not hasattr(model.full.layers[0].conv, "parametrizations"), \
+        "skip_tiers must not even WRAP the named tier -- not just avoid changing its values"
+
+
+def test_enable_spectral_norm_skip_tiers_still_wraps_and_clips_the_others():
+    torch.manual_seed(0)
+    model = pt.SlimmableParametricA2(num_params=2, widths=[4, 8])
+    before_lite = [p.clone() for n, p in model.lite.named_parameters()]
+
+    model.enable_spectral_norm(skip_tiers=["full"])
+
+    assert hasattr(model.lite.layers[0].conv, "parametrizations")
+    after_lite = [p for n, p in model.lite.named_parameters()]
+    assert any(not torch.equal(b, a) for b, a in zip(before_lite, after_lite)), \
+        "the non-skipped tier must still actually be wrapped/clipped"
+
+
+def test_enable_spectral_norm_no_skip_tiers_wraps_every_tier_as_before():
+    """Backward compatibility: omitting skip_tiers must reproduce the pre-fix behavior
+    exactly -- every tier wrapped, none exempted."""
+    torch.manual_seed(0)
+    model = pt.SlimmableParametricA2(num_params=2, widths=[4, 8])
+    model.enable_spectral_norm()
+    assert hasattr(model.lite.layers[0].conv, "parametrizations")
+    assert hasattr(model.full.layers[0].conv, "parametrizations")
