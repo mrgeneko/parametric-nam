@@ -39,6 +39,7 @@ Usage:
       --config ~/work/parametric-nam-models/amps/myamp-full-sag/config.toml
 """
 import argparse
+import csv
 import itertools
 import json
 import os
@@ -124,6 +125,46 @@ def hypercube_corners(param_names, max_full_corners: int = 512):
     return corners
 
 
+def bundle_grid_corners(nam_path, param_names):
+    """The exact trained combinations, read from the published bundle's own dataset_params.csv.
+
+    WHY THIS IS THE DEFAULT (2026-09-17). The reduced hypercube_corners() set probes every knob
+    at literal 0.0/1.0 regardless of what the device was actually trained on -- and most grids
+    do not reach those values. Scanning there measures EXTRAPOLATION, not instability, and
+    reports it in the same units as a real defect. Measured cost of that confusion on one
+    afternoon's fleet scan: a Dumble variant read 43x and a 5-knob Mesa read 47,461x at
+    out-of-grid corners, while both are 0/16 and 0/576 across their real grids. Three of nine
+    flagged bundles were false alarms on that basis alone.
+
+    A published bundle already carries the answer -- release_run.sh stages dataset_params.csv
+    beside the .nam -- so unlike full_grid_corners() this needs no --config and no access to
+    the training repo. Returns None when there is no bundle CSV to read (a bare .nam), leaving
+    the caller to fall back and SAY SO rather than silently extrapolate.
+    """
+    csv_path = Path(nam_path).parent / "dataset_params.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        with open(csv_path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    except OSError:
+        return None
+    if not rows or any(n not in rows[0] for n in param_names):
+        return None
+    out, seen = [], set()
+    for r in rows:
+        try:
+            vals = [float(r[n]) for n in param_names]
+        except (TypeError, ValueError):
+            return None
+        key = tuple(vals)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((",".join(f"{n}={v:g}" for n, v in zip(param_names, vals)), vals))
+    return out or None
+
+
 def full_grid_corners(config_path, param_names):
     """The FULL Cartesian product of --config's own [knobs] grid -- the exact combinations
     gen_dataset_from_schx.py rendered for training (e.g. 972 for Tweed), not a reduced sample.
@@ -151,6 +192,76 @@ def _batched(seq, n):
         yield batch
 
 
+
+#: Log-spaced probe frequencies, Hz. Floored at 20 Hz deliberately: the A2 stack's receptive
+#: field is 6332 samples / 131.9 ms, so the slowest periodicity it can resolve at all is
+#: SR/RF ~= 7.58 Hz (see param_train.RECEPTIVE_FIELD_SAMPLES). Content below that completes
+#: less than one cycle inside the model's window and is structurally indistinguishable from a
+#: slow DC drift -- probing there measures undefined behavior, not instability.
+PROBE_FREQS = [20, 30, 45, 65, 95, 140, 200, 290, 420, 600, 880, 1300, 1900, 2800, 4000, 6000, 8800, 12000]
+
+
+def frequency_probe(model, vals, level, flag_abs, dur=0.4):
+    """Which frequencies drive this (model, corner) past `flag_abs`, and is it transient-gated?
+
+    Runs each frequency twice at the same peak level:
+      * SUSTAINED -- 50 ms raised fade-in, so there is no attack transient at all.
+      * GATED     -- hard on/off, the sharpest attack representable at this amplitude.
+
+    The two together separate the failure modes this fleet actually produces, which the
+    windowed scan alone cannot tell apart (both just read as "a big peak"):
+
+      * gated >> sustained  -> TRANSIENT-triggered. The narrow (corner x transient-shape)
+        instability the FiLM runaway investigation documents -- a real defect.
+      * gated ~= sustained, broad across frequency -> the model is simply producing too much
+        everywhere at this corner. In practice that has meant EXTRAPOLATION: a corner outside
+        the trained grid, where no training signal constrains the output (measured 2026-09-17:
+        a Dumble variant read 43x at an out-of-grid corner yet 0/16 across its real grid).
+        Benign as a model defect; check the corner is in-grid before reading anything into it.
+
+    Returns (rows, verdict) where rows is [(freq, sustained_peak, gated_peak), ...].
+    """
+    t = np.arange(int(dur * SR)) / SR
+    fade_n = int(0.05 * SR)
+    env = np.minimum(1.0, np.arange(len(t)) / max(fade_n, 1))
+    gate = np.zeros(len(t)); gate[int(0.25 * len(t)):int(0.75 * len(t))] = 1.0
+    cond = torch.tensor([vals], dtype=torch.float32)
+    rows = []
+    for f in PROBE_FREQS:
+        sine = np.sin(2 * np.pi * f * t)
+        pk = []
+        for shape in (env, gate):
+            sig = (sine * shape * level).astype(np.float32)
+            with torch.no_grad():
+                o = model(torch.from_numpy(sig).unsqueeze(0).unsqueeze(0), cond)
+            pk.append(float(o.abs().max()))
+        rows.append((f, pk[0], pk[1]))
+    over = [r for r in rows if max(r[1], r[2]) > flag_abs]
+    if not over:
+        verdict = "no probe frequency exceeds the threshold"
+    else:
+        gated_only = [r for r in over if r[2] > 2.0 * max(r[1], 1e-9)]
+        frac = len(over) / len(rows)
+        # ORDER MATTERS: breadth is tested BEFORE attack-dependence. A corner that fails at
+        # essentially every frequency is over-producing unconditionally, which in practice has
+        # meant extrapolation outside the trained grid -- and it can still show a gated/sustained
+        # ratio > 2 in the bands where the sustained tone happens to be quiet, so an
+        # attack-first test misreads it as the narrow transient defect. Measured 2026-09-17:
+        # a Dumble out-of-grid corner failed 18/18 bands (sustained 30.2 at 20 Hz) yet an
+        # attack-first classifier called it TRANSIENT; the real transient defect (Mesa RED w4)
+        # fails 9/18 bands with sustained clean at EVERY frequency.
+        if frac > 0.75:
+            verdict = (f"BROADBAND ({len(over)}/{len(rows)} bands, sustained and gated alike) -- "
+                       f"over-producing unconditionally. CHECK THIS CORNER IS IN THE TRAINED GRID "
+                       f"before treating it as instability")
+        elif len(gated_only) >= max(1, len(over) // 2):
+            verdict = (f"TRANSIENT-triggered ({len(gated_only)}/{len(over)} bands need the attack; "
+                       f"sustained tones clean) -- the narrow (corner x transient) defect")
+        else:
+            verdict = f"band-limited ({len(over)}/{len(rows)} bands), not attack-gated"
+    return rows, verdict
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nam", required=True)
@@ -171,12 +282,18 @@ def main():
                          "--no-auto-config to disable that and force the reduced set. Needs --batch-size's batching "
                          "to stay fast at that scale -- see the module docstring for measured cost.")
     ap.add_argument("--no-auto-config", action="store_true",
-                    help="don't look for a config.toml next to --nam -- use the reduced "
-                         "hypercube corner set even if one is found. The reduced set has "
-                         "concretely missed real defects twice (see hypercube_corners()'s own "
-                         "docstring, and the tweed-5f6-a-full-sag-ac w4 runaway this flag's "
-                         "sibling was added to catch) -- only pass this for a genuinely "
-                         "config-less .nam, or to intentionally reproduce the weaker check.")
+                    help="skip trained-grid discovery entirely and force the reduced 0/1 "
+                         "hypercube corner set. Discovery order is otherwise: the bundle's "
+                         "dataset_params.csv (the combinations actually RENDERED) > a config.toml "
+                         "beside the .nam (the grid INTENDED, which can differ -- Mesa Orange's "
+                         "config lists a Master=0.1 combination that was dropped from the render) "
+                         "> the hypercube. Forcing the hypercube probes every knob at literal "
+                         "0.0/1.0, which most grids never reach, so it measures EXTRAPOLATION "
+                         "beyond the trained range rather than instability within it. That is "
+                         "worth knowing deliberately -- a plugin host can send any knob value -- "
+                         "but it must not be read as a defect: on 2026-09-17 it produced 47,461x "
+                         "and 43x readings on two models that are 0/576 and 0/16 across their "
+                         "actual grids.")
     ap.add_argument("--batch-size", type=int, default=8,
                     help="corners per batched forward call (default: %(default)s). Batching "
                          "across corners (not just chunks) is what makes --config's full-grid "
@@ -196,6 +313,17 @@ def main():
                          "which climbed unboundedly past 34GB on the exact same machine/model. "
                          "Raise this only if you have headroom to spare -- workers x batch_size "
                          "is the number that matters, not either alone.")
+    ap.add_argument("--freq-probe", type=int, default=0, metavar="N",
+                    help="after scanning, run a sine-sweep probe on the N worst-flagged corners "
+                         "of each tier (0 = off). Reports, per frequency, the peak under a "
+                         "SUSTAINED tone (50 ms fade-in, no attack) and under a hard-GATED burst. "
+                         "Separates the two failure shapes the windowed scan reports identically: "
+                         "gated >> sustained is the narrow transient-triggered instability that is "
+                         "a real defect; broadband-and-sustained has in practice meant the corner "
+                         "is OUTSIDE the trained grid, where nothing constrains the model. Probe "
+                         "frequencies start at 20 Hz -- below the ~7.58 Hz receptive-field floor "
+                         "the model cannot represent the input at all, so anything there measures "
+                         "undefined behavior rather than instability.")
     ap.add_argument("--workers", type=int, default=None,
                     help="concurrent (chunk, corner-batch) forward calls (default: cpu_count). "
                          "This model is too narrow (few channels) for PyTorch's own intra-op "
@@ -230,21 +358,43 @@ def main():
     if sr != SR:
         raise SystemExit(f"reference sr {sr} != {SR}")
 
-    config = args.config
-    if config is None and not args.no_auto_config:
-        candidate = Path(args.nam).parent / "config.toml"
-        if candidate.exists():
-            config = str(candidate)
-            print(f"  auto-discovered {candidate} next to --nam -- scanning full trained grid "
-                  f"(--no-auto-config to disable)")
-    if config:
-        corners = full_grid_corners(config, param_names)
-    else:
-        print("  WARNING: no --config and no config.toml found next to --nam -- using the "
-              "reduced hypercube corner set, which has concretely missed real defects before "
-              "(interior grid points, not just hypercube vertices, can be the worst corner). "
-              "Pass --config for a definitive check.")
+    # CORNER-SET SELECTION, most authoritative first. Merged from two independent fixes to
+    # the same problem (74af6c5 auto-discovered config.toml; d80e5c8 read dataset_params.csv):
+    # the ACTUALLY-RENDERED combinations outrank the INTENDED ones, because they differ in
+    # practice. Mesa Orange's config.toml lists Or Master=0.1, but that combination was dropped
+    # from the render -- LiveSPICE emitted isolated single-sample spikes there at oversample
+    # 8/16/32 alike -- so the model never saw it. Scanning it would be extrapolation wearing a
+    # trained grid's clothes. dataset_params.csv records what was really rendered; config.toml
+    # is the fallback for a bundle that lacks it; the 0/1 hypercube is a last resort.
+    grid_source = None
+    if args.config:
+        corners = full_grid_corners(args.config, param_names)
+        grid_source = "--config trained grid"
+    elif args.no_auto_config:
         corners = hypercube_corners(param_names)
+        grid_source = "0/1 hypercube (EXPLICITLY REQUESTED -- probes beyond the trained grid)"
+    else:
+        corners = bundle_grid_corners(args.nam, param_names)
+        if corners is not None:
+            grid_source = "bundle dataset_params.csv (exact rendered combinations)"
+        else:
+            candidate = Path(args.nam).parent / "config.toml"
+            if candidate.exists():
+                corners = full_grid_corners(str(candidate), param_names)
+                grid_source = f"auto-discovered {candidate.name} (intended grid; no "
+                grid_source += "dataset_params.csv beside the .nam)"
+            else:
+                corners = hypercube_corners(param_names)
+    if grid_source is None:
+        print("  WARNING: no trained grid available (no --config, no dataset_params.csv and no "
+              "config.toml\n           beside the .nam) -- falling back to the 0/1 hypercube, "
+              "which probes knob values\n           this model may never have been trained on. "
+              "The reduced set has also concretely\n           missed real defects before "
+              "(interior grid points, not just vertices, can be the\n           worst corner). "
+              "Findings here are EXTRAPOLATION, not a verdict on the model.")
+        grid_source = "0/1 hypercube (FALLBACK -- EXTRAPOLATION, not the trained grid)"
+    print(f"  corner set: {grid_source}")
+    corner_vals = {label: vals for label, vals in corners}   # for --freq-probe
     chunk_n = int(args.chunk_s * SR)
     n_chunks = len(x) // chunk_n
     n_batches = -(-len(corners) // args.batch_size)  # ceil
@@ -325,6 +475,30 @@ def main():
                 print(f"      peak={pk:10.3f}  corner={label:16}  t={c*args.chunk_s:.0f}-{(c+1)*args.chunk_s:.0f}s")
         else:
             print("    clean -- no anomalous windows")
+
+        # --freq-probe: characterise the SHAPE of each flagged corner's failure, not just its
+        # size. Runs on the worst corners only (the probe is cheap per corner, but there is no
+        # point sweeping a corner that never flagged).
+        if args.freq_probe and flagged:
+            seen, probe_corners = set(), []
+            for pk, label, c in flagged:
+                if label in seen:
+                    continue
+                seen.add(label)
+                probe_corners.append(label)
+                if len(probe_corners) >= args.freq_probe:
+                    break
+            level = float(np.abs(x).max())
+            for label in probe_corners:
+                vals = corner_vals.get(label)
+                if vals is None:
+                    continue
+                rows, verdict = frequency_probe(model, vals, level, args.flag_abs)
+                print(f"    frequency probe @ {label} (input peak {level:.3f}): {verdict}")
+                print(f"      {'Hz':>7} {'sustained':>11} {'gated':>10}")
+                for f, sus, gat in rows:
+                    mark = " **" if max(sus, gat) > args.flag_abs else ""
+                    print(f"      {f:7d} {sus:11.3f} {gat:10.3f}{mark}")
 
     print(f"\n  summary ({len(submodels)} tier(s)):")
     for tag, n_flagged, median, pk_max, pk_min in tier_summaries:
