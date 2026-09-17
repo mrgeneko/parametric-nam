@@ -164,10 +164,19 @@ def main():
     ap.add_argument("--flag-abs", type=float, default=3.0,
                     help="...AND exceeds this absolute volts floor (avoids flagging near-silent models)")
     ap.add_argument("--config", default=None,
-                    help="per-circuit TOML -- if given, scan the FULL trained grid (exact "
+                    help="per-circuit TOML -- scan the FULL trained grid (exact "
                          "combinations gen_dataset_from_schx.py rendered, e.g. 972 for Tweed) instead "
-                         "of the reduced hypercube corner set. Needs --batch-size's batching "
+                         "of the reduced hypercube corner set. Auto-discovered from a config.toml "
+                         "next to --nam if not given (every release bundle ships one) -- pass "
+                         "--no-auto-config to disable that and force the reduced set. Needs --batch-size's batching "
                          "to stay fast at that scale -- see the module docstring for measured cost.")
+    ap.add_argument("--no-auto-config", action="store_true",
+                    help="don't look for a config.toml next to --nam -- use the reduced "
+                         "hypercube corner set even if one is found. The reduced set has "
+                         "concretely missed real defects twice (see hypercube_corners()'s own "
+                         "docstring, and the tweed-5f6-a-full-sag-ac w4 runaway this flag's "
+                         "sibling was added to catch) -- only pass this for a genuinely "
+                         "config-less .nam, or to intentionally reproduce the weaker check.")
     ap.add_argument("--batch-size", type=int, default=8,
                     help="corners per batched forward call (default: %(default)s). Batching "
                          "across corners (not just chunks) is what makes --config's full-grid "
@@ -221,14 +230,27 @@ def main():
     if sr != SR:
         raise SystemExit(f"reference sr {sr} != {SR}")
 
-    corners = (full_grid_corners(args.config, param_names) if args.config
-              else hypercube_corners(param_names))
+    config = args.config
+    if config is None and not args.no_auto_config:
+        candidate = Path(args.nam).parent / "config.toml"
+        if candidate.exists():
+            config = str(candidate)
+            print(f"  auto-discovered {candidate} next to --nam -- scanning full trained grid "
+                  f"(--no-auto-config to disable)")
+    if config:
+        corners = full_grid_corners(config, param_names)
+    else:
+        print("  WARNING: no --config and no config.toml found next to --nam -- using the "
+              "reduced hypercube corner set, which has concretely missed real defects before "
+              "(interior grid points, not just hypercube vertices, can be the worst corner). "
+              "Pass --config for a definitive check.")
+        corners = hypercube_corners(param_names)
     chunk_n = int(args.chunk_s * SR)
     n_chunks = len(x) // chunk_n
     n_batches = -(-len(corners) // args.batch_size)  # ceil
     print(f"  {len(corners)} corners x {n_chunks} chunks each "
           f"({n_batches} corner-batches/chunk, batch-size={args.batch_size}, workers={workers})"
-          f"{' [full grid]' if args.config else ' [reduced hypercube]'}")
+          f"{' [full grid]' if config else ' [reduced hypercube]'}")
 
     def make_score(model):
         def score(job):
