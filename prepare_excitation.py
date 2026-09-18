@@ -272,6 +272,23 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     # which on a 141-corner device meant no output at all for over an hour. Storing by index
     # keeps `rows` in corner order regardless of completion order, so the artifact and the
     # worst-case pick do not depend on scheduling.
+    # KNOWN OPEN BUG (2026-09-18): this nested-executor path (an outer corner-level
+    # ThreadPoolExecutor whose workers each call find_saturation_point(), which spins up its
+    # OWN inner ThreadPoolExecutor for the amplitude sweep) has been observed to DEADLOCK
+    # outright -- not slow, not thrashing, genuinely hung: `sample`'d a stuck process and
+    # found the main thread and every worker thread parked in
+    # `_PySemaphore_Wait`/`_pthread_cond_wait`, waiting on a semaphore nothing was going to
+    # signal. Reproduced via scaffold_config.py (which auto-computes --corner-workers from
+    # core count, so any 8+-knob device on a normal machine is exposed) against an 8-knob
+    # amp's full-hypercube-plus-sample_grid corner set; over an hour with zero CPU progress
+    # and zero live children before being killed. NOT root-caused (nothing points at a
+    # specific named lock -- the cache-file locking in cache_findpeak/findpeak_cache_key is
+    # the most likely shared resource between corner-worker threads, but that is a guess, not
+    # a finding). WORKAROUND: pass --corner-workers 1 to take the serial branch below
+    # entirely, which does not exhibit this. If you hit the same hang, `sample <pid>` (macOS)
+    # or `py-spy dump --pid <pid>` (if installed) will show the same parked-semaphore
+    # signature; killing and retrying with --corner-workers 1 is the known-safe path until
+    # this is actually root-caused.
     results = [None] * len(corners)
     if corner_workers > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
