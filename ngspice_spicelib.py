@@ -145,8 +145,17 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
             raw_out = os.path.join(tmp, f'{tag}_r{round_i}.raw')
             cir_path = os.path.join(tmp, f'{tag}_r{round_i}.cir')
             deck = build_deck(input_src=input_src, knobs=knobs)
+            # `save v(probe_node)` BEFORE `tran`, not left to ngspice's default -- with no
+            # `save` at all, ngspice retains EVERY node's full transient history in memory for
+            # the whole run (this device's deck alone has 40+ named nodes), not just the one
+            # `write` below actually asks for. Harmless on a short probe clip; catastrophic on
+            # a multi-minute excitation: measured on the Boss OD-3 (217s excitation, any
+            # knob setting) climbing linearly at ~72 MB/s with no `save`, OOM-killed multiple
+            # concurrent renders on a real machine before this fix -- restricted to just the
+            # probe node, the identical render grows at ~2.5 MB/s instead (~16-28x less),
+            # comfortably bounded regardless of excitation length or --workers concurrency.
             deck += (f"\n.options {opt_line}\n"
-                     f".control\ntran {step:.1e} {dur:.6f}\n"
+                     f".control\nsave v({probe_node})\ntran {step:.1e} {dur:.6f}\n"
                      f"write {raw_out} v({probe_node})\n.endc\n.end\n")
             open(cir_path, 'w').write(deck)
             tasks[outfile] = runner.run(cir_path, exe_log=True)
