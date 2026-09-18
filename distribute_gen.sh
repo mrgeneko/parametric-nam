@@ -48,7 +48,8 @@
 #
 # Override via env: REMOTE_DIR (repo path on every worker, default ~/work/parametric-nam),
 #                    LOCAL_DIR (merged output on this machine, default ~/work/tmp/$JOB),
-#                    PY (python invocation on the worker, default ". .venv/bin/activate && python")
+#                    PY (python invocation on the worker, default ".venv/bin/python" --
+#                    direct, not via `activate`, which a repo rename silently breaks)
 #
 set -euo pipefail
 
@@ -107,7 +108,19 @@ done
 IFS=',' read -r -a WORKER_ARR <<< "$WORKERS"
 REMOTE_DIR="${REMOTE_DIR:-\$HOME/work/parametric-nam}"
 LOCAL_DIR="${LOCAL_DIR:-$HOME/work/tmp/$JOB}"
-PY="${PY:-. .venv/bin/activate && python}"
+# CALL THE VENV INTERPRETER DIRECTLY rather than sourcing activate. Every other entry point
+# in this repo already does (release_run.sh, run_pipeline.py, distribute_pull.py, setup.sh);
+# this line was the only one that depended on `activate` being correct, and that dependency
+# is fragile in a way that stays invisible for weeks: a venv records its own absolute path in
+# bin/activate and pyvenv.cfg at creation time, so RENAMING OR MOVING THE REPO breaks
+# activate while leaving .venv/bin/python perfectly functional (the symlinks inside are
+# self-contained). Found 2026-09-17: this repo was renamed spice-to-nam -> parametric-nam
+# weeks earlier, and on the machine where that happened `. .venv/bin/activate` still exported
+# VIRTUAL_ENV=/Users/gene/work/spice-to-nam/.venv -- a path that no longer exists -- so it
+# prepended a missing directory to PATH and `python` fell off it entirely. Nothing noticed,
+# because nothing else sources activate; it surfaced only when a distributed render dispatched
+# a shard to that machine and the worker died with "command not found: python".
+PY="${PY:-.venv/bin/python}"
 
 # A silent network hang (machine sleeps, path black-holes packets -- NOT a clean disconnect,
 # which ssh already detects and exits nonzero for on its own) has no default timeout: an
