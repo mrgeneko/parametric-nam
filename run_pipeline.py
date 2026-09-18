@@ -47,7 +47,7 @@ from gen_dataset_from_schx import check_oracle
 # argparse dests whose config values are filesystem paths (argparse's type=Path is
 # only applied to CLI strings, not to set_defaults values, so we convert here).
 _CONFIG_PATH_DESTS = {"dataset_dir", "nam_output", "checkpoint_dir", "release_dir",
-                      "log", "schx", "input", "resume", "workspace"}
+                      "log", "schx", "input", "resume", "workspace", "pedal_dir"}
 
 
 # Where each artifact lands under --workspace. A run produces files from four different
@@ -880,7 +880,7 @@ def main():
 
     # --- generation (gen_dataset_from_schx.py) ---
     g = ap.add_argument_group("generation")
-    g.add_argument("--backend",      choices=["cpp", "livespice", "ngspice"], default="livespice")
+    g.add_argument("--backend",      choices=["cpp", "livespice", "ngspice", "ngspice-deck"], default="livespice")
     g.add_argument("--koren",        action="store_true",
                    help="ngspice: Koren triode model (softer, for stiff amps)")
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
@@ -897,8 +897,22 @@ def main():
     g.add_argument("--input-upsample", type=int, default=0,
                    help="ngspice: upsample input audio N-fold before the filesource write "
                         "(fixes near-Nyquist solver non-convergence). Auto-set per-circuit if omitted.")
-    g.add_argument("--schx",         type=Path, help="Path to .schx (livespice)")
+    g.add_argument("--schx",         type=Path, help="Path to .schx (livespice, ngspice; optional "
+                   "metadata-only for ngspice-deck -- see gen_dataset_from_schx.py's --schx help)")
     g.add_argument("--circuit",      help="Circuit name (cpp)")
+    g.add_argument("--pedal-dir",    type=Path,
+                   help="ngspice-deck: directory containing --module, added to sys.path. Same "
+                        "convention as preflight.py/render_ngspice_deck.py --backend ngspice-deck, "
+                        "so a device's hand-written deck fix (e.g. the Boss OD-3's rail impedance) "
+                        "lives in one module every caller shares.")
+    g.add_argument("--module",       help="ngspice-deck: module exposing build_deck/KNOB_NAMES, "
+                        "e.g. gen_boss_od3_ngspice")
+    g.add_argument("--probe-node",   default="OUT",
+                   help="ngspice-deck: node/tap to render and measure (default: %(default)s)")
+    g.add_argument("--maxstep",      type=float, default=3e-6,
+                   help="ngspice-deck: initial max internal solver step (default: %(default)s). "
+                        "Equivalent of --oversample for this backend -- see "
+                        "gen_dataset_from_schx.py --maxstep help.")
     g.add_argument("--knobs",        help="Comma-separated knob names")
     g.add_argument("--input",        type=Path, help="Input sweep WAV")
     g.add_argument("--workers",      type=int,  default=os.cpu_count())
@@ -1287,10 +1301,10 @@ def main():
         # ------------------------------------------------------------------
         # Step 3: is every knob sane -- none dead, none reversed, input level plausible?
         #
-        # preflight.py only has a mode for --backend livespice (plus the separate ngspice-deck/
-        # ltspice-deck hand-deck path this pipeline doesn't drive) -- there is no mode for the
-        # schx-translated "ngspice" backend or for "cpp", so this step is a no-op for those today
-        # rather than a bad approximation of one.
+        # preflight.py has a mode for --backend livespice and, now that this pipeline can drive
+        # the hand-written-deck path too (see STEP 4 below), for ngspice-deck as well -- there is
+        # no mode for the schx-translated "ngspice" backend or for "cpp", so this step is a no-op
+        # for those today rather than a bad approximation of one.
         #
         # ABORTS on failure, same as the grid check above: a dead or reversed knob is exactly the
         # kind of thing that renders and trains "successfully" and produces a plausible-looking but
@@ -1303,6 +1317,23 @@ def main():
                 "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
             cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "livespice",
                    "--schx", str(args.schx), "--input", str(args.input)]
+            if args.knobs:
+                cmd += ["--knobs", args.knobs]
+            if args.knob_kind:
+                cmd += ["--knob-kind", args.knob_kind]
+            if args.fixed_params:
+                cmd += ["--fixed-params", args.fixed_params]
+            stream_run(cmd, fh, "Preflight")
+        elif (run_generate and args.config and args.backend == "ngspice-deck"
+                and args.pedal_dir and args.module and args.input
+                and not args.skip_preflight_check):
+            section("STEP 3 / 6 — Preflight", fh)
+            log("Checking that every knob is alive and moves the right direction, and that the "
+                "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
+            cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "ngspice-deck",
+                   "--pedal-dir", str(args.pedal_dir), "--module", args.module,
+                   "--probe-node", args.probe_node, "--maxstep", str(args.maxstep),
+                   "--input", str(args.input)]
             if args.knobs:
                 cmd += ["--knobs", args.knobs]
             if args.knob_kind:
@@ -1327,6 +1358,10 @@ def main():
             ]
             if args.schx:          gen_cmd += ["--schx",         args.schx]
             if args.circuit:       gen_cmd += ["--circuit",      args.circuit]
+            if args.pedal_dir:     gen_cmd += ["--pedal-dir",    args.pedal_dir]
+            if args.module:        gen_cmd += ["--module",       args.module]
+            if args.probe_node != "OUT": gen_cmd += ["--probe-node", args.probe_node]
+            if args.maxstep != 3e-6: gen_cmd += ["--maxstep",    args.maxstep]
             if args.knobs:         gen_cmd += ["--knobs",        args.knobs]
             if args.input:         gen_cmd += ["--input",        args.input]
             if args.values:        gen_cmd += ["--values",       args.values]

@@ -98,6 +98,19 @@ def _toml_key(name: str) -> str:
     return name if re.fullmatch(r"[A-Za-z0-9_.-]+", name) else f'"{name}"'
 
 
+def _insert_line_after(text: str, after_key: str, new_lines: str) -> str:
+    """Insert `new_lines` right after `after_key`'s line (and any indented comment
+    continuation lines) -- for a field the shared template does not declare at all,
+    because it only applies to one backend (ngspice-deck's --pedal-dir/--module/
+    --probe-node/--maxstep). Same splice convention as run_pipeline.set_input_line,
+    generalized to insert rather than replace."""
+    pat = re.compile(rf"^{re.escape(after_key)}[ \t]*=.*\n(?:[ \t]+#.*\n?)*", re.MULTILINE)
+    m = pat.search(text)
+    if not m:
+        raise ValueError(f"template has no top-level '{after_key} = ...' line to insert after")
+    return text[:m.end()] + new_lines.rstrip("\n") + "\n" + text[m.end():]
+
+
 def _replace_table(text: str, header: str, body_lines: list) -> str:
     """Same consecutive-assignment-lines splice as grid_adequacy.write_knobs, so a
     trailing comment ahead of the next section (like the template's own `[fixed]`
@@ -298,7 +311,9 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
 
 
 def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
-                        sweep_dur_cap: float, n_knobs: int = 0, workers: int = 4) -> bool:
+                        sweep_dur_cap: float, n_knobs: int = 0, workers: int = 4,
+                        backend: str = "livespice", deck_args: dict = None,
+                        knob_ranges: dict = None, chain: dict = None) -> bool:
     """Build a properly-calibrated excitation via prepare_excitation.py (which measures
     this circuit's REAL saturation onset across the knob grid's corners, rather than
     pointing `input` at a raw downloaded sweep with no calibration behind it at all --
@@ -310,6 +325,20 @@ def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
     knob ranges to work from -- best-effort: a failure here degrades to leaving `input`
     pointed at the raw clip (same "best-effort, don't abort the scaffold" philosophy as
     _measure_oversample), not an aborted scaffold.
+
+    `backend="ngspice-deck"` is a DIFFERENT contract: prepare_excitation.py's ngspice-deck
+    branch ignores --config for corner resolution entirely (it only reads --config, if given,
+    to update `input` afterward -- see its own main(), the `if args.backend == "ngspice-deck"`
+    branch requires --pedal-dir/--module/--range explicitly and never touches args.config until
+    the final update step). So for this backend `deck_args` (pedal_dir/module/probe_node/
+    maxstep) and `knob_ranges` ({name: [v1, v2, ...]}, the SAME placeholder grid just written
+    into [knobs]) must be supplied and are forwarded as explicit --range flags -- there is no
+    way to hand prepare_excitation.py a config and have it figure out ngspice-deck knobs itself.
+    For the SAME reason, `chain` (the capture-chain dict scaffold_config.py already resolved
+    and wrote into this config, or None for --no-capture-chain) is also forwarded explicitly --
+    prepare_excitation.py's ngspice-deck branch resolves capture from CLI flags only, never
+    from --config (see its own `_capture = _cc_resolve(args)` at the top of that dispatch,
+    only re-resolved WITH cfg inside the livespice branch specifically).
 
     --sweep-dur is capped at `sweep_dur_cap` -- build_excitation.py's own default is "the
     whole --sweep-file" (uncapped), which for a typical multi-minute downloaded sweep would
@@ -329,8 +358,17 @@ def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
     # prepare_excitation.py raises a clear, actionable error above 9 knobs; pass --max-corners
     # there instead of going back to the blind set.
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
-           "--backend", "livespice", "--config", str(config_path),
+           "--backend", backend, "--config", str(config_path),
            "--sweep-file", str(sweep_file), "--output", str(output_wav)]
+    if backend == "ngspice-deck":
+        cmd += ["--pedal-dir", str(deck_args["pedal_dir"]), "--module", deck_args["module"],
+                "--probe-node", deck_args["probe_node"], "--maxstep", str(deck_args["maxstep"])]
+        for name, vals in knob_ranges.items():
+            cmd += ["--range", f"{name}=" + ",".join(str(v) for v in vals)]
+        if chain is None:
+            cmd += ["--no-capture-chain"]
+        else:
+            cmd += ["--capture-hp-hz", str(chain["corner_hz"]), "--capture-order", str(chain["order"])]
     # Pass our own --workers through. This was missing: scaffold used --workers for its
     # truncation phase (12 concurrent renders) and then handed prepare_excitation.py nothing,
     # so onset measurement -- by far the longer phase on a many-knob circuit -- ran serially
@@ -359,19 +397,36 @@ def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--schx", type=Path, required=True)
+    ap.add_argument("--schx", type=Path, default=None,
+                    help="required for --backend livespice/ngspice. Optional for ngspice-deck "
+                         "(--pedal-dir/--module are the ones that matter there) -- only used "
+                         "for the supply-rail bound and config.json metadata if this device "
+                         "happens to also have one.")
     ap.add_argument("--input", default="examples/T3K-sweep-v3.wav",
                     help="sweep/DI to measure truncation against and record as `input` "
                          "(default: examples/T3K-sweep-v3.wav -- NOT bundled, download it "
                          "from https://www.tone3000.com/create/capture; assumes you run "
                          "this from the repo root)")
     ap.add_argument("--output", type=Path, default=None,
-                    help="config.toml path to write (default: <schx stem>.config.toml "
-                         "in the current directory)")
-    ap.add_argument("--backend", choices=["livespice", "ngspice"], default="livespice",
+                    help="config.toml path to write (default: <schx stem>.config.toml, or "
+                         "<module>.config.toml for ngspice-deck, in the current directory)")
+    ap.add_argument("--backend", choices=["livespice", "ngspice", "ngspice-deck"], default="livespice",
                     help="oversample auto-measurement only runs for livespice -- ngspice's "
                          "adaptive timestepping isn't tuned the same way (see "
-                         "ngspice/README.md)")
+                         "ngspice/README.md), and ngspice-deck has no supersample+decimate "
+                         "step for it to measure at all (see --maxstep)")
+    ap.add_argument("--pedal-dir", help="ngspice-deck: directory containing --module, added to "
+                    "sys.path. Same convention as render_ngspice_deck.py/preflight.py/"
+                    "gen_dataset_from_schx.py --backend ngspice-deck.")
+    ap.add_argument("--module", help="ngspice-deck: module exposing build_deck/KNOB_NAMES, "
+                    "e.g. gen_boss_od3_ngspice. KNOB_NAMES is used for control discovery "
+                    "instead of parse_schx_controls().")
+    ap.add_argument("--probe-node", default="OUT",
+                    help="ngspice-deck: node/tap to render and measure (default: %(default)s)")
+    ap.add_argument("--maxstep", type=float, default=3e-6,
+                    help="ngspice-deck: initial max internal solver step, written into the "
+                         "config (default: %(default)s) -- the equivalent of --oversample for "
+                         "this backend.")
     _cc_add_cli_args(ap)
     ap.add_argument("--write-backend-sidecar", action="store_true",
                     help="if the chosen backend DIVERGES while measuring oversample, write the "
@@ -409,24 +464,61 @@ def main() -> None:
                          f"saturation coverage). No effect if --skip-prepare-excitation.")
     args = ap.parse_args()
 
-    if not args.schx.exists():
-        sys.exit(f"schx not found: {args.schx}")
-
-    controls = parse_schx_controls(str(args.schx))
-    if not controls:
-        sys.exit(f"no pots/switches found in {args.schx} -- nothing to scaffold a grid for")
-    names = sorted(set(controls.values()))
-    print(f"  {len(names)} control(s) discovered in {args.schx.name}: {', '.join(names)}")
-
-    output = args.output or Path(f"{args.schx.stem}.config.toml")
+    if args.backend == "ngspice-deck":
+        if not (args.pedal_dir and args.module):
+            ap.error("--pedal-dir and --module are required for --backend ngspice-deck")
+        sys.path.insert(0, _os.path.abspath(args.pedal_dir))
+        import importlib
+        deck_mod = importlib.import_module(args.module)
+        if not hasattr(deck_mod, "build_deck") or not hasattr(deck_mod, "KNOB_NAMES"):
+            sys.exit(f"{args.module} must expose build_deck() and KNOB_NAMES")
+        names = list(deck_mod.KNOB_NAMES)
+        if not names:
+            sys.exit(f"{args.module}.KNOB_NAMES is empty -- nothing to scaffold a grid for")
+        print(f"  {len(names)} control(s) discovered in {args.module}.KNOB_NAMES: {', '.join(names)}")
+        if args.schx is not None and not args.schx.exists():
+            sys.exit(f"schx not found: {args.schx}")
+        output = args.output or Path(f"{args.module}.config.toml")
+    else:
+        if args.schx is None:
+            ap.error(f"--schx is required for --backend {args.backend}")
+        if not args.schx.exists():
+            sys.exit(f"schx not found: {args.schx}")
+        controls = parse_schx_controls(str(args.schx))
+        if not controls:
+            sys.exit(f"no pots/switches found in {args.schx} -- nothing to scaffold a grid for")
+        names = sorted(set(controls.values()))
+        print(f"  {len(names)} control(s) discovered in {args.schx.name}: {', '.join(names)}")
+        output = args.output or Path(f"{args.schx.stem}.config.toml")
 
     text = TEMPLATE.read_text()
-    text = _replace_line(text, "schx",
-        f'schx       = "{args.schx}"   # {len(names)} control(s) discovered by scaffold_config.py')
+    if args.backend == "ngspice-deck":
+        if args.schx is not None:
+            text = _replace_line(text, "schx",
+                f'schx       = "{args.schx}"   # OPTIONAL for ngspice-deck -- not used for '
+                f'rendering (--module below is), only the supply-rail bound + metadata')
+        else:
+            text = _replace_line(text, "schx",
+                '# schx not used -- ngspice-deck renders via --module below, not a .schx')
+        text = _replace_line(text, "backend", f'backend    = "{args.backend}"')
+        text = _insert_line_after(text, "backend",
+            f'pedal-dir  = "{args.pedal_dir}"\n'
+            f'module     = "{args.module}"   # {len(names)} control(s) discovered by scaffold_config.py\n'
+            f'probe-node = "{args.probe_node}"\n'
+            f'maxstep    = {args.maxstep:g}   # equivalent of oversample for this backend -- see '
+            f'gen_dataset_from_schx.py --maxstep help')
+    else:
+        text = _replace_line(text, "schx",
+            f'schx       = "{args.schx}"   # {len(names)} control(s) discovered by scaffold_config.py')
+        text = _replace_line(text, "backend", f'backend    = "{args.backend}"')
     text = _replace_line(text, "input", f'input      = "{args.input}"')
-    text = _replace_line(text, "backend", f'backend    = "{args.backend}"')
 
-    if args.backend == "livespice":
+    if args.backend == "ngspice-deck":
+        text = _replace_line(text, "oversample",
+            "# oversample does not apply to --backend ngspice-deck (no supersample+decimate "
+            "step in this path, unlike the schx-translated ngspice backend) -- maxstep above "
+            "is the equivalent knob.")
+    elif args.backend == "livespice":
         cands = tuple(int(c) for c in args.candidates.split(","))
         try:
             oversample, comment = _measure_oversample(
@@ -478,13 +570,26 @@ def main() -> None:
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} combinations)")
 
-    if args.backend == "livespice" and not args.skip_prepare_excitation and not Path(args.input).exists():
+    _excitation_backends = ("livespice", "ngspice-deck")
+    if args.backend in _excitation_backends and not args.skip_prepare_excitation and not Path(args.input).exists():
         print(f"  WARNING: --input {args.input} not found -- skipping the calibrated-excitation "
               f"build, leaving `input` pointed at the raw path as given.")
-    elif args.backend == "livespice" and not args.skip_prepare_excitation:
+    elif args.backend in _excitation_backends and not args.skip_prepare_excitation:
         excitation_wav = output.with_name(f"{output.stem}_excitation.wav")
-        ok = _prepare_excitation(output, Path(args.input), excitation_wav,
-                                 args.sweep_dur_cap, n_knobs=len(names), workers=args.workers)
+        if args.backend == "ngspice-deck":
+            # ngspice-deck's own corner-finder ignores --config for knob ranges (see
+            # _prepare_excitation's docstring) -- hand it the SAME placeholder grid just
+            # written into [knobs] explicitly, so the two cannot silently diverge.
+            knob_ranges = {name: _grid_for_kind(classify(name)[0], args.grid_points) for name in names}
+            deck_args = {"pedal_dir": args.pedal_dir, "module": args.module,
+                         "probe_node": args.probe_node, "maxstep": args.maxstep}
+            ok = _prepare_excitation(output, Path(args.input), excitation_wav,
+                                     args.sweep_dur_cap, n_knobs=len(names), workers=args.workers,
+                                     backend="ngspice-deck", deck_args=deck_args,
+                                     knob_ranges=knob_ranges, chain=_chain)
+        else:
+            ok = _prepare_excitation(output, Path(args.input), excitation_wav,
+                                     args.sweep_dur_cap, n_knobs=len(names), workers=args.workers)
         if ok and excitation_wav.exists():
             # prepare_excitation.py already pointed `input` here, and its line carries the
             # measured worst-case onset and corner count that this function does not have.

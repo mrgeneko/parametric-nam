@@ -184,10 +184,16 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
     return results
 
 
-def render_one(build_deck, knobs, outfile, probe_node, sr, t, input_src, tmp, maxstep=3e-6):
+def render_one(build_deck, knobs, outfile, probe_node, sr, t, input_src, tmp, maxstep=3e-6,
+               timeout=300):
     """Single-render convenience wrapper matching every render_*.py's existing render()
     signature/return value (peak, or None on failure) -- for the --knob (single render) CLI
-    path, where spicelib's parallelism has nothing to parallelize."""
+    path, where spicelib's parallelism has nothing to parallelize.
+
+    `timeout` is per ROUND (render_grid retries at maxstep, maxstep/3, maxstep/10), forwarded
+    rather than left at render_grid's 300s default so a caller with its own timeout policy
+    (gen_dataset_from_schx.py scales this with audio length and --timeout-mult) doesn't have
+    that policy silently overridden for this one backend."""
     results = render_grid(build_deck, [(knobs, outfile)], probe_node, sr, t, input_src, tmp,
-                           maxstep=maxstep, parallel_sims=1)
+                           maxstep=maxstep, parallel_sims=1, timeout=timeout)
     return results[outfile]

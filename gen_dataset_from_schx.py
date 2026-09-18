@@ -670,6 +670,54 @@ def _filesource(raw_wav: Path, up: int, cache_dir: Path) -> str:
     return str(fs)
 
 
+def _run_ngspice_deck(idx, params, out_wav, timeout_s, deck, fixed_params=None):
+    """Render one combination through a hand-written per-device deck (a gen_<device>_ngspice.py's
+    build_deck/KNOB_NAMES) instead of the generic schx-to-ngspice translation -- for a device
+    whose hand-written deck has fixes/topology the generic translator doesn't carry (e.g. the
+    Boss OD-3's finite rail impedance, needed for real-audio convergence at low Drive; see
+    parametric-devices/pedals/gen_boss_od3_ngspice.py's own "RAIL IMPEDANCE" docstring section).
+
+    Reuses ngspice_spicelib.render_one() -- the SAME primitive render_ngspice_deck.py (ad hoc
+    renders) and preflight.py's NgspiceBackend (knob-sanity checks) already use -- so a device's
+    fix lives in exactly one deck module and every caller (ad hoc render, preflight, and now real
+    dataset generation) sees it identically. `deck` is built once in main() (input loaded once,
+    reused across every combination) with keys build_deck/probe_node/sr/t/input_src/tmp/maxstep.
+
+    `fixed_params` (--fixed-params NAME=VAL,...) is merged into `params` before every render,
+    same convention as _run_ngspice's ngspice-schx path -- a knob pinned in [fixed] (e.g. a
+    volume control excluded from the swept grid) must reach build_deck() as an explicit value,
+    not rely on the deck module's own KNOB_DEFAULTS: those two can and do coincide by accident
+    (this device's Level default happens to be 0.5, the same value a config might pin it at),
+    which would hide this exact gap until someone pinned a knob at a NON-default value and
+    silently got the wrong render.
+
+    Returns a failure Result, or None on success. On success `out_wav` is OVERWRITTEN at REAL
+    VOLTS before returning: render_one/render_grid write a peak-normalized int16 wav (fine for
+    ad hoc listening, but _finalize_wav's rail-bound/crest checks and combine()'s cross-dataset
+    normalization both need genuine circuit-output voltage, not an arbitrary per-file scale) --
+    same undo-the-normalization formula as render_backends.NgspiceBackend.render_many, so this
+    doesn't invent a second, subtly different reconstruction of the same thing.
+    """
+    if fixed_params:
+        params = dict(params)
+        for kv in fixed_params.split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                params[k.strip()] = float(v)
+    from ngspice_spicelib import render_one
+    pk = render_one(deck["build_deck"], params, str(out_wav), deck["probe_node"],
+                    deck["sr"], deck["t"], deck["input_src"], deck["tmp"],
+                    maxstep=deck.get("maxstep", 3e-6), timeout=timeout_s)
+    if pk is None:
+        return Result(idx, error="ngspice-deck: did not converge at any timestep "
+                                 "(maxstep, maxstep/3, maxstep/10 all failed)")
+    from scipy.io import wavfile as _wavfile
+    out_sr, y16 = _wavfile.read(str(out_wav))
+    sig = (y16.astype(np.float64) / (0.9 * 32767.0) * pk).astype(np.float32)
+    sf.write(str(out_wav), sig, out_sr, subtype="FLOAT")
+    return None
+
+
 def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                  param_map, fixed_params, ng):
     """Translate netlist (baked pots) -> ngspice -> resample to 48k -> out_wav.
@@ -1223,6 +1271,11 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
     out_wav = path.with_suffix(".wav")
 
     try:
+        if backend == "ngspice-deck":
+            err = _run_ngspice_deck(idx, params, out_wav, timeout_s, ng or {}, fixed_params)
+            return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest,
+                                        warmup_s=warmup_s, rail_rms=rail_rms, capture=capture)
+
         if backend == "ngspice":
             err = _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
                                param_map, fixed_params, ng or {})
@@ -2350,7 +2403,7 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice"], default="cpp")
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck"], default="cpp")
     ap.add_argument("--no-retry", action="store_true",
                     help="Do NOT escalate solver settings when a combination fails to converge. "
                          "By default a failed render is retried with a stiffer solve (more Newton "
@@ -2390,14 +2443,38 @@ def main():
                          "if omitted (0).")
 
     # livespice backend
-    ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice)")
-    ap.add_argument("--knobs", help="comma-separated knob names to vary. livespice: omit to list "
-                               "all pots in the schx. cpp: required -- the harness has its own "
-                               "schematic registry this script cannot see, so there is nothing to "
-                               "default to.")
+    ap.add_argument("--schx",  type=Path, help="path to .schx file (livespice, ngspice). Optional "
+                               "for ngspice-deck -- not used for rendering there (the hand-written "
+                               "deck is), only for the supply-rail bound and config.json metadata "
+                               "if you happen to have one for the same device.")
+    ap.add_argument("--knobs", help="comma-separated knob names to vary. livespice/ngspice: omit "
+                               "to list all pots in the schx. ngspice-deck: omit to list "
+                               "--module's KNOB_NAMES; the names given here must match "
+                               "KNOB_NAMES exactly (case-sensitive) -- no second name mapping, "
+                               "same reasoning as check_backend()'s sidecar-only design: a name "
+                               "translated through two places is a name that can silently drift. "
+                               "cpp: required -- the harness has its own schematic registry this "
+                               "script cannot see, so there is nothing to default to.")
 
     # cpp backend
     ap.add_argument("--circuit", help="circuit name (cpp)")
+
+    # ngspice-deck backend (hand-written gen_<device>_ngspice.py deck, not the generic
+    # schx-to-ngspice translation -- see render_ngspice_deck.py/preflight.py --backend
+    # ngspice-deck, the same convention reused here so a device's fix lives in one deck module
+    # and every caller -- ad hoc render, preflight, and dataset generation -- sees it identically)
+    ap.add_argument("--pedal-dir", help="ngspice-deck: directory containing --module, added to sys.path")
+    ap.add_argument("--module", help="ngspice-deck: module exposing build_deck/KNOB_NAMES, "
+                    "e.g. gen_boss_od3_ngspice")
+    ap.add_argument("--probe-node", default="OUT",
+                    help="ngspice-deck: node/tap to render and measure (default: %(default)s)")
+    ap.add_argument("--maxstep", type=float, default=3e-6,
+                    help="ngspice-deck: initial max internal solver step (default: %(default)s). "
+                    "render_one/render_grid retry at maxstep, maxstep/3, maxstep/10 on their own "
+                    "if a round doesn't converge -- this is the STARTING point of that ladder, "
+                    "not a fixed value. --oversample does not apply to this backend (there is no "
+                    "supersample+decimate step here, unlike the schx-translated ngspice path); "
+                    "this is the equivalent knob.")
 
     ap.add_argument("--gear-make", default="", help="physical gear manufacturer, written into "
                      "the exported .nam's metadata (e.g. --gear-make 'Manufacturer'). "
@@ -2628,6 +2705,35 @@ def main():
         knobs = knob_keys
         circuit_label = args.schx.stem
 
+    elif args.backend == "ngspice-deck":
+        if not (args.pedal_dir and args.module):
+            ap.error("--pedal-dir and --module are required for --backend ngspice-deck")
+        sys.path.insert(0, os.path.abspath(args.pedal_dir))
+        import importlib
+        deck_mod = importlib.import_module(args.module)
+        if not hasattr(deck_mod, "build_deck") or not hasattr(deck_mod, "KNOB_NAMES"):
+            ap.error(f"{args.module} must expose build_deck() and KNOB_NAMES")
+
+        if not args.knobs:
+            print(f"Knobs in {args.module}: {', '.join(deck_mod.KNOB_NAMES)}")
+            sys.exit(0)
+
+        knob_keys = [k.strip() for k in args.knobs.split(",")]
+        unknown = [k for k in knob_keys if k not in deck_mod.KNOB_NAMES]
+        if unknown:
+            ap.error(f"--knobs {unknown} not in {args.module}.KNOB_NAMES: {deck_mod.KNOB_NAMES} "
+                     f"(case-sensitive, no name mapping for this backend -- see --knobs help)")
+        knobs = knob_keys
+        circuit_label = args.module
+        # OPTIONAL, and NOT used for rendering (the hand-written deck is) -- only for the
+        # supply-rail bound (rail_bound()) and config.json metadata, if this device happens to
+        # also have a .schx (e.g. one used for the generic-backend path or knob discovery).
+        if args.schx:
+            if not args.schx.exists():
+                ap.error(f"schx not found: {args.schx}")
+            schx = str(args.schx)
+            check_backend(args.schx, args.backend, ap)
+
     else:  # cpp
         if not args.circuit:
             ap.error("--circuit is required for --backend cpp")
@@ -2705,6 +2811,10 @@ def main():
             ap.error("--oversample auto does not apply to --backend cpp: the emitted C++ inherits "
                      "whatever oversample it was BUILT with. Re-emit it, or measure on the "
                      "livespice/ngspice backend and rebuild.")
+        if args.backend == "ngspice-deck":
+            ap.error("--oversample auto does not apply to --backend ngspice-deck: there is no "
+                     "supersample+decimate step in this path (unlike the schx-translated ngspice "
+                     "backend) for it to measure. Use --maxstep to control solver fidelity.")
         if args.backend == "livespice":
             args.oversample = choose_oversample(
                 schx, knobs, combos, in_wav, param_map, args.fixed_params,
@@ -2720,11 +2830,15 @@ def main():
             args.oversample = int(args.oversample)
         except ValueError:
             ap.error(f"--oversample must be an integer or 'auto' (got {args.oversample!r})")
+        if args.backend == "ngspice-deck" and args.oversample != 2:
+            print(f"note: --oversample {args.oversample} has no effect on --backend ngspice-deck "
+                  f"(recorded in config.json, but unused for rendering) -- use --maxstep instead.",
+                  file=sys.stderr)
 
     # 10x realtime at the default 2x oversample; scale up with oversample since
     # sim cost is ~proportional to it (e.g. 32x -> ~160x audio length).
     timeout_s = max(120, int(audio_frames / sr * 10 * max(1, args.oversample / 2) * args.timeout_mult))
-    if args.backend == "ngspice":
+    if args.backend in ("ngspice", "ngspice-deck"):
         # ngspice adaptive sim can run ~5-50x realtime on stiff amps; be generous
         # (a divergent combo aborts near t=0 anyway, so this mainly guards hangs).
         timeout_s = max(600, int(audio_frames / sr * 120 * args.timeout_mult))
@@ -2897,6 +3011,26 @@ def main():
               f"{', input_upsample='+str(_input_up)+'x' if _input_up > 1 else ''}"
               f"{', conv='+_conv_str if _conv_str else ''})", file=sys.stderr)
 
+    elif args.backend == "ngspice-deck":
+        # Loaded ONCE and reused across every combination -- same convention as every
+        # render_*.py/render_ngspice_deck.py already uses (load_input, then many build_deck
+        # calls against the same (sr, t, input_src)), not re-read/re-written per combination.
+        # ABSOLUTE-VOLTS mode (vin=None): this dataset's excitation is already built at the
+        # fleet's V0dBFS=1V convention (prepare_excitation.py et al) with deliberately
+        # different-level segments -- see ngspice_spicelib.load_input()'s own docstring for why
+        # rescaling by the file's own peak here would be wrong, same reasoning as
+        # render_ngspice_deck.py's --absolute.
+        tmp_dir = out_dir / "ngspice_deck_scratch"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        from ngspice_spicelib import load_input as _deck_load_input
+        _sr_d, _t_d, _input_src_d = _deck_load_input(str(in_wav), None, str(tmp_dir),
+                                                      src_name="input.src")
+        ng = {"build_deck": deck_mod.build_deck, "probe_node": args.probe_node,
+              "sr": _sr_d, "t": _t_d, "input_src": _input_src_d, "tmp": str(tmp_dir),
+              "maxstep": args.maxstep}
+        print(f"ngspice-deck: {args.module}.build_deck ready (probe_node={args.probe_node}, "
+              f"maxstep={args.maxstep:g})", file=sys.stderr)
+
     # Effective per-knob sampled range (min/max actually seen across combos).
     # Recorded so the exported .nam declares the true trained domain per knob
     # — e.g. a tone pot swept only 0.15..0.85 must not advertise 0..1 to the
@@ -2941,6 +3075,8 @@ def main():
         "gear_model": args.gear_model or circuit_label,
         "gear_type": args.gear_type or "amp",
         "capture_chain": _capture_cfg(args),
+        **({"pedal_dir": str(args.pedal_dir), "probe_node": args.probe_node,
+            "maxstep": args.maxstep} if args.backend == "ngspice-deck" else {}),
     }, indent=2))
     from capture_chain import describe as _cc_describe
     print(f"  {_cc_describe(_capture_cfg(args))}")
