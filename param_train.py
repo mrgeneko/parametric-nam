@@ -655,7 +655,7 @@ class ParametricA2(nn.Module):
             v0dbfs = _schx_input_v0dbfs(config.get("schx"))
             input_level_dbu = _input_level_dbu(v0dbfs) if v0dbfs else None
 
-        param_map = config.get("param_map", {})
+        param_map = config.get("param_map") or {}
         bounds = config.get("bounds", {})
         defaults = config.get("defaults", {}) or {}
         steps_map = config.get("steps", {}) or {}
