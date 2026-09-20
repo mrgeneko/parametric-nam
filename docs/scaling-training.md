@@ -116,7 +116,7 @@ Suggested arms, chosen to separate the confound:
 
 | arm | schedule | question |
 |---|---|---|
-| control | `--restart-period 50 --restart-mult 1 --restart-decay 0.97` | current defaults |
+| control | `--restart-period 50 --restart-mult 1 --restart-decay 0.97` | pre-2026-09-20 defaults (`--restart-mult` now defaults to 2 -- see below) |
 | geometric | `--restart-period 150 --restart-mult 2 --restart-decay 0.85 --stale-cycles 2` | the unattributed winner |
 | long-equal | `--restart-period 400 --restart-mult 1 --restart-decay 0.9` | is it geometric growth, or just cycles long enough to amortise? |
 
@@ -144,8 +144,10 @@ The cap also made it possible to fix the plateau-stop rule outright — see
 
 Two deliberate properties of the default, both so it can't surprise an existing config:
 
-- It is **inert at `--restart-mult 1`** (the default), which never grows cycles — so the
-  default run is unaffected, and the cap only becomes load-bearing under `mult>1`.
+- It is **inert at `--restart-mult 1`**, which never grows cycles. **UPDATE 2026-09-20:**
+  `--restart-mult` itself now defaults to `2` (see "Making `--restart-mult 2` the default"
+  below), so this cap is now load-bearing on a *default* run too — only an explicit
+  `--restart-mult 1` makes it inert again.
 - If `--restart-period` is itself ≥ 1200, the default **disables itself with a notice** rather
   than pinning every cycle to the period you asked for, which would silently turn your
   `--restart-mult` into a no-op. An explicit `--restart-max-period` still wins there.
@@ -237,12 +239,33 @@ tradeoff was made without re-running the 41-run simulation at the new value:
   is no longer `> max_period` — the "any stopping window spans a complete cycle" property from
   point 1 above no longer holds. A run whose cycle has grown (via `--restart-mult > 1`) past 750
   epochs can now be stopped mid-cycle, on a high-LR stretch, before that cycle's own trough — the
-  exact cosine-tail failure mode the cap was built to defuse. **Inert at the default
-  `--restart-mult 1`**, where cycle length is just `--restart-period` and is typically far under
-  750 — only load-bearing for a deliberately-growing-cycle run.
+  exact cosine-tail failure mode the cap was built to defuse. **No longer inert by default**
+  as of the same day: `--restart-mult` itself now defaults to `2` (see below), so a *default*
+  run's cycles will grow past 750 epochs (the 800-epoch cycle, the 5th restart) before the
+  1200 cap flattens them — only an explicit `--restart-mult 1` keeps cycle length reliably
+  under 750 now.
 
-If a future run's plateau stop looks premature and it is using `--restart-mult > 1` with a cycle
-that reached or exceeded 750 epochs, this coupling loss is the first thing to check.
+If a future run's plateau stop looks premature and its cycle reached or exceeded 750 epochs
+(true for any sufficiently long run at the current default, not just an explicit `mult>1`
+one), this coupling loss is the first thing to check.
+
+### Making `--restart-mult 2` the default (2026-09-20)
+
+`--restart-mult` changed from `1` to `2` as the fleet-wide default. The unconfounded part of
+the case for this: every full-LR restart pays a roughly fixed recovery cost regardless of
+cycle length (~7-epoch avg, ~30-epoch worst-case), so at equal-length cycles that cost is a
+constant *fraction* of the whole run (measured ~54% at 150-epoch cycles) — growing cycles
+geometrically shrinks that fraction toward zero instead (~9% on the same budget). That much
+holds regardless of whether growth is the right SHAPE for the amortization win.
+
+What is **not** settled: the one real before/after comparison ("Option A" above) that showed
+3.7x better ESR in 35% fewer steps changed four variables at once and warm-started, so it
+cannot be attributed to geometric growth specifically — the `long-equal` arm proposed above
+(same amortization via a longer *flat* `--restart-period`, no growth at all) has never
+actually been run. The default was still changed, on the strength of the unconfounded
+fixed-cost argument alone — but if that 3-arm experiment is ever run and `long-equal` matches
+`geometric`, this default should revert to `1` with a longer `--restart-period` instead of
+staying pinned to an unproven growth-shape claim.
 
 #### Trend-based rules were tried and lost
 

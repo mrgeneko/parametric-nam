@@ -356,9 +356,10 @@ def test_zero_opts_out_silently():
     assert error is None and notice is None, "the documented opt-out must be quiet"
 
 
-def test_default_does_not_nag_on_the_common_mult1_run():
-    """--restart-mult defaults to 1, so a default cap that warned 'no-op at mult 1' would
-    print on essentially every ordinary run. Only an EXPLICIT cap may say that."""
+def test_default_does_not_nag_on_an_explicit_mult1_run():
+    """--restart-mult 1 is an explicit opt-out (default is 2 as of 2026-09-20), but a default
+    cap that warned 'no-op at mult 1' on every such run would still be unwanted noise --
+    only an EXPLICIT --restart-max-period may say that."""
     _, notice, error = pt.resolve_restart_max_period(None, restart_period=50, restart_mult=1)
     assert notice is None and error is None
 

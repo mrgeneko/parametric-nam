@@ -296,26 +296,40 @@ walkthrough steps on this page:
 Training with `epochs = 0` runs until you `touch <workspace>/checkpoints/STOP`, exporting
 the best model continuously. Use the first run to find the budget, then set a real schedule.
 
-**On SGDR restarts.** The defaults are `--restart-mult 1` (equal-length cycles) and
-`--restart-decay 0.97`. Every full-LR restart pays a roughly *fixed* recovery cost — several
-epochs spent re-descending to where the previous cycle already was — so with equal-length
-cycles that cost stays a constant fraction of the run no matter how long you train
-(measured: ~54% of total epochs spent re-climbing).
+**On SGDR restarts.** The defaults are `--restart-mult 2` (geometric cycle growth, changed
+from `1` on 2026-09-20) and `--restart-decay 0.97`. Every full-LR restart pays a roughly
+*fixed* recovery cost — several epochs spent re-descending to where the previous cycle already
+was — so at equal-length cycles (`--restart-mult 1`) that cost stays a constant fraction of the
+run no matter how long you train (measured: ~54% of total epochs spent re-climbing). `mult=2`
+grows each cycle geometrically while the per-restart cost stays fixed, so the wasted fraction
+shrinks toward zero (~9% on the same budget) instead.
 
-`--restart-mult 2` grows each cycle geometrically while the per-restart cost stays fixed, so
-the wasted fraction shrinks toward zero (~9% on the same budget). It is still **not** a
-safe always-on default on its own — geometrically growing cycles used to make a cycle-counted
-auto-stop rule geometrically slower to fire — but as of 2026-09-15/16 this is handled
-automatically rather than left to manual flag tuning: `--restart-max-period` (default `1200`,
-on) caps cycle growth at that many epochs, and the plateau rule itself now defaults to the
-epoch-counted `--stale-epochs` (flat `750` as of 2026-09-20, was `1500`) rather than the old
-cycle-counted `--stale-cycles 3`, which was measured **unsafe** (fired early on 14 of 41 real
-runs, one forfeiting 2.6x final ESR). Note `750` is no longer coupled to `--restart-max-period`
-the way `1500` was, so it no longer guarantees a stopping window spans a full cycle under
-`--restart-mult > 1` — see [The plateau rule](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles)
+CAVEAT (unresolved as of 2026-09-20): the one real before/after comparison behind this default
+changed `--restart-period`, `--restart-mult`, `--restart-decay`, AND `--lr` all at once, plus
+warm-started — it measured 3.7x better ESR in 35% fewer steps, but that result is **not**
+cleanly attributable to geometric growth specifically (a longer *flat* `--restart-period` might
+amortize the same fixed recovery cost just as well; see `docs/scaling-training.md`'s "Option A"
+for the proposed 3-arm experiment that would disambiguate this, not yet run). The default was
+changed anyway on the strength of the unconfounded fixed-cost argument above, which holds
+regardless of whether the growth is geometric or just longer-flat — but if that experiment
+later shows long-equal cycles matching geometric ones, this default should revert to `1` with a
+longer `--restart-period` instead.
+
+Geometrically growing cycles used to make a cycle-counted auto-stop rule geometrically slower
+to fire, but as of 2026-09-15/16 this is handled automatically rather than left to manual flag
+tuning: `--restart-max-period` (default `1200`, on) caps cycle growth at that many epochs, and
+the plateau rule itself now defaults to the epoch-counted `--stale-epochs` (flat `750` as of
+2026-09-20, was `1500`) rather than the old cycle-counted `--stale-cycles 3`, which was
+measured **unsafe** (fired early on 14 of 41 real runs, one forfeiting 2.6x final ESR). Note
+`750` is no longer coupled to `--restart-max-period` the way `1500` was, so it no longer
+guarantees a stopping window spans a full cycle under `--restart-mult > 1` — and since
+`--restart-mult` now DEFAULTS to `2`, that gap is live on a default run too, not just an
+opt-in one, once a cycle grows past 750 epochs (the 5th restart, at 800) — see
+[The plateau rule](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles)
 in `docs/scaling-training.md` for the full comparison and the tradeoff. Pass
 `--restart-max-period 0` to opt out and restore the old uncapped/`--stale-cycles`-paired
-behavior exactly.
+behavior exactly, or `--restart-mult 1` to opt out of growth entirely and keep cycle length
+reliably under 750.
 
 ---
 

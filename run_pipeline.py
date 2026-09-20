@@ -977,8 +977,13 @@ def main():
                    help="Training epochs, or 0 = open-ended (run until touch <ckpt>/STOP)")
     g.add_argument("--restart-period", type=int,   default=50,
                    help="Open-ended SGDR restart period in epochs")
-    g.add_argument("--restart-mult",   type=int,   default=1,
-                   help="Open-ended SGDR period multiplier per restart")
+    g.add_argument("--restart-mult",   type=int,   default=2,
+                   help="Open-ended SGDR period multiplier per restart. Always forwarded to "
+                        "param_train.py (unlike --restart-max-period/--stale-cycles below, "
+                        "which are only forwarded when explicit) -- so this default must be "
+                        "kept in sync with param_train.py's own default by hand; see that "
+                        "flag's help there for the full rationale/caveats behind 2 "
+                        "(changed from 1 on 2026-09-20).")
     g.add_argument("--restart-max-period", type=int, default=None,
                    help="Open-ended SGDR cycle-length ceiling in epochs, forwarded to "
                         "param_train.py. Pass 0 to opt out of its default cap (1200) and get "

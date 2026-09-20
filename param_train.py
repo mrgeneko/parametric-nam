@@ -1667,8 +1667,11 @@ def resolve_restart_max_period(requested, restart_period, restart_mult):
             f"({restart_period}): the cap can only stop cycle GROWTH, not shrink the "
             f"starting cycle. Lower --restart-period instead.")
     # Explicitly set at mult=1 is harmless but certainly not what the caller intended;
-    # only say so when they actually typed it (the default must stay silent here, since
-    # --restart-mult itself defaults to 1 and that is the overwhelmingly common run).
+    # only say so when they actually typed it (--restart-max-period, that is -- this branch
+    # only reaches at all when it was passed). restart_mult==1 no longer means "the default"
+    # since 2026-09-20 (--restart-mult itself now defaults to 2) -- it means the caller
+    # explicitly opted back into flat cycles, which is exactly when this no-op warning is
+    # most worth surfacing, not less.
     if restart_mult == 1:
         return requested, (f"--restart-max-period {requested} is a no-op at --restart-mult 1 "
                            f"(cycles never grow past --restart-period {restart_period})."), None
@@ -1688,8 +1691,11 @@ def resolve_restart_max_period(requested, restart_period, restart_mult):
 #: coupled to max_period, patience (750) sits BELOW the 1200 max_period default, so the
 #: trough-coverage guarantee resolve_stale_rules() used to provide is GONE -- a stop can
 #: now fire mid-cycle, before that cycle's own LR trough, for any run whose cycle has grown
-#: (via --restart-mult > 1) past 750 epochs. Inert at the default --restart-mult 1, where
-#: cycle length is just --restart-period and typically far under 750.
+#: (via --restart-mult > 1) past 750 epochs. NO LONGER INERT BY DEFAULT (2026-09-20):
+#: --restart-mult itself now defaults to 2, so a default run's cycles WILL grow past 750
+#: (the 800-epoch cycle, the 5th restart) before the 1200 max_period cap flattens them --
+#: only an explicit --restart-mult 1 keeps cycle length pinned to --restart-period and
+#: reliably under 750.
 DEFAULT_STALE_EPOCHS = 750
 
 
@@ -1892,24 +1898,34 @@ def main():
     ap.add_argument("--restart-period", type=int, default=50,
                     help="Open-ended mode: SGDR cosine-warm-restart period in epochs "
                          "(default: %(default)s). Each low-LR trough tends to mint a new best.")
-    ap.add_argument("--restart-mult", type=int, default=1,
+    ap.add_argument("--restart-mult", type=int, default=2,
                     help="Open-ended mode: SGDR period multiplier per restart "
-                         "(1 = equal cycles; 2 = doubling). (default: %(default)s -- a no-op; "
-                         "--restart-decay defaults to 0.97, not 1.0, but this flag has no safe "
-                         "always-on default of its own since --stale-cycles' patience has to be "
-                         "adjusted alongside it, see CAVEAT below.) Every full-LR restart pays a "
-                         "roughly FIXED recovery cost regardless of cycle length (see "
-                         "--restart-decay's own ~7-epoch-avg / ~30-epoch-worst-case measurement) "
-                         "-- so at mult=1's equal-length cycles that fixed cost stays a constant "
-                         "FRACTION of the whole run no matter how long you train (measured: 23 "
-                         "cycles of 150 epochs = 3,387 epochs total, ~54%% of it re-climbing). "
-                         "mult=2 grows each cycle geometrically (150, 300, 600, 1200, 2400, ...) "
-                         "while the recovery cost per restart stays fixed, so the wasted fraction "
-                         "shrinks toward zero as training continues (same total epoch budget, "
-                         "same measurement basis: ~9%% wasted) -- pair it with --restart-decay for "
-                         "the other half of the same problem (each reset still climbs all the way "
+                         "(1 = equal cycles; 2 = doubling). (default: %(default)s, changed from "
+                         "1 on 2026-09-20.) Every full-LR restart pays a roughly FIXED recovery "
+                         "cost regardless of cycle length (see --restart-decay's own "
+                         "~7-epoch-avg / ~30-epoch-worst-case measurement) -- so at mult=1's "
+                         "equal-length cycles that fixed cost stays a constant FRACTION of the "
+                         "whole run no matter how long you train (measured: 23 cycles of 150 "
+                         "epochs = 3,387 epochs total, ~54%% of it re-climbing). mult=2 grows "
+                         "each cycle geometrically (150, 300, 600, 1200, 2400, ...) while the "
+                         "recovery cost per restart stays fixed, so the wasted fraction shrinks "
+                         "toward zero as training continues (same total epoch budget, same "
+                         "measurement basis: ~9%% wasted) -- pair it with --restart-decay for the "
+                         "other half of the same problem (each reset still climbs all the way "
                          "back to the same eta_max, undoing some of what the low-LR trough just "
-                         "built). CAVEAT: --stale-cycles counts CYCLES, not epochs, so mult=2's "
+                         "built). CAVEAT (unresolved as of 2026-09-20, see docs/scaling-"
+                         "training.md \"Option A\"): the one real before/after comparison behind "
+                         "this default changed restart-period, restart-mult, restart-decay AND lr "
+                         "at once, plus warm-started -- it measured 3.7x better ESR in 35%% fewer "
+                         "steps, but that result is NOT cleanly attributable to mult=2 alone (a "
+                         "longer FLAT --restart-period might amortize the same fixed recovery "
+                         "cost just as well; the doc's proposed 3-arm disambiguating experiment "
+                         "has not been run). Chosen as the default anyway on the strength of the "
+                         "unconfounded FIXED-cost argument above, which does not depend on "
+                         "growth being geometric specifically -- but if a future run of that "
+                         "experiment shows long-equal cycles matching geometric ones, this "
+                         "default should revert to 1 with a longer --restart-period instead. "
+                         "CAVEAT 2: --stale-cycles counts CYCLES, not epochs, so mult=2's "
                          "geometrically growing cycles make that auto-stop rule geometrically "
                          "slower to fire at its default patience. --restart-max-period (ON by "
                          "default) now bounds this: once cycles stop growing, --stale-cycles is "
@@ -1917,15 +1933,22 @@ def main():
                          "3,600 epochs). If you opt out of the cap with --restart-max-period 0, "
                          "the old advice applies -- lower --stale-cycles (2-3), pair it with "
                          "--stale-epochs as an epoch-counted backstop, or set an explicit "
-                         "epoch/step budget rather than relying on --stale-cycles alone.")
+                         "epoch/step budget rather than relying on --stale-cycles alone. CAVEAT "
+                         "3: since mult=2 is now the default, --stale-epochs' flat 750 patience "
+                         "(see DEFAULT_STALE_EPOCHS) is no longer inert by default -- a default "
+                         "run's cycles WILL grow past 750 epochs (e.g. the 800-epoch cycle, the "
+                         "5th restart) before the 1200 cap flattens them, so the documented "
+                         "'stop can fire mid-cycle' regression there is now live for any "
+                         "sufficiently long default run, not just an opt-in mult>1 one.")
     ap.add_argument("--restart-max-period", type=int, default=None,
                     help=f"Open-ended mode: stop --restart-mult's geometric growth once a cycle "
                          f"reaches this many epochs; every later cycle stays this length (i.e. "
                          f"mult reverts to 1 from that point on). Default: "
                          f"{DEFAULT_RESTART_MAX_PERIOD}. **0 opts out** and restores the "
                          f"historical uncapped behavior exactly. Ignored when --restart-mult is "
-                         f"1, which never grows -- so this default changes nothing for the "
-                         f"default mult=1 run, and is only load-bearing under mult>1. Also "
+                         f"1 (which never grows) -- since --restart-mult now defaults to 2, this "
+                         f"cap is load-bearing on a default run, not just under an explicit "
+                         f"mult>1. Only a --restart-mult 1 override makes it inert again. Also "
                          f"auto-disables (with a notice) if --restart-period is itself >= "
                          f"{DEFAULT_RESTART_MAX_PERIOD}, rather than silently pinning cycles to "
                          f"the period you asked for. Applies at the next cycle BOUNDARY, never "
