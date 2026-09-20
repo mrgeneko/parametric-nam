@@ -30,7 +30,9 @@ bake_nam.py  [optional, terminal]       (.param.nam → standard NAM .nam)
       ▼
 release_run.sh                          (verify + stage + package)
       validates NAM version / head_mode, composes the release container,
-      runs plot_tone_response.py for the fidelity chart, stages the bundle
+      runs plot_tone_response.py for the fidelity chart, scans the STAGED
+      bundle with scan_film_runaway.py and HARD-FAILS on an unstable model
+      (--skip-stability to override), stages the bundle
 ```
 
 | Tool | Input | Output | When |

@@ -284,11 +284,13 @@ and `bake_nam.py` relate on the way from a checkpoint to a published `.nam` — 
 
 ## Backends
 
-Three simulation backends: **`livespice`** (default, real-time-capable, `.schx`-native),
-**`ngspice`** (offline, adaptive-timestep, for stiff/high-gain circuits), and **`ltspice-deck`**
-(for circuits ngspice can't converge on, or where LTspice's answer is the stable one). Full
-comparison, when to reach for each, and the real measured tradeoffs are in
-[`docs/backends.md`](docs/backends.md).
+Four simulation backends: **`livespice`** (default, real-time-capable, `.schx`-native),
+**`ngspice`** (offline, adaptive-timestep, for stiff/high-gain circuits translated from a
+`.schx`), **`ngspice-deck`** (for a device with no `.schx` at all — a hand-written ngspice
+netlist module, driven straight through `run_pipeline.py`/`gen_dataset_from_schx.py` now, not
+just `preflight.py`/`prepare_excitation.py`), and **`ltspice-deck`** (for circuits ngspice
+can't converge on, or where LTspice's answer is the stable one). Full comparison, when to
+reach for each, and the real measured tradeoffs are in [`docs/backends.md`](docs/backends.md).
 
 ---
 

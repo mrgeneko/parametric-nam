@@ -825,6 +825,16 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
 - **`--resume <ckpt>/latest.pt`** continues a run. **`--mmap`** memory-maps
   `outputs.npy` (low RAM). **`--crop-len`** is the training window; 24000 is ≫ the
   model's receptive field and ~2× faster than 48000.
+- **`--freeze-tiers full` / `--freeze-tiers lite,w4`** (slimmable only, comma list of
+  `model.tier_labels()`) — excludes the named tier(s) from the optimizer entirely
+  (`requires_grad_(False)` on every param) AND from `--init-from`'s `--spectral-norm` wrap
+  (which otherwise clips a layer's weight the moment it's wrapped, regardless of
+  `requires_grad` — a frozen tier would get silently clipped anyway before a single training
+  step). Together these make a frozen tier's weights exactly what was loaded, unconditionally.
+  For a targeted `--init-from`/`--resume` fine-tune of one tier's known defect (e.g. a FiLM/
+  LeakyReLU runaway `scan_film_runaway.py` found) with zero risk of touching a tier that
+  already ships clean — slimmable tiers share no weights, but joint grad clipping otherwise
+  lets a wider tier's larger gradient norm set a narrower tier's effective step size.
 - **`--lora-rank N`** — **REMOVED (2026-08-27), Python side kept for reading old checkpoints
   only.** Requesting a non-zero rank exits with an error; set `PARAMETRIC_NAM_ALLOW_LORA=1` to
   override for an ablation. See the status note in
@@ -846,9 +856,11 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
   model at `--crop-len 48000 --batch-size 64 --repeats 32` on Apple Silicon (MPS backend)
   ran **~100-120s/epoch** (median ~104s across 295 epochs of one real run). Open-ended
   (`--epochs 0`) SGDR runs commonly take **several hours across many restart cycles**
-  before `--stale-cycles` triggers auto-stop — that same run improved its all-time-best
-  ESR on both tiers as late as its 6th 50-epoch cycle (~9 hours of wall time in), so don't
-  read an early plateau as convergence.
+  before the plateau rule triggers auto-stop (`--stale-cycles` at the time of this run;
+  `--stale-epochs 1500` is the current default, see
+  [docs/scaling-training.md](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles))
+  — that same run improved its all-time-best ESR on both tiers as late as its 6th 50-epoch
+  cycle (~9 hours of wall time in), so don't read an early plateau as convergence.
 
 ## `checkpoint_infer.py` — inference from a training checkpoint (Python, no C++)
 
@@ -954,6 +966,32 @@ Packages a finished (or killed) `run_pipeline.py` run into a verified release bu
 validates the `.nam` payloads, composes the tiers into one "optimal" container, measures
 what the composite buys, and writes `MANIFEST.md` + `reproduce.sh`. Nothing about the
 model shape is hardcoded — tiers/widths/config are all derived from the run itself.
+
+**Hard-fails on an unstable model (2026-09-17).** After staging, it scans the STAGED bundle
+(not the run directory, so it sees exactly what will be published) with
+`scan_film_runaway.py` against the trained grid and exits **1** — never printing "bundle
+ready" — if any combination blows up. This exists because passing every prior check
+(NAM version, `head_mode`, ESR) said nothing about a real published bundle that peaked at
+~19,600x its loudest training content on 9 of 72 trained combinations; ESR cannot see this
+failure mode (in one matched pair, the arm with the *best* accuracy was also the *worst* for
+stability). `--skip-stability` is the deliberate override for when a human has looked at the
+finding and decided to publish anyway — it records that it was skipped rather than staying
+silent about it.
+
+**Self-contained and portable (2026-09-14).** The staged bundle now copies in `$CONFIG`
+itself and the per-combination ESR csvs (previously `reproduce.sh` embedded an absolute path
+to a file outside the bundle, so it broke on another machine); `reproduce.sh` resolves
+`--config` against its own directory and reads `--dataset-dir` from `$DATASET` rather than a
+baked-in path. **Variant-aware**: `CONFIG` defaults to `config.toml.$VARIANT` when `VARIANT`
+is set, and deliberately refuses to fall back to the bare `config.toml` (which describes the
+*parent* device for a variant-keyed circuit) — a variant release with no `VARIANT`/`CONFIG`
+set previously staged the wrong training recipe silently. `MANIFEST.md` now also records
+when the tone chart was skipped (`plot_tone_response.py` is best-effort and exits 0 without
+`render_parametric`), so a release can no longer ship with that check silently unexercised.
+`setup.sh` provisions `render_parametric` itself now (via `$RENDER_PARAMETRIC`/`PATH`/a
+sibling `NeuralAmpModelerCore` checkout, building it if it finds source) — previously nothing
+did, so `ab_realtime_playback.py`'s C++ product-path check couldn't run at all on a fresh
+machine.
 
 No git or network dependency — it never touches another repo. Publishing the resulting
 bundle somewhere (e.g. your own model archive) is a separate, optional step; the script

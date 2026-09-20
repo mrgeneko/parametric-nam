@@ -303,11 +303,16 @@ cycles that cost stays a constant fraction of the run no matter how long you tra
 (measured: ~54% of total epochs spent re-climbing).
 
 `--restart-mult 2` grows each cycle geometrically while the per-restart cost stays fixed, so
-the wasted fraction shrinks toward zero (~9% on the same budget). It is **not** a safe
-always-on default, which is why it isn't one: `--stale-cycles` counts *cycles*, not epochs,
-so geometrically growing cycles make that auto-stop rule geometrically slower to fire. If
-you use `mult 2`, lower `--stale-cycles` to 2–3, add `--stale-epochs` as an epoch-counted
-backstop, or set an explicit epoch/step budget instead of relying on `--stale-cycles`.
+the wasted fraction shrinks toward zero (~9% on the same budget). It is still **not** a
+safe always-on default on its own — geometrically growing cycles used to make a cycle-counted
+auto-stop rule geometrically slower to fire — but as of 2026-09-15/16 this is handled
+automatically rather than left to manual flag tuning: `--restart-max-period` (default `1200`,
+on) caps cycle growth at that many epochs, and the plateau rule itself now defaults to the
+epoch-counted `--stale-epochs 1500` rather than the old cycle-counted `--stale-cycles 3`,
+which was measured **unsafe** (fired early on 14 of 41 real runs, one forfeiting 2.6x final
+ESR) — see [The plateau rule](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles)
+in `docs/scaling-training.md` for the full comparison. Pass `--restart-max-period 0` to opt
+out and restore the old uncapped/`--stale-cycles`-paired behavior exactly.
 
 ---
 

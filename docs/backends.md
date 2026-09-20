@@ -1,6 +1,7 @@
 [← back to README](../README.md)
 
-Full backend comparison for parametric-nam (`livespice` vs `ngspice` vs `ltspice-deck`).
+Full backend comparison for parametric-nam (`livespice` vs `ngspice` vs `ngspice-deck` vs
+`ltspice-deck`).
 
 # Backends
 
@@ -12,6 +13,7 @@ Full backend comparison for parametric-nam (`livespice` vs `ngspice` vs `ltspice
 | diverges, or needs extreme `oversample` | **ngspice** (`.schx`-native, no deck needed) |
 | converges but the output is **impossible** (bigger than the supply rails allow) | **ltspice-deck** / **ngspice** — see below |
 | ngspice can't converge on real playing content at any `maxstep` | **ltspice-deck** |
+| the device has **no `.schx` at all** (a real MOSFET/BJT, or a feedback loop LiveSPICE's fixed-timestep solver can't hold) | **ngspice-deck** (or `ltspice-deck` if its deck can't converge either) |
 | LiveSPICE emits isolated single-sample overshoots that survive every oversample and iteration count | a solver limitation — see [livespice-newton-damping-proposal.md](livespice-newton-damping-proposal.md) |
 
 The third row is the one that costs you a training run, because it is **silent**: divergence
@@ -62,13 +64,18 @@ slow or stuck ngspice render will eventually finish; time-box it and compare aga
 `livespice` (or, for a hand-written-deck device, `ltspice-deck` below) before spending a
 long timeout budget on it.
 
-**Don't confuse this with `preflight.py`/`prepare_excitation.py --backend ngspice-deck`** — a
-different flag on different tools, for a different situation. The `--backend ngspice` above
-still describes the circuit as a `.schx` file, just solves it with ngspice instead of
-LiveSPICE. `ngspice-deck` is for a device that has **no `.schx` at all** — a hand-written
-ngspice netlist module (kept in a private devices repo), typically because the circuit needs
-something `.schx` has no component for (a real MOSFET) or a feedback loop LiveSPICE's
-fixed-timestep solver can't hold at all, not even with `--backend ngspice`'s translation.
+**Don't confuse this with `--backend ngspice-deck`** — a different flag, for a different
+situation. The `--backend ngspice` above still describes the circuit as a `.schx` file, just
+solves it with ngspice instead of LiveSPICE. `ngspice-deck` is for a device that has **no
+`.schx` at all** — a hand-written ngspice netlist module (kept in a private devices repo,
+exposing `build_deck`/`KNOB_NAMES`), typically because the circuit needs something `.schx` has
+no component for (a real MOSFET) or a feedback loop LiveSPICE's fixed-timestep solver can't
+hold at all, not even with `--backend ngspice`'s translation. As of 2026-09-18 this is a
+first-class backend choice on `run_pipeline.py` and `gen_dataset_from_schx.py` themselves
+(`--pedal-dir`/`--module`/`--probe-node`/`--maxstep`, the same convention `preflight.py`/
+`prepare_excitation.py`/`scaffold_config.py` already used) — real dataset generation is no
+longer stuck going through the generic schx-to-ngspice translation (which carries none of a
+device's hand-tuned fixes) just because it lacks a `.schx`.
 
 **LTspice** (`--backend ltspice-deck` on `preflight.py`/`prepare_excitation.py`/
 `grid_adequacy.py`/`check_transient_coverage.py`, or `render_ltspice_deck.py`
