@@ -243,7 +243,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     # down as corner_workers rises, keeping the product roughly constant.
     sweep_workers = max(1, 8 // max(1, corner_workers))
 
-    def _measure(idx_label_vals):
+    def _measure(idx_label_vals, amp_executor=None):
         idx, (label, vals) = idx_label_vals
         params = dict(vals); params.update(fixed)
         cpath = findpeak_cache_key(identity, params, cache_extra)
@@ -255,7 +255,7 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                 Path(ctmp).mkdir(parents=True, exist_ok=True)
             sat = find_saturation_point(backend, params, str(ctmp), max_v=peak_max_v,
                                          lead_silence_s=lead_silence_s, capture=capture,
-                                         workers=sweep_workers)
+                                         workers=sweep_workers, executor=amp_executor)
             cache_findpeak(cpath, sat)
         return label, params, sat
 
@@ -272,28 +272,34 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     # which on a 141-corner device meant no output at all for over an hour. Storing by index
     # keeps `rows` in corner order regardless of completion order, so the artifact and the
     # worst-case pick do not depend on scheduling.
-    # KNOWN OPEN BUG (2026-09-18): this nested-executor path (an outer corner-level
-    # ThreadPoolExecutor whose workers each call find_saturation_point(), which spins up its
-    # OWN inner ThreadPoolExecutor for the amplitude sweep) has been observed to DEADLOCK
-    # outright -- not slow, not thrashing, genuinely hung: `sample`'d a stuck process and
-    # found the main thread and every worker thread parked in
+    # FIXED (2026-09-19), was KNOWN OPEN BUG (2026-09-18): this nested-executor path (an outer
+    # corner-level ThreadPoolExecutor whose workers each called find_saturation_point(), which
+    # spun up its OWN inner ThreadPoolExecutor for the amplitude sweep) was observed to
+    # DEADLOCK outright -- not slow, not thrashing, genuinely hung: `sample`'d a stuck process
+    # and found the main thread and every worker thread parked in
     # `_PySemaphore_Wait`/`_pthread_cond_wait`, waiting on a semaphore nothing was going to
-    # signal. Reproduced via scaffold_config.py (which auto-computes --corner-workers from
-    # core count, so any 8+-knob device on a normal machine is exposed) against an 8-knob
-    # amp's full-hypercube-plus-sample_grid corner set; over an hour with zero CPU progress
-    # and zero live children before being killed. NOT root-caused (nothing points at a
-    # specific named lock -- the cache-file locking in cache_findpeak/findpeak_cache_key is
-    # the most likely shared resource between corner-worker threads, but that is a guess, not
-    # a finding). WORKAROUND: pass --corner-workers 1 to take the serial branch below
-    # entirely, which does not exhibit this. If you hit the same hang, `sample <pid>` (macOS)
-    # or `py-spy dump --pid <pid>` (if installed) will show the same parked-semaphore
-    # signature; killing and retrying with --corner-workers 1 is the known-safe path until
-    # this is actually root-caused.
+    # signal. Root-caused 2026-09-19: total subprocess concurrency is IDENTICAL between
+    # --corner-workers 1 (safe) and --corner-workers >1 (buggy) -- both peak at 8 renders at
+    # once, since sweep_workers = 8 // corner_workers. The one variable that actually differs
+    # is whether more than one ThreadPoolExecutor is ever ALIVE, or being CONSTRUCTED, from a
+    # non-main worker thread at the same time -- with corner_workers>1, every corner-worker
+    # thread used to build its own separate inner pool concurrently, hitting
+    # concurrent.futures.thread's process-global bookkeeping (the shared atexit/
+    # _threads_queues registration every Executor.__init__/shutdown touches) from multiple
+    # threads at once. Fix: build ONE shared amplitude-level pool here, in the main thread,
+    # BEFORE any corner-worker thread starts, sized to the same total peak concurrency
+    # (corner_workers x sweep_workers) as before, and pass it into every find_saturation_point()
+    # call via `executor=` -- see that function's own `executor` docstring. No ThreadPoolExecutor
+    # is now ever constructed from a worker thread. --corner-workers 1 is untouched (it never
+    # had more than one pool alive to begin with) and remains a safe fallback if this
+    # resurfaces in some other shape.
     results = [None] * len(corners)
     if corner_workers > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=corner_workers) as ex:
-            futs = {ex.submit(_measure, (i, c)): i for i, c in enumerate(corners)}
+        amp_pool_size = max(1, corner_workers * sweep_workers)
+        with ThreadPoolExecutor(max_workers=amp_pool_size) as amp_ex, \
+             ThreadPoolExecutor(max_workers=corner_workers) as ex:
+            futs = {ex.submit(_measure, (i, c), amp_ex): i for i, c in enumerate(corners)}
             for n, fut in enumerate(as_completed(futs), 1):
                 label, params, sat = fut.result()
                 results[futs[fut]] = (label, params, sat, _report(label, sat, n, len(corners)))

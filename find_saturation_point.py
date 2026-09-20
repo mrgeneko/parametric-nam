@@ -58,7 +58,7 @@ def _loglog_interp(x1, y1, x2, y2, ytarget):
 def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silence_s=0.0,
                            start_v=0.005, max_v=40.0, npoints=20, sr=SR, workers=8,
                            progress=None, max_extend_decades=4, min_start_v=1e-9,
-                           capture=None):
+                           capture=None, executor=None):
     """Sweep a clean `freq` Hz tone's amplitude (log-spaced, `start_v`..`max_v`, `npoints`
     points) through `backend` at fixed `params`, and find where output RMS stops rising.
 
@@ -82,6 +82,26 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
     rendered through. Whoever passes it MUST also put capture_chain.cache_tag(capture) in
     their findpeak cache_extra, or a raw-measured onset gets served to a chained caller.
 
+    `executor`, if given, is a pre-created ThreadPoolExecutor this call submits its amplitude
+    renders into INSTEAD of creating (and tearing down) its own -- see the KNOWN OPEN BUG note
+    in prepare_excitation.py's corner-concurrent branch: with --corner-workers > 1, every
+    corner-worker thread used to create its OWN separate ThreadPoolExecutor here, so N corners
+    running concurrently meant N ThreadPoolExecutor instances being independently constructed
+    and torn down FROM NON-MAIN WORKER THREADS AT THE SAME TIME -- a real reproduced deadlock
+    (every thread, including main, parked in _PySemaphore_Wait), root-caused 2026-09-19: total
+    subprocess concurrency is IDENTICAL between --corner-workers 1 (safe, serial branch, one
+    inner pool alive at a time) and --corner-workers >1 (buggy) -- both run 8 renders at once,
+    since sweep_workers = 8 // corner_workers. The only variable that differs is whether more
+    than one ThreadPoolExecutor is ever alive/being constructed at once from worker-thread
+    context, which points at concurrent access to concurrent.futures.thread's process-global
+    bookkeeping (the shared atexit/_threads_queues registration each Executor.__init__ touches)
+    rather than anything backend- or subprocess-specific. Passing one shared, pre-built
+    `executor` (constructed ONCE, from the main thread, before any corner-worker thread starts)
+    means no ThreadPoolExecutor is ever constructed from a worker thread again -- callers with
+    a single corner (preflight.py, check_transient_coverage.py) are unaffected and keep
+    default=None, which preserves the exact previous behaviour (own pool, created and torn
+    down inline) since they never had two pools alive concurrently to begin with.
+
     Returns None if every amplitude fails to converge.
     """
     Path(tmp).mkdir(parents=True, exist_ok=True)
@@ -104,13 +124,26 @@ def find_saturation_point(backend, params, tmp, freq=200.0, dur=2.0, lead_silenc
             return float(amp), ys.get(tag)
 
         amps = list(np.geomspace(lo, hi, n))
-        with ThreadPoolExecutor(max_workers=min(workers, len(amps))) as ex:
-            futures = [ex.submit(_one, (next(seq), a)) for a in amps]
+        if executor is not None:
+            # Shared pool (see `executor` docstring above): submit into it directly, no `with`
+            # block -- this call does not own it and must not shut it down. Concurrency is
+            # bounded by the pool's own fixed size, not by `workers` here (that arg only
+            # matters for the own-pool branch below), so this deliberately submits every
+            # amplitude at once and lets the shared pool's worker count do the throttling.
+            futures = [executor.submit(_one, (next(seq), a)) for a in amps]
             raw_results = []
             for fut in as_completed(futures):
                 raw_results.append(fut.result())
                 if progress is not None:
                     progress(len(raw_results), len(futures), time.monotonic() - t0)
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(amps))) as ex:
+                futures = [ex.submit(_one, (next(seq), a)) for a in amps]
+                raw_results = []
+                for fut in as_completed(futures):
+                    raw_results.append(fut.result())
+                    if progress is not None:
+                        progress(len(raw_results), len(futures), time.monotonic() - t0)
 
         out = []
         for amp, y in raw_results:
