@@ -2995,25 +2995,27 @@ def main():
         print("  Composed best-of-every-tier container for "
               f"{args.output.name}", file=sys.stderr)
 
-    # Save best checkpoint(s): best.pt (full) + best_<label>.pt per other tier.
-    if ckpt_dir is not None:
-        for lbl in labels:
-            if best_state[lbl] is None:
-                continue
-            fname = "best.pt" if lbl == "full" else f"best_{lbl}.pt"
-            torch.save({
-                "epoch": epoch,
-                "model": best_state[lbl],
-                "optimizer": optimizer.state_dict(),
-                "scheduler_last_epoch": scheduler.last_epoch,
-                "scheduler_T_cur": getattr(scheduler, "T_cur", None),
-                "scheduler_T_i": getattr(scheduler, "T_i", None),
-                "best_esr": best_esr["full"],
-                "best_esr_by_tier": dict(best_esr),
-                "args_dict": dict(vars(args)),
-                "capture_chain": _ds_capture_chain,
-            }, ckpt_dir / fname)
-            print(f"  Best {lbl} model saved to {ckpt_dir / fname}", file=sys.stderr)
+    # NOT re-saving best.pt/best_<label>.pt here, deliberately. The in-loop save (above,
+    # "per-tier best-checkpointing") already writes a fully self-consistent file the instant
+    # each tier improves: model=best_state[lbl], optimizer/scheduler/epoch all captured at
+    # THAT SAME moment. best_state[lbl] being non-None implies that save already happened,
+    # in the same conditional scope, on the same iteration -- so re-saving here is pure
+    # redundancy, not a safety net.
+    #
+    # It used to re-save anyway, with a bug: this "epoch" is the bare loop variable, i.e.
+    # wherever the loop happened to exit (the STOP epoch), not the epoch best_state[lbl] was
+    # captured at -- and "optimizer"/"scheduler_*" are the CURRENT (stop-time) state, not
+    # state from that tier's actual best epoch either. The result was a checkpoint whose
+    # weights were correct but whose epoch/optimizer/scheduler metadata silently described a
+    # different, later point in training -- caught 2026-09-20 publishing the SLO-100 run,
+    # where it read as (wrongly) "the best-epoch weights were lost" until a direct tensor
+    # diff against latest.pt showed best_lite.pt's weights were genuinely distinct (326/330
+    # tensors differed), i.e. the in-loop save had already done its job correctly and this
+    # block was just re-stamping it with the wrong epoch.
+    #
+    # Resuming from best.pt/best_<label>.pt (uncommon, but args.resume doesn't forbid it)
+    # now correctly rewinds to that tier's own best epoch, not the training's final one --
+    # which is what "epoch" in a file named best_*.pt should mean.
 
     # ------------------------------------------------------------------
     # Parameter sensitivity check -- runs by default; --skip-param-sensitivity to skip.
