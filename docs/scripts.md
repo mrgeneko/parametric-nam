@@ -857,7 +857,7 @@ python param_train.py --dataset <ds> --output <model.param.nam> --checkpoint-dir
   ran **~100-120s/epoch** (median ~104s across 295 epochs of one real run). Open-ended
   (`--epochs 0`) SGDR runs commonly take **several hours across many restart cycles**
   before the plateau rule triggers auto-stop (`--stale-cycles` at the time of this run;
-  `--stale-epochs 1500` is the current default, see
+  `--stale-epochs`, a flat `750` as of 2026-09-20 (was `1500`), is the current default, see
   [docs/scaling-training.md](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles))
   — that same run improved its all-time-best ESR on both tiers as late as its 6th 50-epoch
   cycle (~9 hours of wall time in), so don't read an early plateau as convergence.

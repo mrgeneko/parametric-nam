@@ -1675,12 +1675,22 @@ def resolve_restart_max_period(requested, restart_period, restart_mult):
     return requested, None, None
 
 
-#: Epoch-counted plateau patience used when SGDR cycle length is capped. Validated by
-#: simulating both stopping rules against 41 distinct real runs (2026-09-16): the longest
-#: drought that was ever FOLLOWED by further improvement was 1164 epochs (the 4-knob Joyo
-#: run, at its knob-count ESR ceiling); next worst 664, and everything else <= 303. 1500
-#: clears the worst case with 1.29x margin, and fired early on zero runs.
-DEFAULT_STALE_EPOCHS = 1500
+#: Epoch-counted plateau patience used when SGDR cycle length is capped. Originally set to
+#: 1500 (2026-09-16) via max(1500, 1.25 * max_period) -- see git history -- chosen so that
+#: at the max_period=1200 default, patience > cap guaranteed any stopping window spanned a
+#: complete cycle (trough included), defusing the cosine-tail artifact. Lowered to a FLAT
+#: 750 (2026-09-20) and decoupled from max_period on request, after re-checking the 41-run
+#: drought distribution (longest ever followed by improvement: 1164 epochs, the 4-knob Joyo
+#: run at its knob-count ESR ceiling; next worst 664; everything else <= 303) -- 750 sits
+#: strictly between those two, so it does not expose any of the other 40 runs, only the one
+#: outlier, whose exact forfeited ESR gain was never measured (no --stale-epochs value in
+#: [665, 1163] was simulated against real data). KNOWN REGRESSION: since this is no longer
+#: coupled to max_period, patience (750) sits BELOW the 1200 max_period default, so the
+#: trough-coverage guarantee resolve_stale_rules() used to provide is GONE -- a stop can
+#: now fire mid-cycle, before that cycle's own LR trough, for any run whose cycle has grown
+#: (via --restart-mult > 1) past 750 epochs. Inert at the default --restart-mult 1, where
+#: cycle length is just --restart-period and typically far under 750.
+DEFAULT_STALE_EPOCHS = 750
 
 
 def resolve_stale_rules(stale_cycles, stale_epochs, max_period):
@@ -1708,22 +1718,31 @@ def resolve_stale_rules(stale_cycles, stale_epochs, max_period):
     The swap is gated on the cycle cap being active. --stale-epochs' own help warns it is
     not immune to the cosine-tail artifact (a new best tends to land near each LR trough,
     so a pure epoch counter can fire mid-cycle during a high-LR stretch that would have
-    found a best at the next trough). A cap makes that impossible: with every cycle
-    <= max_period and patience > max_period, any window of `stale_epochs` consecutive
-    epochs necessarily spans at least one complete cycle, trough included. With no cap,
-    cycles grow without bound, the guarantee is gone, and the historical cycle-counted
-    default is still the safer rule -- so keep it.
+    found a best at the next trough). A cap USED TO make that impossible when patience was
+    kept > max_period (see git history for the 1.25x-coupled formula this replaced): with
+    every cycle <= max_period and patience > max_period, any window of `stale_epochs`
+    consecutive epochs necessarily spanned at least one complete cycle, trough included.
 
-    Patience is max(DEFAULT_STALE_EPOCHS, 1.25 * max_period) rather than either alone:
-    the 1.25x factor preserves the trough-coverage guarantee for a caller who raises the
-    cap, and the floor keeps a caller who LOWERS it from dropping under the empirically
-    validated 1500 (e.g. --restart-max-period 400 would otherwise give 500, below the
-    664-epoch rewarded drought one real run needed).
+    KNOWN REGRESSION (2026-09-20): patience is now DEFAULT_STALE_EPOCHS flat (750),
+    decoupled from max_period on request, to shorten the default plateau wait below the
+    1500 the 1.25x coupling forced at the standard max_period=1200. This DROPS the
+    trough-coverage guarantee above -- 750 < 1200, so a run whose cycle has grown (via
+    --restart-mult > 1) past 750 epochs can now stop mid-cycle. Inert at the default
+    --restart-mult 1, where cycle length is just --restart-period and is typically far
+    under 750; only load-bearing risk for a deliberately-growing-cycle run. See
+    DEFAULT_STALE_EPOCHS's own comment for the drought-distribution evidence behind 750
+    specifically (it clears the 41-run dataset's second-worst real drought, 664 epochs,
+    with margin, and only forfeits the one 1164-epoch outlier that 1500 was sized to
+    cover).
+
+    With no cap, cycles grow without bound, no epoch-counted rule has a trough-coverage
+    guarantee at all, and the historical cycle-counted default is still the safer rule --
+    so keep it.
     """
     notice = None
     if max_period > 0:
         if stale_epochs is None:
-            stale_epochs = max(DEFAULT_STALE_EPOCHS, int(round(1.25 * max_period)))
+            stale_epochs = DEFAULT_STALE_EPOCHS
         if stale_cycles is None:
             stale_cycles = 0
     else:
@@ -1973,33 +1992,34 @@ def main():
                          "epochs (not cycles) with NO tier minting a new best val ESR, checked "
                          "every epoch independent of cycle boundaries. THIS IS NOW THE DEFAULT "
                          "PLATEAU RULE (since 2026-09-16), replacing --stale-cycles whenever "
-                         "--restart-max-period is active; default is max(1500, 1.25 * the cycle "
-                         "cap), i.e. 1500 at the 1200 default. 0 disables it. "
+                         "--restart-max-period is active; default is a flat 750 (since "
+                         "2026-09-20, lowered from 1500 on request). 0 disables it. "
                          "WHY: simulating both rules against 41 distinct real runs' own cycle "
                          "structures and improvement timelines showed --stale-cycles 3 would "
                          "have fired early on 14 of them, worst case stopping a distortion-pedal "
                          "run at epoch 3198 when it went on minting new bests until 9321 -- a "
                          "2.615x better model thrown away. This rule fired early on none. "
-                         "WHY 1500: the longest drought ever FOLLOWED by further improvement was "
-                         "1164 epochs (the 4-knob Joyo run at its knob-count ESR ceiling); next "
-                         "worst 664, everything else <=303. 1500 clears the worst case with "
-                         "1.29x margin. WHY IT IS SAFE NOW when its own older help called it a "
-                         "blunt instrument: the objection was the cosine-tail artifact (a best "
-                         "tends to land near each LR trough, so an epoch counter can fire "
-                         "mid-cycle during a high-LR stretch that would have found a best at the "
-                         "next trough). --restart-max-period removes that -- with every cycle "
-                         "<= the cap and patience > the cap, any window of this many epochs "
-                         "necessarily spans a complete cycle, trough included. That guarantee is "
-                         "why the default is tied to the cap rather than being a bare constant, "
-                         "and why it does NOT apply when you pass --restart-max-period 0 (there "
-                         "--stale-cycles 3 stays the default instead). "
+                         "WHY 750: the longest drought ever FOLLOWED by further improvement in "
+                         "that 41-run dataset was 1164 epochs (the 4-knob Joyo run at its "
+                         "knob-count ESR ceiling); next worst 664, everything else <=303. 750 "
+                         "sits strictly between the two, so it forfeits only that one outlier "
+                         "(exact forfeited ESR gain not measured) while still clearing every "
+                         "other run's real drought with margin. "
+                         "CAVEAT vs the original 1500 default: that value was tied to "
+                         "--restart-max-period (max(1500, 1.25 * cap)) specifically so patience "
+                         "stayed > cap, guaranteeing any stopping window spanned a complete SGDR "
+                         "cycle (trough included) and could not fire mid-cycle on a high-LR "
+                         "stretch (the cosine-tail artifact this whole rule exists to dodge). "
+                         "750 is now a flat constant, NOT coupled to the cap, so that guarantee "
+                         "is gone for any run whose cycle has grown (via --restart-mult > 1) "
+                         "past 750 epochs -- inert at the default --restart-mult 1, where cycle "
+                         "length is just --restart-period and is typically far under 750. "
                          "Note both rules are OR'd -- whichever fires first stops the run -- so "
                          "enabling this WITHOUT disabling --stale-cycles would change nothing in "
                          "exactly the dangerous cases, since the cycle rule fires first. "
                          "Caveat inherent to any patience rule: it wastes exactly this many "
-                         "epochs by construction (~22h at 54s/epoch). Counter resets on "
-                         "--resume. (default: max(1500, 1.25 * --restart-max-period) when "
-                         "capped, else 0)")
+                         "epochs by construction. Counter resets on "
+                         "--resume. (default: 750 when capped, else 0)")
     ap.add_argument("--batch-size", type=int, default=16,
                     help="Batch size (default: %(default)s)")
     ap.add_argument("--lr", type=float, default=3e-4,

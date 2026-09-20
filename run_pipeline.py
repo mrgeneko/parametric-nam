@@ -1009,8 +1009,8 @@ def main():
                    help="Open-ended auto-stop: stop after this many consecutive epochs with no "
                         "new best on any tier (0 = disabled). This is param_train.py's default "
                         "plateau rule when the cycle cap is active. Same default=None "
-                        "pass-through rule as --stale-cycles: param_train.py computes it as "
-                        "max(1500, 1.25 * --restart-max-period), and duplicating that formula "
+                        "pass-through rule as --stale-cycles: param_train.py's own default is a "
+                        "flat 750 (since 2026-09-20, was 1500), and duplicating that constant "
                         "here is how the two drift apart.")
     g.add_argument("--batch-size",     type=int,   default=16)
     g.add_argument("--lr",             type=float, default=3e-4)

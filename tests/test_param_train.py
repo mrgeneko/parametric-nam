@@ -467,11 +467,18 @@ def test_freeze_tier_joint_clip_does_not_crash_on_frozen_tier_with_no_grad():
 # active. Simulating both rules against 41 distinct real runs showed --stale-cycles 3
 # would have fired early on 14 of them (worst: stopping at epoch 3198 a run that kept
 # improving to 9321, a 2.615x better model), while the epoch rule fired early on none.
+#
+# 2026-09-20: --stale-epochs lowered from 1500 to a FLAT 750, decoupled from max_period
+# on request. The 41-run drought distribution (longest ever followed by improvement 1164
+# epochs, next worst 664, everything else <=303) means 750 forfeits only the one 1164
+# outlier and clears every other run's real drought with margin -- but it also drops the
+# patience > max_period trough-coverage guarantee the 1.25x coupling used to provide (see
+# DEFAULT_STALE_EPOCHS's own comment and resolve_stale_rules' docstring for the tradeoff).
 
 
 def test_capped_run_uses_the_epoch_rule_and_disables_the_cycle_rule():
     sc, se, _ = pt.resolve_stale_rules(None, None, max_period=1200)
-    assert (sc, se) == (0, 1500)
+    assert (sc, se) == (0, 750)
 
 
 def test_uncapped_run_keeps_the_historical_cycle_rule():
@@ -482,18 +489,20 @@ def test_uncapped_run_keeps_the_historical_cycle_rule():
     assert notice is not None and "uncapped" in notice
 
 
-def test_patience_scales_with_a_raised_cap_to_keep_trough_coverage():
-    """Patience must stay > cap so any window spans a complete cycle."""
+def test_patience_is_flat_regardless_of_cap():
+    """Since 2026-09-20, patience is DEFAULT_STALE_EPOCHS (750) flat -- NOT scaled with
+    max_period. This is a deliberate regression from the prior 1.25x-coupled behavior
+    (patience used to stay > cap to guarantee trough coverage); a raised cap no longer
+    raises patience to match, so a very long cycle can now be stopped mid-cycle."""
     _, se, _ = pt.resolve_stale_rules(None, None, max_period=4000)
-    assert se == 5000 == int(1.25 * 4000)
-    assert se > 4000
+    assert se == pt.DEFAULT_STALE_EPOCHS == 750
+    assert se < 4000
 
 
-def test_patience_never_drops_below_the_validated_floor_on_a_lowered_cap():
-    """1.25 * 400 = 500 would sit under the 664-epoch rewarded drought one real run needed,
-    so the empirical floor wins."""
+def test_patience_stays_flat_on_a_lowered_cap_too():
+    """No floor coupling left to test against a lowered cap -- 750 is 750 regardless."""
     _, se, _ = pt.resolve_stale_rules(None, None, max_period=400)
-    assert se == pt.DEFAULT_STALE_EPOCHS == 1500
+    assert se == pt.DEFAULT_STALE_EPOCHS == 750
 
 
 def test_explicit_values_are_honored_including_zero():
@@ -501,7 +510,7 @@ def test_explicit_values_are_honored_including_zero():
     assert pt.resolve_stale_rules(0, 900, max_period=1200)[:2] == (0, 900)
     # Explicitly re-enabling the cycle rule alongside the epoch rule is allowed; the loop
     # ORs them, so the cycle rule would fire first -- the caller's business, not ours.
-    assert pt.resolve_stale_rules(3, None, max_period=1200)[:2] == (3, 1500)
+    assert pt.resolve_stale_rules(3, None, max_period=1200)[:2] == (3, 750)
 
 
 def test_warns_when_both_rules_end_up_disabled():

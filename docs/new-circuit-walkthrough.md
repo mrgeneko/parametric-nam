@@ -308,11 +308,14 @@ safe always-on default on its own — geometrically growing cycles used to make 
 auto-stop rule geometrically slower to fire — but as of 2026-09-15/16 this is handled
 automatically rather than left to manual flag tuning: `--restart-max-period` (default `1200`,
 on) caps cycle growth at that many epochs, and the plateau rule itself now defaults to the
-epoch-counted `--stale-epochs 1500` rather than the old cycle-counted `--stale-cycles 3`,
-which was measured **unsafe** (fired early on 14 of 41 real runs, one forfeiting 2.6x final
-ESR) — see [The plateau rule](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles)
-in `docs/scaling-training.md` for the full comparison. Pass `--restart-max-period 0` to opt
-out and restore the old uncapped/`--stale-cycles`-paired behavior exactly.
+epoch-counted `--stale-epochs` (flat `750` as of 2026-09-20, was `1500`) rather than the old
+cycle-counted `--stale-cycles 3`, which was measured **unsafe** (fired early on 14 of 41 real
+runs, one forfeiting 2.6x final ESR). Note `750` is no longer coupled to `--restart-max-period`
+the way `1500` was, so it no longer guarantees a stopping window spans a full cycle under
+`--restart-mult > 1` — see [The plateau rule](scaling-training.md#the-plateau-rule-stale-epochs-replaced-stale-cycles)
+in `docs/scaling-training.md` for the full comparison and the tradeoff. Pass
+`--restart-max-period 0` to opt out and restore the old uncapped/`--stale-cycles`-paired
+behavior exactly.
 
 ---
 

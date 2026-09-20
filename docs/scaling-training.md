@@ -195,11 +195,11 @@ real runs**' own cycle structures and improvement timelines showed it is not mer
 Worst case: a distortion-pedal run where the cycle rule fires at epoch 3198, but the run kept
 minting new bests until **9321**. Others forfeited 1.69x, 1.59x, 1.52x, 1.45x.
 
-**Defaults now** (both gated on the cap being active): `--stale-epochs` = `max(1500, 1.25 × cap)`
-= 1500, and `--stale-cycles` = 0. With `--restart-max-period 0` the old pairing (`--stale-cycles
-3`, `--stale-epochs 0`) is kept instead.
+**Defaults as shipped 2026-09-16** (both gated on the cap being active): `--stale-epochs` =
+`max(1500, 1.25 × cap)` = 1500, and `--stale-cycles` = 0. With `--restart-max-period 0` the old
+pairing (`--stale-cycles 3`, `--stale-epochs 0`) is kept instead.
 
-Two things make this work, neither of which was true before:
+Two things made this work, neither of which was true before:
 
 1. **The cap defuses the cosine-tail objection.** `--stale-epochs` was documented as a blunt
    instrument because a best tends to land near each LR trough, so an epoch counter can fire
@@ -216,6 +216,33 @@ change nothing in precisely the 14 dangerous cases — the cycle rule fires firs
 replacement. For the same reason `run_pipeline.py` no longer forwards either flag unless
 explicitly passed; it used to forward `--stale-cycles 3` unconditionally, which would have
 overridden the new per-run choice.
+
+#### Lowered to a flat 750, decoupled from the cap (2026-09-20)
+
+`--stale-epochs` now defaults to a **flat 750**, no longer coupled to `--restart-max-period` at
+all — `DEFAULT_STALE_EPOCHS` in `param_train.py` on request, to shorten the default plateau wait
+below what the `1.25 ×` coupling forced (1500 at the standard 1200 cap).
+
+This is **not a free win** — it gives up real safety margin the 1500 default had, and the
+tradeoff was made without re-running the 41-run simulation at the new value:
+
+- **It reopens exactly the case 1500 was sized to cover.** 750 sits strictly between the 41-run
+  dataset's two longest real droughts (664, comfortably cleared; 1164, the 4-knob Joyo run at
+  its knob-count ESR ceiling, now missed) — so it forfeits that one run early, same as the old
+  `--stale-cycles 3` default did to 14 different runs. Unlike those 14 cases, **the magnitude of
+  what 750 forfeits on the Joyo run was never measured** — no value between 665 and 1163 was
+  simulated against the real data, so there is no equivalent "1.69x, 1.59x, …" figure for this
+  decision the way there was for the old cycle rule's failures.
+- **It drops the trough-coverage guarantee entirely.** 750 < 1200 (the cap default), so patience
+  is no longer `> max_period` — the "any stopping window spans a complete cycle" property from
+  point 1 above no longer holds. A run whose cycle has grown (via `--restart-mult > 1`) past 750
+  epochs can now be stopped mid-cycle, on a high-LR stretch, before that cycle's own trough — the
+  exact cosine-tail failure mode the cap was built to defuse. **Inert at the default
+  `--restart-mult 1`**, where cycle length is just `--restart-period` and is typically far under
+  750 — only load-bearing for a deliberately-growing-cycle run.
+
+If a future run's plateau stop looks premature and it is using `--restart-mult > 1` with a cycle
+that reached or exceeded 750 epochs, this coupling loss is the first thing to check.
 
 #### Trend-based rules were tried and lost
 
