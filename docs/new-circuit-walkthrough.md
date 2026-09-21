@@ -17,7 +17,7 @@ Rough shape, on a many-core desktop:
 
 | step | cost | what drives it |
 |---|---|---|
-| 1 — scaffold | minutes | measured at 3m26s for a 3-knob pedal; most of it is the excitation build |
+| 1 — scaffold | minutes for a simple pedal, **can run over an hour for a full amp** | measured at 3m26s for a 3-knob pedal (most of it the excitation build), but 70+ minutes and still running for a 6-knob full tube amp with a sag supply (2026-09-21, Ceriatone Muchless Captain Reverb) — the oversample-measurement sub-step (`measure_truncation.py`) scales with knob-setting count AND per-render cost, both far higher for a multi-tube amp than a pedal. Local-only (`--workers` is threads on one box, no cross-machine mode) despite being embarrassingly parallel the same way step 6 is — a real candidate for the per-item sharding `distribute_pull.py` already gives step 6, not yet built for this step |
 | 3 — grid refine | minutes to tens of minutes | knob-*axis* count, not combination count; cached between runs |
 | 4 — re-size excitation | minutes | corner count × per-render cost |
 | 6 — generate + train | **hours to days** | combinations × clip length × oversample, then training |

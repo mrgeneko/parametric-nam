@@ -167,6 +167,15 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     60 s file, and a 7-device fleet would have taken hours. Threads are the right tool: every unit of
     work is a subprocess, so the GIL is irrelevant.
 
+    `workers` IS ONLY LOCAL THREADS ON ONE BOX, not cross-machine -- unlike step 6's dataset
+    generation, this has no `distribute_pull.py`-style --worker HOST:DIR:PARALLEL mode, despite
+    being the exact same shape of embarrassingly-parallel, one-subprocess-per-job work. For a
+    simple pedal that is fine (measured 3m26s total for scaffold_config.py, most of it the
+    excitation build, not this step). For a full amp it is not: measured 70+ minutes and still
+    running (2026-09-21, Ceriatone Muchless Captain Reverb, 6 knobs + sag supply) on a machine
+    sitting next to two other idle boxes that could have taken a third of the job list each. A
+    real candidate for the same per-item sharding step 6 already has -- not yet built.
+
     `clips` are the probe windows from probe_clips() (possibly just the whole input); each
     (setting, oversample) is rendered per window and the ESR numerator/denominator POOLED
     across windows, so the reported number estimates the same whole-file quantity either way.
