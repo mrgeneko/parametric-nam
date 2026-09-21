@@ -131,17 +131,30 @@ def write_knobs(config_path: Path, knobs: dict) -> None:
     uses -- a full TOML round-trip (parse -> dict -> re-serialize) would blow away
     exactly the hand-written commentary these configs are full of.
 
-    Only consumes the CONSECUTIVE `NAME = [...]` lines right after the header, stopping at
-    the first blank line, comment, or new section -- some configs put an explanatory
-    comment between [knobs]'s last line and the next section (e.g. muff's "Volume is a
-    passive output divider..." paragraph ahead of [fixed]); stopping there instead of at
-    the next `[section]` keeps that from being silently deleted as if it were still part
-    of the knobs table."""
+    Only consumes the CONSECUTIVE `NAME = [...]` lines right after the header (skipping any
+    LEADING comment/blank lines first -- see below), stopping at the first blank line,
+    comment, or new section -- some configs put an explanatory comment between [knobs]'s
+    last line and the next section (e.g. muff's "Volume is a passive output divider..."
+    paragraph ahead of [fixed]); stopping there instead of at the next `[section]` keeps
+    that from being silently deleted as if it were still part of the knobs table.
+
+    LEADING comment/blank lines, directly under the `[knobs]` header and before the first
+    `NAME = [...]` line, are skipped over (not stopped at) before the assignment scan
+    starts -- otherwise the scan's very first match attempt fails immediately (a comment is
+    not an assignment), body_end never advances past body_start, and the new grid gets
+    INSERTED at body_start while the entire old [knobs] body -- comments and all -- survives
+    untouched right after it: two knob tables' worth of `NAME = [...]` lines for the same
+    keys, invalid TOML ("Cannot overwrite a value"). Found 2026-09-21 the hard way, on a
+    config whose [knobs] header was immediately followed by a multi-line explanatory
+    comment (a knob-ordering rationale) rather than the first value line directly."""
     text = config_path.read_text()
     m = re.search(r"^\[knobs\][ \t]*(?:#.*)?\n", text, re.MULTILINE)
     if not m:
         sys.exit(f"--apply: no [knobs] table found in {config_path} -- write it by hand.")
     body_start = m.end()
+    leading_re = re.compile(r'^([ \t]*(?:#.*)?\n)', re.MULTILINE)
+    while (lm := leading_re.match(text, body_start)):
+        body_start = lm.end()
     # Bare TOML keys (letters/digits/underscore/dot/hyphen only) OR a quoted key ("..."/'...') --
     # almost every real knob name in this fleet has a space (e.g. "Lead Pre", "OR Gain"), which
     # is NOT a valid bare TOML key, so it's always written quoted (see the write side below).

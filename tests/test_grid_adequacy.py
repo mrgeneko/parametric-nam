@@ -7,6 +7,7 @@ cell-error/suggest/write-back logic is tested independently of ngspice/livespice
 See grid_adequacy.py.
 """
 import tempfile
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -293,6 +294,36 @@ class TestWriteKnobs:
         cfg.write_text('schx = "device.schx"\n[fixed]\nVolume = 1.0\n')
         with pytest.raises(SystemExit):
             write_knobs(cfg, {"Gain": [0.1, 0.9]})
+
+    LEADING_COMMENT_TEMPLATE = (
+        'schx = "device.schx"\n'
+        "\n"
+        "[knobs]\n"
+        "# Ordered by signal flow, not alphabetically -- explanatory comment\n"
+        "# spanning multiple lines, directly under the header.\n"
+        "Gain = [0.0, 0.5, 1.0]\n"
+        "Tone = [0.0, 1.0]\n"
+        "\n"
+        "[fixed]\n"
+        "Volume = 1.0\n"
+    )
+
+    def test_a_leading_comment_under_the_header_is_preserved_not_duplicated(self, tmp_path):
+        """Regression test: a comment directly under [knobs] (before the first NAME = [...]
+        line) used to make the value-line scan fail its very first match, so body_end never
+        advanced past body_start and the new grid was INSERTED rather than substituted --
+        the entire old [knobs] body, comments and all, survived untouched right after it.
+        Two knob tables' worth of the same keys is invalid TOML. Found 2026-09-21 on a real
+        config whose [knobs] header was immediately followed by a knob-ordering comment."""
+        cfg = tmp_path / "device.toml"
+        cfg.write_text(self.LEADING_COMMENT_TEMPLATE)
+        write_knobs(cfg, {"Gain": [0.0, 0.25, 0.5, 1.0], "Tone": [0.0, 1.0]})
+        out = cfg.read_text()
+        assert out.count("Gain = ") == 1, f"knob line duplicated:\n{out}"
+        assert out.count("Tone = ") == 1, f"knob line duplicated:\n{out}"
+        assert "Ordered by signal flow" in out
+        parsed = tomllib.load(open(cfg, "rb"))
+        assert parsed["knobs"]["Gain"] == [0.0, 0.25, 0.5, 1.0]
 
 
 class TestRendererNgspiceDeck:
