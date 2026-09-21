@@ -2576,6 +2576,20 @@ def main():
     ap.add_argument("--transient-margin", type=float, default=1.0,
                     help="transient check: require transient-peak >= per-corner onset * this "
                          "(default 1.0 = must just reach onset)")
+    ap.add_argument("--sweep-start-v", type=float, default=0.005,
+                    help="find_saturation_point's initial sweep floor for the transient gate "
+                         "(default: %(default)s). Raise for a circuit with an ACTIVE internal "
+                         "supply (an AC-driven sag/rectifier network) whose own ripple floor "
+                         "sits above the default -- otherwise this gate silently re-derives a "
+                         "near-0V floor artifact, making its 'OK' verdict a false pass. MUST "
+                         "match whatever values sized the excitation being checked (see "
+                         "prepare_excitation.py's own --sweep-start-v/--min-start-v help for "
+                         "the full story, the Vox AC30 Top Boost sag-ac case).")
+    ap.add_argument("--min-start-v", type=float, default=1e-9,
+                    help="find_saturation_point's downward-extension floor for the transient "
+                         "gate (default: %(default)s). See --sweep-start-v above -- both are "
+                         "needed together and must match the values used to size the "
+                         "excitation being checked.")
     ap.add_argument("--defaults", help="per-knob DEFAULT value, k=v,... (in trained units). "
                     "Recorded in the .nam's parameters[].default so a bake with no --params "
                     "uses the circuit's real default position, not the range midpoint "
@@ -2925,7 +2939,8 @@ def main():
         # the raw node is not the onset of the signal that actually becomes the target.
         result = check_coverage(schx, values_per_knob, fixed_kv,
                                 args.oversample, transient_peak, margin=args.transient_margin,
-                                sample_grid=sample_grid, capture=_capture_cfg(args))
+                                sample_grid=sample_grid, capture=_capture_cfg(args),
+                                min_start_v=args.min_start_v, start_v=args.sweep_start_v)
         print()
         if not result["ok"]:
             print("Transient check FAILED -- refusing to start generation (--skip-transient-check "

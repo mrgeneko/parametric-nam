@@ -734,3 +734,26 @@ def test_render_error_survives_stderr_with_no_progress():
     import gen_dataset_from_schx as g
     assert "boom" in g._render_error("boom: something broke")
     assert g._render_error("") == ""
+
+
+def test_transient_gate_forwards_sweep_start_v_and_min_start_v():
+    """Regression: gen_dataset_from_schx.py's own transient-coverage gate calls
+    check_transient_coverage.check_coverage() in-process with no --sweep-start-v/--min-start-v
+    exposed at all, so it silently used check_coverage's hardcoded defaults (0.005/1e-9) even
+    after prepare_excitation.py and check_transient_coverage.py's own CLI grew these flags to
+    fix the AC30 (sag ac) ripple-floor false-pass bug. Every worker chunk of a sharded
+    gen_dataset run re-derives the SAME wrong near-0V onset independently -- found 2026-09-21
+    when a distributed AC30 dataset-gen run stalled ~90 minutes with zero combos rendered.
+    """
+    import re
+    from pathlib import Path
+    src = Path(__file__).parent.parent.joinpath("gen_dataset_from_schx.py").read_text()
+    assert '"--sweep-start-v"' in src, "gen_dataset_from_schx.py must expose --sweep-start-v"
+    assert '"--min-start-v"' in src, "gen_dataset_from_schx.py must expose --min-start-v"
+    m = re.search(r"result = check_coverage\((?:[^()]|\([^()]*\))*\)", src, re.DOTALL)
+    assert m, "could not find the check_coverage(...) call site"
+    call = m.group(0)
+    assert "min_start_v=args.min_start_v" in call, \
+        "check_coverage() call must forward args.min_start_v"
+    assert "start_v=args.sweep_start_v" in call, \
+        "check_coverage() call must forward args.sweep_start_v"
