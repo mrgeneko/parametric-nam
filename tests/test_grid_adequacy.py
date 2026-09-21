@@ -223,6 +223,33 @@ class TestSuggestAxis:
         assert out[0] == 0.0
         assert out[-1] == 3.0
 
+    def test_densify_only_keeps_a_point_that_the_default_would_drop(self):
+        """--densify-only exists so a caller can ask for a strictly-widened grid: every
+        existing point must survive, no matter how oversampled its neighbouring cells."""
+        values = [0.0, 1.0, 2.0, 3.0]
+        worst = {(0.0, 1.0): 0.01, (1.0, 2.0): 0.01, (2.0, 3.0): 0.05}
+        default = suggest_axis(values, worst, target=1.0)
+        assert 1.0 not in default   # sanity: this IS the drop case the flag exists to prevent
+        densified = suggest_axis(values, worst, target=1.0, densify_only=True)
+        assert set(values) <= set(densified)
+
+    def test_densify_only_still_bisects_an_over_target_cell(self):
+        """--densify-only must not also suppress the OTHER half of suggest_axis -- it only
+        turns off dropping, refining an inadequate cell still has to work."""
+        out = suggest_axis([0.0, 1.0], worst={(0.0, 1.0): 0.5}, target=0.1, densify_only=True)
+        assert out == [0.0, 0.5, 1.0]
+
+    def test_densify_only_is_a_strict_superset_across_many_random_targets(self):
+        """Property check, not just the one hand-picked case above: for a range of targets
+        against the same trivially-oversampled grid, densify_only's result must always
+        contain every original point -- the default (non-densify) result is not required to,
+        and the point of the flag is that guarantee."""
+        values = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+        worst = {(values[i], values[i + 1]): 0.001 for i in range(len(values) - 1)}
+        for target in (0.01, 0.05, 0.1, 1.0):
+            out = suggest_axis(list(values), worst, target=target, densify_only=True)
+            assert set(values) <= set(out), f"target={target} dropped a point"
+
 
 class TestWriteKnobs:
     TEMPLATE = (

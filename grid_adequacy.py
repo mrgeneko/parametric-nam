@@ -662,12 +662,18 @@ def measure_grid(render, knobs: dict, target: float, workers: int) -> tuple[dict
     return aggregate_report(res, knobs, target)
 
 
-def suggest_axis(values: list, worst: dict, target: float) -> list:
+def suggest_axis(values: list, worst: dict, target: float, densify_only: bool = False) -> list:
     """Refine the cells that fail, drop points that are not earning their place.
 
     A cell whose error is FAR under target (<= target/10) is oversampled: its interior is recoverable
     by interpolation, so the point between two such cells is redundant. A cell over target gets
     bisected. Applied once -- run again to iterate.
+
+    `densify_only`: skip the drop branch entirely -- every existing point is kept no matter how
+    oversampled its neighbouring cells measure, only bisection (adding points) ever happens. For
+    a caller who wants the grid strictly widened, never thinned: --densify-only asks this
+    function to only ever emit a SUPERSET of `values`, which the plain (default) behaviour above
+    does not guarantee -- it can and does drop points it judges redundant.
     """
     out = [values[0]]
     i = 0
@@ -678,7 +684,7 @@ def suggest_axis(values: list, worst: dict, target: float) -> list:
             out.append(round(0.5 * (lo + hi), 4))        # bisect: the grid is losing here
             out.append(hi)
             i += 1
-        elif (i + 2 < len(values)
+        elif (not densify_only and i + 2 < len(values)
               and np.isfinite(e) and e <= target / 10
               and np.isfinite(worst.get((values[i + 1], values[i + 2]), float("nan")))
               and worst[(values[i + 1], values[i + 2])] <= target / 10):
@@ -790,6 +796,15 @@ def main() -> None:
                          "clears --target or --max-iterations runs out, writing the result back "
                          "into --config's [knobs] table -- one command instead of suggest, "
                          "hand-copy, rerun, repeat.")
+    ap.add_argument("--densify-only", action="store_true",
+                    help="never drop a point for being oversampled -- suggest_axis()'s default "
+                         "behaviour also THINS a cell it judges trivial (error <= target/10 on "
+                         "both neighbours), so the suggested/applied grid is not always a "
+                         "superset of the current one. This flag skips that branch entirely: "
+                         "the result can only ever gain points (bisecting an over-target cell), "
+                         "guaranteeing every existing grid point survives. Use when you want a "
+                         "strictly-widened grid and are not asking this tool to also judge which "
+                         "of your existing points are worth keeping.")
     ap.add_argument("--max-iterations", type=int, default=5,
                     help="cap on --apply's suggest/reverify loop (default 5)")
     ap.add_argument("--no-disk-cache", action="store_true",
@@ -881,7 +896,7 @@ def main() -> None:
             print("\n  suggested regrid:\n\n  [knobs]")
             tot = 1
             for axis, vals in knobs.items():
-                new = suggest_axis(list(vals), worst_by_axis[axis], args.target)
+                new = suggest_axis(list(vals), worst_by_axis[axis], args.target, densify_only=args.densify_only)
                 tot *= len(new)
                 print(f"  {axis:<8} = {new}")
             print(f"\n  -> {tot} combinations (was {n_combos})")
@@ -995,14 +1010,14 @@ def main() -> None:
                       f"keep refining, or accept the cost: each further split multiplies the "
                       f"combination count, and a coarse cell may be the cheaper trade.")
                 break
-            knobs_cur = {axis: suggest_axis(vals, worst_by_axis[axis], args.target)
+            knobs_cur = {axis: suggest_axis(vals, worst_by_axis[axis], args.target, densify_only=args.densify_only)
                         for axis, vals in knobs_cur.items()}
 
     if args.suggest and not args.apply:
         print("\n  suggested regrid:\n\n  [knobs]")
         tot = 1
         for axis, vals in knobs.items():
-            new = suggest_axis(list(vals), worst_by_axis[axis], args.target)
+            new = suggest_axis(list(vals), worst_by_axis[axis], args.target, densify_only=args.densify_only)
             tot *= len(new)
             print(f"  {axis:<8} = {new}")
         print(f"\n  -> {tot} combinations (was {n_combos})")
