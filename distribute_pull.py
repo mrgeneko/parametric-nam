@@ -73,6 +73,11 @@ COMBO_LINE = re.compile(r"^\[\s*\d+/\s*\d+\]\s+[\d.]+%\s+combo_(\d+)\s+(OK|FAIL)
 # "N/M probes done" is ALL the per-item signal grid_adequacy.py's progress line carries.
 GRIDADQ_PROBE_LINE = re.compile(r"^\s*\d+/\d+\s+probes\s+done")
 
+# measure_truncation.py's own per-setting heartbeat ("  3/15 settings done", printed by
+# measure() once per knob setting -- see its own comment on why this is per-setting rather
+# than per-render), the equivalent of GRIDADQ_PROBE_LINE for the oversample-measurement job.
+MEASURE_TRUNC_LINE = re.compile(r"^\s*\d+/\d+\s+settings\s+done")
+
 
 class ComboPace:
     """Is a worker producing combinations at a rate the rest of the fleet makes plausible?
@@ -359,6 +364,65 @@ def grid_adequacy_args_from_config(config_path: Path, repo_root: Path) -> "list[
     return ["--config", _relpath_or_warn("config", config_path, repo_root)]
 
 
+def measure_truncation_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
+    """--config and --input, repo-relative -- the equivalent of gen_args_from_config for
+    measure_truncation.py. Its [knobs]/schx come from --config already (load_device() reads
+    them the same way run_pipeline.py's load_config() does); --input is still its own flag
+    (measure_truncation.py takes it separately, so the value can be the sweep the DATASET was
+    actually rendered with even if a config's own `input` field was later resized -- see
+    docs/new-circuit-walkthrough.md step 4) but defaults to the config's own value here so a
+    dispatch does not have to repeat it.
+    """
+    cfg = load_config(config_path)
+    out = ["--config", _relpath_or_warn("config", config_path, repo_root)]
+    if cfg.get("input"):
+        out += ["--input", _relpath_or_warn("input", cfg["input"], repo_root)]
+    return out
+
+
+def _collect_measure_truncation(workers, remote_out, local_dir, config_path, extra_args):
+    """Pull every worker's shard_*.json into one local directory, then run
+    measure_truncation.py --merge on them so this prints the exact same table an unsharded run
+    would -- same no-clobber-hazard reasoning as _collect_grid_adequacy: each shard file's name
+    embeds its own --shard spec, so a plain whole-tree rsync from every worker is safe in any
+    order.
+
+    Runs LOCALLY (no ssh, no repo_root translation) -- config_path is used as given, same as
+    _collect_grid_adequacy.
+    """
+    local_dir = Path(local_dir).expanduser()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    for w, out in zip(workers, remote_out):
+        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+                       capture_output=True, text=True)
+    shards = sorted(local_dir.glob("shard_*.json"))
+    if not shards:
+        log("  collect: no shard_*.json found on any worker -- nothing to merge")
+        return
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "measure_truncation.py"),
+           "--merge", *[str(s) for s in shards], "--config", str(config_path)]
+    # --input is required by measure_truncation.py's own CLI even in --merge mode (the
+    # post-merge reference-convergence check re-renders), so supply it from the config unless
+    # extra_args already overrides it -- same fallback gen_args_from_config's --input relies on.
+    if "--input" not in extra_args:
+        input_wav = load_config(config_path).get("input")
+        if input_wav:
+            cmd += ["--input", str(input_wav)]
+        else:
+            log(f"  collect: {config_path} has no [input] and --input was not passed -- the "
+                f"post-merge reference-convergence check will fail to start; pass --input "
+                f"yourself after --")
+    cmd += extra_args
+    log(f"  collect: merging {len(shards)} shard file(s) ...")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        log(f"  {line}")
+    if r.returncode != 0:
+        log(f"  collect: merge exited {r.returncode}")
+        if r.stderr.strip():
+            log(f"  {r.stderr.strip()}")
+
+
 def _warn_chunk_aliasing(gen_args, chunks):
     """Warn when --chunks shares a factor with a knob axis, freezing that knob inside every shard.
 
@@ -630,7 +694,21 @@ GRID_ADEQUACY_JOB = Job(
         _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_args),
 )
 
-JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB)}
+MEASURE_TRUNCATION_JOB = Job(
+    name="measure_truncation",
+    script="measure_truncation.py",
+    progress_re=MEASURE_TRUNC_LINE,
+    output_flag="--emit",
+    build_args=lambda config_path, repo_root, extra_args:
+        measure_truncation_args_from_config(config_path, repo_root) + extra_args,
+    chunk_output=lambda base_output, chunk: f"{base_output}/shard_{chunk.replace('/', '_')}.json",
+    # no_combine is GEN_DATASET_JOB-specific, same as GRID_ADEQUACY_JOB -- accepted and
+    # ignored here so all three jobs share one call site in main().
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine:
+        _collect_measure_truncation(workers, remote_out, local_dir, config_path, extra_args),
+)
+
+JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATION_JOB)}
 
 
 def main():
@@ -645,7 +723,12 @@ def main():
                          "gen_dataset_from_schx.py -- unchanged behavior for existing callers). "
                          "'grid_adequacy' dispatches grid_adequacy.py --shard instead, and "
                          "--collect runs its --merge step so the final report is identical to "
-                         "an unsharded grid_adequacy.py run.")
+                         "an unsharded grid_adequacy.py run. 'measure_truncation' dispatches "
+                         "measure_truncation.py --shard (scaffold_config.py's oversample-"
+                         "measurement step) the same way -- --chunks should usually be much "
+                         "smaller than the default 64 here: the grid being cut is knob "
+                         "SETTINGS (probe_settings(knobs), ~2x knob count), not combinations, "
+                         "so 64 chunks over ~15 settings hands most workers nothing.")
     ap.add_argument("--chunks", type=int, default=64,
                     help="how many pieces to cut the grid into (default 64). Each is dispatched "
                          "as --shard i-i/CHUNKS. See module docstring on sizing.")

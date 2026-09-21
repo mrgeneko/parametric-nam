@@ -540,10 +540,46 @@ class TestJobAbstraction:
         assert not os.path.isabs(a[1])
         assert a[2:] == ["--target", "0.02"]
 
-    def test_tools_registry_has_both_jobs_and_gen_dataset_is_the_default(self):
-        assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy"}
+    def test_measure_truncation_job_dispatches_its_own_script_and_output_flag(self, monkeypatch):
+        cmd = self._run_chunk_cmd(monkeypatch, job=dp.MEASURE_TRUNCATION_JOB)
+        assert cmd == ("cd ~/work/parametric-nam && ./.venv/bin/python -u "
+                       "measure_truncation.py --backend livespice --shard 3-3/16 "
+                       "--emit ~/out/shard_3-3_16.json")
+
+    def test_chunk_output_naming_for_measure_truncation_matches_grid_adequacy_convention(self):
+        assert (dp.MEASURE_TRUNCATION_JOB.chunk_output("~/out", "3-3/16")
+                == "~/out/shard_3-3_16.json")
+
+    def test_measure_trunc_progress_line_matches_the_real_heartbeat(self):
+        assert dp.MEASURE_TRUNC_LINE.match("  3/15 settings done")
+        assert dp.MEASURE_TRUNC_LINE.match("12/12 settings done")
+
+    def test_measure_trunc_progress_line_does_not_match_unrelated_output(self):
+        for line in ("Workers:      12", "    3/48 probes done",
+                      "[controller] no combination completed in 70.0 min"):
+            assert dp.MEASURE_TRUNC_LINE.match(line) is None, line
+
+    def test_measure_truncation_build_args_expands_config_and_input_and_appends_extras(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text('backend = "livespice"\ninput = "%s"\n' % (tmp_path / "sweep.wav"),
+                       encoding="utf-8")
+        a = dp.measure_truncation_args_from_config(cfg, tmp_path / "repo")
+        assert a == ["--config", os.path.relpath(cfg, tmp_path / "repo"),
+                     "--input", os.path.relpath(tmp_path / "sweep.wav", tmp_path / "repo")]
+        a2 = dp.MEASURE_TRUNCATION_JOB.build_args(cfg, tmp_path / "repo", ["--ref-os", "16"])
+        assert a2[-2:] == ["--ref-os", "16"]
+
+    def test_measure_truncation_build_args_omits_input_when_config_has_none(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text('backend = "livespice"\n', encoding="utf-8")
+        a = dp.measure_truncation_args_from_config(cfg, tmp_path / "repo")
+        assert a == ["--config", os.path.relpath(cfg, tmp_path / "repo")]
+
+    def test_tools_registry_has_all_jobs_and_gen_dataset_is_the_default(self):
+        assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy", "measure_truncation"}
         assert dp.JOBS["gen_dataset"] is dp.GEN_DATASET_JOB
         assert dp.JOBS["grid_adequacy"] is dp.GRID_ADEQUACY_JOB
+        assert dp.JOBS["measure_truncation"] is dp.MEASURE_TRUNCATION_JOB
         assert dp.Worker("hostA:~/x:4").job is dp.GEN_DATASET_JOB
 
 

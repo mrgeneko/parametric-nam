@@ -62,7 +62,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_dataset_from_schx import parse_schx_controls, _is_convergence_failure
-from measure_truncation import measure, probe_clips
+from measure_truncation import measure, merge_truncation_shards, probe_clips, ref_error_check, score_rows
 from knob_classify import classify  # noqa: E402
 from run_pipeline import set_input_line  # noqa: E402
 # ONE definition, shared with gen_dataset_from_schx.py's transient gate. If the sizer and
@@ -259,11 +259,44 @@ def _report_divergence(schx: Path, backend: str, err: str, write: bool) -> None:
 
 
 def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tuple,
-                        ref_os: int, probe_s: float, workers: int):
+                        ref_os: int, probe_s: float, workers: int,
+                        oversample_results: list | None = None):
     """Run measure_truncation's own measure(), print its table, and return (chosen_os,
     comment) -- or (None, None) if the oracle isn't built or the render fails outright
     (best-effort: a failed measurement degrades to a placeholder, it doesn't abort the
-    scaffold)."""
+    scaffold).
+
+    `oversample_results`, if given, is a list of measure_truncation.py --emit files (e.g. from
+    `distribute_pull.py --tool measure_truncation ... --collect`) -- this SKIPS the local
+    sweep entirely and scores from that pre-sharded, already-collected set instead, the same
+    way `measure_truncation.py --merge` does. Only the reference-convergence check still
+    renders here (fresh, against the worst setting the merge finds -- see ref_error_check's own
+    docstring on why a merge can't reuse a shard's cache). Added 2026-09-21: on a full amp
+    (6 knobs, sag supply) this step alone measured 70+ minutes single-machine, and this file's
+    own `--workers` was local-only -- see measure_truncation.py's docstring for the full story.
+    """
+    if oversample_results:
+        print(f"  scoring {len(oversample_results)} pre-measured shard file(s) instead of "
+              f"rendering locally ...", flush=True)
+        rows, m_cands, m_ref_os = merge_truncation_shards([str(p) for p in oversample_results])
+        if tuple(m_cands) != tuple(candidates) or m_ref_os != ref_os:
+            print(f"  WARNING: the merged shards were measured with candidates={m_cands}/"
+                  f"ref_os={m_ref_os}, not this run's {candidates}/{ref_os} -- using the "
+                  f"SHARDS' own values instead of what was requested.")
+            candidates, ref_os = tuple(m_cands), m_ref_os
+        r = score_rows(rows, candidates)
+        _, at_worst = r[candidates[0]]
+        if at_worst is not None:
+            try:
+                with tempfile.TemporaryDirectory() as tds:
+                    td = Path(tds)
+                    clips, lead_n, sr = probe_clips(input_wav, probe_s, 4, td)
+                    r["ref_error"] = ref_error_check(schx, at_worst, ref_os, clips, lead_n, sr,
+                                                     256, None, td, workers)
+            except Exception as e:
+                print(f"  WARNING: post-merge reference-convergence check failed ({e}) -- "
+                      f"table below has no ref_error column.")
+        return _print_oversample_table(candidates, r)
     if not input_wav.exists():
         print(f"  WARNING: --input {input_wav} not found -- skipping oversample "
               f"measurement, writing a placeholder instead.")
@@ -289,6 +322,14 @@ def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tu
               f"(see setup.sh --no-cli / $LIVESPICE_CLI). Writing a placeholder instead.")
         return None, None
 
+    return _print_oversample_table(candidates, r)
+
+
+def _print_oversample_table(candidates: tuple, r: dict):
+    """Print the (os, truncation ESR, worst setting) table and return (chosen_os, comment) --
+    shared by _measure_oversample()'s local-render path and its --oversample-results
+    (pre-sharded/merged) path, so both produce an identical table from an identical `res` dict.
+    """
     vals = {c: r.get(c, (float("nan"), None))[0] for c in candidates}
     print(f"\n  {'os':>4}  {'truncation ESR':>15}  worst setting")
     for c in candidates:
@@ -445,6 +486,15 @@ def main() -> None:
     ap.add_argument("--ref-os", type=int, default=32)
     ap.add_argument("--probe-s", type=float, default=10.0)
     ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2))
+    ap.add_argument("--oversample-results", nargs="+", metavar="PATH",
+                    help="skip the local oversample-measurement sweep and score from these "
+                         "measure_truncation.py --emit files instead (e.g. collected by "
+                         "distribute_pull.py --tool measure_truncation --collect). Use this "
+                         "for a full amp, where the local sweep alone can run over an hour on "
+                         "one box -- see measure_truncation.py's own docstring. --candidates/"
+                         "--ref-os are still validated against what the shards were actually "
+                         "measured with (a mismatch is a WARNING, not an error: the shards' "
+                         "own values win).")
     ap.add_argument("--skip-prepare-excitation", action="store_true",
                     help="leave `input` pointed at the raw --input clip as-is, instead of "
                          "the default of building a properly-calibrated excitation from it "
@@ -522,7 +572,8 @@ def main() -> None:
         cands = tuple(int(c) for c in args.candidates.split(","))
         try:
             oversample, comment = _measure_oversample(
-                args.schx, names, Path(args.input), cands, args.ref_os, args.probe_s, args.workers)
+                args.schx, names, Path(args.input), cands, args.ref_os, args.probe_s, args.workers,
+                oversample_results=args.oversample_results)
         except _BackendDiverged as e:
             # Do NOT write a config naming a backend we just watched fail. Everything after this
             # point -- prepare_excitation's corner sweep especially -- renders through the same

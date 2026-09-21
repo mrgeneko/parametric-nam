@@ -53,6 +53,7 @@ change; see internal engineering notes) and is just as easy from the outside:
 from __future__ import annotations
 
 import argparse
+import json
 import os as _os
 import sys
 import tempfile
@@ -157,9 +158,141 @@ def load_device(config_path: Path) -> tuple[str, Path, list[str]]:
     return (config_path.parent.name, schx, knobs)
 
 
+def _render_batch(schx: Path, clips: list[Path], iterations: int, speaker: str | None,
+                   td: Path, workers: int, triples) -> dict[tuple, np.ndarray | None]:
+    """Render every (setting, oversample, window) triple through the oracle's --jobs batch
+    mode: parallel across workers, per-invocation fixed cost paid per worker, not per render.
+
+    Extracted from measure() (2026-09-21) so the post-merge reference-convergence check in
+    main()'s --merge path can render the same way without a second copy of this logic --
+    exactly the drift shard.py's own docstring warns two copies of shard-selection would risk,
+    applied here to render dispatch instead.
+    """
+    jobs, keymap = [], {}
+    for p, os_, wi in triples:
+        key = (tuple(sorted(p.items())), os_, wi)
+        w = td / f"{abs(hash((str(schx), key)))}.wav"
+        jobs.append({"input": str(clips[wi]), "output": str(w),
+                     "params": ",".join(f"{k}={v}" for k, v in p.items()),
+                     "oversample": os_, "iterations": iterations})
+        keymap[str(w)] = key
+    errs = _livespice_batch(str(schx), jobs, workers, speaker)
+    out: dict[tuple, np.ndarray | None] = {}
+    fails: dict[str, list[int]] = {}
+    for wpath, key in keymap.items():
+        if errs.get(wpath) is None and Path(wpath).exists():
+            d, _ = sf.read(wpath)
+            out[key] = np.asarray(d, dtype=np.float64)
+        else:
+            out[key] = None
+            fails.setdefault(errs.get(wpath) or "no output", []).append(key[1])
+    # GROUPED, not one line per render: a config-level failure (bad knob name, wrong
+    # circuit) fails EVERY render with the identical message, and printing that message
+    # 20+ times just buries the one thing worth reading. Group by message instead.
+    for msg, oss in fails.items():
+        oss_str = ",".join(str(o) for o in sorted(set(oss)))
+        print(f"      {len(oss)} render(s) failed (os={oss_str}): {msg}", file=sys.stderr)
+    return out
+
+
+def score_rows(rows: list[dict], candidates: tuple[int, ...]) -> dict:
+    """The worst-over-knob-settings reduction, shared by the live, --emit, and --merge paths.
+
+    Operates on the row schema every path builds: {"index", "params", "esr": {os_str:
+    {"num", "den"}}}. Sharing this one function is what makes a sharded run's table
+    IDENTICAL to an unsharded one by construction rather than by argument -- the reduction
+    runs the same code whether `rows` came from one process's own cache or from merging
+    several workers' --emit files.
+    """
+    res: dict = {"n_settings": len(rows)}
+    for os_ in candidates:
+        worst, at = 0.0, None
+        for r in rows:
+            num, den = r["esr"][str(os_)]["num"], r["esr"][str(os_)]["den"]
+            e = num / den if den > 0 else float("nan")
+            if np.isfinite(e) and e >= worst:
+                worst, at = e, r["params"]
+        res[os_] = (worst, at)
+    return res
+
+
+def merge_truncation_shards(paths: list[str]) -> tuple[list[dict], tuple[int, ...], int]:
+    """Combine per-shard --emit files into one ordered row list, refusing anything incomplete.
+
+    The same three guards as prepare_excitation.merge_onset_shards, applied to knob settings
+    instead of corners -- each guards a way a distributed measurement goes wrong SILENTLY:
+      * solver identity must agree across shards -- see solver_identity(). A truncation number
+        measured by one livespice-cli build is not comparable to one measured by another (see
+        that function's own docstring for the cross-architecture-binary-hash trap this avoids).
+      * every setting index 0..N-1 must appear EXACTLY once. A missing index means a shard
+        died and the worst-over-settings pick is computed with a hole; a duplicate means two
+        shards overlapped and the run is not what it claims.
+      * setting_total, candidates, and ref_os must all agree across shards, so shards from two
+        different configs or --candidates/--ref-os invocations (a config edited mid-run, or a
+        copy-pasted dispatch command with a typo) cannot be silently stitched together.
+
+    Returns (rows, candidates, ref_os) -- the caller still needs candidates/ref_os to run the
+    post-merge reference-convergence check and to sanity-check them against its own CLI args.
+    """
+    rows, seen, totals, solvers, cand_sets, ref_oss = {}, set(), set(), set(), set(), set()
+    for p in paths:
+        d = json.loads(Path(p).read_text())
+        totals.add(d["setting_total"]); solvers.add(d["solver"])
+        cand_sets.add(tuple(d["candidates"])); ref_oss.add(d["ref_os"])
+        for r in d["rows"]:
+            i = r["index"]
+            if i in seen:
+                raise SystemExit(f"setting index {i} appears in more than one shard -- shards "
+                                 f"overlap; re-dispatch with disjoint --shard specs")
+            seen.add(i); rows[i] = r
+    if len(solvers) > 1:
+        raise SystemExit(f"shards were measured by DIFFERENT renderer builds ({sorted(solvers)}) "
+                         f"-- truncation numbers are not comparable. Rebuild every worker to the "
+                         f"same revision and re-run.")
+    if "livespice:UNKNOWN" in solvers:
+        raise SystemExit("could not fingerprint the renderer binary on at least one worker -- "
+                         "refusing to merge truncation numbers that cannot be proven comparable.")
+    if len(totals) > 1:
+        raise SystemExit(f"shards disagree on the setting count ({sorted(totals)}) -- they were "
+                         f"measured against different knob grids; re-dispatch from one config.")
+    if len(cand_sets) > 1 or len(ref_oss) > 1:
+        raise SystemExit(f"shards disagree on candidates/ref_os ({sorted(cand_sets)} / "
+                         f"{sorted(ref_oss)}) -- re-dispatch every shard with matching "
+                         f"--candidates/--ref-os.")
+    total = totals.pop()
+    gaps = sorted(set(range(total)) - seen)
+    if gaps:
+        raise SystemExit(f"{len(gaps)} setting(s) missing from the merge (first: {gaps[:8]}) -- "
+                         f"a shard did not finish. The worst-over-settings pick would be "
+                         f"computed from an incomplete set; re-run the missing shard(s).")
+    return [rows[i] for i in range(total)], cand_sets.pop(), ref_oss.pop()
+
+
+def ref_error_check(schx: Path, at_worst: dict, ref_os: int, clips: list[Path], lead_n: int,
+                    sr: int, iterations: int, speaker: str | None, td: Path,
+                    workers: int) -> float:
+    """ESR(reference, 2x reference) at the worst setting -- see measure()'s own docstring
+    ("IS THE REFERENCE ITSELF CONVERGED?") for why this check exists. Extracted so main()'s
+    --merge path can run it fresh (a merge has each shard's num/den terms, not the raw
+    renders, so this always re-renders both sides rather than reusing a cache)."""
+    k = tuple(sorted(at_worst.items()))
+    got = _render_batch(schx, clips, iterations, speaker, td, workers,
+                        [(at_worst, o, wi) for o in (ref_os, ref_os * 2) for wi in range(len(clips))])
+    num = den = 0.0
+    for wi in range(len(clips)):
+        a, b = got.get((k, ref_os, wi)), got.get((k, ref_os * 2, wi))
+        if a is None or b is None:
+            continue
+        n, d = esr_terms(a, b, lead_n, sr)
+        num += n
+        den += d
+    return num / den if den > 0 else float("nan")
+
+
 def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: int,
             ref_os: int, candidates: tuple[int, ...], iterations: int,
-            speaker: str | None, td: Path, workers: int) -> dict:
+            speaker: str | None, td: Path, workers: int,
+            shard: str | None = None, emit: str | None = None) -> dict | None:
     """Worst-over-knob-settings truncation ESR at each candidate oversample.
 
     Renders run CONCURRENTLY. Serially this was leaving 13 of 14 cores idle while a single
@@ -167,84 +300,85 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     60 s file, and a 7-device fleet would have taken hours. Threads are the right tool: every unit of
     work is a subprocess, so the GIL is irrelevant.
 
-    `workers` IS ONLY LOCAL THREADS ON ONE BOX, not cross-machine -- unlike step 6's dataset
-    generation, this has no `distribute_pull.py`-style --worker HOST:DIR:PARALLEL mode, despite
-    being the exact same shape of embarrassingly-parallel, one-subprocess-per-job work. For a
-    simple pedal that is fine (measured 3m26s total for scaffold_config.py, most of it the
-    excitation build, not this step). For a full amp it is not: measured 70+ minutes and still
-    running (2026-09-21, Ceriatone Muchless Captain Reverb, 6 knobs + sag supply) on a machine
-    sitting next to two other idle boxes that could have taken a third of the job list each. A
-    real candidate for the same per-item sharding step 6 already has -- not yet built.
+    `workers` is only local threads on one box. CROSS-MACHINE sharding is `shard`/`emit`
+    instead (added 2026-09-21, same shape as prepare_excitation.py's --shard/--emit-onsets):
+    pass `shard="LOW-HIGH/TOTAL"` to render only that slice of `probe_settings(knobs)` (striped
+    by index modulo TOTAL, same shard.py contract every other shardable step uses), and `emit`
+    to write that slice's (setting, candidate) ESR terms as JSON instead of scoring -- scoring
+    needs EVERY setting (both the worst-over-settings table and the reference-convergence
+    check), so a shard scoring from its own slice would be confidently wrong the same way a
+    --shard'd prepare_excitation.py run does not size its own excitation. Merge with
+    merge_truncation_shards() (main()'s --merge) once every shard has finished.
 
     `clips` are the probe windows from probe_clips() (possibly just the whole input); each
     (setting, oversample) is rendered per window and the ESR numerator/denominator POOLED
     across windows, so the reported number estimates the same whole-file quantity either way.
     """
     settings = probe_settings(knobs)
+    setting_total = len(settings)
+    shard_index = None
+    if shard:
+        from shard import select
+        picked, *_ = select(list(enumerate(settings)), shard)
+        shard_index = [i for i, _ in picked]
+        settings = [s for _, s in picked]
 
-    # All (setting, oversample, window) renders through the oracle's --jobs batch mode:
-    # parallel across workers, per-invocation fixed cost paid per worker, not per render.
-    def run_batch(triples) -> dict[tuple, np.ndarray | None]:
-        jobs, keymap = [], {}
-        for p, os_, wi in triples:
-            key = (tuple(sorted(p.items())), os_, wi)
-            w = td / f"{abs(hash((str(schx), key)))}.wav"
-            jobs.append({"input": str(clips[wi]), "output": str(w),
-                         "params": ",".join(f"{k}={v}" for k, v in p.items()),
-                         "oversample": os_, "iterations": iterations})
-            keymap[str(w)] = key
-        errs = _livespice_batch(str(schx), jobs, workers, speaker)
-        out: dict[tuple, np.ndarray | None] = {}
-        fails: dict[str, list[int]] = {}
-        for wpath, key in keymap.items():
-            if errs.get(wpath) is None and Path(wpath).exists():
-                d, _ = sf.read(wpath)
-                out[key] = np.asarray(d, dtype=np.float64)
-            else:
-                out[key] = None
-                fails.setdefault(errs.get(wpath) or "no output", []).append(key[1])
-        # GROUPED, not one line per render: a config-level failure (bad knob name, wrong
-        # circuit) fails EVERY render with the identical message, and printing that message
-        # 20+ times just buries the one thing worth reading. Group by message instead.
-        for msg, oss in fails.items():
-            oss_str = ",".join(str(o) for o in sorted(set(oss)))
-            print(f"      {len(oss)} render(s) failed (os={oss_str}): {msg}", file=sys.stderr)
-        return out
-
-    cache = run_batch([(p, os_, wi) for p in settings for os_ in (*candidates, ref_os)
-                       for wi in range(len(clips))])
+    # Rendered and scored ONE SETTING AT A TIME, not one giant batch across every setting.
+    # Two reasons: (1) it prints a per-item heartbeat ("N/M settings done") that
+    # distribute_pull.py's Job.progress_re needs to tell a working shard from a stalled one --
+    # without it `done` never advances and a slow-but-fine render gets killed as stuck, same
+    # failure mode this module's own docstring on --workers used to just accept. (2) `workers`
+    # still parallelizes WITHIN one setting's (candidate + ref_os) x window jobs -- plenty (at
+    # least (len(candidates)+1) x len(clips)) to keep a many-core box busy -- so this costs
+    # little concurrency for a real per-item progress signal.
+    rows = []
+    n_rendered = n_ok = 0
+    for n, p in enumerate(settings):
+        idx = shard_index[n] if shard_index is not None else n
+        k = tuple(sorted(p.items()))
+        got = _render_batch(schx, clips, iterations, speaker, td, workers,
+                            [(p, os_, wi) for os_ in (*candidates, ref_os)
+                             for wi in range(len(clips))])
+        n_rendered += len(got)
+        n_ok += sum(1 for v in got.values() if v is not None)
+        esr_row = {}
+        for os_ in candidates:
+            num = den = 0.0
+            for wi in range(len(clips)):
+                a, b = got.get((k, os_, wi)), got.get((k, ref_os, wi))
+                if a is None or b is None:
+                    continue
+                n_, d_ = esr_terms(a, b, lead_n, sr)
+                num += n_
+                den += d_
+            esr_row[str(os_)] = {"num": num, "den": den}
+        rows.append({"index": idx, "params": p, "esr": esr_row})
+        print(f"  {n + 1}/{len(settings)} settings done", flush=True, file=sys.stderr)
 
     # EVERY render failed. Do NOT fall through to the table below: worst/at stay at their
     # initial (0.0, None), which prints as a confident-looking "0.00e+00 ... falls nanx" --
     # a precise-looking number produced by measuring NOTHING. That is exactly how this got
     # missed the first time: a wrong-case fixed-param name failed all 21 renders identically
     # and the tool still printed a verdict, just a garbled one, instead of stopping.
-    if cache and all(v is None for v in cache.values()):
+    if n_rendered and n_ok == 0:
         raise RuntimeError(
-            f"{schx}: EVERY render failed ({len(cache)}/{len(cache)}). Nothing was measured, "
+            f"{schx}: EVERY render failed ({n_rendered}/{n_rendered}). Nothing was measured, "
             "so there is no table to print. See the failure(s) above -- this usually means a "
             "config problem (wrong knob/fixed-param name, wrong --speaker, wrong backend), "
             "not a convergence issue; fix that and re-run.")
 
-    def pooled_esr(k: tuple, os_a: int, os_b: int) -> float:
-        num = den = 0.0
-        for wi in range(len(clips)):
-            a, b = cache.get((k, os_a, wi)), cache.get((k, os_b, wi))
-            if a is None or b is None:
-                continue
-            n, d = esr_terms(a, b, lead_n, sr)
-            num += n
-            den += d
-        return num / den if den > 0 else float("nan")
+    if emit:
+        from prepare_excitation import solver_identity
+        ident = solver_identity("livespice")
+        Path(emit).write_text(json.dumps({
+            "setting_total": setting_total, "candidates": list(candidates), "ref_os": ref_os,
+            "solver": ident, "shard": shard, "rows": rows,
+        }, indent=2))
+        print(f"wrote {len(rows)} setting row(s) to {emit} (solver {ident}) -- NOT scored; "
+              f"merge with --merge to score once across every shard", file=sys.stderr)
+        return None
 
-    res: dict = {"n_settings": len(settings)}
-    for os_ in candidates:
-        worst, at = 0.0, None
-        for p in settings:
-            e = pooled_esr(tuple(sorted(p.items())), os_, ref_os)
-            if np.isfinite(e) and e >= worst:
-                worst, at = e, p
-        res[os_] = (worst, at)
+    res = score_rows(rows, candidates)
 
     # IS THE REFERENCE ITSELF CONVERGED?
     #
@@ -258,8 +392,8 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     # the reference's own error, the ratios go flat, and every entry is an UNDERSTATEMENT.
     _, at_worst = res[candidates[0]]
     if at_worst is not None:
-        cache.update(run_batch([(at_worst, ref_os * 2, wi) for wi in range(len(clips))]))
-        res["ref_error"] = pooled_esr(tuple(sorted(at_worst.items())), ref_os, ref_os * 2)
+        res["ref_error"] = ref_error_check(schx, at_worst, ref_os, clips, lead_n, sr,
+                                           iterations, speaker, td, workers)
     return res
 
 
@@ -294,12 +428,40 @@ def main() -> None:
                     help="override write_probe_clip's 1.0s default lead-in for a circuit whose "
                          "own settling time is longer (e.g. a slow RC network) -- see that "
                          "function's docstring. Default: use its own 1.0s.")
+    ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL",
+                    help="measure only the knob settings whose index modulo TOTAL falls in "
+                         "[LOW, HIGH] -- shard.py's shared contract, same as "
+                         "gen_dataset_from_schx.py/prepare_excitation.py. Requires --emit and "
+                         "SKIPS scoring: both the worst-over-settings table and the reference-"
+                         "convergence check need EVERY setting, so a shard scoring from its "
+                         "own slice would be confidently wrong, the same way a --shard'd "
+                         "prepare_excitation.py run does not size its own excitation. "
+                         "Striping (modulo), not contiguous blocks, for the same reason as "
+                         "every other shardable step here: settings are not equal cost.")
+    ap.add_argument("--emit", metavar="PATH",
+                    help="write this shard's measured (setting, candidate) ESR terms as JSON "
+                         "instead of scoring. Carries the setting total, candidates/ref_os, "
+                         "each row's GLOBAL setting index, and a fingerprint of the renderer "
+                         "binary so --merge can refuse mismatched work.")
+    ap.add_argument("--merge", nargs="+", metavar="PATH",
+                    help="combine --emit files from every shard, verify completeness and "
+                         "solver agreement, then score ONCE from the full set -- including a "
+                         "fresh reference-convergence check at the worst setting the merge "
+                         "finds (a merge has each shard's num/den terms, not the raw renders, "
+                         "so that one check always re-renders). Refuses on a missing or "
+                         "duplicated setting index, a solver-build mismatch, or a "
+                         "candidates/ref_os disagreement -- each of which would otherwise "
+                         "yield a silently wrong table.")
     args = ap.parse_args()
 
     cands = tuple(int(c) for c in args.candidates.split(","))
     if max(cands) >= args.ref_os:
         ap.error(f"--candidates must all be below --ref-os ({args.ref_os}): you cannot measure the "
                  f"reference against itself")
+    if bool(args.shard) != bool(args.emit):
+        ap.error("--shard and --emit must be used together")
+    if args.merge and (args.shard or args.emit):
+        ap.error("--merge is mutually exclusive with --shard/--emit")
 
     try:
         name, schx, knobs = load_device(args.config)
@@ -313,21 +475,59 @@ def main() -> None:
     print(f"reference:  oversample={args.ref_os}, {args.iterations} Newton iterations")
     print(f"device:     {name} ({len(knobs)} knobs)\n")
 
-    rows = []
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td,
-                                        lead_s=args.lead_silence_s)
-        if len(clips) > 1 or clips[0] != args.input:
-            print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
-                  f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")
-        print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
-        try:
-            r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
-                        args.iterations, args.speaker, td, args.workers)
-        except RuntimeError as e:
-            sys.exit(f"\nERROR: {e}")
-        rows.append((name, r))
+    if args.merge:
+        # MERGE MODE: every setting was already measured elsewhere. Skip rendering the sweep
+        # entirely and score from the verified union -- merge_truncation_shards() refuses
+        # anything incomplete or measured by a divergent solver build, so reaching here means
+        # the set is trustworthy. Only the reference-convergence check still renders (fresh --
+        # see ref_error_check's own docstring for why a merge can't just reuse a shard's cache).
+        merged_rows, m_cands, m_ref_os = merge_truncation_shards(args.merge)
+        if m_cands != cands or m_ref_os != args.ref_os:
+            ap.error(f"--candidates/--ref-os ({cands}/{args.ref_os}) don't match what the "
+                     f"merged shards were dispatched with ({m_cands}/{m_ref_os}) -- pass the "
+                     f"same values used to dispatch them.")
+        print(f"merged {len(merged_rows)} setting(s) from {len(args.merge)} shard file(s)")
+        r = score_rows(merged_rows, cands)
+        _, at_worst = r[cands[0]]
+        if at_worst is not None:
+            with tempfile.TemporaryDirectory() as tds:
+                td = Path(tds)
+                clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td,
+                                                lead_s=args.lead_silence_s)
+                r["ref_error"] = ref_error_check(schx, at_worst, args.ref_os, clips, lead_n, sr,
+                                                 args.iterations, args.speaker, td, args.workers)
+        rows = [(name, r)]
+    elif args.shard:
+        # SHARDED MODE: render only this slice and write it out; do NOT score. See measure()'s
+        # own docstring for why scoring needs every setting.
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td,
+                                            lead_s=args.lead_silence_s)
+            print(f"  measuring shard {args.shard} of {name} ({len(knobs)} knobs) ...",
+                  flush=True, file=sys.stderr)
+            try:
+                measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands, args.iterations,
+                       args.speaker, td, args.workers, shard=args.shard, emit=args.emit)
+            except RuntimeError as e:
+                sys.exit(f"\nERROR: {e}")
+        return
+    else:
+        rows = []
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            clips, lead_n, sr = probe_clips(args.input, args.probe_s, args.n_windows, td,
+                                            lead_s=args.lead_silence_s)
+            if len(clips) > 1 or clips[0] != args.input:
+                print(f"probing:    {len(clips)} x {sf.info(str(clips[0])).frames / sr:.1f}s windows "
+                      f"(--probe-s {args.probe_s:g}; 0 = whole file)\n")
+            print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
+            try:
+                r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
+                            args.iterations, args.speaker, td, args.workers)
+            except RuntimeError as e:
+                sys.exit(f"\nERROR: {e}")
+            rows.append((name, r))
 
     hdr = " | ".join(f"@ os={c}" for c in cands)
     print(f"\n| device | {hdr} | worst setting @ os={cands[0]} | ref err | verdict |")
