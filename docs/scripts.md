@@ -587,6 +587,60 @@ Four things that are easy to get wrong:
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
   successes, and a chunk is not handed back to a host that already failed it.
 
+## `sync_findpeak_cache.sh` — warm the onset cache across a fleet before sharding
+
+```bash
+./sync_findpeak_cache.sh --workers host1,host2,host3 [--dry-run]
+```
+
+Gathers `~/.cache/parametric-nam/findpeak/` from every worker into this machine's own cache,
+then scatters the resulting union back out to all of them — so every machine ends a sync
+holding the same set of measured saturation onsets, instead of each one only knowing what it
+personally computed. `--dry-run` runs the gather phase with rsync's own `--dry-run -v` and
+stops before scattering anything, so it's safe to preview what a sync would pull in.
+
+Run it **before** dispatching a sharded `prepare_excitation.py`/`check_transient_coverage.py`
+sizing pass, or a `distribute_pull.py --tool gen_dataset` run (whose renderer runs the same
+transient-coverage gate internally, against the FULL corner set, on every single chunk — see
+that tool's own `--corner-workers` help). Without this, a pull-scheduled chunk that lands on a
+machine other than the one that originally measured a given corner pays the full onset-search
+cost again, once per machine until that machine's own cache fills in from its own chunks
+(observed directly, 2026-09-21: a Ceriatone Muchless Captain Reverb generation run re-derived
+the same ~100-minute-cold onset search independently on multiple workers before this existed).
+
+Discovers each worker's own `$HOME` via a live `ssh $w 'echo $HOME'` rather than assuming `~`
+resolves the same way everywhere — this fleet's workers span `/Users/chewie`, `/home/gene`,
+and others, and a hardcoded prefix would silently miss or misplace a worker's cache. Uses
+`rsync --ignore-existing` on every leg: an entry already present at the destination, under
+either side of the sync, is never re-transferred or overwritten, so nothing already correct
+can be clobbered.
+
+**Safe to run blind — no solver-build check needed here**, unlike `merge_onset_shards()`/
+`merge_truncation_shards()`. Every findpeak cache entry's own key already folds in the
+oracle's `solver_identity()` (every `_setup()` branch in `prepare_excitation.py` builds its
+`cache_extra` with `|solver=<identity>` before calling `findpeak_cache_key()` — confirmed via
+`tests/test_prepare_excitation.py::TestSetupLivespiceSolverIdentityInCache`), so a rebuilt
+oracle or a different revision on another machine simply produces a different cache file, never
+a colliding one. The merge is a pure, content-addressed union of small immutable JSON files —
+there is no such thing as a conflicting entry, only a missing one. This was an OPEN
+prerequisite as of `docs/fleet-deployment-proposal.md` §4a and `docs/per-item-sharding-
+proposal.md`'s closing section; both were closed the same day this script was built (2026-09-21).
+
+**A separate assumption this script inherits, not one it introduces**: cross-machine
+reproducibility of the underlying renders themselves. Measured bit-identical across five
+repeats on ONE machine (Mesa Orange, oversample 8) — circumstantial, not yet a full-precision-
+verified agreement across ARM/x86. If a rendering bug is ever traced to platform-specific
+float behavior, syncing the onset cache is exactly the mechanism that would spread a
+platform-specific wrong answer fleet-wide — worth keeping in mind before scheduling this
+unattended (see `docs/per-item-sharding-proposal.md`'s "Determinism" section).
+
+**Not scoped to one circuit** — it syncs the whole cache, including every past device's entries
+a host has ever accumulated. Harmless (content-addressed) but not free: verified moving 291 new
+entries into a 1671-entry union across 3 hosts when this script was built, and separately (this
+session, using a since-reconciled duplicate implementation before this one was found already
+committed) 2726 entries across 4 hosts — both took seconds, so fine at this fleet's size;
+revisit if the cache grows enough for that to change.
+
 ## `gen_dataset_from_schx.py` — generate the dataset
 
 Simulates the circuit across knob combinations, one WAV per combination, then combines

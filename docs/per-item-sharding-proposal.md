@@ -12,11 +12,18 @@ be read as an elaboration of that §4 rather than an alternative to it.
 
 Two ideas here were already written down in its §4a before this document existed, and were
 re-derived independently: warming the shared `findpeak` cache across the fleet, and giving
-corner probing a `--shard i-i/N`. That section is also ahead of this one on a point that
-matters — the findpeak cache key does not include the simulator's own version, so a rebuilt
-oracle silently reuses old measurements, and that must be closed before any cross-machine
-cache sync. Its §2 (the host inventory) is the natural home for the per-host facts this
-document currently leaves to `--worker HOST:DIR:PARALLEL`.
+corner probing a `--shard i-i/N`. The latter shipped (`prepare_excitation.py`/
+`check_transient_coverage.py`/`measure_truncation.py` all have `--shard`/`--emit-onsets`/
+`--merge-onsets` now). The former shipped too, 2026-09-21, as `sync_findpeak_cache.sh` (see
+`docs/scripts.md`) — run once before dispatching a sharded sizing/coverage/generation job, not
+part of `distribute_pull.py` itself. Its prerequisite, closing the "the findpeak cache key does
+not include the simulator's own version" gap this section is ahead of this doc on, turned out
+to already be closed by the time `sync_findpeak_cache.sh` was built: every `_setup()` branch in
+`prepare_excitation.py` already folds `solver_identity()` into `cache_extra` before it reaches
+`findpeak_cache_key()`, confirmed by a new regression test
+(`TestSetupLivespiceSolverIdentityInCache`) rather than assumed. Its §2 (the host inventory) is
+still the natural home for the per-host facts this document currently leaves to
+`--worker HOST:DIR:PARALLEL`, which remains open.
 
 ## Summary
 

@@ -138,6 +138,65 @@ class TestMainSweepPeakVsCheckTransientCoverage:
         assert self._sweep_peak_from_cmd(cmd) == pytest.approx(10.0)
 
 
+class TestSetupLivespiceSolverIdentityInCache:
+    """The findpeak cache key must be sensitive to the ORACLE'S OWN BUILD, not just the
+    circuit and knob settings -- otherwise two machines on different livespice-cli revisions
+    (or a rebuilt oracle on the same machine) silently collide on the same cache entry, and a
+    fleet-wide onset-cache sync would mix incompatible measurements with no way to detect it.
+
+    This is a REGRESSION test, not new coverage of new behavior: solver_identity() already
+    rides inside cache_extra for every backend (see _setup()'s own f-string) -- confirmed
+    2026-09-21 while designing a cross-machine findpeak-cache sync tool, which depends on this
+    already being true. Pins it down explicitly so it can't silently regress.
+    """
+
+    def _args(self, schx, oversample=8, iterations=256, peak_max_v=40.0, min_start_v=1e-9,
+             sweep_start_v=0.005):
+        import types
+        return types.SimpleNamespace(backend="livespice", schx=str(schx), range=["Fuzz=0.0,1.0"],
+                                     config=None, oversample=oversample, iterations=iterations,
+                                     peak_max_v=peak_max_v, min_start_v=min_start_v,
+                                     sweep_start_v=sweep_start_v, fixed_params="")
+
+    def test_cache_extra_embeds_the_solver_identity(self, tmp_path, monkeypatch):
+        import prepare_excitation as pe
+        monkeypatch.setattr(pe, "solver_identity", lambda backend: "livespice:deadbeef1234")
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        _, _, cache_extra, *_ = pe._setup(self._args(schx))
+        assert "livespice:deadbeef1234" in cache_extra
+
+    def test_different_solver_identity_produces_a_different_cache_extra(self, tmp_path, monkeypatch):
+        import prepare_excitation as pe
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+        monkeypatch.setattr(pe, "solver_identity", lambda backend: "livespice:aaaaaaa")
+        _, _, a, *_ = pe._setup(self._args(schx))
+        monkeypatch.setattr(pe, "solver_identity", lambda backend: "livespice:bbbbbbb")
+        _, _, b, *_ = pe._setup(self._args(schx))
+        assert a != b
+
+    def test_different_solver_identity_produces_a_different_findpeak_cache_path(self, tmp_path, monkeypatch):
+        """End to end: not just cache_extra as a string, but the actual on-disk cache file
+        findpeak_cache_key() resolves to -- the property a cross-machine sync tool relies on
+        to never merge two builds' entries under one key."""
+        import prepare_excitation as pe
+        from find_saturation_point import findpeak_cache_key
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        schx = tmp_path / "fake.schx"
+        schx.write_text("<Schematic></Schematic>")
+
+        monkeypatch.setattr(pe, "solver_identity", lambda backend: "livespice:aaaaaaa")
+        _, identity, extra_a, *_ = pe._setup(self._args(schx))
+        path_a = findpeak_cache_key(identity, {"Fuzz": 0.5}, extra_a)
+
+        monkeypatch.setattr(pe, "solver_identity", lambda backend: "livespice:bbbbbbb")
+        _, _, extra_b, *_ = pe._setup(self._args(schx))
+        path_b = findpeak_cache_key(identity, {"Fuzz": 0.5}, extra_b)
+
+        assert path_a != path_b
+
+
 class TestSetupNgspiceBackend:
     """--backend ngspice (the GENERIC schx-translated path, added 2026-09-11 for a .schx
     circuit whose LiveSPICE render diverges under real signal, e.g. Arbiter Fuzz Face) must
