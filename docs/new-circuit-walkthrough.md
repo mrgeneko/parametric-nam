@@ -1,8 +1,10 @@
 # From a new `.schx` to a trained `.param.nam`
 
-The end-to-end path for a circuit this repo has never seen: **six steps, five commands**.
-Step 2 is pure review — no command, and the one step whose omission the pipeline's own
-gates cannot catch for you.
+The end-to-end path for a circuit this repo has never seen: **six steps, five commands —
+one of the steps optional**. Step 2 is pure review — no command, and one of the two steps
+(with step 4) whose omission the pipeline's own gates cannot catch for you. Step 3 is the
+optional one: a diagnostic on the knob grid, not a gate on it — see its own section below
+for when to skip it.
 
 **Before you start**, you need what the [README](../README.md#train-from-a-spice-schematic)
 sets up: the `livespice-cli` oracle built (`./setup.sh`, or `export LIVESPICE_CLI=...` if your
@@ -18,7 +20,7 @@ Rough shape, on a many-core desktop:
 | step | cost | what drives it |
 |---|---|---|
 | 1 — scaffold | minutes for a simple pedal, **can run over an hour for a full amp** | measured at 3m26s for a 3-knob pedal (most of it the excitation build), but 70+ minutes for a 6-knob full tube amp with a sag supply (2026-09-21, Ceriatone Muchless Captain Reverb) — the oversample-measurement sub-step (`measure_truncation.py`) scales with knob-setting count AND per-render cost, both far higher for a multi-tube amp than a pedal. As of 2026-09-21 this sub-step CAN be sharded across machines, same shape as step 6: dispatch with `distribute_pull.py --tool measure_truncation --worker HOST:DIR:PARALLEL ... --collect DIR` (small `--chunks`, since the grid here is knob *settings* — `probe_settings(knobs)`, ~2× knob count — not combinations: 64 chunks over ~15 settings starves most workers), then pass the collected `shard_*.json` files to `scaffold_config.py --oversample-results shard_*.json` instead of `--input`'s local sweep |
-| 3 — grid refine | minutes to tens of minutes | knob-*axis* count, not combination count; cached between runs |
+| 3 — grid refine (**optional**) | minutes to tens of minutes | knob-*axis* count, not combination count; cached between runs. Skip if grid density is a budget call, not an ESR-target call -- see its own section |
 | 4 — re-size excitation | minutes | corner count × per-render cost |
 | 6 — generate + train | **hours to days** | combinations × clip length × oversample, then training |
 
@@ -183,18 +185,39 @@ ideally in the config's filename, so nobody later mistakes it for the full devic
 > range — for a pedal whose controls do not center at noon. It does not remove a knob from
 > the grid.
 
-## 3. Refine the knob grid
+## 3. Refine the knob grid (optional)
+
+**This step is a diagnostic, not a gate — decide up front whether you want it to act.**
+`grid_adequacy.py` answers one narrow question: does the CURRENT grid sample the circuit
+densely enough to interpolate well against a target ESR. That is a real, useful number, but
+it answers "is this grid adequate for a given ESR target," not "how many points should this
+grid have" — the latter is at least as often decided by render/train budget (renders and
+epochs cost real time, and a denser grid costs both) as by chasing interpolation error down.
+If you already know your point counts from budget, skip straight to step 4 -- but see step
+6's own table for a real, separate gate this does NOT get you out of: `run_pipeline.py`
+re-runs this same measurement internally by default and aborts on the same target, whether
+or not you ran this step yourself. `--skip-grid-check` (or a matching `--grid-target`) there
+is the actual opt-out, not skipping this section.
+
+Two ways to use it, depending on which question you're actually asking:
 
 ```bash
-./grid_adequacy.py --config my_pedal.config.toml --apply
+./grid_adequacy.py --config my_pedal.config.toml               # measure only, change nothing
+./grid_adequacy.py --config my_pedal.config.toml --apply        # measure AND rewrite the grid
 ```
 
-Renders each cell's midpoint and compares it against interpolating its neighbours. A cell
-whose residual exceeds the target is a floor no amount of training can lift — the
-information was never sampled. `--apply` bisects failing cells, re-probes, and writes the
-converged grid back, leaving all your comments intact.
+**Without `--apply` (the default), nothing is written** — `write_knobs()`, the only place
+the config file gets modified, is gated behind `--apply` in the code, not just in this doc's
+advice. Confirmed on 2026-09-21 mid-flight against a real device: this is safe to leave
+running or kill at any point, since it can't have half-written anything. It renders each
+cell's midpoint and compares it against interpolating its neighbours, then prints where the
+current grid is furthest from your target — worth reading even at a budget-fixed point
+count, because it tells you WHICH existing point is worst-placed, so you can *reposition* a
+point within a fixed budget rather than add one.
 
-Probe renders are cached on disk, so step 6's re-verification of this grid is free.
+**With `--apply`**, it acts on that measurement: bisects failing cells, re-probes, and writes
+the converged grid back, leaving all your comments intact. Probe renders are cached on disk,
+so step 6's re-verification of this grid is free either way.
 
 > **`--apply` can also *coarsen* an axis**, down to a 2-point floor, when a knob's midpoints
 > interpolate well. Think before accepting that on an interacting tone network. Measured
@@ -203,7 +226,7 @@ Probe renders are cached on disk, so step 6's re-verification of this grid is fr
 > if it isn't. Restoring a midpoint by hand is cheap insurance; if you do, say so in a
 > comment, because a later `--apply` will otherwise re-cut it.
 
-## 4. Re-size the excitation against the refined grid
+## 4. Re-size the excitation against the final grid
 
 ```bash
 ./prepare_excitation.py --backend livespice \
@@ -213,7 +236,8 @@ Probe renders are cached on disk, so step 6's re-verification of this grid is fr
 ```
 
 **Do not skip this because step 1 already built one.** Step 1's excitation was sized against
-the *placeholder* grid. Step 3 changed the grid underneath it, which changes the corner set,
+the *placeholder* grid. If step 3 changed the grid, or you hand-edited it yourself (skipping
+step 3 entirely is legitimate — see its own section), either one changes the corner set,
 which changes the worst-case saturation onset the excitation has to reach.
 
 **Why the excitation has to be scaled to the circuit.** A model can only learn behaviour the
@@ -297,13 +321,19 @@ walkthrough steps on this page:
 
 | banner it prints | what it does | on failure |
 |---|---|---|
-| `STEP 1 / 6 — Grid Adequacy` | re-verifies the grid from step 3 (cached, so ~instant) | **aborts** |
+| `STEP 1 / 6 — Grid Adequacy` | measures the grid against `--grid-target` (cached if step 3 already ran; a fresh render otherwise) | **aborts** |
 | `STEP 2 / 6 — Input Headroom` | does the excitation reach saturation at default settings | warns |
 | `STEP 3 / 6 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
 | `STEP 4 / 6 — Dataset Generation` | renders every combination (coverage re-checked inside) | **aborts** |
 | `STEP 5 / 6 — Combine` | assembles `outputs.npy` | |
 | `STEP 6 / 6 — Training` | SGDR warm restarts, open-ended | |
 | `RELEASE` | models, `.schx`, `MANIFEST.md`, `reproduce.sh` | |
+
+**If you skipped walkthrough step 3 on purpose** (a budget-fixed grid, not chasing
+`grid_target`), this internal `STEP 1/6` still runs by default and **aborts** if a cell
+measures over target — it doesn't know you already made that call. Pass `--skip-grid-check`
+to `run_pipeline.py` to render anyway, or `--grid-target` to match whatever ESR floor you've
+actually accepted. Skipping walkthrough step 3 does not skip this gate; only this flag does.
 
 Training with `epochs = 0` runs until you `touch <workspace>/checkpoints/STOP`, exporting
 the best model continuously. Use the first run to find the budget, then set a real schedule.

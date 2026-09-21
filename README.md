@@ -92,18 +92,31 @@ export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 ```
 
 Then follow **[`docs/new-circuit-walkthrough.md`](docs/new-circuit-walkthrough.md)** — six
-steps from a `.schx` you have never trained to a finished `.param.nam`, with the reasoning
-for each. All you need on top of the above is a `.schx`: your own, one from
-`LiveSPICE-Amp-Collection`, or the **bundled `examples/large_muffin/large_muffin.schx`** if
-you would rather practise on a known circuit first (see `large_muffin.md` for its notes).
+steps from a `.schx` you have never trained to a finished `.param.nam` (one of them
+optional), with the reasoning for each. All you need on top of the above is a `.schx`: your
+own, one from `LiveSPICE-Amp-Collection`, or the **bundled
+`examples/large_muffin/large_muffin.schx`** if you would rather practise on a known circuit
+first (see `large_muffin.md` for its notes).
 
-Do all six, in order. Two of them look optional and are not, because both fail **silently**:
+**Step 3 (grid refinement) is a diagnostic, not a gate.** It measures whether the current
+grid interpolates well, but whether to act on that — add points, remove points, or just
+reposition existing ones — is a render/train-budget call the tool cannot make for you.
+Skip straight to step 4 if you are setting grid density by budget rather than chasing an
+interpolation-ESR target; run it without `--apply` (the default) if you still want the
+diagnostic without letting it change your point counts. Note this does not opt you out of
+`run_pipeline.py`'s own internal grid-adequacy gate at train time (step 6) — that one aborts
+by default regardless of whether you ran this step; use `--skip-grid-check` there if you've
+deliberately accepted a budget-driven grid.
+
+The other five are not optional even when they look like it — two of them fail
+**silently**:
 
 - **Step 2 — review the scaffold's knob order and kinds.** The order is baked into the
   dataset and the model, so fixing it later means re-rendering everything. A misclassified
   knob passes every automated check downstream, dead or not.
-- **Step 4 — re-size the excitation after the grid is settled.** Step 1 sizes one against a
-  placeholder grid; step 3 then changes that grid. Train on the stale one and the model
+- **Step 4 — re-size the excitation after the grid is settled (or after you hand-edit it).**
+  Step 1 sizes one against a placeholder grid; whatever changes that grid afterward — step
+  3's own regrid, or your own edits — invalidates it. Train on the stale one and the model
   plays clean at knob settings where the real circuit distorts.
 
 ### Listen
