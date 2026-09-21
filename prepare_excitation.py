@@ -186,7 +186,8 @@ def merge_onset_shards(paths):
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
                       lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None,
-                      corner_workers=1, shard=None, emit_onsets=None, backend_name="livespice"):
+                      corner_workers=1, shard=None, emit_onsets=None, backend_name="livespice",
+                      min_start_v=1e-9, start_v=0.005):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -255,7 +256,8 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                 Path(ctmp).mkdir(parents=True, exist_ok=True)
             sat = find_saturation_point(backend, params, str(ctmp), max_v=peak_max_v,
                                          lead_silence_s=lead_silence_s, capture=capture,
-                                         workers=sweep_workers, executor=amp_executor)
+                                         workers=sweep_workers, executor=amp_executor,
+                                         min_start_v=min_start_v, start_v=start_v)
             cache_findpeak(cpath, sat)
         return label, params, sat
 
@@ -382,7 +384,7 @@ def _setup(args):
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
         backend = LiveSpiceBackend(schx, oversample=oversample, iterations=args.iterations)
         identity = Path(schx).read_bytes()
-        cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, Path(schx).name, _capture
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -404,7 +406,7 @@ def _setup(args):
         # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
-        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module, _capture
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -417,7 +419,7 @@ def _setup(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.ltspice_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module, _capture
@@ -453,7 +455,7 @@ def _setup(args):
         # above documents for ngspice-deck vs ltspice-deck. conv_cache_tag guards the same
         # hazard for a device-model override (e.g. a corrected transistor fit): an onset
         # measured under one --conv must not be served to a caller expecting a different one.
-        cache_extra = (f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}"
+        cache_extra = (f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}"
                       + cache_tag(_capture) + conv_cache_tag(conv))
         # lead_silence_s IS needed here, same as ngspice-deck: this is ngspice under the hood
         # (schx_to_ngspice.py's generated .cir, not a hand-written deck, but the same solver),
@@ -530,6 +532,37 @@ def main():
     ap.add_argument("--peak-max-v", type=float, default=40.0,
                      help="find_saturation_point sweep ceiling -- the 40V default suits an "
                           "amp; lower it (e.g. 3-5) for a small pedal circuit")
+    ap.add_argument("--sweep-start-v", type=float, default=0.005,
+                     help="find_saturation_point's initial sweep floor (default: %(default)s, "
+                          "matching that function's own start_v default). Raise this for a "
+                          "circuit with an ACTIVE internal supply whose own ripple floor sits "
+                          "ABOVE the default -- --min-start-v alone cannot fix that case, since "
+                          "it only bounds downward EXTENSION below this starting point, and "
+                          "extension is never reached if the very first probe point is already "
+                          "ripple-contaminated. Set above your circuit's own measured near-"
+                          "silent output floor (with margin) -- see --min-start-v's help for "
+                          "how to measure that floor directly and the Vox AC30 (sag ac) case "
+                          "that motivated both flags.")
+    ap.add_argument("--min-start-v", type=float, default=1e-9,
+                     help="find_saturation_point's downward-extension floor (default: "
+                          "%(default)s, matching that function's own default). Raise this for "
+                          "a circuit with an ACTIVE internal supply (an AC-driven sag/rectifier "
+                          "network, --backend livespice's FRONTEND=ac style) rather than ideal "
+                          "DC rails -- such a circuit generates a small amount of its OWN "
+                          "output (ripple) completely independent of the input signal, so as "
+                          "the sweep extends toward ever-smaller inputs, measured gain "
+                          "(output/input) diverges without bound and NEVER finds a genuine "
+                          "linear region -- the sweep exhausts every extension decade and "
+                          "reports the floor itself as 'the onset', sizing an excitation at "
+                          "~0V (silent). Found 2026-09-20 on the Vox AC30 Top Boost (sag ac): "
+                          "even after cutting the supply's own ripple ~17x (reservoir caps "
+                          "4.7/22uF -> 47/470uF), residual ripple (~0.04V RMS) still triggered "
+                          "this at the default 1e-9V floor -- no amount of realistic supply "
+                          "filtering makes a truly-AC-coupled circuit's ripple exactly zero, so "
+                          "the floor itself needs raising above it, not chased downward "
+                          "forever. Set this above your circuit's own measured near-silent "
+                          "output floor (with margin) -- a probe at a genuinely tiny input "
+                          "(e.g. 1e-6 V) on the ACTUAL circuit tells you that floor directly.")
     _cc_add_cli_args(ap)
     ap.add_argument("--conv", default=None,
                     help="[ngspice] device-model convergence/fidelity overrides key=val,... "
@@ -681,6 +714,7 @@ def main():
         tmp = str(scratch_dir("prepare_excitation", args.keep_scratch))
         worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                         peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                        min_start_v=args.min_start_v, start_v=args.sweep_start_v,
                                         capture=_capture,
                                         corner_workers=(args.corner_workers if args.corner_workers
                                                         else max(1, min(6, (os.cpu_count() or 4) // 4))),
