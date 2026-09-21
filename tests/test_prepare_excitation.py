@@ -145,12 +145,14 @@ class TestSetupNgspiceBackend:
     unknown backend."""
 
     def _args(self, schx=None, range_=None, config=None, oversample=None, peak_max_v=40.0,
-             lead_silence_s=3.0, fixed_params="", conv=None):
+             lead_silence_s=3.0, fixed_params="", conv=None, min_start_v=1e-9,
+             sweep_start_v=0.005):
         import types
         return types.SimpleNamespace(backend="ngspice", schx=schx, range=range_ or [],
                                      config=config, oversample=oversample,
                                      peak_max_v=peak_max_v, lead_silence_s=lead_silence_s,
-                                     fixed_params=fixed_params, conv=conv)
+                                     fixed_params=fixed_params, conv=conv,
+                                     min_start_v=min_start_v, sweep_start_v=sweep_start_v)
 
     def test_builds_an_ngspice_schx_backend_from_schx_and_range(self, tmp_path):
         schx = tmp_path / "fake.schx"

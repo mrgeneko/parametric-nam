@@ -298,8 +298,16 @@ class TestCacheKeyCarriesTheChain:
         import inspect, importlib, re
         src = inspect.getsource(importlib.import_module(mod))
         # only CONSTRUCTION sites; `a, b, cache_extra = _build_backend(args)` is a
-        # destructuring assignment, not a key being built.
-        sites = re.findall(r'cache_extra = f".*', src)
+        # destructuring assignment, not a key being built. Optional `(` and a bounded
+        # DOTALL window (not just `.*` on one line) because a cache_extra built from several
+        # f-string pieces spans multiple lines, e.g.:
+        #     cache_extra = (f"os={oversample}|...|minv={min_start_v}"
+        #                    f"|startv={start_v}") + cache_tag(capture)
+        # A single-line-only match missed every one of check_transient_coverage.py's 4 sites
+        # once they grew a second f-string line (2026-09-21) -- found via this test itself
+        # going from "cache_tag present" to "no cache_extra found at all", not a quieter
+        # false pass, but still worth tightening rather than leaving fragile.
+        sites = re.findall(r'cache_extra = \(?f".{0,300}', src, re.DOTALL)
         assert sites, f"{mod}: no cache_extra found -- did it move?"
         for line in sites:
             assert "cache_tag(" in line, f"{mod}: cache_extra without the chain tag: {line.strip()}"
@@ -528,7 +536,8 @@ class TestEveryBackendGetsAChain:
             exclude_knob=[], probe_node="OUT", maxstep=3e-6, parallel_sims=8,
             peak_max_v=40.0, lead_silence_s=3.0, range=["Gain=0,1"], fixed_params=None,
             no_capture_chain=None, capture_hp_hz=None, capture_order=None, config=None,
-            schx=None, oversample=None, iterations=None)
+            schx=None, oversample=None, iterations=None,
+            min_start_v=1e-9, sweep_start_v=0.005)
         out = pe._setup(args)
         assert out[-1] is not None, "deck backend silently lost the capture chain"
         assert out[-1] == {"corner_hz": DEFAULT_CORNER_HZ, "order": DEFAULT_ORDER}

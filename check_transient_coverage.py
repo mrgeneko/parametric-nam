@@ -66,6 +66,10 @@ from find_saturation_point import (find_saturation_point, findpeak_cache_key,  #
                                     cache_findpeak)
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
+# NOT imported at module level: prepare_excitation.py imports FROM this module
+# (resolve_sample_grid/_corners/_sample_interior), so a top-level import here would be
+# circular. Imported lazily, at first use, inside _check_corners() instead -- by then this
+# module is already fully loaded, so the cycle never actually forms.
 
 SR = 48000
 
@@ -304,68 +308,148 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
                     full_hypercube: "bool | None" = None, lead_silence_s: float = 0.0,
                     max_corners: "int | None" = None, sample_grid: int = 0,
                     capture: dict = None, workers: int = 8,
-                    min_start_v: float = 1e-9, start_v: float = 0.005) -> dict:
+                    min_start_v: float = 1e-9, start_v: float = 0.005,
+                    corner_workers: int = 1, shard: str = None, emit_onsets: str = None,
+                    backend_name: str = "livespice") -> "dict | None":
     """Backend-agnostic core: every corner's own saturation onset (find_saturation_point.py)
     vs. the excitation's transient peak. Shared by check_coverage() (.schx/LiveSPICE) and
     check_coverage_ngspice_deck() (a hand-written ngspice deck with no .schx at all) -- the
     ONLY thing that differs between them is how `backend`/`identity`/`cache_extra` get built.
 
-    Returns {"ok": bool, "rows": [...]}. "ok" is False if ANY corner fails OR its onset
-    couldn't be determined (a render failure is not a pass -- see main()'s same convention).
+    Returns {"ok": bool, "rows": [...]}, or None when `emit_onsets` is set (this shard's rows
+    are written to disk instead -- see prepare_excitation.py's --emit-onsets/--merge-onsets,
+    the same convention, reused here via shard_corners()/merge_onset_shards()/solver_identity()
+    imported from there). Unlike a worst-case-onset SIZING pass, a coverage CHECK needs no
+    cross-shard reduction -- each corner's pass/fail depends only on its own onset, so a shard
+    computes real, final "ok" values for its own corners; merge only verifies completeness/
+    solver-agreement and concatenates, mirroring prepare_excitation.py's division of labor
+    exactly except for that one simplification.
+
+    CORNER-LEVEL PARALLELISM (2026-09-21, same pattern as prepare_excitation.py's
+    worst_case_onset(), same reason it is structured this way): a single shared amplitude-level
+    ThreadPoolExecutor is built ONCE here, in the main thread, before the outer corner-level
+    ThreadPoolExecutor is created -- so no ThreadPoolExecutor is ever constructed from a worker
+    thread, avoiding the reproduced concurrent.futures deadlock prepare_excitation.py's own
+    --corner-workers hit before that fix (2026-09-19/20, see its commit history). Corners are
+    independent (each corner's own adaptive range-extension never reads another corner's
+    result), so this parallelises cleanly the same way.
+
+    "ok" is False if ANY corner fails OR its onset couldn't be determined (a render failure is
+    not a pass -- see main()'s same convention).
     """
-    corners = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners, sample_grid=sample_grid)
-    corners = _sample_interior(knob_ranges, corners, sample_grid)
+    from prepare_excitation import shard_corners, solver_identity
+    corners_all = _corners(knob_ranges, full_hypercube=full_hypercube, max_corners=max_corners, sample_grid=sample_grid)
+    corners_all = _sample_interior(knob_ranges, corners_all, sample_grid)
+    corner_total = len(corners_all)
+    corners = list(enumerate(corners_all))   # [(global_index, (clabel, vals)), ...]
+    if shard:
+        corners = shard_corners(corners_all, shard)   # already [(global_index, corner), ...]
+        if not quiet:
+            print(f"  shard {shard}: {len(corners)} of {corner_total} corners")
     if not quiet:
         print(f"Transient saturation coverage: {label}")
         print(f"  transient peak = {transient_peak:.3f} V   {len(corners)} corners "
               f"({'structural-only (DEPRECATED)' if full_hypercube is False else                 f'budgeted, max {max_corners}' if max_corners is not None else                 f'full binary hypercube'} set)  "
               f"margin={margin}x\n")
 
-    rows = []
-    with tempfile.TemporaryDirectory() as scratch:
-        for i, (clabel, vals) in enumerate(corners, 1):
-            params = dict(vals); params.update(fixed)
-            cpath = findpeak_cache_key(identity, params, cache_extra)
-            if cpath.exists() and not no_cache:
-                sat = json.loads(cpath.read_text())
-            else:
-                # Each corner's own saturation sweep is up to 20 real backend renders (see
-                # find_saturation_point.py) -- on a stiff circuit, or with a full 2**n-corner
-                # hypercube (up to 512 corners), that's real minutes-to-hours of work with
-                # nothing printed between corners otherwise. One line per corner as it STARTS
-                # (not per-amplitude within it -- that's for a one-shot caller like preflight.py
-                # --find-peak; here it would mean thousands of lines across a full hypercube).
-                if not quiet:
-                    print(f"  [{i}/{len(corners)}] {clabel} — rendering ...", flush=True)
-                sat = find_saturation_point(backend, params, scratch, max_v=peak_max_v,
-                                             lead_silence_s=lead_silence_s, capture=capture,
-                                             workers=workers, min_start_v=min_start_v,
-                                             start_v=start_v)
-                cache_findpeak(cpath, sat)
-            onset = sat.get("onset_99pct_input_v") if sat else None
-            if onset is None:
-                # Two very different situations were previously collapsed into one vague
-                # message. `sat is None` means EVERY amplitude in the sweep failed to render
-                # -- see stderr (each failure now names its own cause: an application
-                # exception, or "KILLED BY SIGNAL ..." for an OS-level kill, almost always
-                # memory pressure under parallel load rather than a circuit problem -- check
-                # `vm_stat` and whether something else is training/rendering concurrently
-                # before assuming the circuit itself is broken). `sat` present but `onset`
-                # None means renders WORKED but the swept amplitude range (start_v..max_v)
-                # never bracketed 99% of the ceiling -- a sweep-range tuning issue, not a
-                # render failure at all.
-                if sat is None:
-                    status = "SKIP (every render in the sweep failed -- see stderr for why)"
-                else:
-                    status = "SKIP (renders OK, but sweep range never bracketed the onset)"
-                ok = None
-            else:
-                ok = transient_peak >= onset * margin
-                status = "OK" if ok else "FAIL -- transient never reaches saturation here"
+    # Concurrency is a PRODUCT, not a sum -- same reasoning/formula as
+    # prepare_excitation.py's worst_case_onset(): find_saturation_point already fans out its
+    # own amplitude points (`workers`), so sweep workers divide down as corner_workers rises,
+    # keeping the total near the core count instead of multiplying it.
+    sweep_workers = max(1, workers // max(1, corner_workers))
+
+    def _measure(idx_clabel_vals, tmp, amp_executor=None):
+        idx, (clabel, vals) = idx_clabel_vals
+        params = dict(vals); params.update(fixed)
+        cpath = findpeak_cache_key(identity, params, cache_extra)
+        if cpath.exists() and not no_cache:
+            sat = json.loads(cpath.read_text())
+        else:
+            # Each corner's own saturation sweep is up to 20 real backend renders (see
+            # find_saturation_point.py) -- on a stiff circuit, or with a full 2**n-corner
+            # hypercube (up to 512 corners), that's real minutes-to-hours of work with
+            # nothing printed between corners otherwise. One line per corner as it STARTS
+            # (not per-amplitude within it -- that's for a one-shot caller like preflight.py
+            # --find-peak; here it would mean thousands of lines across a full hypercube).
             if not quiet:
-                onset_str = "NONE" if onset is None else f"{onset:.3f} V"
-                print(f"  {clabel:16} onset={onset_str:>10}  {status}")
-            rows.append({"corner": clabel, "params": params, "onset_v": onset, "ok": ok})
+                print(f"  [{clabel}] rendering ...", flush=True)
+            sat = find_saturation_point(backend, params, str(tmp), max_v=peak_max_v,
+                                         lead_silence_s=lead_silence_s, capture=capture,
+                                         workers=sweep_workers, min_start_v=min_start_v,
+                                         start_v=start_v, executor=amp_executor)
+            cache_findpeak(cpath, sat)
+        # FIXED (2026-09-21): this block used to sit inside the `else:` above, so a CACHE HIT
+        # loaded `sat` and then silently dropped the corner -- no row, no print, not counted
+        # as failed/skipped/passed, just missing. Only bit --no-cache runs (this session's own
+        # AC30 checks) since caching was never exercised on a mid-restructure run, but it is a
+        # real latent bug independent of everything else changed here.
+        onset = sat.get("onset_99pct_input_v") if sat else None
+        if onset is None:
+            # Two very different situations were previously collapsed into one vague
+            # message. `sat is None` means EVERY amplitude in the sweep failed to render
+            # -- see stderr (each failure now names its own cause: an application
+            # exception, or "KILLED BY SIGNAL ..." for an OS-level kill, almost always
+            # memory pressure under parallel load rather than a circuit problem -- check
+            # `vm_stat` and whether something else is training/rendering concurrently
+            # before assuming the circuit itself is broken). `sat` present but `onset`
+            # None means renders WORKED but the swept amplitude range (start_v..max_v)
+            # never bracketed 99% of the ceiling -- a sweep-range tuning issue, not a
+            # render failure at all.
+            if sat is None:
+                status = "SKIP (every render in the sweep failed -- see stderr for why)"
+            else:
+                status = "SKIP (renders OK, but sweep range never bracketed the onset)"
+            ok = None
+        else:
+            ok = transient_peak >= onset * margin
+            status = "OK" if ok else "FAIL -- transient never reaches saturation here"
+        if not quiet:
+            onset_str = "NONE" if onset is None else f"{onset:.3f} V"
+            print(f"  {clabel:16} onset={onset_str:>10}  {status}")
+        return {"corner": clabel, "params": params, "onset_v": onset, "ok": ok, "index": idx}
+
+    results = [None] * len(corners)
+    if emit_onsets:
+        # SHARDED MODE: measure only this slice, compute each corner's OWN final "ok" (a
+        # pass/fail check needs no cross-corner reduction, unlike a worst-case-onset SIZING
+        # pass -- each corner's verdict depends only on its own onset), and write it out.
+        # merge_onsets combines shards, verifying completeness/solver-agreement.
+        with tempfile.TemporaryDirectory() as scratch:
+            if corner_workers > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                amp_pool_size = max(1, corner_workers * sweep_workers)
+                with ThreadPoolExecutor(max_workers=amp_pool_size) as amp_ex, \
+                     ThreadPoolExecutor(max_workers=corner_workers) as ex:
+                    futs = {ex.submit(_measure, ic, Path(scratch) / f"corner_{n:04d}", amp_ex): n
+                            for n, ic in enumerate(corners)}
+                    for fut in as_completed(futs):
+                        results[futs[fut]] = fut.result()
+            else:
+                for n, ic in enumerate(corners):
+                    results[n] = _measure(ic, scratch)
+        Path(emit_onsets).write_text(json.dumps({
+            "corner_total": corner_total, "solver": solver_identity(backend_name),
+            "shard": shard, "rows": results,
+        }))
+        print(f"wrote {len(results)} row(s) to {emit_onsets} (solver "
+              f"{solver_identity(backend_name)}) -- NOT summarized; merge with --merge-onsets "
+              f"to report once across every shard")
+        return None
+
+    with tempfile.TemporaryDirectory() as scratch:
+        if corner_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            amp_pool_size = max(1, corner_workers * sweep_workers)
+            with ThreadPoolExecutor(max_workers=amp_pool_size) as amp_ex, \
+                 ThreadPoolExecutor(max_workers=corner_workers) as ex:
+                futs = {ex.submit(_measure, ic, Path(scratch) / f"corner_{n:04d}", amp_ex): n
+                        for n, ic in enumerate(corners)}
+                for fut in as_completed(futs):
+                    results[futs[fut]] = fut.result()
+        else:
+            for n, ic in enumerate(corners):
+                results[n] = _measure(ic, scratch)
+    rows = results
 
     failed = [r for r in rows if r["ok"] is False]
     skipped = [r for r in rows if r["ok"] is None]
@@ -390,7 +474,8 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                    peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                    full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
                    sample_grid: int = 0, capture: dict = None, workers: int = 8,
-                   min_start_v: float = 1e-9, start_v: float = 0.005) -> dict:
+                   min_start_v: float = 1e-9, start_v: float = 0.005,
+                   corner_workers: int = 1, shard: str = None, emit_onsets: str = None) -> "dict | None":
     """[.schx / LiveSPICE path] Importable directly (gen_dataset_from_schx.py's hard gate uses
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
@@ -403,7 +488,9 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, sample_grid=sample_grid, workers=workers)
+                           max_corners=max_corners, sample_grid=sample_grid, workers=workers,
+                           corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
+                           backend_name="livespice")
 
 
 def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
@@ -411,7 +498,9 @@ def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample
                           peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
                           full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
                           sample_grid: int = 0, capture: dict = None, conv: dict = None,
-                          min_start_v: float = 1e-9, start_v: float = 0.005) -> dict:
+                          min_start_v: float = 1e-9, start_v: float = 0.005,
+                          corner_workers: int = 1, shard: str = None,
+                          emit_onsets: str = None) -> "dict | None":
     """[.schx / GENERIC ngspice path, i.e. --backend "ngspice"] For a circuit whose .schx
     exists but whose LiveSPICE render diverges under real signal (e.g. Arbiter Fuzz Face's
     tight DC-coupled feedback loop) yet needs no hand-written deck at all -- unlike
@@ -432,7 +521,9 @@ def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, sample_grid=sample_grid)
+                           max_corners=max_corners, sample_grid=sample_grid,
+                           corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
+                           backend_name="ngspice")
 
 
 def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, knob_ranges: dict,
@@ -442,7 +533,9 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
                                 quiet: bool = False, full_hypercube: "bool | None" = None,
                                 max_corners: "int | None" = None, sample_grid: int = 0,
                                 lead_silence_s: float = 3.0, capture: dict = None,
-                                min_start_v: float = 1e-9, start_v: float = 0.005) -> dict:
+                                min_start_v: float = 1e-9, start_v: float = 0.005,
+                                corner_workers: int = 1, shard: str = None,
+                                emit_onsets: str = None) -> "dict | None":
     """[hand-written ngspice-deck path] For a device whose real component (a MOSFET, a real
     BJT) has no .schx model at all -- see render_backends.py's NgspiceBackend and
     preflight.py/prepare_excitation.py's identical --backend ngspice-deck split. `module_file`
@@ -469,7 +562,9 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, sample_grid=sample_grid, lead_silence_s=lead_silence_s)
+                           max_corners=max_corners, sample_grid=sample_grid, lead_silence_s=lead_silence_s,
+                           corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
+                           backend_name="ngspice-deck")
 
 
 def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ranges: dict,
@@ -479,7 +574,9 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                                 no_cache: bool = False, quiet: bool = False,
                                 full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
                                 sample_grid: int = 0, capture: dict = None,
-                                min_start_v: float = 1e-9, start_v: float = 0.005) -> dict:
+                                min_start_v: float = 1e-9, start_v: float = 0.005,
+                                corner_workers: int = 1, shard: str = None,
+                                emit_onsets: str = None) -> "dict | None":
     """[hand-written LTspice-deck path] For a device whose ngspice-deck counterpart can't
     converge on real playing content at all -- see ltspice_spicelib.py's own docstring.
     `module_file` is the gen_*_ltspice.py module's own `__file__` (its source bytes are the
@@ -496,7 +593,9 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
                            no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
-                           max_corners=max_corners, sample_grid=sample_grid)
+                           max_corners=max_corners, sample_grid=sample_grid,
+                           corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
+                           backend_name="ltspice-deck")
 
 
 def main():
@@ -578,7 +677,53 @@ def main():
     ap.add_argument("--out-scale", type=float, default=0.05,
                     help="[ltspice-deck] LTspice .wave output is +/-1V-PCM-bounded -- see "
                          "ltspice_spicelib.py's docstring")
+    ap.add_argument("--corner-workers", type=int, default=1,
+                    help="measure this many knob corners concurrently (default: 1, serial -- "
+                         "this tool had NO corner-level parallelism at all until 2026-09-21). "
+                         "Same safe shared-executor pattern as prepare_excitation.py's own "
+                         "--corner-workers (see _check_corners()'s docstring): concurrency is "
+                         "a PRODUCT with --workers, which divides down as this rises to keep "
+                         "the total near the core count.")
+    ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL", default=None,
+                    help="measure only the corners whose index modulo TOTAL falls in "
+                         "[LOW, HIGH] -- shard.py's shared contract, same as "
+                         "prepare_excitation.py/gen_dataset_from_schx.py. Requires "
+                         "--emit-onsets. Unlike a worst-case-onset SIZING pass, a coverage "
+                         "CHECK needs no cross-shard reduction (each corner's pass/fail "
+                         "depends only on its own onset) -- --merge-onsets just verifies "
+                         "completeness/solver-agreement and reports the union.")
+    ap.add_argument("--emit-onsets", metavar="PATH", default=None,
+                    help="write this shard's measured rows (each already carrying its own "
+                         "final pass/fail) as JSON instead of printing a summary. Carries the "
+                         "corner total and a fingerprint of the renderer binary so "
+                         "--merge-onsets can refuse mismatched work.")
+    ap.add_argument("--merge-onsets", metavar="PATH", nargs="+", default=None,
+                    help="combine --emit-onsets files from every shard, verify completeness "
+                         "and solver agreement, then print the combined coverage report once.")
     args = ap.parse_args()
+
+    if args.merge_onsets:
+        from prepare_excitation import merge_onset_shards
+        rows = merge_onset_shards(args.merge_onsets)
+        failed = [r for r in rows if r["ok"] is False]
+        skipped = [r for r in rows if r["ok"] is None]
+        for r in rows:
+            onset_str = "NONE" if r["onset_v"] is None else f"{r['onset_v']:.3f} V"
+            status = ("OK" if r["ok"] else "FAIL -- transient never reaches saturation here"
+                      if r["ok"] is False else "SKIP (see the shard's own stderr for why)")
+            print(f"  {r['corner']:16} onset={onset_str:>10}  {status}")
+        print()
+        if failed:
+            print(f"FAILED: {len(failed)}/{len(rows)} corners never see a transient past their own "
+                  f"saturation onset -- the model can go out-of-distribution there on real playing. "
+                  f"Raise --sweep-peak (build_excitation.py) past the highest FAILED onset, or "
+                  f"lengthen --sweep-dur for more varied transient shapes, and rebuild.")
+        if skipped:
+            print(f"WARNING: {len(skipped)}/{len(rows)} corners' onset could not be determined "
+                  f"(render failures or onset above --peak-max-v) -- treat as unverified, not passing.")
+        if not failed and not skipped:
+            print("PASSED: transient content reaches saturation at every checked corner.")
+        sys.exit(0 if not (failed or skipped) else 1)
 
     cfg = load_config(Path(args.config))
     _capture = _cc_resolve(args, cfg)
@@ -622,7 +767,9 @@ def main():
                                              max_corners=args.max_corners,
                                              sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
                                              capture=_capture,
-                                             lead_silence_s=args.lead_silence_s)
+                                             lead_silence_s=args.lead_silence_s,
+                                             corner_workers=args.corner_workers,
+                                             shard=args.shard, emit_onsets=args.emit_onsets)
         schx_or_module = module
     elif backend_name == "ltspice-deck":
         pedal_dir = os.path.expanduser(cfg["pedal_dir"])
@@ -641,7 +788,9 @@ def main():
                                              full_hypercube=(False if args.no_full_hypercube else None),
                                              max_corners=args.max_corners,
                                              sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
-                                             capture=_capture)
+                                             capture=_capture,
+                                             corner_workers=args.corner_workers,
+                                             shard=args.shard, emit_onsets=args.emit_onsets)
         schx_or_module = module
     elif backend_name == "ngspice":
         # Previously fell into the `else` branch below, which hardcodes LiveSpiceBackend --
@@ -657,7 +806,9 @@ def main():
                                         full_hypercube=(False if args.no_full_hypercube else None),
                                         max_corners=args.max_corners,
                                         sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
-                                        capture=_capture, conv=_conv)
+                                        capture=_capture, conv=_conv,
+                                        corner_workers=args.corner_workers,
+                                        shard=args.shard, emit_onsets=args.emit_onsets)
         schx_or_module = schx
     else:
         schx = str(cfg["schx"])
@@ -669,8 +820,13 @@ def main():
                                 full_hypercube=(False if args.no_full_hypercube else None),
                                 max_corners=args.max_corners,
                                 sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
-                                capture=_capture, workers=args.workers)
+                                capture=_capture, workers=args.workers,
+                                corner_workers=args.corner_workers,
+                                shard=args.shard, emit_onsets=args.emit_onsets)
         schx_or_module = schx
+
+    if result is None:
+        return 0
 
     if args.json:
         Path(args.json).write_text(json.dumps({
