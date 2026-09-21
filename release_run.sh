@@ -97,8 +97,23 @@ a = torch.load(str(ckpt / "best.pt"), map_location="cpu", weights_only=False).ge
 # A run with no widths is a legacy single-width model — no tiers to compose.
 raw_widths = a.get("widths")
 if not raw_widths:
-    sys.exit("this run has no --widths (legacy single-width model) — no tiers to compose")
-widths = [int(w) for w in str(raw_widths).split(",") if w.strip()]
+    # --widths itself defaults to None at the argparse level (the real [4, 8] default is
+    # applied later in param_train.py, not recorded into args_dict) -- a run launched via
+    # run_pipeline.py's config.toml path with no explicit --widths override hits this every
+    # time, and it is NOT a legacy single-width model, just one that never typed the flag.
+    # Fall back to deriving widths from metrics.csv's own val_esr_w<N> column headers
+    # (written for every tier regardless of how widths was set) rather than hard-failing a
+    # perfectly normal multi-tier run. Only actually legacy (single-width, no val_esr_w*
+    # columns at all) still fails below.
+    header_probe = next(csv.reader(open(ckpt / "metrics.csv")))
+    inferred = sorted(int(m.group(1)) for c in header_probe
+                       if (m := re.match(r"val_esr_w(\d+)$", c)))
+    if not inferred:
+        sys.exit("this run has no --widths AND no val_esr_w<N> columns in metrics.csv "
+                  "(legacy single-width model) — no tiers to compose")
+    widths = inferred
+else:
+    widths = [int(w) for w in str(raw_widths).split(",") if w.strip()]
 
 # Tier labels come from the model's OWN rule, so they cannot drift from param_train.
 # Do NOT infer them from metrics.csv column order — that order is not guaranteed
@@ -154,7 +169,7 @@ emit("BATCH", a.get("batch_size", "?"))
 emit("LR", a.get("lr", "?"))
 emit("CROP", a.get("crop_len", "?"))
 emit("REPEATS", a.get("repeats", "?"))
-emit("WIDTHS_CSV", a.get("widths", ""))
+emit("WIDTHS_CSV", a.get("widths") or ",".join(str(w) for w in widths))
 emit("CIRCUIT_NAME", cfg.get("circuit", "?"))
 emit("OVERSAMPLE", cfg.get("oversample", "?"))
 emit("BACKEND", cfg.get("backend", "?"))
@@ -268,7 +283,7 @@ echo "==> payloads validated"
 if [ "$verify" -eq 1 ]; then
   echo "==> measuring composite vs best_full on identical fixed val crops ..."
   cat > "$TMPD/verify.py" <<'PY'
-import sys, numpy as np, torch, torch.nn as nn
+import csv, re, sys, numpy as np, torch, torch.nn as nn
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[4])          # repo root — MUST precede the param_train import
@@ -277,7 +292,15 @@ from param_train import SlimmableParametricA2, ParamDataset, validate
 ckpt, ds_dir, run = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 a = torch.load(str(ckpt / "best.pt"), map_location="cpu", weights_only=False)
 args = a.get("args_dict", {})
-widths = [int(w) for w in str(args["widths"]).split(",")]
+# See facts.py's own comment above (same script, step 1): --widths defaults to None at the
+# argparse level, so a run that never typed the flag has no explicit value here even though
+# it is a perfectly normal multi-tier run. Fall back to metrics.csv's val_esr_w<N> columns.
+if args.get("widths"):
+    widths = [int(w) for w in str(args["widths"]).split(",")]
+else:
+    header_probe = next(csv.reader(open(ckpt / "metrics.csv")))
+    widths = sorted(int(m.group(1)) for c in header_probe
+                     if (m := re.match(r"val_esr_w(\d+)$", c)))
 dev = "mps" if torch.backends.mps.is_available() else "cpu"
 
 ds = ParamDataset(ds_dir, crop_len=args["crop_len"], repeats=args["repeats"], mmap=True)
