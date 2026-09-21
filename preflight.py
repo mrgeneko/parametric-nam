@@ -76,6 +76,7 @@ from find_saturation_point import (find_saturation_point, _linear_region_top,  #
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 from knob_classify import classify as _classify_by_name  # noqa: E402
+from prepare_excitation import solver_identity  # noqa: E402
 
 SR = 48000
 _DBU_0_RMS_VOLTS = 0.7746  # 0dBu reference, matches param_train.py
@@ -140,7 +141,8 @@ def _build_backend(args):
         resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
         backend = LiveSpiceBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
         identity = Path(args.schx).read_bytes()
-        cache_extra = f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = (f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+                       f"|solver={solver_identity('livespice')}") + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     if args.backend == "ngspice":
         # The GENERIC schx-translated path (ngspice/schx_to_ngspice.py via NgspiceSchxBackend),
@@ -160,6 +162,7 @@ def _build_backend(args):
         # (or vice versa) -- the exact hazard ngspice-deck/ltspice-deck's own comment documents.
         # conv_cache_tag guards the same hazard for a device-model override.
         cache_extra = (f"backend=ngspice|os={args.oversample}|maxv={args.peak_max_v}"
+                      f"|solver={solver_identity('ngspice')}"
                       + cache_tag(_capture) + conv_cache_tag(conv))
         return backend, knobs, identity, cache_extra
     if args.backend == "ngspice-deck":
@@ -181,7 +184,8 @@ def _build_backend(args):
         # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
-        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = (f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+                       f"|solver={solver_identity('ngspice-deck')}") + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module):
@@ -193,7 +197,8 @@ def _build_backend(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.render_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}" + cache_tag(_capture)
+        cache_extra = (f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+                       f"|solver={solver_identity('ltspice-deck')}") + cache_tag(_capture)
         return backend, knobs, identity, cache_extra
     sys.exit(f"unknown --backend {args.backend!r}")
 

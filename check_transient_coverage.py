@@ -480,10 +480,11 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
     this in-process -- no subprocess, no re-parsing a config, and it can't be silently skipped
     by someone calling gen_dataset_from_schx.py without going through run_pipeline.py / this
     tool's own CLI first). See _check_corners() for the actual check."""
+    from prepare_excitation import solver_identity
     backend = LiveSpiceBackend(schx, oversample=oversample, iterations=iterations)
     identity = Path(schx).read_bytes()
     cache_extra = (f"os={oversample}|it={iterations}|maxv={peak_max_v}|minv={min_start_v}"
-                   f"|startv={start_v}") + cache_tag(capture)
+                   f"|startv={start_v}|solver={solver_identity('livespice')}") + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
@@ -512,11 +513,13 @@ def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample
     this tool most (LiveSPICE diverges on them). Caught 2026-09-11 while wiring generic-
     ngspice support into prepare_excitation.py for Arbiter Fuzz Face.
     """
+    from prepare_excitation import solver_identity
     conv = conv or {}
     backend = NgspiceSchxBackend(schx, oversample=oversample, conv=conv)
     identity = Path(schx).read_bytes()
     cache_extra = (f"backend=ngspice|os={oversample}|maxv={peak_max_v}|minv={min_start_v}"
-                  f"|startv={start_v}" + cache_tag(capture) + conv_cache_tag(conv))
+                  f"|startv={start_v}|solver={solver_identity('ngspice')}"
+                  + cache_tag(capture) + conv_cache_tag(conv))
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
@@ -542,6 +545,7 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     is the gen_*_ngspice.py module's own `__file__` (its source bytes are the cache identity,
     same convention as preflight.py's _build_backend -- an edited deck re-checks automatically).
     See _check_corners() for the actual check."""
+    from prepare_excitation import solver_identity
     backend = NgspiceBackend(build_deck, probe_node=probe_node, maxstep=maxstep,
                              parallel_sims=parallel_sims)
     identity = Path(module_file).read_bytes()
@@ -557,7 +561,8 @@ def check_coverage_ngspice_deck(build_deck, module_file: str, probe_node: str, k
     # backend emits, so it cannot collide with either, and changing it would invalidate every
     # cached entry in the fleet to fix a bug it does not have.
     cache_extra = (f"backend=ngspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
-                   f"|minv={min_start_v}|startv={start_v}") + cache_tag(capture)
+                   f"|minv={min_start_v}|startv={start_v}"
+                   f"|solver={solver_identity('ngspice-deck')}") + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,
@@ -584,11 +589,13 @@ def check_coverage_ltspice_deck(build_deck, module_file: str, tap: str, knob_ran
     the actual check. No lead_silence_s here (unlike ngspice-deck): LTspice's `.ic`/`uic`
     initial-condition hints replace the need for a cold-start settling lead-in -- see
     ltspice_spicelib.py's docstring."""
+    from prepare_excitation import solver_identity
     backend = LtspiceBackend(build_deck, tap=tap, maxstep=maxstep, parallel_sims=parallel_sims,
                              out_scale=out_scale)
     identity = Path(module_file).read_bytes()
     cache_extra = (f"backend=ltspice-deck|maxstep={maxstep}|maxv={peak_max_v}"
-                   f"|minv={min_start_v}|startv={start_v}") + cache_tag(capture)
+                   f"|minv={min_start_v}|startv={start_v}"
+                   f"|solver={solver_identity('ltspice-deck')}") + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
                            capture=capture, min_start_v=min_start_v, start_v=start_v,
                            label=Path(module_file).stem, margin=margin, peak_max_v=peak_max_v,

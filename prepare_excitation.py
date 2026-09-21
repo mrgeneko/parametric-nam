@@ -384,7 +384,9 @@ def _setup(args):
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
         backend = LiveSpiceBackend(schx, oversample=oversample, iterations=args.iterations)
         identity = Path(schx).read_bytes()
-        cache_extra = f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
+        cache_extra = (f"os={oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+                       f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
+                       f"|solver={solver_identity('livespice')}") + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, Path(schx).name, _capture
     if args.backend == "ngspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -406,7 +408,9 @@ def _setup(args):
         # The livespice extra is deliberately NOT changed: it carries "os=..|it=.." which no deck
         # backend emits, so it cannot collide with either, and touching it would invalidate every
         # cached entry in the fleet to fix a bug it does not have.
-        cache_extra = f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
+        cache_extra = (f"backend=ngspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+                       f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
+                       f"|solver={solver_identity('ngspice-deck')}") + cache_tag(_capture)
         return backend, identity, cache_extra, knob_ranges, fixed, args.lead_silence_s, args.module, _capture
     if args.backend == "ltspice-deck":
         if not (args.pedal_dir and args.module and args.range):
@@ -419,7 +423,9 @@ def _setup(args):
                                  maxstep=args.maxstep, parallel_sims=args.parallel_sims,
                                  out_scale=args.out_scale, timeout=args.ltspice_timeout)
         identity = Path(mod.__file__).read_bytes()
-        cache_extra = f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}" + cache_tag(_capture)
+        cache_extra = (f"backend=ltspice-deck|maxstep={args.maxstep}|maxv={args.peak_max_v}"
+                       f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
+                       f"|solver={solver_identity('ltspice-deck')}") + cache_tag(_capture)
         # No lead_silence_s: LTspice's .ic/uic hints replace the need for a cold-start
         # settling lead-in -- see ltspice_spicelib.py's docstring.
         return backend, identity, cache_extra, knob_ranges, fixed, 0.0, args.module, _capture
@@ -455,7 +461,9 @@ def _setup(args):
         # above documents for ngspice-deck vs ltspice-deck. conv_cache_tag guards the same
         # hazard for a device-model override (e.g. a corrected transistor fit): an onset
         # measured under one --conv must not be served to a caller expecting a different one.
-        cache_extra = (f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}|minv={args.min_start_v}|startv={args.sweep_start_v}"
+        cache_extra = (f"backend=ngspice|os={oversample}|maxv={args.peak_max_v}"
+                      f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
+                      f"|solver={solver_identity('ngspice')}"
                       + cache_tag(_capture) + conv_cache_tag(conv))
         # lead_silence_s IS needed here, same as ngspice-deck: this is ngspice under the hood
         # (schx_to_ngspice.py's generated .cir, not a hand-written deck, but the same solver),
