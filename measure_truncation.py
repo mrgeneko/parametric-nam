@@ -195,6 +195,14 @@ def _render_batch(schx: Path, clips: list[Path], iterations: int, speaker: str |
     return out
 
 
+# A setting's reference render (den = sum(ref_signal**2)) below this fraction of the loudest
+# reference measured for the same candidate is treated as NEAR-SILENT, not a real measurement
+# -- see score_rows' own docstring. 1e-6 is -60dB relative to the loudest setting: comfortably
+# below anything a genuinely quiet-but-audible setting would produce, but well above the
+# floating-point/solver noise floor a truly muted knob (Volume=0, Master=0) collapses to.
+NEAR_SILENT_DEN_RATIO = 1e-6
+
+
 def score_rows(rows: list[dict], candidates: tuple[int, ...]) -> dict:
     """The worst-over-knob-settings reduction, shared by the live, --emit, and --merge paths.
 
@@ -203,16 +211,38 @@ def score_rows(rows: list[dict], candidates: tuple[int, ...]) -> dict:
     IDENTICAL to an unsharded one by construction rather than by argument -- the reduction
     runs the same code whether `rows` came from one process's own cache or from merging
     several workers' --emit files.
+
+    NEAR-SILENT SETTINGS ARE EXCLUDED FROM THE WORST PICK, not just from divide-by-zero.
+    probe_settings() always tests every knob at its own 0.0/1.0 extreme with the rest at 0.5 --
+    for ANY device with a Volume/Master-shaped control mapped so that one extreme mutes the
+    output (confirmed on this fleet: Master=0.0 on the Ceriatone Muchless Captain Reverb
+    measures rms=0.000000), several probe settings render near-silent. `den` (the reference
+    signal's own energy) is not exactly zero there -- floating-point/solver noise keeps it a
+    tiny positive number -- so the old `den > 0` guard does not catch it, and `num/den` divides
+    two noise-floor-sized quantities that do not scale down together, producing a confidently
+    wrong "worst setting" that is actually a numerically unstable near-silence, not a real
+    truncation problem. Excluded settings are still counted (see `res["excluded_near_silent"]`)
+    so the caller can report them rather than have them just vanish from the table.
     """
     res: dict = {"n_settings": len(rows)}
     for os_ in candidates:
+        c = str(os_)
+        dens = [r["esr"][c]["den"] for r in rows if r["esr"][c]["den"] > 0]
+        den_floor = max(dens) * NEAR_SILENT_DEN_RATIO if dens else 0.0
         worst, at = 0.0, None
+        excluded = []
         for r in rows:
-            num, den = r["esr"][str(os_)]["num"], r["esr"][str(os_)]["den"]
-            e = num / den if den > 0 else float("nan")
+            num, den = r["esr"][c]["num"], r["esr"][c]["den"]
+            if den <= den_floor:
+                if den > 0:
+                    excluded.append(r["params"])
+                continue
+            e = num / den
             if np.isfinite(e) and e >= worst:
                 worst, at = e, r["params"]
         res[os_] = (worst, at)
+        if excluded:
+            res.setdefault("excluded_near_silent", {})[os_] = excluded
     return res
 
 
@@ -568,6 +598,17 @@ def main() -> None:
         else:
             verdict = f"falls {fall}"
         print(f"| {name} | " + " | ".join(cells) + f" | {atstr} | {refstr} | {verdict} |")
+
+        excluded = r.get("excluded_near_silent")
+        if excluded:
+            for c, params_list in excluded.items():
+                locs = "; ".join(", ".join(f"{k}={v:g}" for k, v in sorted(p.items()))
+                                 for p in params_list)
+                print(f"  NOTE: {name} @ os={c}: {len(params_list)} setting(s) excluded from "
+                      f"the worst-setting pick as near-silent (reference energy < "
+                      f"{NEAR_SILENT_DEN_RATIO:.0e} of the loudest setting measured) -- ESR is "
+                      f"not a meaningful number there, not evidence of a truncation problem: "
+                      f"{locs}")
 
     print("\n`ref err` = ESR(reference, 2x reference) at the worst setting: how far the reference "
           f"itself\nstill moves. It must sit well below the @os={cands[-1]} column, or that column is "

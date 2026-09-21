@@ -344,6 +344,18 @@ def _print_oversample_table(candidates: tuple, r: dict):
               f"issue, not convergence -- worth checking by hand against "
               f"measure_truncation.py's docstring before trusting the number below)")
 
+    excluded = r.get("excluded_near_silent")
+    if excluded:
+        from measure_truncation import NEAR_SILENT_DEN_RATIO
+        for c, params_list in excluded.items():
+            locs = "; ".join(", ".join(f"{k}={v:g}" for k, v in sorted(p.items()))
+                             for p in params_list)
+            print(f"  NOTE: @ os={c}: {len(params_list)} setting(s) excluded from the "
+                  f"worst-setting pick as near-silent (reference energy < "
+                  f"{NEAR_SILENT_DEN_RATIO:.0e} of the loudest setting measured) -- ESR is not "
+                  f"a meaningful number there (a Volume/Master-shaped knob muting the output "
+                  f"is the usual cause), not evidence of a truncation problem: {locs}")
+
     chosen = candidates[-1]
     comment = f"measured by scaffold_config.py -- {vals[chosen]:.2e} at os={chosen} (see table above)"
     return chosen, comment

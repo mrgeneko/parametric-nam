@@ -83,6 +83,54 @@ def test_score_rows_matches_between_one_shard_and_two_merged_shards():
     assert unsharded == merged
 
 
+def test_score_rows_excludes_a_near_silent_setting_from_the_worst_pick():
+    """Real failure mode: probe_settings() always tests every knob at its own 0/1 extreme,
+    and a Volume/Master-shaped knob at its 'off' extreme renders near-silent (confirmed on the
+    Ceriatone Muchless Captain Reverb's Master=0.0: rms=0.000000). The reference energy (den)
+    there is a tiny positive noise-floor number, not exactly zero, so a bare `den > 0` guard
+    lets num/den blow up into a confidently wrong 'worst setting' -- this asserts that setting
+    is excluded instead, even though its raw num/den ratio would otherwise dominate."""
+    rows = [
+        _row(0, {"Master": 0.5}, {"2": {"num": 0.02, "den": 100.0}}),   # normal setting
+        _row(1, {"Master": 1.0}, {"2": {"num": 0.05, "den": 90.0}}),    # normal setting
+        # near-silent: den is 1e-9x the loudest row's den, well under the exclusion floor --
+        # its own ratio (1e-10/1e-12 = 100) would otherwise swamp every real setting above.
+        _row(2, {"Master": 0.0}, {"2": {"num": 1e-10, "den": 1e-12}}),
+    ]
+    res = mt.score_rows(rows, (2,))
+    worst, at = res[2]
+    assert at == {"Master": 1.0}          # the genuine worst setting, not the silent one
+    assert worst == pytest.approx(0.05 / 90.0)
+    assert res["excluded_near_silent"][2] == [{"Master": 0.0}]
+
+
+def test_score_rows_does_not_flag_the_only_setting_as_near_silent():
+    """Exclusion is RELATIVE to the loudest setting measured for that candidate -- with only
+    one row, there is nothing louder to judge it against, so it is not near-silent by this
+    definition and must still be scored (there being nothing else to pick as 'worst')."""
+    rows = [_row(0, {"Master": 0.0}, {"2": {"num": 1e-10, "den": 1e-12}})]
+    res = mt.score_rows(rows, (2,))
+    worst, at = res[2]
+    assert at == {"Master": 0.0}
+    assert "excluded_near_silent" not in res
+
+
+def test_score_rows_does_not_confuse_a_zero_den_render_failure_with_near_silence():
+    """den == 0.0 EXACTLY is measure()'s own separate 'this render produced nothing usable'
+    sentinel (see esr_terms: it returns (0.0, 0.0) when too few samples survive the lead-in
+    skip). That must fall through the existing `den > 0` NaN guard as before, not get counted
+    in `excluded_near_silent` -- the two are different failure modes and conflating them would
+    hide a genuine render failure inside a list meant for numerically-unstable-but-real ones."""
+    rows = [
+        _row(0, {"Master": 0.5}, {"2": {"num": 0.02, "den": 100.0}}),
+        _row(1, {"Master": 1.0}, {"2": {"num": 0.0, "den": 0.0}}),   # render failure, not near-silence
+    ]
+    res = mt.score_rows(rows, (2,))
+    worst, at = res[2]
+    assert at == {"Master": 0.5}
+    assert "excluded_near_silent" not in res
+
+
 # --------------------------------------------------------------------------- merge_truncation_shards
 
 def test_merge_rejects_a_missing_setting(tmp_path):

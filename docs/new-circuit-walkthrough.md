@@ -57,7 +57,19 @@ Does four things you would otherwise do by hand:
 
 - **Discovers every control** from the `.schx` (ganged pots collapsed to one knob).
 - **Measures oversample** against a reference, rather than taking argparse's default of 2,
-  which is too low for most real circuits.
+  which is too low for most real circuits. This measurement is INDEPENDENT of the `[knobs]`
+  grid values step 2 asks you to review -- `measure_truncation.py`'s `probe_settings()` only
+  reads knob NAMES (`load_device()` discards a config's own grid values entirely) and always
+  probes a fixed pattern: every knob at 0.0/1.0 with the rest at 0.5, plus all-min/all-max/
+  all-mid. So narrowing or reshaping a knob's grid in step 2 does **not** invalidate this
+  number and does **not** need a re-measure -- only adding, removing, or renaming a knob does.
+  One caveat this fixed pattern brings with it: for a Volume/Master-shaped knob whose 0.0 or
+  1.0 extreme mutes the circuit's output (measured directly on the Ceriatone Muchless Captain
+  Reverb: Master=0.0 renders silent, rms=0.000000), that probe setting's reference signal
+  carries almost no energy. `score_rows()` excludes such near-silent settings from the
+  worst-setting pick (its own docstring covers why: the ESR ratio there is a noise-floor
+  artifact, not a real number) and reports them separately in the printed table rather than
+  letting them stand in for the actual worst case.
 - **Guesses each knob's kind** (`drive`/`hi`/`lo`/`mid`/`rms`) from its name.
 - **Builds a first excitation** via `prepare_excitation.py` and points `input` at it.
   This one is **provisional** — it is sized against the placeholder grid written moments
