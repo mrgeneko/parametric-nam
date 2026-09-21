@@ -148,11 +148,22 @@ last = max(int(r["epoch"]) for r in rows)
 
 cfg = json.loads((ds / "config.json").read_text())
 knobs = cfg.get("knobs", [])
-# A capture-sourced dataset (gen_dataset_from_captures.py, .nam or .wav) has no .schx --
-# config.json records that as schx=null. Everything schx-specific below (bundling the schematic,
-# deriving its git revision, the tone-response ground-truth overlay, the registry handoff) is
-# gated on this.
-is_capture = cfg.get("schx") is None
+# THREE dataset provenances, not two. schx=null alone used to mean "capture-sourced" -- wrong
+# for an ngspice-deck/ltspice-deck run (gen_dataset_from_schx.py --backend ngspice-deck / a
+# --module pedal): those ALSO have no .schx (they render from a Python-defined netlist instead
+# of a LiveSPICE circuit), but they are a real circuit simulation, not a real-hardware capture.
+# Confirmed as a real bug, not a hypothetical (2026-09-21, Boss OD-3 ngspice-deck release): the
+# old `is_capture = schx is None` put a deck-sourced run through the capture branch, which would
+# have printed "N real captured .nam files (not a circuit simulation)" -- N=0, since deck runs
+# have no source_files either -- into a published MANIFEST.md. backend=="capture" is what
+# gen_dataset_from_captures.py actually writes; deck backends write their own backend name
+# instead, so that's the correct discriminator, not schx's presence.
+is_capture = cfg.get("backend") == "capture"
+is_deck = (not is_capture) and cfg.get("schx") is None
+# Everything schx-specific below (bundling the schematic, deriving its git revision, the
+# tone-response ground-truth overlay, the registry handoff) needs a REAL schx file, which
+# means neither of the above.
+has_schx = (not is_capture) and (not is_deck)
 
 def emit(k, v): print(f"{k}={shlex.quote(str(v))}")
 def emit_arr(k, vs): print(f"{k}=({' '.join(shlex.quote(str(v)) for v in vs)})")
@@ -185,6 +196,8 @@ emit("RECIPE_NOTE",
      if _recipe else "")
 emit("FIXED", cfg.get("fixed_params", "") or "none")
 emit("IS_CAPTURE", "1" if is_capture else "0")
+emit("IS_DECK", "1" if is_deck else "0")
+emit("HAS_SCHX", "1" if has_schx else "0")
 emit("GEAR_MAKE", cfg.get("gear_make", "?"))
 emit("GEAR_MODEL", cfg.get("gear_model", "?"))
 emit("GEAR_TYPE", cfg.get("gear_type", "?"))
@@ -384,10 +397,10 @@ cp "$CONFIG" "$STAGE/config.toml"
 for f in "$CKPT"/per_combo_esr_*.csv; do [ -f "$f" ] && cp "$f" "$STAGE/"; done
 cp "$DS/config.json"   "$STAGE/dataset_config.json"
 cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
-# Capture-sourced runs (IS_CAPTURE=1, see facts.py) have no .schx to bundle -- config.json's own
-# schx=null already says so, and $SCHX is just this script's schx-path default in that case, not
-# a real file for this run.
-[ "$IS_CAPTURE" -eq 0 ] && cp "$SCHX" "$STAGE/"
+# Capture-sourced AND deck-sourced runs (IS_CAPTURE=1 / IS_DECK=1) have no .schx to bundle --
+# config.json's own schx=null says so for both, and $SCHX is just this script's schx-path
+# default in that case, not a real file for this run.
+[ "$HAS_SCHX" -eq 1 ] && cp "$SCHX" "$STAGE/"
 
 # Tone-response documentation: small-signal magnitude frequency response of the shipped
 # composite, per tier, at each tone knob's min/max -- rendered through the real C++ product
@@ -399,11 +412,11 @@ cp "$DS/params.csv"    "$STAGE/dataset_params.csv"
 # the render binary is unavailable the tool prints a warning and exits 0; if only the oracle
 # is missing it falls back to the model-only chart. Non-fatal on error too, so a broken
 # chart never blocks a publish.
-# Capture-sourced runs have no circuit to overlay against -- plot_tone_response.py already
-# falls back to a model-only chart when the schx/oracle side is unavailable, so just omit --schx
-# rather than pointing it at a schx that isn't this run's source.
+# Capture-sourced and deck-sourced runs have no .schx to overlay against -- plot_tone_response.py
+# already falls back to a model-only chart when the schx/oracle side is unavailable, so just omit
+# --schx rather than pointing it at a schx that isn't this run's source.
 TONE_SCHX_ARGS=()
-[ "$IS_CAPTURE" -eq 0 ] && TONE_SCHX_ARGS=(--schx "$SCHX")
+[ "$HAS_SCHX" -eq 1 ] && TONE_SCHX_ARGS=(--schx "$SCHX")
 
 TONE_CHART=0
 if "$PY_BIN" "$HERE/plot_tone_response.py" \
@@ -418,11 +431,12 @@ else
   echo "==> tone-response chart skipped (render_parametric unavailable or errored)"
 fi
 
-if [ "$IS_CAPTURE" -eq 0 ]; then
+if [ "$HAS_SCHX" -eq 1 ]; then
   SCHX_REPO="$(git -C "$(dirname "$SCHX")" rev-parse --show-toplevel)"
   SCHX_REV="$(git -C "$SCHX_REPO" rev-parse --short HEAD)"
 else
-  # No schematic for a capture-sourced run -- see PROVENANCE_LINE below for what's shown instead.
+  # No schematic for a capture-sourced or deck-sourced run -- see PROVENANCE_LINE below for
+  # what's shown instead.
   SCHX_REPO=""
   SCHX_REV=""
 fi
@@ -567,11 +581,17 @@ bundle'"'"'s head mode could not be confirmed, so treat cross-run ESR comparison
     ;;
 esac
 
-# Provenance line: a real .schx + git revision for a schx-sourced run, or the source .nam
-# captures' own gear metadata for a capture-sourced one (IS_CAPTURE, see facts.py) -- there is no
-# schematic to cite for the latter, config.json already records that as schx=null.
-if [ "$IS_CAPTURE" -eq 0 ]; then
+# Provenance line: a real .schx + git revision for a schx-sourced run, an ngspice-deck/
+# ltspice-deck module for a deck-sourced one (IS_DECK -- a real circuit simulation, just not a
+# LiveSPICE .schx), or the source .nam captures' own gear metadata for a capture-sourced one
+# (IS_CAPTURE, see facts.py) -- there is no schematic to cite for the latter two, config.json
+# already records that as schx=null for both, but they must not be conflated: a deck run
+# printed through the capture branch would falsely claim "real captured .nam files (not a
+# circuit simulation)" for a run that IS a circuit simulation (confirmed 2026-09-21, Boss OD-3).
+if [ "$HAS_SCHX" -eq 1 ]; then
   PROVENANCE_LINE="- **Schematic:** \`parametric-devices @ $SCHX_REV\` — \`$(basename "$SCHX")\`."
+elif [ "$IS_DECK" -eq 1 ]; then
+  PROVENANCE_LINE="- **Source:** \`$BACKEND\` circuit simulation — module \`$CIRCUIT_NAME\` (parametric-devices, no \`.schx\`; deck backends render from a Python-defined netlist, not a LiveSPICE schematic) — $GEAR_MAKE $GEAR_MODEL ($GEAR_TYPE)."
 else
   PROVENANCE_LINE="- **Source:** $N_SOURCE_FILES real captured \`.nam\` files (not a circuit simulation) — $GEAR_MAKE $GEAR_MODEL ($GEAR_TYPE)."
 fi
@@ -686,8 +706,10 @@ EOF
 # ---------------------------------------------------------------------------
 # 8. reproduce.sh
 # ---------------------------------------------------------------------------
-if [ "$IS_CAPTURE" -eq 0 ]; then
+if [ "$HAS_SCHX" -eq 1 ]; then
   REPRO_PROV_LINE="#   schematic : parametric-devices @ $SCHX_REV  ($(basename "$SCHX"))"
+elif [ "$IS_DECK" -eq 1 ]; then
+  REPRO_PROV_LINE="#   source    : $BACKEND circuit simulation -- module $CIRCUIT_NAME (parametric-devices, no .schx)"
 else
   REPRO_PROV_LINE="#   source    : $N_SOURCE_FILES real captured .nam files -- $GEAR_MAKE $GEAR_MODEL"
 fi
@@ -789,9 +811,15 @@ ls -1 "$STAGE" | sed 's/^/      /'
 # add-run.sh (--release/--category/--circuit/--schx-repo/--variant/--commit/--push),
 # here's the command it would need, for reference -- not run automatically:
 # ---------------------------------------------------------------------------
-if [ "$IS_CAPTURE" -eq 0 ]; then
+if [ "$HAS_SCHX" -eq 1 ]; then
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --schx-repo "$SCHX_REPO")
 else
+  # add-run.sh's --capture-source only ever meant "no schx to validate against devices.toml,
+  # skip that check" (confirmed by reading it, 2026-09-21) -- true for a deck-sourced run too,
+  # even though the flag's NAME says "capture". Reused here rather than inventing an unverified
+  # --deck-source flag that script doesn't actually have; if add-run.sh's own output text ever
+  # asserts "real capture" specifically (not just "no schx"), it needs the same IS_DECK-vs-
+  # IS_CAPTURE split this file just got.
   args=(--release "$STAGE" --category "$CATEGORY" --circuit "$CIRCUIT" --capture-source)
 fi
 [ -n "$VARIANT" ] && args+=(--variant "$VARIANT")
