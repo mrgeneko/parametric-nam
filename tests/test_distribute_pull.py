@@ -120,7 +120,9 @@ def test_merge_keeps_every_shards_rows(tmp_path):
     b = _shard_csv(tmp_path, "b.csv", [1, 4, 7])
     c = _shard_csv(tmp_path, "c.csv", [2, 5, 8])
     out = tmp_path / "params.csv"
-    assert dp.merge_params([a, b, c], out) == 9
+    n, idx = dp.merge_params([a, b, c], out)
+    assert n == 9
+    assert idx == list(range(9))
     got = [int(r["idx"]) for r in csv.DictReader(open(out))]
     assert got == list(range(9)), "rows must be complete and in grid order"
 
@@ -141,13 +143,15 @@ def test_merge_dedupes_a_chunk_rendered_by_two_workers(tmp_path):
     a = _shard_csv(tmp_path, "a.csv", [0, 1, 2])
     b = _shard_csv(tmp_path, "b.csv", [2, 3])
     out = tmp_path / "params.csv"
-    assert dp.merge_params([a, b], out) == 4
+    n, idx = dp.merge_params([a, b], out)
+    assert n == 4
+    assert idx == [0, 1, 2, 3]
     assert [int(r["idx"]) for r in csv.DictReader(open(out))] == [0, 1, 2, 3]
 
 
 def test_merge_of_nothing_reports_zero_rather_than_writing_a_bad_file(tmp_path):
     out = tmp_path / "params.csv"
-    assert dp.merge_params([], out) == 0
+    assert dp.merge_params([], out) == (0, [])
     assert not out.exists()
 
 
@@ -156,7 +160,9 @@ def test_merge_tolerates_an_empty_shard(tmp_path):
     a = _shard_csv(tmp_path, "a.csv", [0, 1])
     empty = _shard_csv(tmp_path, "empty.csv", [])
     out = tmp_path / "params.csv"
-    assert dp.merge_params([a, empty], out) == 2
+    n, idx = dp.merge_params([a, empty], out)
+    assert n == 2
+    assert idx == [0, 1]
 
 
 class TestComboPace:
@@ -589,11 +595,33 @@ def test_collect_returns_consistency_flag(tmp_path, monkeypatch):
     local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
     monkeypatch.setattr(dp.subprocess, "run",
                         lambda *a, **k: __import__("types").SimpleNamespace(returncode=1, stdout="", stderr=""))
-    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: 2)
-    (local / "sig" / "a.npy").write_bytes(b"x")
+    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: (2, [0, 1]))
+    (local / "sig" / "000000.npy").write_bytes(b"x")
     assert dp._collect([], [], local) is False          # 2 rows, 1 npy
-    (local / "sig" / "b.npy").write_bytes(b"x")
+    (local / "sig" / "000001.npy").write_bytes(b"x")
     assert dp._collect([], [], local) is True           # 2 rows, 2 npy
+
+
+def test_collect_names_the_exact_orphaned_indices(tmp_path, monkeypatch, capsys):
+    """A rows/.npy mismatch must name WHICH indices are affected, not just report two counts.
+
+    Regression: the Ceriatone Captain Reverb (sag) run (2026-09-21) had 880 rows / 882 .npy
+    files, and finding the two culprits (801, 842) took a manual npy-vs-csv diff because the
+    log only ever printed the two counts. Without --repair-missing this must still surface the
+    exact indices so a human (or a future caller) doesn't have to re-derive them by hand.
+    """
+    import distribute_pull as dp
+    local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
+    monkeypatch.setattr(dp.subprocess, "run",
+                        lambda *a, **k: __import__("types").SimpleNamespace(returncode=1, stdout="", stderr=""))
+    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: (2, [0, 1]))
+    for name in ("000000.npy", "000001.npy", "000005.npy"):
+        (local / "sig" / name).write_bytes(b"x")
+    logged = []
+    monkeypatch.setattr(dp, "log", logged.append)
+    assert dp._collect([], [], local) is False
+    text = "\n".join(logged)
+    assert "5" in text, f"the orphaned index (5) must be named in the log, got: {logged!r}"
 
 
 def test_combine_accepts_the_bare_string_argparse_actually_produces(tmp_path, monkeypatch):
@@ -637,6 +665,16 @@ def test_no_combine_flag_exists_and_defaults_off():
         assert ap.parse_args([]).no_combine is False
 
 
+def test_repair_missing_flag_exists_and_defaults_off():
+    import distribute_pull as dp
+    ap = dp.build_parser() if hasattr(dp, "build_parser") else None
+    if ap is None:
+        import inspect
+        assert "--repair-missing" in inspect.getsource(dp), "flag must be registered"
+    else:
+        assert ap.parse_args([]).repair_missing is False
+
+
 def test_collect_returns_false_not_none_when_nothing_merged(tmp_path, monkeypatch):
     """The no-params.csv path must return False, not a bare None.
 
@@ -650,7 +688,7 @@ def test_collect_returns_false_not_none_when_nothing_merged(tmp_path, monkeypatc
     local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
     monkeypatch.setattr(dp.subprocess, "run",
                         lambda *a, **k: __import__("types").SimpleNamespace(returncode=1, stdout="", stderr=""))
-    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: 0)   # nothing merged
+    monkeypatch.setattr(dp, "merge_params", lambda srcs, dst: (0, []))   # nothing merged
     got = dp._collect([], [], local)
     assert got is False, f"expected False, got {got!r}"
     assert should_combine(got, no_combine=False) is not None, "must refuse to combine"

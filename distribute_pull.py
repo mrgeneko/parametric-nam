@@ -35,7 +35,7 @@ where startup is a few percent of chunk runtime.
 NOT A REPLACEMENT for distribute_gen.sh's setup work (repo sync, --sync-file, gate). Run
 those first; this only schedules the rendering.
 """
-import argparse, csv, os, re, statistics, subprocess, sys, threading, time
+import argparse, csv, json, os, re, statistics, subprocess, sys, threading, time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -483,7 +483,9 @@ def merge_params(shard_csvs, out_path):
     same reason: a header buried mid-table is read downstream as a combination. Deduped on
     idx because a chunk re-dispatched after a failure, or left over from an aborted run, is
     rendered by two workers under the same global index and the rows are equivalent. Sorted
-    so the file is diffable and reads in grid order. Returns the row count.
+    so the file is diffable and reads in grid order. Returns (row count, sorted index list) --
+    the index list matters as much as the count: a count alone cannot tell a caller WHICH
+    indices are missing when it doesn't match the .npy count (see _collect).
     """
     rows, hdr = {}, None
     for f in shard_csvs:
@@ -494,16 +496,60 @@ def merge_params(shard_csvs, out_path):
             for r in rdr:
                 rows[int(r["idx"])] = r
     if not hdr:
-        return 0
+        return 0, []
     with open(out_path, "w", newline="") as fh:
         wtr = csv.DictWriter(fh, fieldnames=hdr)
         wtr.writeheader()
         for i in sorted(rows):
             wtr.writerow(rows[i])
-    return len(rows)
+    return len(rows), sorted(rows)
 
 
-def _collect(workers, remote_out, local_dir):
+def _repair_missing(local_dir: Path, config_path, extra_args, missing_npy, repo_root: Path):
+    """Regenerate exactly the combinations whose .npy is missing a params.csv row (or vice
+    versa), LOCALLY and one index at a time.
+
+    One at a time is not a style choice: gen_dataset_from_schx.py takes an exclusive,
+    non-blocking lock on --output for the whole run (acquire_generation_lock) -- a second
+    concurrent invocation against the SAME --output is refused outright, loudly, by design
+    (two concurrent generations into one dir corrupt params.csv silently otherwise). Running
+    these sequentially is simply working with that lock instead of fighting it.
+
+    Reuses gen_args_from_config -- the SAME expansion the original dispatch used -- so a
+    repair render cannot silently drift onto different knob ranges/fixed-params/oversample
+    than the run it's patching. --shard IDX-IDX/TOTAL selects exactly one global index
+    (modulo TOTAL is a no-op for any IDX < TOTAL); TOTAL comes from the collected dir's own
+    config.json (combination_count), falling back to one past the highest index this run has
+    ever seen if that key or file is missing.
+    """
+    total = None
+    cfg_json = local_dir / "config.json"
+    if cfg_json.exists():
+        try:
+            total = json.loads(cfg_json.read_text()).get("combination_count")
+        except (json.JSONDecodeError, OSError):
+            pass
+    if not total:
+        total = max(missing_npy) + 1
+        log(f"  repair: config.json has no combination_count -- using {total} "
+            f"(one past the highest index seen)")
+    base_args = gen_args_from_config(config_path, repo_root) + list(extra_args)
+    ok = []
+    for idx in missing_npy:
+        log(f"  repair: regenerating index {idx} (--shard {idx}-{idx}/{total}) ...")
+        cmd = [sys.executable, str(repo_root / "gen_dataset_from_schx.py"), *base_args,
+               "--output", str(local_dir), "--shard", f"{idx}-{idx}/{total}"]
+        r = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"  repair: index {idx} FAILED (exit {r.returncode}) -- "
+                f"{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else '(no stderr)'}")
+        else:
+            ok.append(idx)
+    log(f"  repair: {len(ok)}/{len(missing_npy)} index(es) regenerated successfully")
+    return ok
+
+
+def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), repair_missing=False):
     """Pull every worker's shard into one local directory, merging params.csv correctly.
 
     THE HALF THIS MODULE USED TO LEAVE OUT. distribute_pull schedules renders; it never
@@ -523,6 +569,15 @@ def _collect(workers, remote_out, local_dir):
     Ordering is the fix, not detection: every worker's params.csv is copied to its own
     scratch name BEFORE any sig/ transfer, and the merged file is written LAST. That is
     correct even when a worker's remote dir and local_dir are the same directory.
+
+    A row-count-vs-.npy-count MISMATCH used to be reported as just that -- two numbers, no
+    indication of which combinations were actually affected. That cost a manual npy-vs-csv
+    diff on the Ceriatone Captain Reverb (sag) run (2026-09-21): two rc=255 SSH-drop retries
+    left index 801 and 842 with a rendered .npy but no params.csv row (the resume-skip check
+    treats an existing .npy as "done" and never re-appends a row for it on a retry whose
+    OWN attempt is what got interrupted before its row was written). Now the exact indices
+    on each side of the mismatch are computed and logged by number, and --repair-missing lets
+    a caller regenerate exactly those indices automatically instead of doing it by hand.
     """
     local_dir = Path(local_dir).expanduser()
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -548,20 +603,46 @@ def _collect(workers, remote_out, local_dir):
                        capture_output=True, text=True)
 
     # 3. merged params.csv LAST, so step 2 cannot clobber it.
-    n_rows = merge_params([f for _, f in got], local_dir / "params.csv")
+    n_rows, csv_idx = merge_params([f for _, f in got], local_dir / "params.csv")
     if n_rows == 0:
         log("  collect: no params.csv found on any worker -- nothing merged")
         return False   # explicit: a bare `return` gave None, which is only ACCIDENTALLY falsy
-    rows = range(n_rows)
-    n_npy = sum(1 for _ in local_dir.glob("sig/**/*.npy"))
-    log(f"  collect: {len(rows)} params rows, {n_npy} .npy files -> {local_dir}")
-    if len(rows) != n_npy:
-        log(f"  collect: WARNING rows != .npy ({len(rows)} vs {n_npy}) -- "
-            f"gen_dataset_from_schx.py --combine will refuse this, correctly.")
+    npy_idx = sorted(int(p.stem) for p in local_dir.glob("sig/**/*.npy"))
+    log(f"  collect: {len(csv_idx)} params rows, {len(npy_idx)} .npy files -> {local_dir}")
+    csv_set, npy_set = set(csv_idx), set(npy_idx)
+    orphan_npy = sorted(npy_set - csv_set)     # .npy exists, no params.csv row for it
+    orphan_csv = sorted(csv_set - npy_set)     # params.csv row exists, no .npy for it
+    consistent = not orphan_npy and not orphan_csv
+    if not consistent:
+        if orphan_npy:
+            log(f"  collect: WARNING {len(orphan_npy)} .npy file(s) with no params.csv row: "
+                f"{orphan_npy}")
+        if orphan_csv:
+            log(f"  collect: WARNING {len(orphan_csv)} params.csv row(s) with no .npy file: "
+                f"{orphan_csv}")
+        log("  collect: gen_dataset_from_schx.py --combine will refuse this, correctly.")
+        if repair_missing and orphan_npy and config_path is not None:
+            fixed = _repair_missing(local_dir, config_path, extra_args, orphan_npy,
+                                     Path(__file__).resolve().parent)
+            if fixed:
+                # Re-check from scratch, reading local_dir/params.csv directly (the repair
+                # renders append to it in place) -- rather than assume success, since a
+                # render that exits 0 is not proof its row landed (that is exactly how
+                # orphan_npy happens in the first place).
+                with open(local_dir / "params.csv", newline="") as fh:
+                    csv_idx = sorted(int(r["idx"]) for r in csv.DictReader(fh))
+                npy_idx = sorted(int(p.stem) for p in local_dir.glob("sig/**/*.npy"))
+                csv_set, npy_set = set(csv_idx), set(npy_idx)
+                consistent = csv_set == npy_set
+                log(f"  collect: after repair -- {len(csv_idx)} params rows, "
+                    f"{len(npy_idx)} .npy files, consistent={consistent}")
+        elif orphan_npy and config_path is None:
+            log("  collect: --repair-missing needs --config to know how to re-render -- "
+                "not attempting a repair.")
     for f in scratch.glob("*.csv"):
         f.unlink()
     scratch.rmdir()
-    return len(rows) == n_npy
+    return consistent
 
 
 def should_combine(consistent: bool, no_combine: bool):
@@ -645,10 +726,11 @@ class Job:
     output_flag: str           # e.g. "--output" or "--shard-out"
     build_args: "callable"     # (config_path, repo_root, extra_args) -> list[str]
     chunk_output: "callable"   # (base_output, chunk_spec) -> str, passed after output_flag
-    collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args, no_combine) -> None
+    collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing) -> None
 
 
-def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine):
+def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine,
+                          repair_missing):
     """GEN_DATASET_JOB's own collect step: merge shards, then build outputs.npy by default.
 
     --collect used to stop right after merging, leaving a directory that LOOKS finished but
@@ -659,7 +741,7 @@ def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args
     Duke of Tone (Overdrive) a manual step each on 2026-09-07; run_pipeline.py has had a
     Combine step all along, so only this distributed path was missing it.
     """
-    consistent = _collect(workers, remote_out, local_dir)
+    consistent = _collect(workers, remote_out, local_dir, config_path, extra_args, repair_missing)
     why = should_combine(consistent, no_combine)
     if why is None:
         log("  combining -> outputs.npy ...")
@@ -676,8 +758,9 @@ GEN_DATASET_JOB = Job(
     build_args=lambda config_path, repo_root, extra_args:
         gen_args_from_config(config_path, repo_root) + extra_args,
     chunk_output=lambda base_output, chunk: base_output,
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine:
-        _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine),
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
+        _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine,
+                              repair_missing),
 )
 
 GRID_ADEQUACY_JOB = Job(
@@ -688,9 +771,10 @@ GRID_ADEQUACY_JOB = Job(
     build_args=lambda config_path, repo_root, extra_args:
         grid_adequacy_args_from_config(config_path, repo_root) + extra_args,
     chunk_output=lambda base_output, chunk: f"{base_output}/shard_{chunk.replace('/', '_')}.json",
-    # no_combine is GEN_DATASET_JOB-specific (grid_adequacy has no "combine" concept at all) --
-    # accepted and ignored here so both jobs share one call site in main().
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine:
+    # no_combine/repair_missing are GEN_DATASET_JOB-specific (grid_adequacy has no "combine" or
+    # per-index-repair concept at all) -- accepted and ignored here so all three jobs share one
+    # call site in main().
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
         _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_args),
 )
 
@@ -702,9 +786,9 @@ MEASURE_TRUNCATION_JOB = Job(
     build_args=lambda config_path, repo_root, extra_args:
         measure_truncation_args_from_config(config_path, repo_root) + extra_args,
     chunk_output=lambda base_output, chunk: f"{base_output}/shard_{chunk.replace('/', '_')}.json",
-    # no_combine is GEN_DATASET_JOB-specific, same as GRID_ADEQUACY_JOB -- accepted and
-    # ignored here so all three jobs share one call site in main().
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine:
+    # no_combine/repair_missing are GEN_DATASET_JOB-specific, same as GRID_ADEQUACY_JOB --
+    # accepted and ignored here so all three jobs share one call site in main().
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
         _collect_measure_truncation(workers, remote_out, local_dir, config_path, extra_args),
 )
 
@@ -749,6 +833,15 @@ def main():
                          "NORMALISES the data and records output_scale into config.json, and for "
                          "a big grid it is a multi-GB write, so this exists for inspecting or "
                          "re-combining with a different --output-peak/--raw.")
+    ap.add_argument("--repair-missing", action="store_true",
+                    help="--collect (--tool gen_dataset only, needs --config): if params.csv "
+                         "rows and .npy files don't match 1:1, regenerate exactly the missing "
+                         "combinations locally (one at a time, reusing the same "
+                         "gen_args_from_config expansion the original dispatch used) before "
+                         "deciding whether to combine. Without this flag, a mismatch is still "
+                         "detected and every affected index is logged by number -- this only "
+                         "controls whether the tool then fixes it automatically or leaves that "
+                         "to you.")
     ap.add_argument("--config", type=Path, default=None,
                     help="per-circuit TOML, the SAME file run_pipeline.py --config takes. "
                          "Expands to the renderer's --backend/--schx/--input/--knobs/--range/"
@@ -894,7 +987,8 @@ def main():
             r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
                                 f"cd ~ && echo {args.output}"], capture_output=True, text=True)
             remote_out.append(r.stdout.strip() or args.output)
-        job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine)
+        job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine,
+                    args.repair_missing)
     else:
         log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
             "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "
