@@ -242,7 +242,15 @@ class NgspiceSchxBackend:
             sys.exit(f"netlist dump failed for {self.schx}: {r.stderr[:300]}")
         self.ng_base = {
             "netlist": str(netlist_path), "koren": False,
-            "ot_damp": "47k", "ot_snub": "10n", "nfb_comp": None,
+            # ot_damp/ot_snub were hardcoded to the EVH 5150's OT ratio (238:1 into 8ohm)
+            # for every circuit rendered through this backend, silently wrong for any other
+            # OT ratio (e.g. the SVT's 400:1 into 4ohm). Route them through the same --conv
+            # key=val channel every other per-circuit device-model override already uses, so
+            # a circuit with a different OT just passes ot_damp=.../ot_snub=... in its own
+            # --conv string -- default behavior (and every existing device) is unchanged.
+            "ot_damp": self.conv.get("ot_damp", "47k"),
+            "ot_snub": self.conv.get("ot_snub", "10n"),
+            "nfb_comp": self.conv.get("nfb_comp"),
             "conv": self.conv, "method": "trap", "input_upsample": 1,
             "oversample": self.oversample,
         }
