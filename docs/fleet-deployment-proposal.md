@@ -5,6 +5,13 @@
 > ([scripts.md](scripts.md#distribute_pullpy--hand-rendering-chunks-out-as-workers-free-up)):
 > one control machine holding SSH access to every worker, handing out chunks as they free up.
 
+**Related proposals.** [per-item-sharding-proposal.md](per-item-sharding-proposal.md) is a
+nearer-term elaboration of §4 below. [config-gate-proposal.md](config-gate-proposal.md) is a
+different, smaller decision — sequencing per-device readiness checks between scaffolding and
+generation — that touches fleet concerns only at its edges (see its "fleet mode" section);
+its §2/§3 below (inventory file, dispatch-time version check) are what that proposal's fleet
+mode would consume once built, rather than inventing its own.
+
 ## What prompted it
 
 Rendering a 648-combination full-amp dataset across four machines took 13 hours and worked,
@@ -142,6 +149,10 @@ working, so a first run never depends on a file the user does not know to write.
 precisely because static weighting failed: its own history records a 1.6 h job stretched to
 8.9 h that way, and measured rates from the recent run tracked neither core count nor RAM.
 The schedule stays the measurement.
+
+This is also the file [config-gate-proposal.md](config-gate-proposal.md)'s fleet mode wants
+to read for `--inventory`/`--worker` selection, once it exists — that proposal deliberately
+does not define its own per-host fact format.
 
 ### 3. Containers — only for the Linux workers, and only for step 5
 
