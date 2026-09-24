@@ -589,6 +589,62 @@ class TestJobAbstraction:
         assert dp.Worker("hostA:~/x:4").job is dp.GEN_DATASET_JOB
 
 
+class _FakeSSHDropPopen:
+    """Simulates the SSH-drop shape of run_chunk's watch loop: stdout hits EOF immediately
+    (broken pipe, nothing read), so the pump thread dies with `done == 0` and the loop exits
+    via `if not t.is_alive(): break` -- never through the pace/killed_slow branch, since pace
+    is None here just like a plain (non-slow-watching) dispatch. proc.wait() then surfaces
+    ssh's own exit code for a dropped connection."""
+
+    instances: "list" = []
+
+    def __init__(self, argv, **kw):
+        self.argv = argv
+        self.stdout = iter(())
+        _FakeSSHDropPopen.instances.append(self)
+
+    def poll(self):
+        return None
+
+    def wait(self):
+        self.returncode = 255
+        return 255
+
+    def kill(self):
+        pass
+
+
+class TestKillRemoteOnFailure:
+    """Regression for the 2026-09-24 AC30 Top Boost incident: one dropped SSH connection
+    (rc=255) left the remote gen_dataset process orphaned and still holding
+    .generation.lock, which then failed the next 30 chunks dispatched to that host --
+    _kill_remote() existed and was documented for exactly this, but was only wired to the
+    explicit pace-based killed_slow branch, never to a plain connection drop."""
+
+    def test_ssh_drop_calls_kill_remote_even_without_pace(self, monkeypatch):
+        monkeypatch.setattr(dp.subprocess, "Popen", _FakeSSHDropPopen)
+        calls = []
+        monkeypatch.setattr(dp.Worker, "_kill_remote",
+                            lambda self, chunk, output: calls.append((chunk, output)))
+        w = dp.Worker("hostA:~/work/parametric-nam:4")
+        rc, dt, out = w.run_chunk("3-3/16", "--backend livespice", "~/out")
+        assert rc == 255
+        assert calls == [("3-3/16", "~/out")]
+
+    def test_successful_chunk_does_not_call_kill_remote(self, monkeypatch):
+        """The new unconditional-on-failure call must stay off the ordinary success path --
+        every chunk paying an extra ssh round-trip would be real, needless overhead at
+        fleet scale."""
+        monkeypatch.setattr(dp.subprocess, "Popen", _FakePopen)
+        calls = []
+        monkeypatch.setattr(dp.Worker, "_kill_remote",
+                            lambda self, chunk, output: calls.append((chunk, output)))
+        w = dp.Worker("hostA:~/work/parametric-nam:4")
+        rc, dt, out = w.run_chunk("3-3/16", "--backend livespice", "~/out")
+        assert rc == 0
+        assert calls == []
+
+
 def test_collect_returns_consistency_flag(tmp_path, monkeypatch):
     """_collect reports whether rows == .npy -- the precondition for combining."""
     import distribute_pull as dp

@@ -283,6 +283,22 @@ class Worker:
         if pace is not None and done and not killed_slow:
             pace.record_rate(done, dt)
         rc = proc.returncode if not killed_slow else 1
+        # Any non-zero rc that DIDN'T already go through the killed_slow branch above still
+        # needs _kill_remote(): an SSH-level drop (broken pipe -> the pump thread's readline
+        # loop hits EOF -> `if not t.is_alive(): break` -> proc.wait() picks up ssh's own
+        # rc=255) leaves the remote gen_dataset process running, reparented to init, still
+        # holding .generation.lock -- exactly what _kill_remote's docstring describes, just
+        # reached from a different branch than the one that originally called it. Without
+        # this, the NEXT chunk dispatched to this host (immediately, since the scheduler has
+        # no idea the previous holder is still alive) fails instantly on the stale lock, and
+        # so does every chunk after that -- one dropped connection cascading into the whole
+        # remainder of a host's work (30 of 64 AC30 Top Boost chunks, 2026-09-24). Safe to
+        # call unconditionally on failure: if the remote process already exited cleanly (a
+        # real application error, not a connection drop), its own flock release already
+        # dropped the lock, and pkill finds nothing to match -- a harmless no-op, not a
+        # redundant kill of something still needed.
+        if rc != 0 and not killed_slow:
+            self._kill_remote(chunk, output)
         return rc, dt, "\n".join(lines)
 
 
