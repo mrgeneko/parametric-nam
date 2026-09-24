@@ -623,7 +623,19 @@ def _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp=-1.0, proc
         _st = sig[warmup_n:] if len(sig) > warmup_n else sig
         rms = float(np.sqrt(np.mean(_st.astype(np.float64) ** 2)))
         peak = float(np.max(np.abs(_st)))
-    np.save(str(path), sig)
+    # Write-to-temp + atomic rename, same convention/reasoning as _filesource() above: a
+    # reader (resume-skip's existence check, --combine, a cross-machine rsync mid-collect)
+    # must never observe a half-written .npy. A direct np.save(str(path), sig) has no such
+    # guarantee -- a killed process (e.g. distribute_pull.py's slow-worker quarantine) can
+    # leave a truncated file sitting at the final name, which existence-based resume-skip
+    # would then treat as done.
+    # np.save APPENDS ".npy" to a string/Path target that doesn't already end in it, so the
+    # temp name must carry an explicit ".npy" suffix itself -- passing it a bare ".tmpID"
+    # name (like _filesource()'s np.savetxt does) makes np.save silently write to
+    # "<name>.tmpID.npy" instead, and the os.replace below would then fail to find "<name>.tmpID".
+    tmp = path.with_name(f"{path.stem}.tmp{os.getpid()}_{threading.get_ident()}.npy")
+    np.save(str(tmp), sig)
+    os.replace(tmp, path)
     out_wav.unlink(missing_ok=True)
     return Result(idx, dsp, proc_t, True, " ".join(warn), rms, peak)
 
