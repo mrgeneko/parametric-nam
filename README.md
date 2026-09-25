@@ -257,7 +257,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
 | `preflight.py` | Pre-generation sanity gate — probes a handful of points through the oracle before a full render; also provides `--find-peak` (saturation onset) |
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |
-| `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample` |
+| `measure_truncation.py` | Measure BDF2 truncation error, pick `oversample`. Long runs: `--checkpoint FILE` makes it resumable after a kill/crash (refuses to resume across a changed `.schx`, input or settings) |
 | `measure_ngspice_timestep.py` | ngspice equivalent of `measure_truncation.py` — measures `maxstep` truncation error for a hand-written ngspice deck |
 | `build_excitation.py` | Build a training excitation that covers the full input range |
 | `prepare_excitation.py` | Size an excitation from measured saturation onset, automatically |

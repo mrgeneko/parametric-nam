@@ -49,10 +49,33 @@ change; see internal engineering notes) and is just as easy from the outside:
     for f in ../parametric-nam-models/*/*/config.toml*; do
         ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --config "$f"
     done
+
+RESUMING AN INTERRUPTED RUN (--checkpoint).
+A full-amp measurement can run for many hours (2026-09-24: an SVT Full measurement was 4/11
+settings in after 2.5 h), and before --checkpoint a killed or crashed process lost all of it.
+    ./measure_truncation.py --input ... --config ... --checkpoint run.ckpt.json
+After every completed knob setting the measured (setting, candidate) ESR terms are written to
+that file (write-to-temp + atomic rename, so a kill mid-write cannot corrupt it). Re-running the
+SAME command loads it, skips the settings already measured, and finishes the rest -- an
+interruption costs at most the one setting in flight. The finished reference-convergence check is
+cached in the file too. It works the same under --shard/--emit, where a killed remote shard
+otherwise loses everything.
+
+The file carries a fingerprint of everything that determines the numbers -- the .schx CONTENT
+hash, the input wav's content hash, knobs, candidates, ref-os, iterations, --speaker, probe
+windows, shard spec and renderer revision -- and a resume REFUSES on any difference, naming the
+fields. Mixing settings measured on two different circuits or inputs yields a table that
+describes neither, and that is exactly what happened to the first SVT Full run when its .schx
+was regenerated mid-measurement. For the same reason a run ABORTS if the .schx changes on disk
+while it is measuring (checkpointed or not) instead of quietly pooling both versions.
+A setting in which any render failed is never checkpointed, so a resume re-measures it rather
+than freezing a partial number. To pause without --checkpoint, SIGSTOP/SIGCONT the process
+group (kill -STOP -PGID / kill -CONT -PGID) -- the workers are children of the same group.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os as _os
 import sys
@@ -319,10 +342,79 @@ def ref_error_check(schx: Path, at_worst: dict, ref_os: int, clips: list[Path], 
     return num / den if den > 0 else float("nan")
 
 
+CHECKPOINT_VERSION = 1
+
+
+def file_sha256(path: Path) -> str:
+    """Content hash of a file (streamed -- the input sweeps are tens of MB)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_checkpoint(path: str, fingerprint: dict) -> tuple[dict[int, dict], dict | None]:
+    """Rows already measured by an earlier run of THIS measurement, keyed by global setting
+    index, plus the cached reference-convergence result (or None).
+
+    Returns ({}, None) when the file does not exist yet. Every other problem REFUSES with
+    SystemExit rather than falling back to "start over": silently discarding hours of measured
+    settings is the failure this file exists to prevent, and silently ACCEPTING rows measured
+    under a different circuit/input/setting-grid is worse -- see the module docstring.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {}, None
+    try:
+        d = json.loads(p.read_text())
+        saved = d["fingerprint"]
+        rows = {int(r["index"]): r for r in d["rows"]}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(f"checkpoint {path} is unreadable ({type(e).__name__}: {e}). Not "
+                         f"overwriting it -- inspect, move or delete it, then re-run.")
+    if d.get("version") != CHECKPOINT_VERSION:
+        raise SystemExit(f"checkpoint {path} is format version {d.get('version')!r}, this tool "
+                         f"writes {CHECKPOINT_VERSION}; move or delete it to start fresh.")
+    diffs = [f"  {k}: checkpoint={saved.get(k)!r}  now={fingerprint.get(k)!r}"
+             for k in sorted(set(saved) | set(fingerprint)) if saved.get(k) != fingerprint.get(k)]
+    if diffs:
+        raise SystemExit(f"checkpoint {path} was measured under a DIFFERENT configuration -- "
+                         f"resuming would pool incomparable settings:\n" + "\n".join(diffs) +
+                         "\nRestore the original inputs to resume, or move/delete the checkpoint "
+                         "to measure from scratch.")
+    return rows, d.get("ref_error")
+
+
+def write_checkpoint(path: str, fingerprint: dict, rows: list[dict],
+                     ref_error: dict | None = None) -> None:
+    """Atomically persist `rows` (write-to-temp in the same directory, then os.replace -- the
+    same convention as gen_dataset_from_schx.py's .npy writes: a reader, or a resume after a
+    kill mid-write, must never see a half-written file at the final name)."""
+    p = Path(path)
+    tmp = p.with_name(f".{p.name}.tmp{_os.getpid()}")
+    tmp.write_text(json.dumps({"version": CHECKPOINT_VERSION, "fingerprint": fingerprint,
+                               "rows": rows, "ref_error": ref_error}, indent=1))
+    _os.replace(tmp, p)
+
+
+def run_fingerprint(input_wav: Path, knobs: list[str], ref_os: int, candidates: tuple[int, ...],
+                    iterations: int, speaker: str | None, probe_s: float, n_windows: int,
+                    lead_silence_s: float | None) -> dict:
+    """Everything OUTSIDE measure()'s own arguments that decides the numbers -- see the module
+    docstring. measure() adds the .schx content hash, setting count and shard spec itself."""
+    from prepare_excitation import solver_identity
+    return {"input_sha256": file_sha256(input_wav), "knobs": list(knobs), "ref_os": ref_os,
+            "candidates": list(candidates), "iterations": iterations, "speaker": speaker,
+            "probe_s": probe_s, "n_windows": n_windows, "lead_silence_s": lead_silence_s,
+            "solver": solver_identity("livespice")}
+
+
 def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: int,
             ref_os: int, candidates: tuple[int, ...], iterations: int,
             speaker: str | None, td: Path, workers: int,
-            shard: str | None = None, emit: str | None = None) -> dict | None:
+            shard: str | None = None, emit: str | None = None,
+            checkpoint: str | None = None, fingerprint: dict | None = None) -> dict | None:
     """Worst-over-knob-settings truncation ESR at each candidate oversample.
 
     Renders run CONCURRENTLY. Serially this was leaving 13 of 14 cores idle while a single
@@ -343,6 +435,11 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     `clips` are the probe windows from probe_clips() (possibly just the whole input); each
     (setting, oversample) is rendered per window and the ESR numerator/denominator POOLED
     across windows, so the reported number estimates the same whole-file quantity either way.
+
+    `checkpoint` (a path) + `fingerprint` (from run_fingerprint()) make the run resumable: see
+    the module docstring. measure() adds the .schx content hash, setting total and shard spec to
+    the fingerprint itself, since only it knows them. Independently of `checkpoint`, it raises
+    if the .schx changes on disk while it is measuring.
     """
     settings = probe_settings(knobs)
     setting_total = len(settings)
@@ -363,12 +460,43 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     # little concurrency for a real per-item progress signal.
     rows = []
     n_rendered = n_ok = 0
+    schx_sha = file_sha256(schx)
+    fp, done, cached_ref = None, {}, None
+    persisted: list[dict] = []      # rows safe to checkpoint (every render succeeded)
+    if checkpoint:
+        if fingerprint is None:
+            raise ValueError("checkpoint= needs fingerprint= (see run_fingerprint())")
+        fp = {**fingerprint, "schx_sha256": schx_sha, "setting_total": setting_total,
+              "shard": shard}
+        done, cached_ref = load_checkpoint(checkpoint, fp)
+        if done:
+            print(f"  resuming from {checkpoint}: {len(done)}/{len(settings)} setting(s) "
+                  f"already measured", file=sys.stderr)
     for n, p in enumerate(settings):
         idx = shard_index[n] if shard_index is not None else n
         k = tuple(sorted(p.items()))
+        if idx in done:
+            if done[idx]["params"] != p:
+                raise SystemExit(f"checkpoint {checkpoint}: setting {idx} was measured at "
+                                 f"{done[idx]['params']} but this run enumerates {p} there -- "
+                                 f"the setting grid changed; move/delete the checkpoint.")
+            rows.append(done[idx])
+            persisted.append(done[idx])
+            print(f"  {n + 1}/{len(settings)} settings done (from checkpoint)", flush=True,
+                  file=sys.stderr)
+            continue
         got = _render_batch(schx, clips, iterations, speaker, td, workers,
                             [(p, os_, wi) for os_ in (*candidates, ref_os)
                              for wi in range(len(clips))])
+        # A circuit edited WHILE measuring makes every later setting describe a different device
+        # than the earlier ones -- the pooled table would be about neither. Refuse, don't pool.
+        if file_sha256(schx) != schx_sha:
+            raise RuntimeError(
+                f"{schx} changed on disk while it was being measured (setting {idx}). Settings "
+                f"measured so far describe the OLD circuit and this one the new one, so no "
+                f"table built from both is valid. Re-run against the final circuit"
+                + (f" (delete {checkpoint} first: it was measured on the old one)."
+                   if checkpoint else "."))
         n_rendered += len(got)
         n_ok += sum(1 for v in got.values() if v is not None)
         esr_row = {}
@@ -382,7 +510,14 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
                 num += n_
                 den += d_
             esr_row[str(os_)] = {"num": num, "den": den}
-        rows.append({"index": idx, "params": p, "esr": esr_row})
+        row = {"index": idx, "params": p, "esr": esr_row}
+        rows.append(row)
+        # Only a setting whose renders ALL succeeded is persisted: a failed render contributes
+        # nothing to num/den, so freezing that row would make a resume "finish" the setting with
+        # a partial number instead of re-measuring it.
+        if checkpoint and all(v is not None for v in got.values()):
+            persisted.append(row)
+            write_checkpoint(checkpoint, fp, persisted)
         print(f"  {n + 1}/{len(settings)} settings done", flush=True, file=sys.stderr)
 
     # EVERY render failed. Do NOT fall through to the table below: worst/at stay at their
@@ -422,8 +557,16 @@ def measure(schx: Path, knobs: list[str], clips: list[Path], lead_n: int, sr: in
     # the reference's own error, the ratios go flat, and every entry is an UNDERSTATEMENT.
     _, at_worst = res[candidates[0]]
     if at_worst is not None:
-        res["ref_error"] = ref_error_check(schx, at_worst, ref_os, clips, lead_n, sr,
-                                           iterations, speaker, td, workers)
+        if cached_ref and cached_ref.get("at") == at_worst:
+            res["ref_error"] = cached_ref["value"]
+            print("  reference-convergence check: reusing the result cached in the checkpoint",
+                  file=sys.stderr)
+        else:
+            res["ref_error"] = ref_error_check(schx, at_worst, ref_os, clips, lead_n, sr,
+                                               iterations, speaker, td, workers)
+            if checkpoint and np.isfinite(res["ref_error"]):
+                write_checkpoint(checkpoint, fp, persisted,
+                                 ref_error={"at": at_worst, "value": res["ref_error"]})
     return res
 
 
@@ -473,6 +616,13 @@ def main() -> None:
                          "instead of scoring. Carries the setting total, candidates/ref_os, "
                          "each row's GLOBAL setting index, and a fingerprint of the renderer "
                          "binary so --merge can refuse mismatched work.")
+    ap.add_argument("--checkpoint", metavar="PATH",
+                    help="make the run resumable: persist each finished knob setting to this "
+                         "JSON file (atomically) and, if it already exists, skip the settings it "
+                         "holds. Refuses to resume if the .schx contents, input wav, knobs, "
+                         "candidates, ref-os, iterations, probe windows, shard spec or renderer "
+                         "revision differ from the run that wrote it. Works with --shard/--emit. "
+                         "See the module docstring.")
     ap.add_argument("--merge", nargs="+", metavar="PATH",
                     help="combine --emit files from every shard, verify completeness and "
                          "solver agreement, then score ONCE from the full set -- including a "
@@ -492,6 +642,9 @@ def main() -> None:
         ap.error("--shard and --emit must be used together")
     if args.merge and (args.shard or args.emit):
         ap.error("--merge is mutually exclusive with --shard/--emit")
+    if args.merge and args.checkpoint:
+        ap.error("--checkpoint does not apply to --merge (nothing is measured there except one "
+                 "reference-convergence render)")
 
     try:
         name, schx, knobs = load_device(args.config)
@@ -500,6 +653,12 @@ def main() -> None:
     if not schx.exists():
         ap.error(f"{name}: MISSING {schx}")
     check_oracle("livespice")
+
+    fingerprint = None
+    if args.checkpoint:
+        fingerprint = run_fingerprint(args.input, knobs, args.ref_os, cands, args.iterations,
+                                      args.speaker, args.probe_s, args.n_windows,
+                                      args.lead_silence_s)
 
     print(f"input:      {args.input.name}")
     print(f"reference:  oversample={args.ref_os}, {args.iterations} Newton iterations")
@@ -538,7 +697,8 @@ def main() -> None:
                   flush=True, file=sys.stderr)
             try:
                 measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands, args.iterations,
-                       args.speaker, td, args.workers, shard=args.shard, emit=args.emit)
+                       args.speaker, td, args.workers, shard=args.shard, emit=args.emit,
+                       checkpoint=args.checkpoint, fingerprint=fingerprint)
             except RuntimeError as e:
                 sys.exit(f"\nERROR: {e}")
         return
@@ -554,7 +714,8 @@ def main() -> None:
             print(f"  measuring {name} ({len(knobs)} knobs) ...", flush=True, file=sys.stderr)
             try:
                 r = measure(schx, knobs, clips, lead_n, sr, args.ref_os, cands,
-                            args.iterations, args.speaker, td, args.workers)
+                            args.iterations, args.speaker, td, args.workers,
+                            checkpoint=args.checkpoint, fingerprint=fingerprint)
             except RuntimeError as e:
                 sys.exit(f"\nERROR: {e}")
             rows.append((name, r))
