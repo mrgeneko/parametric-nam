@@ -35,6 +35,7 @@ Usage from a device's render_X.py:
                            input_src=input_src, tmp=tmp, parallel_sims=8)
     # results: {outfile: peak_or_None}
 """
+import glob
 import os
 import sys
 import numpy as np
@@ -139,9 +140,10 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
     for round_i, step in enumerate(rungs if rungs is not None else (maxstep, maxstep / 3, maxstep / 10)):
         if not pending:
             break
-        raw_paths, tasks = {}, {}
+        raw_paths, tasks, tags = {}, {}, {}
         for knobs, outfile in pending:
             tag = os.path.splitext(os.path.basename(outfile))[0]
+            tags[outfile] = tag
             raw_out = os.path.join(tmp, f'{tag}_r{round_i}.raw')
             cir_path = os.path.join(tmp, f'{tag}_r{round_i}.cir')
             deck = build_deck(input_src=input_src, knobs=knobs)
@@ -187,6 +189,23 @@ def render_grid(build_deck, jobs, probe_node, sr, t, input_src, tmp,
             wavfile.write(outfile, sr, (yv / (pk + 1e-9) * 0.9 * 32767).astype(np.int16))
             results[outfile] = pk
         pending = still_pending
+
+        # SCRATCH CLEANUP -- this round's .cir/.raw + spicelib's own .log/.exe.log siblings
+        # were never deleted (found the hard way: a 189-combo JC-120 render left 60GB of them
+        # behind, each .raw ~435-455MB vs. the final 41.7MB .npy -- full double-precision
+        # solver output at whatever adaptive step it actually took, not the final decimated
+        # 48kHz float32 signal). Safe to delete unconditionally for every job dispatched this
+        # round, success or not: a result already extracted needs its raw file, a job still
+        # pending gets a FRESH file next round (round_i is baked into the name), so nothing
+        # from this round is ever read again either way. Glob rather than exact paths because
+        # SimRunner (see render_one/render_grid's own comments elsewhere) auto-numbers the
+        # .log/.exe.log it creates alongside the .cir, not a name this function controls.
+        for outfile in raw_paths:
+            for f in glob.glob(os.path.join(tmp, f'{tags[outfile]}_r{round_i}*')):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
     for _knobs, outfile in pending:
         results[outfile] = None
