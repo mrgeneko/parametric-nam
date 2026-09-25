@@ -42,7 +42,7 @@ BATCH   = HERE / "gen_dataset_from_schx.py"
 DEFAULT_STEPS_PER_EPOCH = 50
 TRAIN   = HERE / "param_train.py"
 
-from gen_dataset_from_schx import check_oracle
+from gen_dataset_from_schx import check_oracle, latest_rows
 
 # argparse dests whose config values are filesystem paths (argparse's type=Path is
 # only applied to CLI strings, not to set_defaults values, so we convert here).
@@ -734,7 +734,9 @@ def check_missing_combinations(dataset_dir: Path, fh, allow_missing: bool) -> No
     if expected is None:
         return
     with open(params_path, newline="") as f:
-        rows = list(csv.DictReader(f))
+        # Latest row per idx: params.csv is append-only, so a combination that failed and was
+        # then re-rendered successfully has BOTH rows -- see latest_rows().
+        rows = latest_rows(list(csv.DictReader(f)))
     failed = [r for r in rows if r.get("ok") != "1"]
     if len(rows) - len(failed) >= expected and not failed:
         return
@@ -1459,7 +1461,7 @@ def main():
             n_combos, audio_s, sr = 0, 0.0, 48000
             try:
                 with open(Path(dataset_dir) / "params.csv") as f:
-                    n_combos = sum(1 for _ in csv.DictReader(f))
+                    n_combos = len(latest_rows(list(csv.DictReader(f))))   # not raw rows: a retried combo has two
                 dcfg = json.loads((Path(dataset_dir) / "config.json").read_text())
                 audio_s = float(dcfg.get("input", {}).get("duration_s") or 0.0)
                 sr = int(dcfg.get("input", {}).get("samplerate") or 48000)

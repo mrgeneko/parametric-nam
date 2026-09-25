@@ -801,3 +801,71 @@ def test_combine_peak_disk_counts_the_worst_prefix_not_just_the_end(tmp_path):
     paths = [fresh, sig / "000000.npy", sig / "000001.npy"]
     # +100 -100 (fresh reclaimed), then +100, +100 (links reclaim nothing) = peak 200
     assert g.combine_peak_disk_bytes(paths, tmp_path, row_bytes=100) == 200
+
+
+# --------------------------------------------------------------------------- latest_rows / combine
+# params.csv is append-only: a retried combination has both its old failed row and its new ok row.
+
+def test_latest_rows_keeps_one_row_per_idx_and_the_last_one_wins():
+    rows = [{"idx": "0", "ok": "1"}, {"idx": "1", "ok": "0", "error": "boom"},
+            {"idx": "2", "ok": "1"}, {"idx": "1", "ok": "1"}]
+    out = g.latest_rows(rows)
+    assert [r["idx"] for r in out] == ["0", "1", "2"]          # first-seen order preserved
+    assert out[1]["ok"] == "1" and "error" not in out[1]       # the retry replaced the failure
+
+
+def test_latest_rows_never_merges_rows_it_cannot_identify():
+    """A malformed/headerless params.csv gives rows with no idx; collapsing them together would
+    hide real failures, so each stays its own entry."""
+    rows = [{"garbage": "x"}, {"garbage": "y"}, {"idx": "", "ok": "0"}, {"idx": None, "ok": "0"}]
+    assert len(g.latest_rows(rows)) == 4
+
+
+def _mini_dataset(tmp_path, csv_rows, n_npy=3, n_samples=4800):
+    import csv as _csv
+    (tmp_path / "sig" / "00").mkdir(parents=True)
+    for i in range(n_npy):
+        np.save(tmp_path / "sig" / "00" / f"{i:06d}.npy",
+                np.full(n_samples, 0.1 * (i + 1), dtype=np.float32))
+    (tmp_path / "config.json").write_text(json.dumps({"combination_count": n_npy}))
+    cols = ["idx", "Gain", "dsp_load", "proc_time", "rms", "peak", "ok", "error", "rung"]
+    with open(tmp_path / "params.csv", "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in csv_rows:
+            w.writerow({c: r.get(c, "") for c in cols})
+    return tmp_path
+
+
+def _ok(idx, peak=0.3):
+    return {"idx": idx, "Gain": 0.5, "ok": "1", "rms": "0.1", "peak": str(peak), "rung": "0"}
+
+
+def test_combine_accepts_a_dataset_whose_failed_combo_was_later_rerendered(tmp_path):
+    """2026-09-25, Bluesbreaker: combo 12 failed at oversample 8 and was re-rendered fine at 32.
+    params.csv then had 22 rows for 21 combinations (one stale failure) and --combine refused
+    with 'dataset generation incomplete' although every combination had succeeded."""
+    d = _mini_dataset(tmp_path, [_ok(0), {"idx": 1, "Gain": 0.5, "ok": "0",
+                                          "error": "exceeds the supply rail"},
+                                  _ok(2), _ok(1, peak=0.6)])
+    g.combine(d, normalize=False)
+    out = np.load(d / "outputs.npy")
+    assert out.shape == (3, 4800)
+
+
+def test_combine_still_refuses_when_a_combination_is_genuinely_missing(tmp_path):
+    d = _mini_dataset(tmp_path, [_ok(0), {"idx": 1, "Gain": 0.5, "ok": "0", "error": "diverged"},
+                                  _ok(2)])
+    with pytest.raises(SystemExit) as e:
+        g.combine(d, normalize=False)
+    assert "incomplete" in str(e.value)
+
+
+def test_combine_normalisation_peak_ignores_a_superseded_failed_row(tmp_path):
+    """The global-peak scale must come from the rows that count, not a stale one."""
+    d = _mini_dataset(tmp_path, [_ok(0, peak=0.2),
+                                  {"idx": 1, "Gain": 0.5, "ok": "0", "peak": "999", "error": "x"},
+                                  _ok(1, peak=0.4), _ok(2, peak=0.3)])
+    g.combine(d, output_peak=0.8)
+    cfg = json.loads((d / "config.json").read_text())
+    assert cfg["raw_global_peak"] == pytest.approx(0.4)

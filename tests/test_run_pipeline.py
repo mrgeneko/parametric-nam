@@ -253,6 +253,46 @@ def test_check_missing_combinations_warns_but_proceeds_with_allow_missing(tmp_pa
     assert "WARNING" in fh.getvalue()
 
 
+def test_check_missing_combinations_passes_when_a_failed_combo_was_later_rerendered_ok(tmp_path):
+    """params.csv is append-only, so a retried combination has BOTH its old failed row and its
+    new ok row. The gate must read the LATEST row per idx -- 2026-09-25: Bluesbreaker combo 12
+    failed at oversample 8, re-rendered fine at 32, and the stale failed row still stopped the
+    pipeline, so the documented "re-run the failed ones" recovery could never pass."""
+    _write_dataset(tmp_path, expected=3,
+                    rows=[{"idx": 0, "ok": "1", "gain": 0.1},
+                          {"idx": 1, "ok": "0", "gain": 0.5, "error": "exceeds the supply rail"},
+                          {"idx": 2, "ok": "1", "gain": 0.9},
+                          {"idx": 1, "ok": "1", "gain": 0.5}])            # the retry, appended last
+    fh = io.StringIO()
+    rp.check_missing_combinations(tmp_path, fh, allow_missing=False)     # must NOT exit
+    assert fh.getvalue() == ""
+
+
+def test_check_missing_combinations_still_fails_when_the_retry_also_failed(tmp_path):
+    _write_dataset(tmp_path, expected=2,
+                    rows=[{"idx": 0, "ok": "1", "gain": 0.1},
+                          {"idx": 1, "ok": "0", "gain": 0.5, "error": "first failure"},
+                          {"idx": 1, "ok": "0", "gain": 0.5, "error": "second failure"}])
+    fh = io.StringIO()
+    with pytest.raises(SystemExit):
+        rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
+    out = fh.getvalue()
+    assert "1 of 2 combinations failed" in out        # ONE failed combination, not two rows
+    assert "second failure" in out and "first failure" not in out
+
+
+def test_check_missing_combinations_latest_row_wins_even_when_it_is_the_failure(tmp_path):
+    """Order matters, not 'has any ok row': a combination that later regressed is failed."""
+    _write_dataset(tmp_path, expected=2,
+                    rows=[{"idx": 0, "ok": "1", "gain": 0.1},
+                          {"idx": 1, "ok": "1", "gain": 0.5},
+                          {"idx": 1, "ok": "0", "gain": 0.5, "error": "regressed"}])
+    fh = io.StringIO()
+    with pytest.raises(SystemExit):
+        rp.check_missing_combinations(tmp_path, fh, allow_missing=False)
+    assert "regressed" in fh.getvalue()
+
+
 def test_check_missing_combinations_noop_when_combination_count_is_absent(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({}))
     (tmp_path / "params.csv").write_text("idx,ok\n0,1\n")

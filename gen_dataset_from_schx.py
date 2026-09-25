@@ -1393,6 +1393,27 @@ def combine_peak_disk_bytes(npy_paths, out_dir: Path, row_bytes: int) -> int:
     return peak
 
 
+def latest_rows(rows):
+    """One params.csv row per combination idx, the LAST one written winning.
+
+    params.csv is APPEND-ONLY: a retry of a failed combination (the documented recovery --
+    "re-run the failed ones", resume-skip renders only what is missing) appends its new row and
+    leaves the old failed one in place. Every reader that COUNTS rows or asks "did anything fail"
+    must therefore collapse to the latest row per idx first, or a combination that has since
+    succeeded still reads as a failure and the recovery path can never pass its own gate
+    (2026-09-25: Bluesbreaker combo 12 -- failed at oversample 8, re-rendered fine at 32, and
+    both check_missing_combinations and --combine still refused the dataset). "Latest wins" is
+    already the rule for rung memory (see main()). A row with no usable idx (a malformed or
+    headerless file) is kept as its own entry so it still surfaces as a failure.
+    """
+    by_idx: dict = {}
+    for n, r in enumerate(rows):
+        i = r.get("idx")
+        key = i.strip() if isinstance(i, str) and i.strip() else ("malformed", n)
+        by_idx[key] = r          # re-assignment keeps first-seen position, latest content
+    return list(by_idx.values())
+
+
 def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: bool = True):
     csv_path = out_dir / "params.csv"
     if not csv_path.exists():
@@ -1419,7 +1440,7 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
     failed = []
     global_peak = 0.0
     with open(csv_path) as f:
-        for r in csv.DictReader(f):
+        for r in latest_rows(list(csv.DictReader(f))):
             total_rows += 1
             if r.get("ok") == "1":
                 ok_rows += 1
