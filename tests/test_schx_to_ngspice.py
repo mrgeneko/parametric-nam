@@ -98,3 +98,60 @@ class TestBjtModelOptionalParameters:
         right = X.bjt_model(BJT_P, {"bjt_ikf": "9.981m"})   # this codebase's milli
         assert "IKF=9981000.0" in wrong    # 9.981 MEGA -- the trap, if triggered
         assert "IKF=0.009981" in right     # 9.981 milli -- the intended value
+
+
+# --------------------------------------------------------------------------- op-amp model
+# The default macromodel hard-limits the output 0.5 V inside each rail; LiveSPICE's own OpAmp
+# clamps its gain node with two very sharp diodes ~2 V inside, so the swing ends ~1.0-1.3 V
+# inside. A cross-engine comparison of a circuit that drives an op-amp into its rails compares
+# two different op-amps unless opamp_model=livespice is set (Bluesbreaker, 2026-09-25).
+
+def _opamp_netlist():
+    def comp(name, typ, terms, **params):
+        return {"name": name, "type": typ, "value": None, "isPot": False, "params": params,
+                "terminals": [{"name": k, "node": v} for k, v in terms.items()]}
+    return {"components": [
+        comp("J_IN", "Input", {"Anode": "IN", "Cathode": "GND"}, V0dBFS="1"),
+        comp("V9", "Rail", {"V9": "V9"}, Voltage="9"),
+        comp("IC1", "OpAmp", {"+": "IN", "-": "OUT", "Out": "OUT", "Vcc+": "V9", "Vcc-": "GND"},
+             Aol="200000", GBP="3000000", Rout="100", Rin="1000000000"),
+        comp("S_OUT", "Speaker", {"Anode": "OUT", "Cathode": "GND"}, V0dBFS="1")]}
+
+
+class TestOpampModel:
+    def test_default_is_the_hard_limit_and_unchanged(self):
+        sub = "\n".join(X.opamp_subckt("OA0", 2e5, 3e6, 100.0, True))
+        assert "min(max(V(g),V(vn)+0.5),V(vp)-0.5)" in sub
+        assert "DCL" not in sub
+
+    def test_livespice_model_is_the_two_sharp_clamp_diodes(self):
+        sub = "\n".join(X.opamp_subckt("OA0", 2e5, 3e6, 100.0, True, model="livespice"))
+        assert ".model DCL_OA0 D(IS=8e-16 N=1)" in sub
+        assert "Vch vp nch DC 2" in sub and "Dch g nch DCL_OA0" in sub     # gain node <= Vcc-2 (+Vd)
+        assert "Vcl ncl vn DC 2" in sub and "Dcl ncl g DCL_OA0" in sub     # gain node >= Vee+2 (-Vd)
+        assert "min(" not in sub and "Bo " not in sub                      # no hard limiter
+        assert "Ro g out" in sub                                           # buffered through Rout
+
+    def test_livespice_model_uses_livespices_own_gain_stage_constants(self):
+        sub = "\n".join(X.opamp_subckt("OA0", 2e5, 3e6, 100.0, True, model="livespice"))
+        assert "Ra g 0 1000.0" in sub                                         # OpAmp.cs Rp1 = 1000
+        assert "Ga 0 g inp inn 200.0" in sub                                # Aol / Rp1 = 200 S
+
+    def test_livespice_model_without_supply_pins_falls_back_like_livespice_does(self):
+        """LiveSPICE only clamps when Vcc+/Vcc- are connected; with no rails there is no clamp
+        to copy, so the default (unclamped) macromodel is used either way."""
+        a = X.opamp_subckt("OA0", 2e5, 3e6, 100.0, False)
+        b = X.opamp_subckt("OA0", 2e5, 3e6, 100.0, False, model="livespice")
+        assert a == b
+
+    def test_conv_key_reaches_the_translated_deck(self):
+        deck = X.translate(_opamp_netlist(), conv={"opamp_model": "livespice"})
+        assert "DCL_OA0" in deck and "min(max(" not in deck
+
+    def test_without_the_conv_key_the_deck_is_byte_identical_to_before(self):
+        base = X.translate(_opamp_netlist())
+        assert base == X.translate(_opamp_netlist(), conv={})
+        assert "min(max(V(g),V(vn)+0.5),V(vp)-0.5)" in base and "DCL" not in base
+
+    def test_unrelated_conv_keys_do_not_change_the_opamp(self):
+        assert X.translate(_opamp_netlist(), conv={"diode_cjo": "100p"}) == X.translate(_opamp_netlist())

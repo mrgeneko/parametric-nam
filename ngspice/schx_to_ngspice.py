@@ -218,12 +218,32 @@ def jfet_model(p, conv):
         sp(qty(_cv(p, 'RS', conv, 'jfet_rs', '10'))))
 
 
-def opamp_subckt(name, Aol, GBP, Rout, rails):
+def opamp_subckt(name, Aol, GBP, Rout, rails, model='hard'):
     """Single-pole op-amp macromodel. The gain node is ground-referenced (the
     external feedback loop sets the DC output level, incl. single-supply mid-bias);
     open-loop pole at GBP/Aol. When Vcc+/Vcc- are connected, the output buffer is
     clamped to the rails (captures op-amp clipping). ngspice's adaptive solver
-    keeps the high-gain stage bounded (unlike LiveSPICE's fixed step)."""
+    keeps the high-gain stage bounded (unlike LiveSPICE's fixed step).
+
+    model='hard' (default, unchanged): the output is hard-limited to 0.5 V inside each rail.
+    model='livespice' (opt-in, --conv opamp_model=livespice): an exact copy of LiveSPICE's own
+    Circuit.OpAmp (OpAmp.cs) -- the gain node is clamped by two very sharp diodes (IS=8e-16,
+    n=1) to Vcc-2 V and Vee+2 V, i.e. the swing ends ~1.0-1.3 V inside each rail (drive
+    dependent), then Rout. The default clips ~0.5-0.8 V wider on each side, so a cross-engine
+    comparison of a circuit that drives an op-amp into its rails is comparing two different
+    op-amps unless this is set. Rin (LiveSPICE's resistor across the inputs) is omitted --
+    negligible against any real source. Only applies when the supply pins are connected, exactly
+    as in LiveSPICE (without them LiveSPICE does not clamp at all)."""
+    if model == 'livespice' and rails:
+        Rp = 1e3                        # LiveSPICE's own Rp1
+        gm, Cp = Aol / Rp, Aol / (2 * math.pi * Rp * GBP)
+        dm = 'DCL_%s' % name
+        return ['.subckt %s inp inn out vp vn' % name,
+                '.model %s D(IS=8e-16 N=1)' % dm,
+                'Ga 0 g inp inn %s' % sp(gm), 'Ra g 0 %s' % sp(Rp), 'Ca g 0 %s' % sp(Cp),
+                'Vch vp nch DC 2', 'Dch g nch %s' % dm,      # gain node <= Vcc-2 (+ one diode drop)
+                'Vcl ncl vn DC 2', 'Dcl ncl g %s' % dm,      # gain node >= Vee+2 (- one diode drop)
+                'Ro g out %s' % sp(Rout), '.ends']
     Rp = 1e6
     gm, Cp = Aol / Rp, Aol / (2 * math.pi * Rp * GBP)
     hdr = '.subckt %s inp inn out%s' % (name, ' vp vn' if rails else '')
@@ -382,10 +402,11 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         Aol = qty(p.get('Aol', '1e6')) or 1e6
         GBP = qty(p.get('GBP', '10e6')) or 10e6
         Rout = qty(p.get('Rout', '100')) or 100.0
-        sig = (Aol, GBP, Rout, rails)
+        model = conv.get('opamp_model', 'hard')
+        sig = (Aol, GBP, Rout, rails, model)
         if sig not in opamps:
             opamps[sig] = 'OA%d' % len(opamps)
-            opamp_defs.extend(opamp_subckt(opamps[sig], Aol, GBP, Rout, rails))
+            opamp_defs.extend(opamp_subckt(opamps[sig], Aol, GBP, Rout, rails, model))
         return opamps[sig]
 
     body, out_node = [], None
@@ -543,7 +564,7 @@ if __name__ == '__main__':
                     help='inject extra SPICE lines, ;-separated (e.g. missing bright caps)')
     ap.add_argument('--conv', default='',
                     help='device convergence overrides, key=val,...  keys: diode_cjo diode_tt '
-                         'bjt_cje bjt_cjc bjt_tf jfet_cgs jfet_cgd jfet_rd jfet_rs '
+                         'bjt_cje bjt_cjc bjt_tf jfet_cgs jfet_cgd jfet_rd jfet_rs opamp_model=livespice '
                          '(e.g. diode_cjo=100p for high-gain hard-clip stages like the metal-distortion pedal)')
     a = ap.parse_args()
     pots = dict((kv.split('=')[0], float(kv.split('=')[1])) for kv in a.pots.split(',') if '=' in kv)
