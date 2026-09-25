@@ -31,7 +31,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_combos, N_samples])
 """
 
-import atexit, argparse, csv, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, threading, time
+import atexit, argparse, csv, fcntl, hashlib, json, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1377,6 +1377,21 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
 DEFAULT_OUTPUT_PEAK = 0.9  # normalize the loudest combination to this peak (~-1 dBFS headroom)
 
 
+def combine_peak_disk_bytes(npy_paths, out_dir: Path, row_bytes: int) -> int:
+    """Worst-case extra disk combine() needs on out_dir's device, walking rows in the order
+    they're consumed: each row adds row_bytes to outputs.npy, then its source is unlinked.
+    A source only gives space back if it's a real file (not a symlink) on out_dir's device."""
+    out_dev = os.stat(out_dir).st_dev
+    cur = peak = 0
+    for p in npy_paths:
+        cur += row_bytes
+        peak = max(peak, cur)
+        st = os.lstat(p)
+        if not stat.S_ISLNK(st.st_mode) and st.st_dev == out_dev:
+            cur -= st.st_size
+    return peak
+
+
 def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: bool = True):
     csv_path = out_dir / "params.csv"
     if not csv_path.exists():
@@ -1442,11 +1457,22 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
     # Time-gated (not every-N-files) heartbeat: a big grid (the British-stack amp's hot-rod variant's 1944 combos)
     # spends real, silent seconds here, indistinguishable from a hang; a small one shouldn't
     # print anything at all.
+    # mmap_mode='r', not a plain np.load: the OUTPUT array below is already disk-backed
+    # (open_memmap), but this loop used to fully load and RETAIN every combo in RAM at
+    # once via a plain np.load -- n_combos x n_samples x 4 bytes, which for a modest grid
+    # (1323 combos, ~40 MB each here) is ~53 GB against 24 GB of physical memory. That's
+    # an OOM kill with no traceback: the process just vanishes mid-"loading N/M" heartbeat,
+    # indistinguishable from a hung rsync until you check dmesg/vm_stat (found exactly this
+    # way, 2026-09-25, combining the AC30 Top Boost's full 1323-combo grid). mmap_mode='r'
+    # makes each array a lazy, page-cache-backed view instead of a resident allocation, so
+    # this loop's own memory footprint stays flat regardless of grid size; the OS pages
+    # each file in on the `arr[i] = sig * scale` read below and can evict under pressure
+    # rather than the kernel picking a process to kill.
     print(f"loading {n_combos} .npy file(s) ...", flush=True)
     _t_load, _last_print = time.monotonic(), 0.0
     sigs = []
     for i, p in enumerate(npy_paths, 1):
-        sigs.append(np.load(str(p)))
+        sigs.append(np.load(str(p), mmap_mode='r'))
         now = time.monotonic()
         if now - _last_print >= 2.0:
             print(f"  {i}/{n_combos} loaded ({now - _t_load:.0f}s)", flush=True)
@@ -1457,6 +1483,19 @@ def combine(out_dir: Path, output_peak: float = DEFAULT_OUTPUT_PEAK, normalize: 
             print(f"BAD LENGTH: {path}: {count} samples (expected {n_samples})", file=sys.stderr)
         sys.exit(f"FATAL: {len(bad_lengths)} .npy file(s) have the wrong length -- "
                  f"corrupt render(s). Re-run those combinations before combining.")
+
+    # Refuse up front if the output can't fit. Without this a full disk kills the process
+    # with SIGBUS mid-copy and NO traceback (memmap writes fault on writeback), after
+    # p.unlink() below has already deleted the sources of every row copied so far -- those
+    # rows are left as silent zeros in outputs.npy (AC30 Top Boost, 2026-09-25: 735 of 1323
+    # rows lost that way).
+    _peak = combine_peak_disk_bytes(npy_paths, out_dir, n_samples * 4)
+    _free = shutil.disk_usage(out_dir).free
+    if _free < _peak + (1 << 30):
+        sys.exit(f"FATAL: not enough free disk to combine -- the output needs up to "
+                 f"{_peak / 2**30:.1f} GiB more than the sources free as they are consumed, "
+                 f"plus a 1 GiB margin; {out_dir} has {_free / 2**30:.1f} GiB free. Free space "
+                 f"or point the dataset at a bigger volume; nothing has been written or deleted.")
 
     out_path = out_dir / "outputs.npy"
     arr = np.lib.format.open_memmap(str(out_path), mode="w+",

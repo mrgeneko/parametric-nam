@@ -757,3 +757,47 @@ def test_transient_gate_forwards_sweep_start_v_and_min_start_v():
         "check_coverage() call must forward args.min_start_v"
     assert "start_v=args.sweep_start_v" in call, \
         "check_coverage() call must forward args.sweep_start_v"
+
+
+def _npy_files(d, n, size):
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(n):
+        p = d / f"{i:06d}.npy"
+        p.write_bytes(b"x" * size)
+        out.append(p)
+    return out
+
+
+def test_combine_peak_disk_real_same_device_sources_reclaim_as_consumed(tmp_path):
+    """Each source is unlinked right after its row is written, so real files on the
+    output's own device only ever cost one row at a time, not the whole output."""
+    files = _npy_files(tmp_path / "sig", 5, size=100)
+    assert g.combine_peak_disk_bytes(files, tmp_path, row_bytes=100) == 100
+
+
+def test_combine_peak_disk_symlinked_sources_reclaim_nothing(tmp_path):
+    """A symlink's unlink frees nothing (the target stays), so the output must fit whole.
+    This is the layout used to combine onto a different volume than the originals."""
+    real = _npy_files(tmp_path / "real", 5, size=100)
+    links = []
+    (tmp_path / "sig").mkdir()
+    for p in real:
+        link = tmp_path / "sig" / p.name
+        link.symlink_to(p)
+        links.append(link)
+    assert g.combine_peak_disk_bytes(links, tmp_path, row_bytes=100) == 500
+
+
+def test_combine_peak_disk_counts_the_worst_prefix_not_just_the_end(tmp_path):
+    """Order matters: reclaimable rows first then non-reclaimable ones peaks at the end."""
+    real = _npy_files(tmp_path / "real", 2, size=100)
+    sig = tmp_path / "sig"
+    sig.mkdir()
+    (sig / "000000.npy").symlink_to(real[0])
+    (sig / "000001.npy").symlink_to(real[1])
+    fresh = sig / "000002.npy"
+    fresh.write_bytes(b"x" * 100)
+    paths = [fresh, sig / "000000.npy", sig / "000001.npy"]
+    # +100 -100 (fresh reclaimed), then +100, +100 (links reclaim nothing) = peak 200
+    assert g.combine_peak_disk_bytes(paths, tmp_path, row_bytes=100) == 200
