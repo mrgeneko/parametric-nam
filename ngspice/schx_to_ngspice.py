@@ -235,6 +235,109 @@ def opamp_subckt(name, Aol, GBP, Rout, rails):
     return [hdr] + core + ['.ends']
 
 
+def centertap_lines(nm, c, t, comps, conv, ot_damp, ot_snub):
+    """CenterTapTransformer -> SPICE lines (E/F ideal-xfmr pair, or opt-in mutual-inductance).
+
+    Pulled out of translate()'s inline component loop (2026-09-24, purely mechanical --
+    no behavior change, verified byte-identical output before/after) so schx_to_ltspice.py
+    can reuse the EXACT same transformer math instead of re-deriving it: this is standard
+    SPICE E/F-controlled-source and K-coupled-inductor syntax, identical between ngspice and
+    LTspice, so there is no dialect-specific reason for a second copy of this logic to exist.
+    See the CenterTapTransformer branch's original inline comments (still below, unchanged)
+    for the full derivation and the LF-divergence investigation that produced xfmr_model=mutual.
+    """
+    # IDEAL center-tapped transformer via controlled sources — matches
+    # LiveSPICE's exact model (no inductance to guess). LiveSPICE:
+    #   Vp = 2*turns*V(SA,ST) = 2*turns*V(ST,SC)   (turns = Np/Ns_full)
+    #   Ip*turns = Isa + Isc                        (ampere-turns)
+    # Realized as: two VCVS set the half-secondary voltages from Vp, two
+    # CCCS reflect each half-secondary current back into the primary.
+    r = str(c['value']).split(':')
+    turns = float(r[0]) / float(r[1]) if len(r) == 2 else 1.0
+    SA, ST, SC, PA, PC = t['SA'], t['ST'], t['SC'], t['PA'], t['PC']
+    gv = sp(1.0 / (2 * turns))   # V(SA,ST) = V(PA,PC)/(2*turns)
+    gi = sp(1.0 / turns)         # Ip = (Isa+Isc)/turns
+    xfmr_model = conv.get('xfmr_model', 'ideal')
+    out = []
+    if xfmr_model == 'mutual':
+        # OPT-IN, per-circuit only (see render_backends.py's --conv routing).
+        # The ideal E/F model above has ZERO source impedance at the P-group's
+        # node -- it forces that node's voltage exactly, regardless of what's
+        # shunting it. The .schx already models finite magnetizing inductance
+        # as a literal shunt Inductor across the P-group (this circuit: "Lm",
+        # 60mH, PA-PC) per this module's own docstring -- but a shunt inductor
+        # across an ideal voltage source can draw more current as frequency
+        # drops, it CANNOT pull that source's voltage down, so it produces no
+        # real LF rolloff. Diagnosed on the Ampeg SVT power amp (2026-09-22):
+        # ngspice's LF output sits ~60-64V rms at 40Hz against a 49.1V physical
+        # ceiling, unmoved by ot_damp/ot_snub calibration or by scaling Lm
+        # 60->480mH (see Ampeg SVT Power Amp.backends.toml).
+        #
+        # Fix: replace the ideal E/F pair with genuine mutual inductance.
+        # Reuse the EXISTING shunt Inductor across PA-PC (found below, not
+        # duplicated) as the P-winding's own self-inductance Lp, add two new
+        # inductors for the S-winding's two halves (SA-ST, ST-SC), and couple
+        # all three with K-statements -- both halves to Lp (the transformer
+        # action) AND to each other (they're one continuous winding with a
+        # center tap, not two independent coils). Deriving each half's self-
+        # inductance from Lp and turns, using the SAME voltage-ratio relation
+        # already above (V(SA,ST) = V(PA,PC)/(2*turns) implies N_Shalf/N_P =
+        # 1/(2*turns), and L ~ N^2): L_Shalf = Lp / (2*turns)^2 = Lp/(4*turns^2).
+        lm_name, lm_henries = None, None
+        for c2 in comps:
+            if c2['type'] != 'Inductor':
+                continue
+            t2 = terms(c2)
+            if set(t2.values()) == {PA, PC}:
+                lm_name = re.sub(r'\s+', '_', c2['name'])
+                lm_henries = qty(c2.get('value') or c2['params'].get('Inductance'))
+                break
+        if lm_henries is None:
+            print('WARN: xfmr_model=mutual on %s needs a shunt Inductor across '
+                  '%s-%s (the P-group) to reuse as Lp -- none found, falling '
+                  'back to the ideal model for this transformer.' % (nm, PA, PC),
+                  file=sys.stderr)
+            xfmr_model = 'ideal'
+        else:
+            l_shalf = lm_henries / (4 * turns * turns)
+            k = float(conv.get('xfmr_k', '0.999'))
+            lm_elem = 'L' + lm_name   # the K line references the SPICE ELEMENT
+                                      # name (the generic Inductor branch's "L"+nm),
+                                      # not the bare .schx component name.
+            out += ['L%s_sa %s %s %s' % (nm, SA, ST, sp(l_shalf)),
+                    'L%s_sc %s %s %s' % (nm, ST, SC, sp(l_shalf)),
+                    'K%s_a L%s_sa %s %s' % (nm, nm, lm_elem, sp(k)),
+                    'K%s_c L%s_sc %s %s' % (nm, nm, lm_elem, sp(k)),
+                    'K%s_ac L%s_sa L%s_sc %s' % (nm, nm, nm, sp(float(conv.get('xfmr_k_ac', k)))),
+                    # bleeders no longer needed for a floating-matrix reason
+                    # (the coupled inductors already give SA/ST/SC a DC path
+                    # through the real windings) -- kept anyway, harmless in
+                    # parallel with a real inductor, cheap insurance.
+                    'R%s_a %s %s 1meg' % (nm, SA, ST),
+                    'R%s_c %s %s 1meg' % (nm, ST, SC),
+                    'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
+                    'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
+                    'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
+    if xfmr_model != 'mutual':
+        out += ['E%s_a %s %s %s %s %s' % (nm, SA, ST, PA, PC, gv),
+                'E%s_c %s %s %s %s %s' % (nm, ST, SC, PA, PC, gv),
+                'F%s_a %s %s E%s_a %s' % (nm, PA, PC, nm, gi),
+                'F%s_c %s %s E%s_c %s' % (nm, PA, PC, nm, gi),
+                # bleeders: give the (otherwise ideal) windings a DC path so the
+                # matrix isn't singular / floating.
+                'R%s_a %s %s 1meg' % (nm, SA, ST),
+                'R%s_c %s %s 1meg' % (nm, ST, SC),
+                # OT damping: a pure-ideal OT + high loop-gain global NFB (e.g.
+                # the stiff amp head) oscillates instantly. A plate-to-plate resistive damper
+                # + a snubber lower the OT Q to converge, at minor HF cost. Light
+                # defaults suit moderate amps; stiff amps need heavier (--ot-damp
+                # 3k --ot-snub 220n --nfb-comp <node>=1n for the stiff amp head's full circuit).
+                'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
+                'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
+                'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
+    return out
+
+
 # --------------------------------------------------------------------------
 # main translation
 # --------------------------------------------------------------------------
@@ -364,94 +467,7 @@ def translate(netlist, pots=None, input_pwl='input.pwl', dur=0.5, csv='out.csv',
         elif ty == 'Pentode':
             s = tube_sub('PEN', p); body.append('X%s %s %s %s %s %s' % (nm, t['P'], t['G2'], t['G'], t['K'], s))
         elif ty == 'CenterTapTransformer':
-            # IDEAL center-tapped transformer via controlled sources — matches
-            # LiveSPICE's exact model (no inductance to guess). LiveSPICE:
-            #   Vp = 2*turns*V(SA,ST) = 2*turns*V(ST,SC)   (turns = Np/Ns_full)
-            #   Ip*turns = Isa + Isc                        (ampere-turns)
-            # Realized as: two VCVS set the half-secondary voltages from Vp, two
-            # CCCS reflect each half-secondary current back into the primary.
-            r = str(c['value']).split(':')
-            turns = float(r[0]) / float(r[1]) if len(r) == 2 else 1.0
-            SA, ST, SC, PA, PC = t['SA'], t['ST'], t['SC'], t['PA'], t['PC']
-            gv = sp(1.0 / (2 * turns))   # V(SA,ST) = V(PA,PC)/(2*turns)
-            gi = sp(1.0 / turns)         # Ip = (Isa+Isc)/turns
-            xfmr_model = conv.get('xfmr_model', 'ideal')
-            if xfmr_model == 'mutual':
-                # OPT-IN, per-circuit only (see render_backends.py's --conv routing).
-                # The ideal E/F model above has ZERO source impedance at the P-group's
-                # node -- it forces that node's voltage exactly, regardless of what's
-                # shunting it. The .schx already models finite magnetizing inductance
-                # as a literal shunt Inductor across the P-group (this circuit: "Lm",
-                # 60mH, PA-PC) per this module's own docstring -- but a shunt inductor
-                # across an ideal voltage source can draw more current as frequency
-                # drops, it CANNOT pull that source's voltage down, so it produces no
-                # real LF rolloff. Diagnosed on the Ampeg SVT power amp (2026-09-22):
-                # ngspice's LF output sits ~60-64V rms at 40Hz against a 49.1V physical
-                # ceiling, unmoved by ot_damp/ot_snub calibration or by scaling Lm
-                # 60->480mH (see Ampeg SVT Power Amp.backends.toml).
-                #
-                # Fix: replace the ideal E/F pair with genuine mutual inductance.
-                # Reuse the EXISTING shunt Inductor across PA-PC (found below, not
-                # duplicated) as the P-winding's own self-inductance Lp, add two new
-                # inductors for the S-winding's two halves (SA-ST, ST-SC), and couple
-                # all three with K-statements -- both halves to Lp (the transformer
-                # action) AND to each other (they're one continuous winding with a
-                # center tap, not two independent coils). Deriving each half's self-
-                # inductance from Lp and turns, using the SAME voltage-ratio relation
-                # already above (V(SA,ST) = V(PA,PC)/(2*turns) implies N_Shalf/N_P =
-                # 1/(2*turns), and L ~ N^2): L_Shalf = Lp / (2*turns)^2 = Lp/(4*turns^2).
-                lm_name, lm_henries = None, None
-                for c2 in comps:
-                    if c2['type'] != 'Inductor':
-                        continue
-                    t2 = terms(c2)
-                    if set(t2.values()) == {PA, PC}:
-                        lm_name = re.sub(r'\s+', '_', c2['name'])
-                        lm_henries = qty(c2.get('value') or c2['params'].get('Inductance'))
-                        break
-                if lm_henries is None:
-                    print('WARN: xfmr_model=mutual on %s needs a shunt Inductor across '
-                          '%s-%s (the P-group) to reuse as Lp -- none found, falling '
-                          'back to the ideal model for this transformer.' % (nm, PA, PC),
-                          file=sys.stderr)
-                    xfmr_model = 'ideal'
-                else:
-                    l_shalf = lm_henries / (4 * turns * turns)
-                    k = float(conv.get('xfmr_k', '0.999'))
-                    lm_elem = 'L' + lm_name   # the K line references the SPICE ELEMENT
-                                              # name (the generic Inductor branch's "L"+nm),
-                                              # not the bare .schx component name.
-                    body += ['L%s_sa %s %s %s' % (nm, SA, ST, sp(l_shalf)),
-                             'L%s_sc %s %s %s' % (nm, ST, SC, sp(l_shalf)),
-                             'K%s_a L%s_sa %s %s' % (nm, nm, lm_elem, sp(k)),
-                             'K%s_c L%s_sc %s %s' % (nm, nm, lm_elem, sp(k)),
-                             'K%s_ac L%s_sa L%s_sc %s' % (nm, nm, nm, sp(float(conv.get('xfmr_k_ac', k)))),
-                             # bleeders no longer needed for a floating-matrix reason
-                             # (the coupled inductors already give SA/ST/SC a DC path
-                             # through the real windings) -- kept anyway, harmless in
-                             # parallel with a real inductor, cheap insurance.
-                             'R%s_a %s %s 1meg' % (nm, SA, ST),
-                             'R%s_c %s %s 1meg' % (nm, ST, SC),
-                             'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
-                             'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
-                             'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
-            if xfmr_model != 'mutual':
-                body += ['E%s_a %s %s %s %s %s' % (nm, SA, ST, PA, PC, gv),
-                         'E%s_c %s %s %s %s %s' % (nm, ST, SC, PA, PC, gv),
-                         'F%s_a %s %s E%s_a %s' % (nm, PA, PC, nm, gi),
-                         'F%s_c %s %s E%s_c %s' % (nm, PA, PC, nm, gi),
-                         # bleeders: give the (otherwise ideal) windings a DC path so the
-                         # matrix isn't singular / floating.
-                         'R%s_a %s %s 1meg' % (nm, SA, ST),
-                         'R%s_c %s %s 1meg' % (nm, ST, SC),
-                         # OT damping: a pure-ideal OT + high loop-gain global NFB (e.g.
-                         # the stiff amp head) oscillates instantly. A plate-to-plate resistive damper
-                         # + a snubber lower the OT Q to converge, at minor HF cost. Light
-                         # defaults suit moderate amps; stiff amps need heavier (--ot-damp
-                         # 3k --ot-snub 220n --nfb-comp <node>=1n for the stiff amp head's full circuit).
-                         'R%s_ppd %s %s %s' % (nm, SA, SC, ot_damp),
-                         'R%s_sn %s n%s_sn 100' % (nm, PA, nm),
-                         'C%s_sn n%s_sn %s %s' % (nm, nm, PC, ot_snub)]
+            body += centertap_lines(nm, c, t, comps, conv, ot_damp, ot_snub)
         else:
             print('WARN: unhandled component %s (%s)' % (nm, ty), file=sys.stderr)
 
