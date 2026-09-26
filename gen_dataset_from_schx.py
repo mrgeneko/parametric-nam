@@ -852,7 +852,7 @@ def _is_convergence_failure(err: str) -> bool:
     return bool(err) and bool(_CONVERGENCE_FAILURE.search(err))
 
 
-def _rungs(backend: str, oversample: int, ng: dict) -> list:
+def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> list:
     """Escalating convergence settings, cheapest first.
 
     We ALREADY KNEW how to fix these -- the reverse-linear-drive pedal needed input_upsample=4,
@@ -918,7 +918,12 @@ def _rungs(backend: str, oversample: int, ng: dict) -> list:
         # Newton iterate in the correct basin. It costs ~5.5x render time.
         rungs, o = [], os_
         while True:
-            rungs.append(dict(oversample=o, iterations=256))
+            # `iterations` is the Newton cap for EVERY rung (default 256, settable per device via
+            # --iterations / a config's `iterations`): a circuit whose hot corners wander into the
+            # wrong root at 256 (Marshall Bluesbreaker at its 7.5 V excitation, 2026-09-26: 3 of 9
+            # hot corners ran away at oversample 8 / 256, 0 of 9 at 8 / 1024) is fixed by more
+            # iterations at the SAME timestep, which the oversample-only ladder never tried.
+            rungs.append(dict(oversample=o, iterations=iterations))
             if o >= 128:
                 break
             o *= 2
@@ -1011,7 +1016,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 timeout_s: int = 1200, oversample: int = 2,
                 max_crest: float = 0.0, ng: dict = None,
                 warmup_s: float = 1.0, no_retry: bool = False, rail_rms: float = None,
-                start_rung: int = 0, capture: dict = None) -> Result:
+                start_rung: int = 0, capture: dict = None, iterations: int = 256) -> Result:
     """Render one combination, ESCALATING THE SOLVER when it fails to converge.
 
     A failed combination used to record its error and be forgotten -- leaving a hole in the
@@ -1029,7 +1034,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         return Result(idx, ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    rungs = [dict()] if no_retry else _rungs(backend, oversample, ng)
+    rungs = [dict()] if no_retry else _rungs(backend, oversample, ng, iterations)
     start = min(max(start_rung, 0), len(rungs) - 1)
     last = None
     for i in range(start, len(rungs)):
@@ -2673,6 +2678,10 @@ def main():
                     "Recorded in the .nam's parameters[].default so a bake with no --params "
                     "uses the circuit's real default position, not the range midpoint "
                     "(e.g. a pedal whose controls don't center at noon).")
+    ap.add_argument("--iterations", type=int, default=256,
+                    help="livespice: Newton iteration cap for every rung of the retry ladder (default 256). "
+                         "Raise it for a circuit whose hot corners converge to a wrong root at 256 -- more "
+                         "iterations at the same timestep, which the oversample ladder never tries.")
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
@@ -3157,6 +3166,7 @@ def main():
         "bounds": knob_bounds,
         "defaults": knob_defaults,
         "oversample": args.oversample,
+        "iterations": args.iterations,
         "param_map": param_map,
         "fixed_params": args.fixed_params,
         "speaker": args.speaker,
@@ -3274,7 +3284,7 @@ def main():
                         warmup_s=args.skip_warmup_s, no_retry=args.no_retry,
                         rail_rms=(None if args.skip_rail_check else rail_bound(schx)),
                         start_rung=max(args.start_rung, prev_rungs.get(i, 0)),
-                        capture=_capture_cfg(args)): i
+                        capture=_capture_cfg(args), iterations=args.iterations): i
             for i, p in to_run
         }
         for f in as_completed(futs):

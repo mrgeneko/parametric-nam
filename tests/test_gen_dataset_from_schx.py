@@ -869,3 +869,34 @@ def test_combine_normalisation_peak_ignores_a_superseded_failed_row(tmp_path):
     g.combine(d, output_peak=0.8)
     cfg = json.loads((d / "config.json").read_text())
     assert cfg["raw_global_peak"] == pytest.approx(0.4)
+
+
+# --------------------------------------------------------------------------- --iterations
+# The livespice ladder used a hard-coded 256 Newton iterations on every rung. The Marshall
+# Bluesbreaker's hot corners (7.5 V excitation) converge to a wrong root at 8/256 but are clean at
+# 8/1024 (2026-09-26), a fix the oversample-only ladder could never reach.
+
+def test_livespice_rungs_use_the_requested_iteration_cap_on_every_rung():
+    rungs = g._rungs("livespice", oversample=8, ng=None, iterations=1024)
+    assert rungs and all(r["iterations"] == 1024 for r in rungs)
+    assert [r["oversample"] for r in rungs] == [r["oversample"] for r in g._rungs("livespice", 8, None)]
+
+
+def test_process_one_passes_the_iteration_cap_to_each_render(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_render(*a, iterations=None, **k):
+        seen.append((a[12], iterations))                 # (oversample, iterations) of this rung
+        return g.Result(a[0], error="unstable: crest=500 > --max-crest 50") if len(seen) < 2 \
+            else g.Result(a[0], ok=True)
+    monkeypatch.setattr(g, "_render_once", fake_render)
+    r = g.process_one(0, {"Gain": 0.5}, tmp_path, tmp_path / "in.wav", "livespice",
+                      schx="x.schx", oversample=8, iterations=1024)
+    assert r.ok
+    assert seen == [(8, 1024), (16, 1024)]
+
+
+def test_iterations_cli_default_is_256_and_settable():
+    import sys as _sys
+    ap_src = open(g.__file__).read()
+    assert '"--iterations", type=int, default=256' in ap_src
