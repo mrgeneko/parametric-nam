@@ -56,6 +56,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
 from check_transient_coverage import resolve_sample_grid, _corners, _sample_interior  # noqa: E402
+from cpu_topology import physical_cpu_count  # noqa: E402
 from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
@@ -490,7 +491,9 @@ def main():
     ap.add_argument("--module", help="[ngspice-deck] module exposing build_deck, e.g. gen_ocd_ngspice")
     ap.add_argument("--probe-node", default="OUT", help="[ngspice-deck] node/tap to render and measure")
     ap.add_argument("--maxstep", type=float, default=3e-6, help="[ngspice-deck]")
-    ap.add_argument("--parallel-sims", type=int, default=8, help="[ngspice-deck]")
+    ap.add_argument("--parallel-sims", type=int, default=physical_cpu_count(),
+                    help="[ngspice-deck] PHYSICAL core count by default (not os.cpu_count()'s "
+                         "logical/SMT count) -- see cpu_topology.py's docstring.")
     ap.add_argument("--ltspice-timeout", type=float, default=None,
                     help="[ltspice-deck] per-render wall ceiling in seconds. Default: scales with clip duration AND --parallel-sims (see ltspice_spicelib.default_timeout), deliberately generous because a too-short ceiling does not error -- it reports every render as a convergence failure. On hardware slower than this was tuned on (older CPU, spinning disk, throttled or busy machine) set LTSPICE_TIMEOUT_SCALE=<multiplier> rather than passing a number here per run.")
     ap.add_argument("--lead-silence-s", type=float, default=3.0,
@@ -598,7 +601,7 @@ def main():
                          "silently mis-sized excitation.")
     ap.add_argument("--corner-workers", type=int, default=None, metavar="N",
                     help="measure this many knob corners concurrently (default: auto, "
-                         "cpu_count//4 capped at 6). Corners are independent, so this is the "
+                         "physical_cpu_count()//4 capped at 6). Corners are independent, so this is the "
                          "main lever on sizing wall-clock: the loop was serial until "
                          "2026-09-17, which left onset measurement ~2 renders deep on a "
                          "12-core machine and cost ~2h on a 141-corner device. Concurrency is "
@@ -725,7 +728,7 @@ def main():
                                         min_start_v=args.min_start_v, start_v=args.sweep_start_v,
                                         capture=_capture,
                                         corner_workers=(args.corner_workers if args.corner_workers
-                                                        else max(1, min(6, (os.cpu_count() or 4) // 4))),
+                                                        else max(1, min(6, physical_cpu_count() // 4))),
                                         shard=args.shard, emit_onsets=args.emit_onsets,
                                         backend_name=args.backend,
                                         full_hypercube=(False if args.no_full_hypercube else None),

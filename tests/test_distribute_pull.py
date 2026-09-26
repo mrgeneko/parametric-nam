@@ -87,9 +87,33 @@ def test_worker_spec_still_parses_with_and_without_env():
     assert with_env.env == "DOTNET_ROOT=$HOME/.dotnet"
 
 
-def test_worker_spec_rejects_a_short_spec():
-    with pytest.raises(ValueError, match="host:dir:parallel"):
-        dp.Worker("h:/d")
+def test_worker_spec_rejects_a_spec_with_no_dir():
+    with pytest.raises(ValueError, match="host:dir"):
+        dp.Worker("h")
+
+
+def test_worker_spec_auto_detects_parallel_when_omitted(monkeypatch):
+    # PARALLEL became optional 2026-09-26 -- omitting it (or leaving it empty/"auto") queries
+    # cpu_topology.physical_cpu_count() instead of requiring an explicit int. Mocked here so
+    # the test is fast/deterministic rather than actually SSHing anywhere.
+    seen = []
+    monkeypatch.setattr(dp, "physical_cpu_count", lambda host=None: seen.append(host) or 7)
+
+    omitted = dp.Worker("h:/d")
+    assert (omitted.host, omitted.dir, omitted.parallel, omitted.env) == ("h", "/d", 7, "")
+    assert seen[-1] == "h"
+
+    empty_with_env = dp.Worker("h:/d::VAR=1")
+    assert (empty_with_env.parallel, empty_with_env.env) == (7, "VAR=1")
+
+    auto_keyword = dp.Worker("h:/d:auto")
+    assert auto_keyword.parallel == 7
+
+    # localhost/127.0.0.1 probe with host=None (local detection), not host="localhost" --
+    # SSHing to yourself to ask your own core count would be silly when the tools this
+    # dispatches to already run local detection for free.
+    local = dp.Worker("localhost:/d")
+    assert seen[-1] is None
 
 
 # --------------------------------------------------------------------- params.csv merge

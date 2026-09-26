@@ -55,6 +55,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from cpu_topology import physical_cpu_count
 import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
@@ -640,10 +641,13 @@ def main():
     # capacitance enabled (2026-09-14): capacitance adds state per triode, 8 concurrent sweeps
     # exhausted memory, and all 25 corners died with the message recommending a flag that did
     # not exist. The default matches find_saturation_point's own.
-    ap.add_argument("--workers", type=int, default=8,
-                    help="concurrent renders within one corner's amplitude sweep. Lower it if "
-                         "renders are killed by the OS (SIGABRT/SIGKILL) -- a memory-pressure "
-                         "symptom, not a circuit fault.")
+    ap.add_argument("--workers", type=int, default=physical_cpu_count(),
+                    help="concurrent renders within one corner's amplitude sweep. Defaults to "
+                         "PHYSICAL core count (not os.cpu_count()'s logical/SMT count) -- see "
+                         "cpu_topology.py's docstring. Lower it if renders are killed by the OS "
+                         "(SIGABRT/SIGKILL) -- a memory-pressure symptom (e.g. tube capacitance "
+                         "adds state per triode -- see the Mesa RED note above), not a circuit "
+                         "fault or a wrong core count.")
     ap.add_argument("--conv", default=None,
                     help="[ngspice] device-model convergence/fidelity overrides key=val,... "
                          "(same format gen_dataset_from_schx.py --conv uses; e.g. "

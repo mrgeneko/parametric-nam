@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 
 from run_pipeline import load_config
+from cpu_topology import physical_cpu_count
 
 
 def log(msg):
@@ -161,11 +162,22 @@ class ComboPace:
 
 class Worker:
     def __init__(self, spec, job=None):
-        # host:remote_dir:parallel[:env]
+        # host:remote_dir[:parallel[:env]] -- parallel is OPTIONAL (2026-09-26): omit it, or
+        # leave it empty/"auto" (host:dir::env needs the empty form to still reach env), to
+        # auto-detect the worker's PHYSICAL core count over SSH via cpu_topology.py. Explicit
+        # values keep working byte-for-byte -- this only fills in what used to be required.
         parts = spec.split(":")
-        if len(parts) < 3:
-            raise ValueError(f"--worker needs host:dir:parallel[:env], got {spec!r}")
-        self.host, self.dir, self.parallel = parts[0], parts[1], int(parts[2])
+        if len(parts) < 2:
+            raise ValueError(f"--worker needs host:dir[:parallel[:env]], got {spec!r}")
+        self.host, self.dir = parts[0], parts[1]
+        parallel_str = parts[2] if len(parts) > 2 else ""
+        if parallel_str.strip() == "" or parallel_str.strip().lower() == "auto":
+            probe_host = None if self.host in ("localhost", "127.0.0.1") else self.host
+            self.parallel = physical_cpu_count(probe_host)
+            print(f"[controller] {self.host}: --worker parallel not given, auto-detected "
+                  f"{self.parallel} physical core(s)", file=sys.stderr)
+        else:
+            self.parallel = int(parallel_str)
         self.env = parts[3] if len(parts) > 3 else ""
         # Defaulted, not required, so every existing caller that builds a Worker with just a
         # spec (this module's own tests included) keeps today's gen_dataset_from_schx.py
@@ -814,9 +826,15 @@ JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATI
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--worker", action="append", required=True, metavar="HOST:DIR:PARALLEL[:ENV]",
-                    help="repeatable. ENV is an optional 'VAR=value' exported before the run "
-                         "(e.g. DOTNET_ROOT=$HOME/.dotnet on a box where dotnet is not on the "
+    ap.add_argument("--worker", action="append", required=True,
+                    metavar="HOST:DIR[:PARALLEL[:ENV]]",
+                    help="repeatable. PARALLEL is optional (2026-09-26) -- omit it, or leave "
+                         "it empty/'auto' (HOST:DIR::ENV to reach ENV without one), to "
+                         "auto-detect the worker's PHYSICAL core count over SSH (see "
+                         "cpu_topology.py's docstring for why physical, not logical/SMT, is "
+                         "the right default for this CPU-bound render workload). ENV is an "
+                         "optional 'VAR=value' exported before the run (e.g. "
+                         "DOTNET_ROOT=$HOME/.dotnet on a box where dotnet is not on the "
                          "non-interactive PATH).")
     ap.add_argument("--tool", choices=sorted(JOBS), default="gen_dataset",
                     help="which script each chunk runs (default gen_dataset, i.e. "

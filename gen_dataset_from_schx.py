@@ -42,6 +42,7 @@ from typing import List
 import numpy as np
 import soundfile as sf
 from shard import parse_shard
+from cpu_topology import physical_cpu_count
 
 HERE = Path(__file__).resolve().parent
 HARNESS = HERE / "harness/build_o3/harness"
@@ -1693,7 +1694,7 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
     import tempfile as _tempfile
     if not jobs:
         return {}
-    workers = max(1, min(workers or os.cpu_count() or 4, len(jobs)))
+    workers = max(1, min(workers or physical_cpu_count() or 4, len(jobs)))
     chunks = [jobs[i::workers] for i in range(workers)]
 
     def run_chunk(chunk):
@@ -1984,7 +1985,7 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                         v = np.asarray(d, dtype=np.float64)
                     cache[key] = v
             else:
-                with ThreadPoolExecutor(max_workers=workers or os.cpu_count()) as ex:
+                with ThreadPoolExecutor(max_workers=workers or physical_cpu_count()) as ex:
                     list(ex.map(lambda j: render(*j), todo))
 
         prewarm([ref_os])          # the expensive ones, all up front
@@ -2541,7 +2542,13 @@ def main():
 
     ap.add_argument("--input",   type=Path)
     ap.add_argument("--output",  type=Path, default=HERE / "training_data")
-    ap.add_argument("--workers", type=int,  default=os.cpu_count())
+    ap.add_argument("--workers", type=int,  default=physical_cpu_count(),
+                    help="concurrent renders. Defaults to PHYSICAL core count (not "
+                         "os.cpu_count()'s logical/SMT count) -- benchmarked 2026-09-26 on "
+                         "two real SMT machines: throughput peaks at the physical core count "
+                         "for this CPU-bound, single-threaded-per-process render workload, "
+                         "then drops (or plateaus/noisily fluctuates) past it. See "
+                         "cpu_topology.py's docstring for the numbers.")
     ap.add_argument("--shard", metavar="LOW-HIGH/TOTAL",
                     help="Render only combinations whose index modulo TOTAL falls in "
                          "[LOW, HIGH] (inclusive), e.g. --shard 0-15/48. For splitting one "
