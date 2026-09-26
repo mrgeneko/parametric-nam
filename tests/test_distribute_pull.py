@@ -386,6 +386,37 @@ Presence = 0.5
         dp.gen_args_from_config(p, tmp_path / "repo" / "sub" / "deeper" / "deepest")
         assert "unlikely to resolve" in capsys.readouterr().err
 
+    def test_ngspice_deck_fields_are_carried(self, tmp_path):
+        """This scheduler had never dispatched an ngspice-deck device before JC-120's
+        sag/reactive-speaker render (2026-09-26) -- every chunk quarantined in seconds with
+        "--pedal-dir and --module are required for --backend ngspice-deck", the exact "Mesa
+        RED omitted --backend" failure mode test_backend_is_included guards, just for a
+        newer field set. pedal-dir is a PATH (needs repo-relative treatment like schx/input);
+        module/probe-node/maxstep are plain values."""
+        (tmp_path / "amps").mkdir(exist_ok=True)
+        pedal_dir = tmp_path / "amps"
+        wav = pedal_dir / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        p = tmp_path / "d.config.toml"
+        p.write_text(f'''
+input = "{wav}"
+backend = "ngspice-deck"
+pedal-dir = "{pedal_dir}"
+module = "gen_jc120_ch1_ngspice"
+probe-node = "nspout"
+maxstep = 1e-05
+[knobs]
+Volume = [0.1, 1.0]
+[fixed]
+Bright = 0.0
+''', encoding="utf-8")
+        a = dp.gen_args_from_config(p, tmp_path / "repo")
+        assert a[a.index("--pedal-dir") + 1] == os.path.join("..", "amps")
+        assert not os.path.isabs(a[a.index("--pedal-dir") + 1])
+        assert a[a.index("--module") + 1] == "gen_jc120_ch1_ngspice"
+        assert a[a.index("--probe-node") + 1] == "nspout"
+        assert a[a.index("--maxstep") + 1] == "1e-05"
+
     def test_config_is_reproduced_faithfully_enough_to_replace_hand_written_flags(self, tmp_path):
         """Guards the property that actually matters: what --config emits is what a careful
         person would have typed. Compared field-by-field against the config's own contents."""

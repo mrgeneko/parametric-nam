@@ -349,11 +349,23 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     out: list[str] = []
     if cfg.get("backend"):
         out += ["--backend", str(cfg["backend"])]
-    for dest, flag in (("schx", "--schx"), ("input", "--input")):
+    for dest, flag in (("schx", "--schx"), ("input", "--input"), ("pedal_dir", "--pedal-dir")):
         v = cfg.get(dest)
         if v is None:
             continue
         out += [flag, _relpath_or_warn(dest, v, repo_root)]
+    # ngspice-deck fields (2026-09-26) -- this scheduler had never dispatched an ngspice-deck
+    # device before JC-120's sag/reactive-speaker render, so this gap was never exercised:
+    # every chunk quarantined in seconds with "--pedal-dir and --module are required for
+    # --backend ngspice-deck", the exact Mesa RED "omitted --backend" failure mode this
+    # function's own docstring already warns about, just for a newer set of fields. module/
+    # probe-node/maxstep are plain values (not paths), unlike pedal-dir above.
+    if cfg.get("module"):
+        out += ["--module", str(cfg["module"])]
+    if cfg.get("probe_node"):
+        out += ["--probe-node", str(cfg["probe_node"])]
+    if cfg.get("maxstep") is not None:
+        out += ["--maxstep", str(cfg["maxstep"])]
     if cfg.get("knobs"):
         out += ["--knobs", str(cfg["knobs"])]
     for r in cfg.get("ranges") or []:
