@@ -893,8 +893,7 @@ def main():
                    help="ngspice: device-model convergence/fidelity overrides key=val,... "
                         "(diode_cjo/diode_tt/bjt_*/jfet_*/tmax/klu; e.g. bjt_vaf=102.207,"
                         "bjt_rb=173.312 for a real datasheet-fitted transistor). Forwarded to "
-                        "gen_dataset_from_schx.py and (via --config) to grid_adequacy.py's own "
-                        "STEP 1 -- see gen_dataset_from_schx.py's own --conv help.")
+                        "gen_dataset_from_schx.py -- see its own --conv help.")
     g.add_argument("--method",       default="", choices=["", "trap", "gear"],
                    help="ngspice: integration method. Auto-set per-circuit if omitted.")
     g.add_argument("--input-upsample", type=int, default=0,
@@ -1050,20 +1049,8 @@ def main():
                         "no horizon), so the 'total steps' it named did not exist -- it reached "
                         "`repeats` through an invented 450-epoch schedule. What it really set was "
                         "steps/epoch. Kept so existing configs behave identically.")
-    g.add_argument("--skip-grid-check", action="store_true",
-                   help="skip the STEP 1 grid-adequacy measurement. It renders each knob cell's "
-                        "midpoint and checks whether the grid can even represent the target ESR — a "
-                        "cell that fails puts a floor under the model that NO training can lift. "
-                        "Cheap relative to generation+training regardless (renders scale with knob-"
-                        "axis count, not combination count -- ~15-200 across the real fleet), but "
-                        "not a fixed constant: cost per render follows --oversample (4-16 across "
-                        "real configs) and backend (ngspice is markedly slower than livespice). "
-                        "See internal engineering notes.")
-    g.add_argument("--grid-target",    type=float, default=0.03,
-                   help="the interpolation ESR the knob grid must support (default 0.03, the "
-                        "audibility floor -- NOT the training-fidelity ESR; see grid_adequacy.py)")
     g.add_argument("--skip-headroom-check", action="store_true",
-                   help="skip the STEP 2 input-headroom check. It finds the device's saturation "
+                   help="skip the STEP 1 input-headroom check. It finds the device's saturation "
                         "onset (--find-peak, at default knob settings) and compares it against the "
                         "excitation's own peak -- an excitation that stays well under the onset "
                         "means the trained dataset may never explore the device's nonlinear/breakup "
@@ -1075,7 +1062,7 @@ def main():
     g.add_argument("--headroom-margin", type=float, default=0.8,
                    help="WARN if excitation peak < margin * saturation onset (default 0.8)")
     g.add_argument("--skip-preflight-check", action="store_true",
-                   help="skip the STEP 3 knob-sanity preflight. Probes a handful of short clips "
+                   help="skip the STEP 2 knob-sanity preflight. Probes a handful of short clips "
                         "through the oracle and ABORTS (like the grid check, unlike the headroom "
                         "check) when a knob is dead, moves the wrong way, or the input-level "
                         "calibration is implausible -- see preflight.py. Only runs for "
@@ -1221,7 +1208,7 @@ def main():
         timings = {}  # step -> wall seconds (absent = skipped)
 
         # ------------------------------------------------------------------
-        # Step 4: Generate
+        # Step 3: Generate
         # ------------------------------------------------------------------
         run_generate = not args.skip_generate
         if run_generate and not args.force_generate:
@@ -1230,44 +1217,15 @@ def main():
                     "Use --force-generate to redo.", fh)
                 run_generate = False
 
-        # Oracle preflight: Step 1 (grid adequacy) and Step 4 (generate) both need it,
-        # and both are about to start if run_generate is still true here. Check before
-        # either, not after the first render fails deep into one of them -- confirmed
+        # Oracle preflight: the input-headroom check, preflight and generation all need it,
+        # and all are about to start if run_generate is still true here. Check before
+        # any of them, not after the first render fails deep into one -- confirmed
         # that's a raw subprocess FileNotFoundError with no useful message otherwise.
         if run_generate:
             check_oracle(args.backend)
 
         # ------------------------------------------------------------------
-        # Step 1: is the knob grid dense enough to be worth rendering?
-        #
-        # A grid too coarse in even one cell puts a FLOOR under the model that no amount of training
-        # can lift -- the information is simply not in the data. That is not hypothetical: the Big
-        # Muff's shipped 14x9 grid had an interpolation error of 0.0899 in Sustain 0.85-1.0, TEN
-        # TIMES the 0.0090 ESR the model was chasing, while 19 of its 21 cells were oversampled by
-        # 20-100x. It was simultaneously too dense almost everywhere and too coarse in the one place
-        # the pedal actually lives, and no training run could ever have told us.
-        #
-        # So measure it BEFORE spending the renders and the epochs. Cheap relative to that either
-        # way (render count scales with knob-axis count, not combination count), but cost per
-        # render follows --oversample and backend, so "cheap" isn't a fixed number across devices.
-        # See internal engineering notes.
-        # ------------------------------------------------------------------
-        if run_generate and args.config and not args.skip_grid_check:
-            section("STEP 1 / 6 — Grid Adequacy", fh)
-            log("Measuring whether the knob grid can even represent the target ESR. A cell whose "
-                "interpolation error exceeds it cannot be fixed by training — the data does not "
-                "contain what the model would need. Re-run grid_adequacy.py --suggest for a "
-                "proposed regrid, or pass --skip-grid-check to render anyway.", fh)
-            # stream_run aborts the pipeline on a non-zero exit, which is exactly what a too-coarse
-            # grid deserves: rendering and training on it would burn hours to hit a floor we already
-            # know about.
-            stream_run([PYTHON, str(HERE / "grid_adequacy.py"),
-                        "--config", str(args.config),
-                        "--target", str(args.grid_target)],
-                       fh, "grid-adequacy")
-
-        # ------------------------------------------------------------------
-        # Step 2: does the excitation actually reach this device's own saturation ceiling?
+        # Step 1: does the excitation actually reach this device's own saturation ceiling?
         #
         # A dense knob grid is not the same question as an excitation that gets loud enough. A
         # model can only learn what's in the data -- if every rendered combination stays in the
@@ -1279,11 +1237,11 @@ def main():
         # WARN, don't abort: --find-peak probes at DEFAULT (0.5) knob settings, not the grid's own
         # hottest corner, so a low ratio here can be a real gap OR a genuine high-headroom device --
         # telling those apart needs a look at the grid's own extreme, which this quick check doesn't
-        # do. Unlike the grid-adequacy check above (a provable floor), this is a prompt to go look,
-        # not a verdict either way.
+        # do. Unlike grid_adequacy.py's check (a provable floor; opt-in, run separately), this is a
+        # prompt to go look, not a verdict either way.
         # ------------------------------------------------------------------
         if run_generate and args.config and not args.skip_headroom_check:
-            section("STEP 2 / 6 — Input Headroom", fh)
+            section("STEP 1 / 5 — Input Headroom", fh)
             log("Checking whether the excitation reaches this device's own saturation onset at "
                 "default knob settings. A WARN here is a prompt to check the grid's own hottest "
                 "corner directly, not an automatic verdict -- see check_input_headroom.py. "
@@ -1310,10 +1268,10 @@ def main():
                 log("input-headroom check: OK.", fh)
 
         # ------------------------------------------------------------------
-        # Step 3: is every knob sane -- none dead, none reversed, input level plausible?
+        # Step 2: is every knob sane -- none dead, none reversed, input level plausible?
         #
         # preflight.py has a mode for --backend livespice and, now that this pipeline can drive
-        # the hand-written-deck path too (see STEP 4 below), for ngspice-deck as well -- there is
+        # the hand-written-deck path too (see STEP 3 below), for ngspice-deck as well -- there is
         # no mode for the schx-translated "ngspice" backend or for "cpp", so this step is a no-op
         # for those today rather than a bad approximation of one.
         #
@@ -1323,7 +1281,7 @@ def main():
         # ------------------------------------------------------------------
         if (run_generate and args.config and args.backend == "livespice" and args.schx
                 and args.input and not args.skip_preflight_check):
-            section("STEP 3 / 6 — Preflight", fh)
+            section("STEP 2 / 5 — Preflight", fh)
             log("Checking that every knob is alive and moves the right direction, and that the "
                 "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
             cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "livespice",
@@ -1338,7 +1296,7 @@ def main():
         elif (run_generate and args.config and args.backend == "ngspice-deck"
                 and args.pedal_dir and args.module and args.input
                 and not args.skip_preflight_check):
-            section("STEP 3 / 6 — Preflight", fh)
+            section("STEP 2 / 5 — Preflight", fh)
             log("Checking that every knob is alive and moves the right direction, and that the "
                 "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
             cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "ngspice-deck",
@@ -1355,12 +1313,12 @@ def main():
 
         # NOTE: the transient/saturation-coverage check (check_transient_coverage.py) is NOT a
         # separate step here -- it already runs automatically inside gen_dataset_from_schx.py's
-        # own STEP 4 generation (gated by --skip-transient-check/--transient-peak/
+        # own STEP 3 generation (gated by --skip-transient-check/--transient-peak/
         # --transient-margin, all forwarded below), so adding another call here would just run it
         # twice. See gen_dataset_from_schx.py's own transient-check block for the real gate.
 
         if run_generate:
-            section("STEP 4 / 6 — Dataset Generation", fh)
+            section("STEP 3 / 5 — Dataset Generation", fh)
             gen_cmd = [
                 PYTHON, BATCH,
                 "--backend", args.backend,
@@ -1421,7 +1379,7 @@ def main():
         check_missing_combinations(dataset_dir, fh, args.allow_missing_combos)
 
         # ------------------------------------------------------------------
-        # Step 5: Combine
+        # Step 4: Combine
         # ------------------------------------------------------------------
         run_combine = not args.skip_combine
         if run_combine and not sig_dir.exists():
@@ -1434,14 +1392,14 @@ def main():
             run_combine = False
 
         if run_combine:
-            section("STEP 5 / 6 — Combine", fh)
+            section("STEP 4 / 5 — Combine", fh)
             timings["combine"] = stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
 
         # ------------------------------------------------------------------
-        # Step 6: Train
+        # Step 5: Train
         # ------------------------------------------------------------------
         if not args.skip_train:
-            section("STEP 6 / 6 — Training", fh)
+            section("STEP 5 / 5 — Training", fh)
 
             # ------------------------------------------------------------------
             # THE TRAINING BUDGET IS A DERIVED QUANTITY, AND IT WAS INVISIBLE.

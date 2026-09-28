@@ -193,11 +193,9 @@ densely enough to interpolate well against a target ESR. That is a real, useful 
 it answers "is this grid adequate for a given ESR target," not "how many points should this
 grid have" — the latter is at least as often decided by render/train budget (renders and
 epochs cost real time, and a denser grid costs both) as by chasing interpolation error down.
-If you already know your point counts from budget, skip straight to step 4 -- but see step
-6's own table for a real, separate gate this does NOT get you out of: `run_pipeline.py`
-re-runs this same measurement internally by default and aborts on the same target, whether
-or not you ran this step yourself. `--skip-grid-check` (or a matching `--grid-target`) there
-is the actual opt-out, not skipping this section.
+If you already know your point counts from budget, skip straight to step 4. `run_pipeline.py`
+does not re-run this measurement (its own grid-adequacy STEP was removed 2026-09-28), so
+nothing downstream penalises skipping it.
 
 Two ways to use it, depending on which question you're actually asking:
 
@@ -217,7 +215,7 @@ point within a fixed budget rather than add one.
 
 **With `--apply`**, it acts on that measurement: bisects failing cells, re-probes, and writes
 the converged grid back, leaving all your comments intact. Probe renders are cached on disk,
-so step 6's re-verification of this grid is free either way.
+so re-running this tool on the same circuit is near-instant either way.
 
 > **`--apply` can also *coarsen* an axis**, down to a 2-point floor, when a knob's midpoints
 > interpolate well. Think before accepting that on an interacting tone network. Measured
@@ -315,25 +313,18 @@ Coverage is a property of the input signal and has to be checked against the inp
 ./run_pipeline.py --config my_pedal.config.toml --workspace ~/runs/device_run1
 ```
 
-Everything from here is automatic. This one command runs six stages of its own, and
+Everything from here is automatic. This one command runs five stages of its own, and
 prints each as a banner — these are `run_pipeline.py`'s internal steps, not the six
 walkthrough steps on this page:
 
 | banner it prints | what it does | on failure |
 |---|---|---|
-| `STEP 1 / 6 — Grid Adequacy` | measures the grid against `--grid-target` (cached if step 3 already ran; a fresh render otherwise) | **aborts** |
-| `STEP 2 / 6 — Input Headroom` | does the excitation reach saturation at default settings | warns |
-| `STEP 3 / 6 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
-| `STEP 4 / 6 — Dataset Generation` | renders every combination (coverage re-checked inside) | **aborts** |
-| `STEP 5 / 6 — Combine` | assembles `outputs.npy` | |
-| `STEP 6 / 6 — Training` | SGDR warm restarts, open-ended | |
+| `STEP 1 / 5 — Input Headroom` | does the excitation reach saturation at default settings | warns |
+| `STEP 2 / 5 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
+| `STEP 3 / 5 — Dataset Generation` | renders every combination (coverage re-checked inside) | **aborts** |
+| `STEP 4 / 5 — Combine` | assembles `outputs.npy` | |
+| `STEP 5 / 5 — Training` | SGDR warm restarts, open-ended | |
 | `RELEASE` | models, `.schx`, `MANIFEST.md`, `reproduce.sh` | |
-
-**If you skipped walkthrough step 3 on purpose** (a budget-fixed grid, not chasing
-`grid_target`), this internal `STEP 1/6` still runs by default and **aborts** if a cell
-measures over target — it doesn't know you already made that call. Pass `--skip-grid-check`
-to `run_pipeline.py` to render anyway, or `--grid-target` to match whatever ESR floor you've
-actually accepted. Skipping walkthrough step 3 does not skip this gate; only this flag does.
 
 Training with `epochs = 0` runs until you `touch <workspace>/checkpoints/STOP`, exporting
 the best model continuously. Use the first run to find the budget, then set a real schedule.

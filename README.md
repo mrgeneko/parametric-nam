@@ -103,10 +103,9 @@ grid interpolates well, but whether to act on that — add points, remove points
 reposition existing ones — is a render/train-budget call the tool cannot make for you.
 Skip straight to step 4 if you are setting grid density by budget rather than chasing an
 interpolation-ESR target; run it without `--apply` (the default) if you still want the
-diagnostic without letting it change your point counts. Note this does not opt you out of
-`run_pipeline.py`'s own internal grid-adequacy gate at train time (step 6) — that one aborts
-by default regardless of whether you ran this step; use `--skip-grid-check` there if you've
-deliberately accepted a budget-driven grid.
+diagnostic without letting it change your point counts. `run_pipeline.py` does not run a
+grid-adequacy check of its own (that STEP and its `--skip-grid-check`/`--grid-target` flags
+were removed 2026-09-28), so this step is purely opt-in.
 
 The other five are not optional even when they look like it — two of them fail
 **silently**:
@@ -179,12 +178,11 @@ train — with per-step timing, a durable **release folder**, and macOS/Linux
 
 | | | on failure |
 |---|---|---|
-| `STEP 1 / 6 — Grid Adequacy` | is the knob grid dense enough to be worth rendering | **aborts** |
-| `STEP 2 / 6 — Input Headroom` | does the excitation reach saturation at default settings | warns |
-| `STEP 3 / 6 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
-| `STEP 4 / 6 — Dataset Generation` | renders every combination | **aborts** |
-| `STEP 5 / 6 — Combine` | per-combination WAVs → `outputs.npy` | |
-| `STEP 6 / 6 — Training` | FiLM-conditioned WaveNet → `.param.nam` | |
+| `STEP 1 / 5 — Input Headroom` | does the excitation reach saturation at default settings | warns |
+| `STEP 2 / 5 — Preflight` | dead/reversed knobs, input calibration | **aborts** |
+| `STEP 3 / 5 — Dataset Generation` | renders every combination | **aborts** |
+| `STEP 4 / 5 — Combine` | per-combination WAVs → `outputs.npy` | |
+| `STEP 5 / 5 — Training` | FiLM-conditioned WaveNet → `.param.nam` | |
 
 Why each gate exists, and what to do when one fires, is in
 [`docs/checklist.md`](docs/checklist.md).

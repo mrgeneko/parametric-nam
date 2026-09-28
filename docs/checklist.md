@@ -16,6 +16,7 @@ excitation, or backend changes — not on every training invocation of an alread
 |---|---|---|
 | `measure_truncation.py` | Is `oversample` high enough (BDF2/livespice truncation error)? | Picking `oversample` for a new device, or auditing the fleet after a solver change |
 | `measure_ngspice_timestep.py` | Is `maxstep` fine enough (ngspice-deck backend only)? | Same, for a hand-written ngspice-deck circuit — `render_ngspice_deck.py`/`render_backends.py`/`ngspice_spicelib.py` all default `maxstep` for convergence, never measured for accuracy |
+| `grid_adequacy.py` | Is the knob grid dense enough to represent a target interpolation ESR (`--target`, default 0.03)? A cell over target puts a floor under the model no training can lift. **Opt-in** — `run_pipeline.py` no longer runs it (removed 2026-09-28). | Choosing point counts for a new device, or after a circuit or knob-range change. `--apply` rewrites the grid in `config.toml`, which invalidates the excitation sizing — re-run `prepare_excitation.py` afterward |
 
 Not run by `run_pipeline.py` — there is no reasonable "auto" trigger for a one-time tuning
 decision. Run by hand, write the result into `config.toml`, move on.
@@ -27,12 +28,11 @@ Run automatically by `run_pipeline.py` for every generation unless skipped. All 
 
 | Step | Tool | Backend scope | On failure |
 |---|---|---|---|
-| STEP 1 | `grid_adequacy.py` | any | **Aborts.** A cell whose interpolation error exceeds the target ESR puts a floor under the model no training can lift. Runs the same measurement whether or not you ever ran `grid_adequacy.py --apply` yourself (that step is optional -- see `docs/new-circuit-walkthrough.md` step 3) or hand-set the grid by render/train budget instead; either way this still checks it against `--grid-target` and aborts by default. `--skip-grid-check` is the actual opt-out for a knowingly budget-driven grid, not having run `--apply`. Fast when probe renders are already cached on disk from a prior `--apply`/measure-only run, but not redundant when they aren't (the config can be hand-edited in between, as Duke of Tone's Tone/Presence midpoints were) — see [scripts](scripts.md#grid_adequacypy--measure-whether-a-knob-grid-is-dense-enough). |
-| STEP 2 | `check_input_headroom.py` | any | **Warns, continues.** A low ratio can be a real gap or a genuine high-headroom device — this is a prompt to check the grid's own hottest corner, not a verdict. |
-| STEP 3 | `preflight.py` | **livespice only** — no mode exists for the schx-translated `ngspice` backend or `cpp` | **Aborts.** A dead or reversed knob renders and trains "successfully" and produces a plausible but wrong model. |
-| *(inside STEP 4)* | `check_transient_coverage.py` | livespice only | **Aborts.** Called directly by `gen_dataset_from_schx.py` itself, not a separate `run_pipeline.py` step — see its own transient-check block. Forwarded flags: `--skip-transient-check`/`--transient-peak`/`--transient-margin`. |
+| STEP 1 | `check_input_headroom.py` | any | **Warns, continues.** A low ratio can be a real gap or a genuine high-headroom device — this is a prompt to check the grid's own hottest corner, not a verdict. |
+| STEP 2 | `preflight.py` | **livespice only** — no mode exists for the schx-translated `ngspice` backend or `cpp` | **Aborts.** A dead or reversed knob renders and trains "successfully" and produces a plausible but wrong model. |
+| *(inside STEP 3)* | `check_transient_coverage.py` | livespice only | **Aborts.** Called directly by `gen_dataset_from_schx.py` itself, not a separate `run_pipeline.py` step — see its own transient-check block. Forwarded flags: `--skip-transient-check`/`--transient-peak`/`--transient-margin`. |
 
-Skip flags: `--skip-grid-check`, `--skip-headroom-check`, `--skip-preflight-check`,
+Skip flags: `--skip-headroom-check`, `--skip-preflight-check`,
 `--skip-transient-check` (forwarded to `gen_dataset_from_schx.py`).
 
 ## Stage 3 — After generating a dataset

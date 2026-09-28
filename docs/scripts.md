@@ -124,8 +124,9 @@ file, comments included.
 **Probe renders are cached on disk** (`~/.cache/parametric-nam/gridadq`), so the second run
 of this tool on a device is near-instant instead of re-rendering everything the first one
 already rendered. That second run is not hypothetical: `--apply` refines the grid, and
-`run_pipeline.py`'s STEP 1 then re-verifies it, so the normal path runs `grid_adequacy`
-twice on the same circuit (see [checklist](checklist.md)).
+re-running the tool to verify the result hits the cache. (`run_pipeline.py` used to re-verify
+the grid itself in a STEP 1; that step was removed 2026-09-28, so this tool is opt-in — see
+[checklist](checklist.md).)
 
 The cache is keyed on everything that changes a probe's **answer** — the `.schx`'s own
 bytes, the knob values, `[fixed]`, oversample/iterations, and the **audio** of the probe

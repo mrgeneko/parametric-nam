@@ -17,9 +17,10 @@ for adequacy (`grid_adequacy.py`), its excitation checked for saturation coverag
 flags.
 
 `run_pipeline.py` already runs two of the four automatically when used single-machine:
-grid adequacy is its Step 1 (default-on, `--skip-grid-check` to disable), and the transient
-gate runs implicitly inside `gen_dataset_from_schx.py`'s Step 4, gated by
-`--skip-transient-check`. preflight is Step 3. So on the single-machine path, this mostly
+grid adequacy *was* its Step 1 (default-on; **removed 2026-09-28** along with
+`--skip-grid-check` and `--grid-target` — `grid_adequacy.py` is now opt-in), and the transient
+gate runs implicitly inside `gen_dataset_from_schx.py`'s step 3, gated by
+`--skip-transient-check`. preflight is step 2. So on the single-machine path, this mostly
 already works.
 
 **It does not work on the sharded path.** `distribute_pull.py --tool gen_dataset` has no
@@ -51,15 +52,19 @@ already exist, not add a parallel way to get the same result.
 
 One script — working name `gate_config.py` — run after `scaffold_config.py` and before
 either `run_pipeline.py` or `distribute_pull.py`. It owns the full pre-generation sequence
-in the order it actually has to happen (sizing depends on nothing; grid adequacy depends on
-nothing; the transient gate depends on the sized excitation; preflight depends on nothing
-but benefits from running last since it's cheapest to re-run after a knob-grid change):
+in the order it actually has to happen (sizing depends on nothing; the transient gate depends
+on the sized excitation; preflight depends on nothing but benefits from running last since
+it's cheapest to re-run after a knob-grid change). **Revised 2026-09-28: `grid_adequacy.py` is
+no longer a default step.** It is opt-in (`--check-grid`, check-only, never `--apply`), and if
+run it must come *before* sizing, because `--apply` rewrites the grid and would stale a
+sizing that already ran. The fingerprint hashes the knob ranges, so a later `--apply` by hand
+invalidates the sidecar and forces a re-gate on its own:
 
 1. `prepare_excitation.py` (if the excitation is missing or the recipe sidecar's fingerprint
    doesn't match the current schx/knob-range/oversample)
-2. `grid_adequacy.py`
-3. `check_transient_coverage.py`
-4. `preflight.py`
+2. `check_transient_coverage.py`
+3. `preflight.py`
+   (optional, before 1: `grid_adequacy.py` under `--check-grid`)
 
 It exits 0 with a written, fingerprinted sidecar (e.g. `<config>.gate.json`) on pass, and
 exits non-zero with a specific reason on failure — never silently partial. `run_pipeline.py`
