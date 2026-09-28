@@ -206,6 +206,12 @@ simulator version *at dispatch* and refuse mismatched workers. That check would 
 both the 472-commit-stale checkout and the render that silently began before a fix landed —
 natively, on every platform, for a fraction of the effort.
 
+> **STATUS (2026-09-28): implemented** in `distribute_pull.py` (`verify_workers`,
+> `compare_versions`) -- see [implementation-roadmap.md](implementation-roadmap.md) item 5.
+> Checked once per worker before any chunk is dispatched, not per chunk. A mismatched worker
+> is EXCLUDED from that run (not an abort of the whole run) unless every worker fails, in
+> which case the run refuses to start. `--skip-version-check` opts out.
+
 ### 4. Pull-based agents, a durable queue, and a dashboard
 
 > See [per-item-sharding-proposal.md](per-item-sharding-proposal.md) for a smaller,

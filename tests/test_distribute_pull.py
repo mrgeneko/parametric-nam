@@ -13,6 +13,8 @@ Both cover failures seen on the Duke of Tone 252-combination run (2026-09-04):
     moving output 28x as "RMS varies only 0.00% -- knob may have no effect".
 """
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -886,3 +888,205 @@ Gain = [0.1, 1.0]
         with pytest.raises(Exception):
             dp.main()
         assert reached.get("hit") is True
+
+
+def _cp(rc=0, out="", err=""):
+    return subprocess.CompletedProcess(args=[], returncode=rc, stdout=out, stderr=err)
+
+
+class TestExtractBackend:
+    def test_finds_backend_value(self):
+        assert dp.extract_backend(["--schx", "x.schx", "--backend", "livespice", "--input", "y"]) == "livespice"
+
+    def test_missing_flag_is_none(self):
+        assert dp.extract_backend(["--schx", "x.schx"]) is None
+
+    def test_flag_with_no_value_is_none_not_a_crash(self):
+        assert dp.extract_backend(["--backend"]) is None
+
+
+class TestVersionCheckCommand:
+    def test_cds_into_the_worker_dir(self):
+        assert dp.version_check_command("/remote/repo", "livespice").startswith("cd /remote/repo && ")
+
+    def test_reads_the_sha_then_self_invokes_solver_identity(self):
+        cmd = dp.version_check_command("/r", "livespice")
+        assert "git rev-parse HEAD" in cmd
+        assert "solver_identity('livespice')" in cmd
+
+    def test_missing_backend_defaults_to_cpp(self):
+        assert "solver_identity('cpp')" in dp.version_check_command("/r", None)
+
+
+class TestParseVersionCheckOutput:
+    def test_two_lines(self):
+        assert dp.parse_version_check_output("abc123\nlivespice:def456+789abc\n") == \
+            ("abc123", "livespice:def456+789abc")
+
+    def test_blank_lines_are_ignored(self):
+        assert dp.parse_version_check_output("\nabc123\n\nlivespice:x\n") == ("abc123", "livespice:x")
+
+    def test_one_line_is_unparseable(self):
+        assert dp.parse_version_check_output("abc123\n") == (None, None)
+
+    def test_empty_is_unparseable(self):
+        assert dp.parse_version_check_output("") == (None, None)
+
+
+class TestCompareVersions:
+    def test_matching_sha_and_solver_passes(self):
+        ok, reason = dp.compare_versions("abc123def456", "abc123def456", "livespice:x+y", "livespice:x+y")
+        assert ok and "matches" in reason
+
+    def test_worker_sha_none_refuses(self):
+        ok, reason = dp.compare_versions(None, "abc123", None, "livespice:x")
+        assert not ok and "commit SHA" in reason
+
+    def test_sha_mismatch_refuses(self):
+        ok, reason = dp.compare_versions("aaa000000000", "bbb111111111", None, None)
+        assert not ok and "commit mismatch" in reason
+        assert "aaa000000000" in reason and "bbb111111111" in reason
+
+    def test_solver_mismatch_with_matching_sha_refuses(self):
+        ok, reason = dp.compare_versions("abc123def456", "abc123def456",
+                                         "livespice:aaa+bbb", "livespice:ccc+ddd")
+        assert not ok and "solver mismatch" in reason
+
+    def test_both_unknown_solver_does_not_refuse(self):
+        # "UNKNOWN" means couldn't determine, not "definitely different" -- see compare_versions'
+        # own docstring. The 472-commit-stale incident this item targets is caught by the SHA
+        # check regardless; the solver half must not manufacture a false refusal here.
+        ok, _ = dp.compare_versions("abc123def456", "abc123def456", "livespice:UNKNOWN", "livespice:x+y")
+        assert ok
+
+    def test_non_livespice_backends_compare_equal_with_no_special_casing(self):
+        ok, _ = dp.compare_versions("abc123def456", "abc123def456",
+                                    "ngspice-deck:unidentified", "ngspice-deck:unidentified")
+        assert ok
+
+    def test_reason_names_both_shas_short_form(self):
+        _, reason = dp.compare_versions("aaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb", None, None)
+        assert "aaaaaaaaaaaa" in reason and "bbbbbbbbbbbb" in reason   # 12-char, not the full sha
+
+
+class TestProbeWorkerVersion:
+    def test_success_parses_both_lines(self, monkeypatch):
+        monkeypatch.setattr(dp.subprocess, "run", lambda *a, **kw: _cp(0, "abc123\nlivespice:x+y\n"))
+        assert dp.probe_worker_version("host", "/r", "livespice") == ("abc123", "livespice:x+y")
+
+    def test_nonzero_exit_is_none_none(self, monkeypatch):
+        monkeypatch.setattr(dp.subprocess, "run", lambda *a, **kw: _cp(1, "", "not found"))
+        assert dp.probe_worker_version("host", "/r", "livespice") == (None, None)
+
+    def test_timeout_is_none_none_not_raised(self, monkeypatch):
+        def boom(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="ssh", timeout=20)
+        monkeypatch.setattr(dp.subprocess, "run", boom)
+        assert dp.probe_worker_version("host", "/r", "livespice") == (None, None)
+
+    def test_ssh_binary_missing_is_none_none_not_raised(self, monkeypatch):
+        def boom(*a, **kw):
+            raise OSError("no such file")
+        monkeypatch.setattr(dp.subprocess, "run", boom)
+        assert dp.probe_worker_version("host", "/r", "livespice") == (None, None)
+
+
+class TestVerifyWorkers:
+    class FakeWorker:
+        def __init__(self, host, d):
+            self.host, self.dir = host, d
+
+    def test_matching_workers_are_kept(self, monkeypatch):
+        import prepare_excitation
+        monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
+        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b: ("abc123def456", "livespice:x"))
+        monkeypatch.setattr(prepare_excitation, "solver_identity", lambda backend: "livespice:x")
+        w = self.FakeWorker("h1", "/r")
+        assert dp.verify_workers([w], "livespice") == [w]
+
+    def test_mismatched_worker_is_excluded_not_fatal_here(self, monkeypatch):
+        monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
+        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b: ("zzz999999999", None))
+        w = self.FakeWorker("h1", "/r")
+        kept = dp.verify_workers([w], None)
+        assert kept == []   # verify_workers only filters; main() decides whether that's fatal
+
+    def test_mixed_fleet_keeps_only_the_matching_one(self, monkeypatch):
+        monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
+        def fake_probe(host, d, b):
+            return ("abc123def456", None) if host == "good" else ("zzz999999999", None)
+        monkeypatch.setattr(dp, "probe_worker_version", fake_probe)
+        good, bad = self.FakeWorker("good", "/r"), self.FakeWorker("bad", "/r")
+        kept = dp.verify_workers([good, bad], None)
+        assert kept == [good]
+
+    def test_controller_not_a_git_checkout_skips_the_whole_check(self, monkeypatch):
+        monkeypatch.setattr(dp, "local_commit_sha", lambda: None)
+        def boom(*a, **kw):
+            raise AssertionError("probe_worker_version should not run when the controller "
+                                 "has no determinable SHA")
+        monkeypatch.setattr(dp, "probe_worker_version", boom)
+        w = self.FakeWorker("h1", "/r")
+        assert dp.verify_workers([w], None) == [w]   # unchanged, not filtered to empty
+
+
+class TestVersionCheckCliIntegration:
+    """Real wiring in main(): --skip-version-check bypasses entirely; a mismatched worker is
+    excluded and (if it was the only one) the run errors out before any dispatch."""
+
+    def _cfg(self, tmp_path):
+        (tmp_path / "amps").mkdir(exist_ok=True)
+        schx = tmp_path / "amps" / "Amp.schx"
+        schx.write_text("<Schematic/>", encoding="utf-8")
+        wav = tmp_path / "amps" / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        p = tmp_path / "d.config.toml"
+        p.write_text(f'''
+schx = "{schx}"
+input = "{wav}"
+backend = "livespice"
+oversample = 8
+[knobs]
+Gain = [0.1, 1.0]
+''', encoding="utf-8")
+        return p
+
+    def _argv(self, cfg, tmp_path, *extra):
+        return ["distribute_pull.py", "--worker", "host:/tmp/x", "--config", str(cfg),
+                "--output", str(tmp_path / "out"), "--skip-gate-check", *extra]
+
+    def test_skip_version_check_never_calls_verify_workers(self, tmp_path, monkeypatch):
+        # A bare `with pytest.raises(Exception): dp.main()` would swallow an AssertionError
+        # raised FROM INSIDE verify_workers just as happily as the real "no such host" failure
+        # main() goes on to hit -- indistinguishable, so it can't be the signal. Record the call
+        # instead and assert on that AFTER the broad exception block, matching this file's own
+        # pattern elsewhere (e.g. test_passing_verification_still_reaches_dispatch's `reached`).
+        called = {}
+        monkeypatch.setattr(dp, "verify_workers", lambda *a, **kw: called.setdefault("hit", True))
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: object())
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path, "--skip-version-check"))
+        with pytest.raises(Exception):
+            dp.main()
+        assert "hit" not in called
+
+    def test_default_calls_verify_workers_and_a_mismatch_aborts_before_dispatch(self, tmp_path, monkeypatch):
+        # verify_workers excludes everyone -- main() must stop at ap.error() (SystemExit) and
+        # never reach the queue/thread-dispatch code that follows.
+        monkeypatch.setattr(dp, "verify_workers", lambda workers, backend: [])
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: object())   # avoid a real ssh core-probe
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path))
+        with pytest.raises(SystemExit) as exc:
+            dp.main()
+        assert exc.value.code == 2
+
+    def test_passing_verification_still_reaches_dispatch(self, tmp_path, monkeypatch):
+        reached = {}
+        def fake_verify(workers, backend):
+            reached["backend"] = backend
+            return workers
+        monkeypatch.setattr(dp, "verify_workers", fake_verify)
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: object())
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path))
+        with pytest.raises(Exception):   # goes on to fail elsewhere (no real host) -- fine
+            dp.main()
+        assert reached["backend"] == "livespice"

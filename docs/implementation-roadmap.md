@@ -70,9 +70,22 @@ Sources:
       `~`-expansion for `repo` detection. Both fixed in `default_ssh`/`_ssh_quote` -- see their
       docstrings. Verified against a real target (`--worker localhost`), not just mocks: the
       remote probe now matches the local self-probe of the identical machine exactly.
-- [ ] **5. Dispatch-time version verification** (fleet step 3). Scheduler checks commit SHA and
-      simulator version and refuses mismatched workers. Would have caught the 472-commit-stale
-      checkout. Uses 4.
+- [x] **5. Dispatch-time version verification** (fleet step 3) — **implemented 2026-09-28**
+      in `distribute_pull.py`. Before any chunk is dispatched (once per worker, not per chunk),
+      each worker's `git rev-parse HEAD` and `prepare_excitation.solver_identity()` (self-
+      invoked on the worker's own checkout -- stays in sync with that function automatically,
+      rather than re-implementing its logic remotely) are compared against the controller's
+      own. A worker that fails is **excluded from the run**, not an abort of the whole thing;
+      if every worker fails, the run refuses to start (`ap.error`, exit 2).
+      `--skip-version-check` opts out entirely. A solver-identity mismatch only refuses when
+      BOTH sides are determinate and differ -- `"livespice:UNKNOWN"` means "couldn't tell", not
+      "different", and a non-livespice backend's `"<backend>:unidentified"` on both sides
+      compares equal with no special-casing. Verified against real ssh targets, not just
+      mocks: `--worker localhost` (this machine, dispatch-checked over a real ssh round trip)
+      matched the controller exactly; pointed at a genuinely different checkout
+      (`parametric-devices`, no `prepare_excitation.py`/`.venv` there), it was correctly
+      excluded and, being the only worker, the run refused to start. Does not consult item 4's
+      inventory file -- `--worker HOST:DIR` already carries the repo path it needs.
 - [ ] **6. Per-item sharding, Phases 1–3** (sharding). `--slots` and `--chunk-size` in
       `distribute_pull.py`, item count derived from the grid (must fail loudly, not guess), and
       `--collect` across hosts × slots with hard assertions (merged rows == N, `.npy` count ==

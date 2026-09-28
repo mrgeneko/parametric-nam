@@ -547,9 +547,10 @@ per slot.
 
 ## `distribute_pull.py` — hand rendering chunks out as workers free up
 
-> Where this is heading — mesh SSH, a generated fleet inventory, a pull-based queue and a
-> dashboard — is written up in
-> [fleet-deployment-proposal.md](fleet-deployment-proposal.md). None of it is implemented.
+> Where this is heading — a pull-based queue and a dashboard — is written up in
+> [fleet-deployment-proposal.md](fleet-deployment-proposal.md); most of the earlier steps
+> (mesh SSH's substitute, the generated fleet inventory, dispatch-time version verification)
+> are now implemented — see [implementation-roadmap.md](implementation-roadmap.md).
 
 **Takes the same `--config` as `run_pipeline.py`.** One description of a device, whether it
 renders on one machine or four:
@@ -650,6 +651,20 @@ Four things that are easy to get wrong:
   machines can take work — one that could not import a dependency killed 27 of 31 chunks in ~70 s.
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
   successes, and a chunk is not handed back to a host that already failed it.
+
+**Dispatch-time version verification** (2026-09-28,
+[fleet-deployment-proposal.md](fleet-deployment-proposal.md) step 3,
+[implementation-roadmap.md](implementation-roadmap.md) item 5). Before any chunk goes out, each
+worker is checked ONCE (not per chunk): its `git rev-parse HEAD` must match the controller's,
+and — self-invoked on the worker's own checkout, so this stays in sync with that function
+automatically rather than re-implementing its logic remotely —
+`prepare_excitation.solver_identity()` must not *determinately* differ (an undetermined
+`"livespice:UNKNOWN"` on either side means "couldn't tell", not "different", and does not by
+itself refuse). Would have caught the 472-commit-stale checkout the fleet doc records. A
+mismatched worker is **excluded from that run**, not an abort of the whole thing; if every
+worker fails, the run refuses to start rather than silently rendering with zero workers.
+`--skip-version-check` opts out. Does not read item 4's inventory file — `--worker HOST:DIR`
+already carries what this needs.
 
 ## `fleet_inventory.py` — probe hosts, write a reviewable fleet inventory
 

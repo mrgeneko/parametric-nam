@@ -333,6 +333,118 @@ def _relpath_or_warn(dest_label: str, v, repo_root: Path) -> str:
     return rel
 
 
+# ---------------------------------------------------------------------------
+# Dispatch-time version verification (fleet-deployment-proposal.md step 3,
+# docs/implementation-roadmap.md item 5). Checked ONCE per worker before any chunk is
+# dispatched to it, not per chunk -- the same "one-time setup, not a per-item cost" reasoning
+# the gate check and physical-core auto-detect already apply. Would have caught two real
+# incidents fleet-deployment-proposal.md's own "what actually went wrong" table records: a
+# worker 472 commits stale, and a render that silently began before a fix landed.
+# ---------------------------------------------------------------------------
+def local_commit_sha() -> "str | None":
+    """This machine's own checkout HEAD -- what every worker's checkout is compared against.
+    None (not raised) if this isn't a git checkout at all; the caller decides what that means
+    for the check as a whole rather than this function guessing."""
+    try:
+        r = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def extract_backend(gen_args: "list[str]") -> "str | None":
+    """Pulls --backend's value back out of an already-built gen_args list (from --config
+    expansion or the raw passthrough) -- there is exactly one source of truth for what backend
+    a dispatch uses, and this reads it rather than asking the caller to say it twice."""
+    try:
+        return gen_args[gen_args.index("--backend") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def version_check_command(worker_dir: str, backend: "str | None") -> str:
+    """One remote command, one ssh round trip: the worker's own commit SHA, then its own
+    prepare_excitation.solver_identity() -- self-invoked on the worker rather than
+    re-implemented here in shell, so this automatically stays in sync with that function's own
+    logic and output format. Self-invocation is safe here (unlike fleet_inventory.py's own
+    bootstrapping probes, which deliberately avoid it): a dispatch is about to send real render
+    work to this exact checkout, so it is guaranteed to already exist as a working venv, not
+    something this check needs to discover the hard way."""
+    return (f"cd {worker_dir} && git rev-parse HEAD && "
+           f"./.venv/bin/python3 -c \"from prepare_excitation import solver_identity; "
+           f"print(solver_identity({(backend or 'cpp')!r}))\"")
+
+
+def parse_version_check_output(stdout: str) -> "tuple[str, str] | tuple[None, None]":
+    lines = [ln.strip() for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    return (lines[0], lines[1]) if len(lines) >= 2 else (None, None)
+
+
+def compare_versions(worker_sha, controller_sha, worker_solver, controller_solver) -> "tuple[bool, str]":
+    """The refuse-or-not decision, isolated from the ssh round trip so it's testable without a
+    network. controller_sha=None means the controller itself isn't a git checkout -- callers
+    should skip the whole check rather than call this, since nothing is verifiable then; this
+    function does not special-case it.
+
+    A solver-identity mismatch is only a refusal when BOTH sides produced a DETERMINATE string
+    that actually differs -- "livespice:UNKNOWN" (git commands failed on one side) means
+    "couldn't tell", not "different", and refusing on that basis would treat not-knowing as
+    wrong. Two workers on different, non-livespice backends both report an identical
+    "<backend>:unidentified" marker, so this composes with no per-backend special-casing.
+    """
+    if worker_sha is None:
+        return False, "could not read the worker's commit SHA (ssh/git failed, or bad output)"
+    if worker_sha != controller_sha:
+        return False, f"commit mismatch: worker {worker_sha[:12]}, controller {controller_sha[:12]}"
+    if (worker_solver and controller_solver and worker_solver != controller_solver
+            and "UNKNOWN" not in worker_solver and "UNKNOWN" not in controller_solver):
+        return False, f"solver mismatch: worker {worker_solver}, controller {controller_solver}"
+    return True, f"commit {worker_sha[:12]} matches; solver {worker_solver or '(undetermined)'}"
+
+
+def probe_worker_version(host: str, worker_dir: str, backend: "str | None",
+                         timeout: float = 20.0) -> "tuple[str | None, str | None]":
+    """The real ssh round trip. Never raises -- an unreachable/broken worker comes back as
+    (None, None), which compare_versions() already treats as a refusal."""
+    cmd = version_check_command(worker_dir, backend)
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
+                           host, cmd], capture_output=True, text=True, timeout=timeout + 10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if r.returncode != 0:
+        return None, None
+    return parse_version_check_output(r.stdout)
+
+
+def verify_workers(workers: "list", backend: "str | None") -> "list":
+    """Filters `workers` down to those that pass the dispatch-time version check, logging every
+    decision. Returns the input UNCHANGED (a no-op, not a filter) if this controller checkout
+    itself has no determinable commit SHA -- nothing here would be verifiable against, and
+    refusing every worker for a controller-side limitation would be worse than not checking."""
+    controller_sha = local_commit_sha()
+    if controller_sha is None:
+        log("WARNING: could not determine this controller's own commit SHA (not a git "
+            "checkout?) -- skipping dispatch-time version verification for this run.")
+        return workers
+    controller_solver = None
+    if backend:
+        from prepare_excitation import solver_identity   # local: keeps this module's own
+        controller_solver = solver_identity(backend)      # import footprint light otherwise
+    kept = []
+    for w in workers:
+        wsha, wsolver = probe_worker_version(w.host, w.dir, backend)
+        ok, reason = compare_versions(wsha, controller_sha, wsolver, controller_solver)
+        if ok:
+            log(f"{w.host}: version check OK -- {reason}")
+            kept.append(w)
+        else:
+            log(f"WARNING: {w.host}: version check FAILED -- {reason} -- excluding from this "
+                f"run. Pass --skip-version-check to bypass (or fix the checkout).")
+    return kept
+
+
 def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     """Expand a per-circuit config.toml into gen_dataset_from_schx.py arguments.
 
@@ -930,6 +1042,13 @@ def main():
                          "(2026-09-28); expected to become the default later. Run `gate_config.py "
                          "--config <config>` on the CONTROLLER before dispatching, not per "
                          "worker -- it needs the sized excitation, which workers may not have.")
+    ap.add_argument("--skip-version-check", action="store_true",
+                    help="don't verify each worker's commit SHA / solver revision against this "
+                         "controller before dispatching (docs/implementation-roadmap.md item "
+                         "5). Default is to check once per worker and EXCLUDE a mismatched one "
+                         "from this run (not abort the whole run) -- see verify_workers(). Pass "
+                         "this only when a mismatch is a known false positive; it is not a "
+                         "warn-only default the way --skip-gate-check is.")
     ap.add_argument("--", dest="_sep", nargs="?", help=argparse.SUPPRESS)
     args, gen_args = ap.parse_known_args()
     if gen_args and gen_args[0] == "--":
@@ -966,6 +1085,12 @@ def main():
         ap.error("pass --config, or the renderer's own arguments after --")
 
     workers = [Worker(w, job=job) for w in args.worker]
+    if not args.skip_version_check:
+        workers = verify_workers(workers, extract_backend(gen_args))
+        if not workers:
+            ap.error("every worker failed the dispatch-time version check -- nothing to "
+                     "dispatch to (see the WARNINGs above). Pass --skip-version-check to "
+                     "bypass, or fix the checkout(s).")
     queue = deque(f"{i}-{i}/{args.chunks}" for i in range(args.chunks))
     attempts = {c: 0 for c in queue}
     tried_on = {c: set() for c in queue}   # chunk -> hosts that have already failed it
