@@ -43,7 +43,7 @@ The premise deserves testing, because SSH turns out to be the *cheapest* of the 
 | # | step to add a machine | can it be eliminated? |
 |---|---|---|
 | 1 | install the VPN/mesh network | no — but you do this anyway |
-| 2 | SSH key trust (keys, `known_hosts`, host aliases) | **yes, one command** — see below |
+| 2 | SSH key trust (keys, `known_hosts`, host aliases) | **not via Tailscale SSH** — it was tried and not adopted (see §1 status); stays manual OpenSSH keys, to be scripted from the inventory |
 | 3 | clone the repo | `setup.sh` |
 | 4 | build the Python venv | `setup.sh` |
 | 5 | **build the .NET oracle (`livespice-cli`)** | **the expensive one** |
@@ -63,6 +63,30 @@ same names, which removes a real failure: a worker that cannot resolve the *cont
 private aliases cannot be told to fetch from a peer.
 
 No code change. Do this first regardless of what else is adopted.
+
+> **STATUS (2026-09-28): Tailscale SSH (`tailscale up --ssh`) was tried and not adopted. The
+> fleet runs plain OpenSSH with keys over the Tailscale network instead.**
+>
+> - **Sandboxed GUI builds cannot do it.** The macOS App Store / GUI Tailscale build refuses:
+>   `tailscale set --ssh` fails with *"The Tailscale SSH server does not run in sandboxed
+>   Tailscale GUI builds."* The open-source `tailscaled` (e.g. the Homebrew build) is required.
+>   One Mac tried the Homebrew build and was reverted to the sandboxed app by choice, so
+>   Tailscale SSH never ran there.
+> - **A fleet-wide attempt with the non-sandboxed build also had problems.** After the ACL
+>   `ssh` rule was changed, *some* connections still failed. **The failing host pairs, the
+>   error text and the final ACL rule were not recorded anywhere** — no repo doc, and none of
+>   the fleet's Claude sessions (checked 2026-09-28) retain it. Do not assume a cause; if this
+>   is retried, capture `ssh -vvv`, `tailscale ping` and the ACL rule (`action` accept vs
+>   check, `src`, `dst`, `users`) and record them here. A `check` action forces browser
+>   re-auth and would break the non-interactive `ssh -o BatchMode=yes` this repo uses — a
+>   candidate cause, not a confirmed one.
+> - **What works today.** `distribute_pull.py` runs `ssh -o BatchMode=yes <alias>` against
+>   `Host` aliases in `~/.ssh/config`, authenticated by a dedicated key
+>   (`~/.ssh/id_ed25519_fleet` on the mini), with Tailscale supplying the network (aliases use
+>   Tailscale IPs). What this does **not** give is the shared-DNS benefit described above:
+>   aliases are per-machine, so a worker still cannot resolve the controller's private
+>   aliases. Key distribution also stays manual, which is a job for the inventory file (§2)
+>   rather than for the transport.
 
 ### 2. An inventory file — removes step 6, and fixes a scheduling bug
 
@@ -258,12 +282,14 @@ that workers write to directly.
   have that, and pinning it fleet-wide is its own chore. It is also heavy for work that is
   ultimately a subprocess launching a simulator.
 - **Containerising the macOS hosts** — see above.
-- **Replacing SSH before enabling mesh SSH** — it is one command, and it removes most of the
-  complaint without touching any code.
+- **Replacing SSH before enabling mesh SSH** — this reasoning assumed mesh SSH is one
+  command. It was not: see the §1 status. Plain OpenSSH over Tailscale is what runs today, so
+  the case for replacing SSH is now judged on its own merits, not against a free alternative.
 
 ## Sequencing
 
-1. Mesh SSH. One command per host, no code.
+1. ~~Mesh SSH. One command per host, no code.~~ Tried, not adopted — see the §1 status.
+   Plain OpenSSH with keys over the Tailscale network is the working substitute.
 2. Inventory file with `--probe-hosts` generation. Fixes the physical-core bug and stops
    rediscovering per-host facts.
 3. Dispatch-time version verification. Cheap; closes the stale-worker and version-skew holes.
