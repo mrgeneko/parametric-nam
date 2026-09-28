@@ -123,9 +123,36 @@ Sources:
       device's first-ever render) left both the slot dir AND its parent missing and raised
       `FileNotFoundError` outright. Fixed with an `ssh ... mkdir -p` per slot before any
       thread starts; regression-tested and mutation-checked.
-- [ ] **8. Gate fleet mode** (gate step 3). `--workers` or `--inventory`; calls
-      `sync_findpeak_cache.sh` before and after; syncs the gitignored excitation `.wav` to
-      every named worker; shards grid-adequacy and transient-coverage probing. Needs 4 and 5.
+- [x] **8. Gate fleet mode** (gate step 3) — **implemented 2026-09-28** in `gate_config.py`.
+      `--workers host1,host2` (mirrors `sync_findpeak_cache.sh`'s own flag) or `--inventory
+      [PATH]` (every host `fleet_inventory.py --probe-hosts` recorded, with each host's own
+      `repo` field used for its `distribute_pull.py --worker` spec instead of a hardcoded
+      guess) opts a run in. When a fleet is named: `sync_findpeak_cache.sh` runs once before
+      and once after; `--check-grid` and transient-coverage both dispatch via
+      `distribute_pull.py --tool grid_adequacy`/`--tool check_transient_coverage` instead of
+      running single-machine; the excitation `.wav` (gitignored, never carried by `git pull`)
+      is rsynced to every host's own repo-relative path right after sizing. Excitation sizing
+      and preflight stay single-machine, matching the proposal's own scoping.
+      **The verdict problem, solved without touching `distribute_pull.py`'s exit-code
+      contract:** that scheduler's own exit code only reflects whether every shard
+      *dispatched*, not the merged grid/transient *verdict* (`_collect_grid_adequacy`/
+      `_collect_check_transient_coverage` never returned anything for `main()` to fold in) --
+      so fleet mode re-runs the same merge command those collectors already run internally,
+      against the shard files they collected, and gates on THAT exit code instead. A dispatch
+      failure and a "dispatched fine but the gate itself failed" are recorded as distinct
+      steps (`grid-dispatch` vs `grid`, `transient-dispatch` vs `transient`) in the sidecar.
+      **Two real bugs found and fixed getting this prerequisite in place**, both via actually
+      running it, not just mocking: `check_transient_coverage.py` wasn't wired into
+      `distribute_pull.py --tool` at all yet (added, mirroring `grid_adequacy`'s own shape),
+      and its `--emit-onsets` write didn't `mkdir -p` its target's parent the way
+      `grid_adequacy.py`'s own `--shard-out` write already did -- a sharded run into a
+      brand-new `--output` directory failed outright before either fix. Verified end to end
+      for real (not just mocks): a full fleet-mode gate run against `localhost` as a 1-node
+      fleet (`duke_of_tone_distortion`, 3 knobs, `--check-grid`) passed every step --
+      cache-sync, grid dispatch+merge, wav sync, transient dispatch+merge (a real
+      corner-by-corner PASSED report), cache-sync-after, preflight -- and a dispatch/verdict
+      failure was separately confirmed to stop the gate at the right step via mutation
+      testing.
 - [ ] **9. Fold shard-vs-local into `run_pipeline.py`** (gate step 4). Steps 1 and 4 of the
       pipeline get a fleet-aware path that delegates to `distribute_pull.py`'s scheduling,
       driven by whether an inventory is present. Do only after 8 is proven on a real device,

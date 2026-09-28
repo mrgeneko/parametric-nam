@@ -417,8 +417,38 @@ both call `--verify` before generating and **WARN, not refuse**, when it's missi
 check entirely. Warn-only is deliberately the default while the gate is adopted; see
 [implementation-roadmap.md](implementation-roadmap.md) item 3 for the plan to flip that default.
 `distribute_pull.py` checks once on the controller against `--config` as given, before any
-worker is dispatched — it says nothing about whether a worker's own checkout has the sized
-excitation synced (open item in [fleet-deployment-proposal.md](fleet-deployment-proposal.md)).
+worker is dispatched.
+
+**Fleet mode** (2026-09-28, [config-gate-proposal.md](config-gate-proposal.md)'s fleet section,
+[implementation-roadmap.md](implementation-roadmap.md) item 8): `--workers host1,host2`
+(mirrors `sync_findpeak_cache.sh`'s own flag) or `--inventory [PATH]` (every host
+`fleet_inventory.py --probe-hosts` recorded, using each one's own `repo` field) opts a run in.
+`--check-grid` and the transient-coverage step then dispatch via `distribute_pull.py --tool
+grid_adequacy`/`--tool check_transient_coverage` instead of running single-machine, bracketed
+by `sync_findpeak_cache.sh` once before and once after; the excitation `.wav` — gitignored,
+never carried by `git pull` — is rsynced to every worker's own repo-relative path right after
+sizing (this is the piece that closes the "says nothing about whether a worker's own checkout
+has the sized excitation synced" gap the paragraph above used to flag). Sizing and preflight
+stay single-machine.
+
+```
+python gate_config.py --config device.config.toml --workers mac-1,linux-1 --check-grid
+python gate_config.py --config device.config.toml --inventory --dry-run   # preview the fleet dispatch
+```
+
+`distribute_pull.py`'s own exit code only reflects whether every shard *dispatched*, not
+whether the merged grid/transient *verdict* passed, so fleet mode re-runs the same merge
+command `_collect_grid_adequacy`/`_collect_check_transient_coverage` already run internally,
+against the shard files they collected, and gates on that. A dispatch failure and a
+dispatched-but-failed verdict are recorded as distinct sidecar steps (`grid-dispatch` vs
+`grid`, `transient-dispatch` vs `transient`).
+
+Building this found two real bugs, both via actually running it: `check_transient_coverage.py`
+wasn't in `distribute_pull.py --tool`'s registry at all (added); and its `--emit-onsets` write
+didn't `mkdir -p` its target's parent the way `grid_adequacy.py`'s own `--shard-out` write
+already did, so a sharded run into a brand-new `--output` directory failed outright (fixed in
+`check_transient_coverage.py`). Verified end to end against a real device on `localhost` as a
+1-node fleet — every step passed, including a real corner-by-corner transient-coverage report.
 
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 

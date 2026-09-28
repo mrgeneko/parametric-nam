@@ -6,8 +6,10 @@
 > `distribute_pull.py --tool gen_dataset` both call `--verify` and warn (not refuse) on a
 > missing/stale sidecar; `--require-gate` opts into aborting, `--skip-gate-check` silences it.
 > Refusing by default, as originally proposed, is deferred — see
-> [implementation-roadmap.md](implementation-roadmap.md) item 3. Steps 3–4 (fleet mode, folding
-> sharding into `run_pipeline.py`) are still proposals. Written 2026-09-23 after a live AC30
+> [implementation-roadmap.md](implementation-roadmap.md) item 3. **Step 3 (fleet mode) is
+> implemented** — `--workers`/`--inventory`, sharding grid/transient-coverage via
+> `distribute_pull.py`, the excitation `.wav` sync — see roadmap item 8. Step 4 (folding
+> sharding into `run_pipeline.py`) is still a proposal. Written 2026-09-23 after a live AC30
 > Top Boost session hit three variants of the same problem in one afternoon. See
 > [fleet-deployment-proposal.md](fleet-deployment-proposal.md) and
 > [per-item-sharding-proposal.md](per-item-sharding-proposal.md) for the existing, larger
@@ -180,8 +182,12 @@ That's real, useful work, but it should come **after**, not alongside, this prop
    **Implemented 2026-09-28, but WARN-only**: both call `--verify` and warn, not refuse, on a
    missing/stale sidecar (`--require-gate` to abort, `--skip-gate-check` to silence). Refusing
    by default is deferred to [implementation-roadmap.md](implementation-roadmap.md) item 3.
-3. `gate_config.py` fleet mode: `--workers`/`--inventory`, calls `sync_findpeak_cache.sh`,
-   syncs the excitation `.wav`, shards grid-adequacy and transient-coverage probing.
-4. Once fleet mode is proven on a real device: fold shard-vs-local selection into
+3. ~~`gate_config.py` fleet mode: `--workers`/`--inventory`, calls `sync_findpeak_cache.sh`,
+   syncs the excitation `.wav`, shards grid-adequacy and transient-coverage probing.~~
+   **Implemented 2026-09-28** -- proven on a real device (`duke_of_tone_distortion`,
+   `--workers localhost`, full pass end to end). See
+   [implementation-roadmap.md](implementation-roadmap.md) item 8 for exactly what shipped,
+   including the verdict-check design and the two real bugs it surfaced.
+4. Fleet mode is now proven on a real device (previous step) -- fold shard-vs-local selection into
    `run_pipeline.py` itself, reading the same inventory, retiring the manual choice between
    the two entry points for Steps 1 and 4.

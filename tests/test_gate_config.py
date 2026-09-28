@@ -316,6 +316,24 @@ class TestRunGate:
         assert runner.cmds == [] and not gc.sidecar_path(cfg).exists()
         assert "excitation:" in capsys.readouterr().out
 
+    def test_dry_run_shows_fleet_dispatch_not_the_single_machine_commands(self, tmp_path, runner,
+                                                                          capsys, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {})
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg, "--dry-run", "--workers", "h1,h2", "--check-grid") == 0
+        out = capsys.readouterr().out
+        assert "fleet:       h1, h2" in out
+        assert "distribute_pull.py" in out and "grid_adequacy" in out
+        assert "check_transient_coverage" in out
+        assert "fleet-wav-sync:" in out
+        assert runner.cmds == [] and not gc.sidecar_path(cfg).exists()
+
+    def test_dry_run_without_fleet_flags_shows_no_fleet_lines(self, tmp_path, runner, capsys):
+        cfg, *_ = make_cfg(tmp_path)
+        run_main(cfg, "--dry-run")
+        out = capsys.readouterr().out
+        assert "fleet:" not in out and "distribute_pull.py" not in out
+
 
 # ---------------------------------------------------------------------------
 # verify
@@ -442,3 +460,322 @@ class TestRecipeInputs:
         write_recipe(cfg, schx, wav, grid={"Gain": [0.1, 0.9]})
         run_main(cfg, "--resize", "never")
         assert "prepare_excitation.py" not in runner.scripts
+
+
+# ---------------------------------------------------------------------------
+# fleet mode (config-gate-proposal.md's "Where fleet/worker concerns fit",
+# docs/implementation-roadmap.md item 8)
+# ---------------------------------------------------------------------------
+import subprocess as _subprocess  # noqa: E402
+
+
+class TestNormalizeInventoryArg:
+    def test_none_stays_none(self):
+        assert gc._normalize_inventory_arg(None) is None
+
+    def test_bare_flag_sentinel_becomes_none(self):
+        assert gc._normalize_inventory_arg("__DEFAULT__") is None
+
+    def test_explicit_path_string_becomes_a_path(self):
+        assert gc._normalize_inventory_arg("/tmp/fleet.toml") == Path("/tmp/fleet.toml")
+
+    def test_a_path_object_passes_through(self, tmp_path):
+        assert gc._normalize_inventory_arg(tmp_path) == tmp_path
+
+
+class TestResolveFleetHosts:
+    def test_workers_csv_wins(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {"should": {}, "not": {}, "be": {}, "used": {}})
+        assert gc.resolve_fleet_hosts("h1, h2 ,h3", None) == ["h1", "h2", "h3"]
+
+    def test_empty_workers_string_raises(self):
+        with pytest.raises(gc.GateError, match="empty"):
+            gc.resolve_fleet_hosts("  , ,", None)
+
+    def test_falls_back_to_inventory_sorted(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory",
+                            lambda p: {"zeta": {}, "alpha": {}})
+        assert gc.resolve_fleet_hosts(None, None) == ["alpha", "zeta"]
+
+    def test_empty_inventory_raises(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {})
+        with pytest.raises(gc.GateError, match="no hosts"):
+            gc.resolve_fleet_hosts(None, None)
+
+    def test_bare_inventory_sentinel_is_normalized_before_loading(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory",
+                            lambda p: seen.setdefault("path", p) or {"h1": {}})
+        gc.resolve_fleet_hosts(None, "__DEFAULT__")
+        assert seen["path"] is None
+
+
+class TestRepoDirForHost:
+    def test_uses_inventorys_own_repo_field(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory",
+                            lambda p: {"mac-1": {"repo": "~/render/parametric-nam"}})
+        assert gc.repo_dir_for_host("mac-1", None) == "~/render/parametric-nam"
+
+    def test_falls_back_to_default_when_host_unknown(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {})
+        assert gc.repo_dir_for_host("mystery-host", None) == "~/work/parametric-nam"
+
+    def test_falls_back_to_default_when_repo_field_absent(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {"h1": {"cores": 8}})
+        assert gc.repo_dir_for_host("h1", None) == "~/work/parametric-nam"
+
+    def test_custom_default_is_honored(self, monkeypatch):
+        monkeypatch.setattr(gc.fleet_inventory, "load_inventory", lambda p: {})
+        assert gc.repo_dir_for_host("h1", None, default="/opt/nam") == "/opt/nam"
+
+
+class TestSyncFindpeakCache:
+    def test_builds_the_right_command(self, monkeypatch):
+        seen = {}
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return _subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        rc, out = gc.sync_findpeak_cache(["h1", "h2"])
+        assert rc == 0 and "ok" in out
+        assert seen["cmd"][0].endswith("sync_findpeak_cache.sh")
+        assert seen["cmd"][1:] == ["--workers", "h1,h2"]
+
+    def test_never_raises_on_failure(self, monkeypatch):
+        def boom(cmd, **kw):
+            raise OSError("no such file")
+        monkeypatch.setattr(gc.subprocess, "run", boom)
+        rc, out = gc.sync_findpeak_cache(["h1"])
+        assert rc != 0 and "OSError" in out
+
+    def test_never_raises_on_timeout(self, monkeypatch):
+        def boom(cmd, **kw):
+            raise _subprocess.TimeoutExpired(cmd="x", timeout=1)
+        monkeypatch.setattr(gc.subprocess, "run", boom)
+        rc, out = gc.sync_findpeak_cache(["h1"])
+        assert rc != 0
+
+
+class TestSyncExcitationWav:
+    def test_missing_wav_raises(self, tmp_path):
+        cfg = {"input": str(tmp_path / "nope.wav")}
+        with pytest.raises(gc.GateError, match="not found"):
+            gc.sync_excitation_wav(cfg, ["h1"], {"h1": "~/work/parametric-nam"})
+
+    def test_destination_is_repo_relative_on_each_worker(self, tmp_path, monkeypatch):
+        wav = tmp_path / "amps" / "exc.wav"
+        wav.parent.mkdir()
+        wav.write_bytes(b"RIFF")
+        monkeypatch.setattr(gc, "HERE", tmp_path)   # "this repo root" for repo_relpath
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        results = gc.sync_excitation_wav({"input": str(wav)}, ["h1"], {"h1": "/remote/repo"})
+        assert results == [("h1", True, "ok")]
+        rsync_cmd = calls[1]
+        assert rsync_cmd[0] == "rsync"
+        assert rsync_cmd[-1] == "h1:/remote/repo/amps/exc.wav"
+
+    def test_per_host_failure_is_reported_not_raised(self, tmp_path, monkeypatch):
+        wav = tmp_path / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        monkeypatch.setattr(gc, "HERE", tmp_path)
+        def fake_run(cmd, **kw):
+            if cmd[0] == "ssh":
+                return _subprocess.CompletedProcess(cmd, 0, "", "")
+            return _subprocess.CompletedProcess(cmd, 1, "", "connection refused")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        results = gc.sync_excitation_wav({"input": str(wav)}, ["bad-host"], {"bad-host": "/r"})
+        host, ok, detail = results[0]
+        assert host == "bad-host" and ok is False and "connection refused" in detail
+
+    def test_one_bad_host_does_not_stop_the_rest(self, tmp_path, monkeypatch):
+        wav = tmp_path / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        monkeypatch.setattr(gc, "HERE", tmp_path)
+        def fake_run(cmd, **kw):
+            if cmd[0] == "rsync" and "bad:" in cmd[-1]:
+                return _subprocess.CompletedProcess(cmd, 1, "", "unreachable")
+            return _subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        results = gc.sync_excitation_wav({"input": str(wav)}, ["good", "bad"],
+                                         {"good": "/r", "bad": "/r"})
+        by_host = {h: ok for h, ok, _ in results}
+        assert by_host == {"good": True, "bad": False}
+
+
+class TestDispatchCommand:
+    def test_grid_and_transient_use_distinct_tools_and_work_subdirs(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        gcmd, gdir = gc.grid_command_fleet(cfg, ["h1"], {"h1": "/r"})
+        tcmd, tdir = gc.transient_command_fleet(cfg, ["h1"], {"h1": "/r"})
+        assert "--tool" in gcmd and gcmd[gcmd.index("--tool") + 1] == "grid_adequacy"
+        assert "--tool" in tcmd and tcmd[tcmd.index("--tool") + 1] == "check_transient_coverage"
+        assert gdir != tdir
+        assert gdir.name == "grid" and tdir.name == "transient"
+
+    def test_worker_flags_built_per_host(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cmd, _ = gc.grid_command_fleet(cfg, ["h1", "h2"], {"h1": "/repo1", "h2": "/repo2"})
+        assert cmd.count("--worker") == 2
+        assert "h1:/repo1" in cmd and "h2:/repo2" in cmd
+
+    def test_skip_gate_check_is_always_forwarded(self, tmp_path):
+        # gate_config.py dispatching itself via distribute_pull.py must not re-trigger
+        # distribute_pull's OWN gate-check wiring (item 3) -- that would be circular.
+        cfg = tmp_path / "d.config.toml"
+        cmd, _ = gc.grid_command_fleet(cfg, ["h1"], {"h1": "/r"})
+        assert "--skip-gate-check" in cmd
+
+    def test_collect_dir_is_namespaced_by_config_stem(self, tmp_path):
+        cfg = tmp_path / "my_amp.config.toml"
+        _, collect_dir = gc.grid_command_fleet(cfg, ["h1"], {"h1": "/r"})
+        assert "my_amp" in str(collect_dir)
+
+
+class TestMergeVerdictCommand:
+    def test_none_when_no_shards_present(self, tmp_path):
+        assert gc._merge_verdict_command("grid_adequacy.py", "--merge", "shard_*.json",
+                                         tmp_path, Path("cfg.toml")) is None
+
+    def test_grid_verdict_uses_correct_flag_and_extra_target(self, tmp_path):
+        (tmp_path / "shard_0-0_2.json").write_text("{}")
+        cmd = gc._merge_verdict_command("grid_adequacy.py", "--merge", "shard_*.json",
+                                        tmp_path, Path("cfg.toml"), extra=["--target", "0.05"])
+        assert cmd[1].endswith("grid_adequacy.py")
+        assert "--merge" in cmd and "--target" in cmd and "0.05" in cmd
+
+    def test_transient_verdict_uses_merge_onsets_not_merge(self, tmp_path):
+        (tmp_path / "tcov_shard_0-0_2.json").write_text("{}")
+        cmd = gc._merge_verdict_command("check_transient_coverage.py", "--merge-onsets",
+                                        "tcov_shard_*.json", tmp_path, Path("cfg.toml"))
+        assert "--merge-onsets" in cmd and "--merge" not in cmd
+
+    def test_only_matching_glob_is_picked_up(self, tmp_path):
+        (tmp_path / "shard_0-0_2.json").write_text("{}")          # grid_adequacy's own file
+        (tmp_path / "tcov_shard_0-0_2.json").write_text("{}")     # must be excluded here
+        cmd = gc._merge_verdict_command("grid_adequacy.py", "--merge", "shard_*.json",
+                                        tmp_path, Path("cfg.toml"))
+        assert str(tmp_path / "tcov_shard_0-0_2.json") not in cmd
+        assert str(tmp_path / "shard_0-0_2.json") in cmd
+
+
+class TestRunGateFleetIntegration:
+    """run_gate's fleet branch, driven through main() -- Runner fakes _run (the sequenced
+    dispatch/merge/preflight/excitation steps); subprocess.run is faked separately for the
+    cache-sync and wav-sync calls, which don't go through _run at all."""
+
+    def _fleet_subprocess(self, monkeypatch, dispatch_calls=None):
+        calls = dispatch_calls if dispatch_calls is not None else []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return _subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        return calls
+
+    def test_no_fleet_flags_runs_single_machine_as_before(self, tmp_path, runner, monkeypatch):
+        sub_calls = self._fleet_subprocess(monkeypatch)
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg) == 0
+        # git_rev(HERE) always runs (unrelated to fleet mode, stamps tool_git_rev in the
+        # sidecar) -- the real assertion is that no ssh/rsync/sync_findpeak_cache call happens.
+        assert not any(c[0] in ("ssh", "rsync") or "sync_findpeak_cache" in str(c[0])
+                      for c in sub_calls)
+        s = sidecar(cfg)
+        assert not any("fleet" in x["step"] for x in s["steps"])
+
+    def test_workers_flag_triggers_fleet_steps_in_order(self, tmp_path, runner, monkeypatch):
+        self._fleet_subprocess(monkeypatch)
+        cfg, schx, wav = make_cfg(tmp_path)
+
+        def on_run(script):
+            # make the fleet dispatch + merge steps look like they produced real shard files,
+            # and preflight look like a real pass, exactly as run_main's callers already need
+            # for the existing (non-fleet) preflight/transient tests to pass.
+            if script == "distribute_pull.py":
+                pass   # collect dirs are created lazily by _merge_verdict_command's own glob
+        runner.on_run = on_run
+        # Fleet mode needs the collected shard dirs to exist for the merge step to find
+        # anything -- create them ahead of the run so "transient"/"grid" don't skip.
+        import gate_config as _gc
+        grid_dir = Path.home() / ".cache" / "parametric-nam" / "gate-fleet" / cfg.stem / "grid"
+        tcov_dir = Path.home() / ".cache" / "parametric-nam" / "gate-fleet" / cfg.stem / "transient"
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        tcov_dir.mkdir(parents=True, exist_ok=True)
+        (grid_dir / "shard_0-0_1.json").write_text("{}")
+        (tcov_dir / "tcov_shard_0-0_1.json").write_text("{}")
+        try:
+            assert run_main(cfg, "--workers", "localhost", "--check-grid") == 0
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(grid_dir.parent, ignore_errors=True)
+        steps = [s["step"] for s in sidecar(cfg)["steps"]]
+        assert steps.index("fleet-cache-sync") < steps.index("grid-dispatch")
+        assert steps.index("grid-dispatch") < steps.index("grid")
+        assert steps.index("grid") < steps.index("excitation")
+        assert steps.index("excitation") < steps.index("fleet-wav-sync")
+        assert steps.index("fleet-wav-sync") < steps.index("transient-dispatch")
+        assert steps.index("transient-dispatch") < steps.index("transient")
+        assert steps.index("transient") < steps.index("fleet-cache-sync-after")
+        assert steps.index("fleet-cache-sync-after") < steps.index("preflight")
+
+    def test_dispatch_failure_stops_before_the_merge_step(self, tmp_path, monkeypatch):
+        r = Runner(fail={"distribute_pull.py": 1})
+        monkeypatch.setattr(gc, "_run", r)
+        self._fleet_subprocess(monkeypatch)
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg, "--workers", "localhost", "--check-grid") == 1
+        s = sidecar(cfg)
+        assert s["failed_step"] == "grid-dispatch"
+        assert r.scripts == ["distribute_pull.py"]   # never reached the merge command
+
+    def test_no_shards_collected_fails_the_gate_not_a_silent_pass(self, tmp_path, monkeypatch):
+        # dispatch "succeeds" (rc 0) but produces no shard files at all -- must not be
+        # silently treated as passing.
+        monkeypatch.setattr(gc, "_run", Runner())
+        self._fleet_subprocess(monkeypatch)
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg, "--workers", "localhost", "--check-grid") == 1
+        assert sidecar(cfg)["failed_step"] == "grid"
+
+    def test_wav_sync_failure_fails_the_gate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gc, "_run", Runner())
+        def fake_run(cmd, **kw):
+            if cmd[0] == "rsync":
+                return _subprocess.CompletedProcess(cmd, 1, "", "no route to host")
+            return _subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg, "--workers", "localhost") == 1
+        assert sidecar(cfg)["failed_step"] == "fleet-wav-sync"
+
+    def test_cache_sync_failure_does_not_fail_the_gate(self, tmp_path, monkeypatch):
+        # sync_findpeak_cache is an optimization, not a correctness requirement -- see its
+        # own docstring.
+        monkeypatch.setattr(gc, "_run", Runner())
+        def fake_run(cmd, **kw):
+            if "sync_findpeak_cache.sh" in str(cmd[0]):
+                return _subprocess.CompletedProcess(cmd, 1, "", "boom")
+            return _subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+        monkeypatch.setattr(gc.subprocess, "run", fake_run)
+        cfg, *_ = make_cfg(tmp_path)
+        grid_dir = Path.home() / ".cache" / "parametric-nam" / "gate-fleet" / cfg.stem / "transient"
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        (grid_dir / "tcov_shard_0-0_1.json").write_text("{}")
+        try:
+            run_main(cfg, "--workers", "localhost")
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(grid_dir.parent, ignore_errors=True)
+        by_step = {s["step"]: s for s in sidecar(cfg)["steps"]}
+        assert by_step["fleet-cache-sync"]["status"] == "warn"
+
+    def test_workers_and_inventory_both_absent_never_calls_fleet_functions(self, tmp_path, monkeypatch):
+        def boom(*a, **kw):
+            raise AssertionError("fleet resolution should not run without --workers/--inventory")
+        monkeypatch.setattr(gc, "resolve_fleet_hosts", boom)
+        monkeypatch.setattr(gc, "_run", Runner())
+        cfg, *_ = make_cfg(tmp_path)
+        assert run_main(cfg) == 0

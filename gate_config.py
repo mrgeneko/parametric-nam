@@ -320,6 +320,156 @@ def grid_command(config: Path, target: float) -> "list[str]":
 
 
 # ---------------------------------------------------------------------------
+# fleet mode (config-gate-proposal.md's "Where fleet/worker concerns fit",
+# docs/implementation-roadmap.md item 8). Opt-in: --workers or --inventory names a fleet.
+#
+# Shards ONLY the two steps that already have --shard support via distribute_pull.py (grid,
+# opt-in via --check-grid same as single-machine; transient coverage). Excitation sizing and
+# preflight stay single-machine -- the proposal never asks to shard either, and sizing in
+# particular is sequential/cache-adaptive in a way that doesn't parallelize the same way.
+#
+# THE VERDICT PROBLEM. distribute_pull.py's own exit code only reflects whether every shard
+# DISPATCHED successfully (--tool grid_adequacy/check_transient_coverage's --collect just logs
+# the merged report; neither _collect_grid_adequacy nor _collect_check_transient_coverage
+# returns anything distribute_pull.py's main() folds into ITS exit code). So "distribute_pull
+# exited 0" does not mean "the gate passed" -- a device whose grid is genuinely inadequate
+# would still dispatch every shard successfully and NOT reflect that in the exit code. Rather
+# than change distribute_pull.py's exit-code contract (a change with its own, wider blast
+# radius -- every existing caller of --tool grid_adequacy/check_transient_coverage, not just
+# this one), fleet mode re-runs the SAME merge command locally against the collected shard
+# files after dispatch, exactly what _collect_grid_adequacy/_collect_check_transient_coverage
+# already run internally for their own human-readable report -- a second, cheap subprocess
+# call, not duplicated logic, and it gives gate_config.py its own real exit code to gate on.
+# ---------------------------------------------------------------------------
+import fleet_inventory  # noqa: E402
+from distribute_pull import _relpath_or_warn as repo_relpath  # noqa: E402  reuse, don't reimplement
+
+FLEET_WORK_ROOT = "~/.cache/parametric-nam/gate-fleet"   # ON EACH WORKER -- same
+                                                          # "your machine's own state"
+                                                          # convention as ~/.cache/parametric-nam/findpeak
+
+
+def _normalize_inventory_arg(inventory_arg) -> "Path | None":
+    """argparse's --inventory nargs='?' gives the literal string "__DEFAULT__" for a BARE
+    --inventory (no path) -- translate that (and a plain string from any other caller) into
+    what fleet_inventory.load_inventory() actually expects: None means its own default path,
+    anything else must be a Path."""
+    if inventory_arg is None or inventory_arg == "__DEFAULT__":
+        return None
+    return Path(inventory_arg)
+
+
+def resolve_fleet_hosts(workers_csv: "str | None", inventory_arg) -> "list[str]":
+    """Host names for fleet mode. --workers (comma-separated, mirroring
+    sync_findpeak_cache.sh's own flag) wins if given; otherwise every host in the loaded
+    inventory. Raises if fleet mode was requested (this function is only called when it was)
+    but resolves to zero hosts -- that is a configuration mistake, not "run locally", which
+    --workers/--inventory being ABSENT already means."""
+    if workers_csv:
+        hosts = [h.strip() for h in workers_csv.split(",") if h.strip()]
+        if not hosts:
+            raise GateError("--workers given but empty")
+        return hosts
+    inv = fleet_inventory.load_inventory(_normalize_inventory_arg(inventory_arg))
+    if not inv:
+        raise GateError("--inventory has no hosts (or the file doesn't exist) -- pass "
+                        "--workers host1,host2 instead, or run fleet_inventory.py --probe-hosts")
+    return sorted(inv)
+
+
+def repo_dir_for_host(host: str, inventory_arg, default: str = "~/work/parametric-nam") -> str:
+    """The repo checkout path to use for `host` in a distribute_pull.py --worker spec: the
+    inventory's own recorded `repo` field when available (measured, not guessed -- see
+    fleet_inventory.py), else the same default candidate fleet_inventory.py itself tries
+    first."""
+    inv = fleet_inventory.load_inventory(_normalize_inventory_arg(inventory_arg))
+    return (inv.get(host) or {}).get("repo") or default
+
+
+def sync_findpeak_cache(hosts: "list[str]", timeout: float = 600.0) -> "tuple[int, str]":
+    """Runs sync_findpeak_cache.sh --workers h1,h2,... . Never raises -- this is an
+    optimization (warms the shared onset cache so a sharded probe hits it instead of
+    re-measuring), not a correctness requirement; a failure here should not fail the gate."""
+    cmd = [str(HERE / "sync_findpeak_cache.sh"), "--workers", ",".join(hosts)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, f"{type(e).__name__}: {e}"
+
+
+def sync_excitation_wav(cfg: dict, hosts: "list[str]", repo_dirs: "dict[str, str]",
+                        timeout: float = 300.0) -> "list[tuple[str, bool, str]]":
+    """rsync the gitignored excitation wav to every named worker's OWN repo-relative path --
+    config `input` paths are already repo-relative by convention (distribute_pull.py's own
+    repo_relpath/_relpath_or_warn is what makes that convention work at all), so the
+    destination is `{that worker's repo dir}/{same relative path}`, not a $HOME-relative one
+    the way sync_findpeak_cache.sh's cache sync is. This is the one piece config-gate-
+    proposal.md calls genuinely new, not just "call the existing thing": git pull carries the
+    fingerprinted sidecar and the code, but never this gitignored file.
+
+    Returns [(host, ok, detail), ...]; never raises for a single host's failure -- one
+    unreachable worker should not stop the sync to the rest.
+    """
+    inp = cfg.get("input")
+    if not inp or not Path(inp).is_file():
+        raise GateError(f"excitation wav not found locally: {inp!r} -- run the gate (sizing) first")
+    rel = repo_relpath("input", inp, HERE)
+    results = []
+    for host in hosts:
+        dest = f"{repo_dirs[host]}/{rel}"
+        mk = subprocess.run(["ssh", "-o", "BatchMode=yes", host,
+                             f"mkdir -p $(dirname {dest})"], capture_output=True, text=True,
+                            timeout=30)
+        if mk.returncode != 0:
+            results.append((host, False, f"mkdir failed: {mk.stderr.strip()[:150]}"))
+            continue
+        r = subprocess.run(["rsync", "-a", str(inp), f"{host}:{dest}"], capture_output=True,
+                           text=True, timeout=timeout)
+        results.append((host, r.returncode == 0,
+                        "ok" if r.returncode == 0 else r.stderr.strip()[:150]))
+    return results
+
+
+def _dispatch_command(tool: str, config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
+                      work_subdir: str, chunks: int) -> "tuple[list[str], Path]":
+    """One distribute_pull.py --tool TOOL invocation across `hosts`. Returns (cmd, local_collect_dir)."""
+    local_collect = (Path.home() / ".cache" / "parametric-nam" / "gate-fleet" /
+                     config.stem / work_subdir)
+    worker_flags = []
+    for h in hosts:
+        worker_flags += ["--worker", f"{h}:{repo_dirs[h]}"]
+    cmd = [PYTHON, str(HERE / "distribute_pull.py"), "--tool", tool, "--config", str(config),
+           "--chunks", str(chunks), "--output", f"{FLEET_WORK_ROOT}/{config.stem}/{work_subdir}",
+           "--collect", str(local_collect), "--skip-gate-check", *worker_flags]
+    return cmd, local_collect
+
+
+def _merge_verdict_command(tool_script: str, merge_flag: str, shard_glob: str,
+                           collect_dir: Path, config: Path,
+                           extra: "list[str] | None" = None) -> "list[str] | None":
+    """Re-runs the same merge command _collect_grid_adequacy/_collect_check_transient_coverage
+    already ran internally, against the shard files it collected -- see the module-level
+    comment above for why this is the exit code fleet mode actually gates on, not
+    distribute_pull.py's own (which only reflects dispatch, not verdict)."""
+    shards = sorted(collect_dir.glob(shard_glob))
+    if not shards:
+        return None
+    return [PYTHON, str(HERE / tool_script), merge_flag, *[str(s) for s in shards],
+           "--config", str(config), *(extra or [])]
+
+
+def grid_command_fleet(config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
+                       chunks: int = 16) -> "tuple[list[str], Path]":
+    return _dispatch_command("grid_adequacy", config, hosts, repo_dirs, "grid", chunks)
+
+
+def transient_command_fleet(config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
+                            chunks: int = 16) -> "tuple[list[str], Path]":
+    return _dispatch_command("check_transient_coverage", config, hosts, repo_dirs, "transient", chunks)
+
+
+# ---------------------------------------------------------------------------
 # running
 # ---------------------------------------------------------------------------
 def _run(cmd: "list[str]") -> int:
@@ -354,8 +504,37 @@ def run_gate(args, config: Path, cfg: dict, prior: "dict | None") -> dict:
         rc = _run(cmd)
         return rc, time.time() - t
 
+    # Fleet mode (docs/implementation-roadmap.md item 8): --workers/--inventory opt in. See
+    # the fleet-mode comment above grid_command_fleet for what is and is not sharded, and why
+    # the merge verdict is re-checked locally rather than trusted from distribute_pull.py's
+    # own exit code.
+    fleet = None
+    if getattr(args, "workers", None) or getattr(args, "inventory", None):
+        hosts = resolve_fleet_hosts(args.workers, args.inventory)
+        fleet = {"hosts": hosts,
+                "repo_dirs": {h: repo_dir_for_host(h, args.inventory) for h in hosts}}
+        rc, out = sync_findpeak_cache(hosts)
+        record("fleet-cache-sync", "pass" if rc == 0 else "warn", rc, detail=out[:300])
+        # non-fatal by design -- see sync_findpeak_cache's own docstring: an optimization,
+        # not a correctness requirement, so a failure here does not fail the gate.
+
     if args.check_grid:
-        cmd = grid_command(config, args.grid_target)
+        if fleet:
+            cmd, collect_dir = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+            rc, secs = timed("grid-dispatch", cmd)
+            record("grid-dispatch", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
+            if rc != 0:
+                return fail("grid-dispatch", f"distribute_pull.py exit {rc} -- a shard "
+                                             f"failed to dispatch/render; see its own log above")
+            merge_cmd = _merge_verdict_command("grid_adequacy.py", "--merge", "shard_*.json",
+                                               collect_dir, config,
+                                               extra=["--target", str(args.grid_target)])
+            if merge_cmd is None:
+                return fail("grid", "fleet dispatch produced no shard_*.json to merge -- "
+                                    "nothing was actually probed")
+            cmd = merge_cmd
+        else:
+            cmd = grid_command(config, args.grid_target)
         rc, secs = timed("grid", cmd)
         record("grid", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
         if rc != 0:
@@ -376,16 +555,44 @@ def run_gate(args, config: Path, cfg: dict, prior: "dict | None") -> dict:
     else:
         record("excitation", "not-needed", detail=why, recipe_inputs=recipe)
 
+    if fleet:
+        # AFTER sizing (whether it ran or not, so the wav is definitely current), and BEFORE
+        # the transient step that needs it present on every worker -- the one piece config-
+        # gate-proposal.md calls genuinely new: git pull never carries a gitignored file.
+        sync_results = sync_excitation_wav(cfg, fleet["hosts"], fleet["repo_dirs"])
+        failed_hosts = [(h, d) for h, ok, d in sync_results if not ok]
+        record("fleet-wav-sync", "fail" if failed_hosts else "pass",
+              detail="; ".join(f"{h}: {d}" for h, d in failed_hosts) or "ok")
+        if failed_hosts:
+            return fail("fleet-wav-sync", f"excitation wav failed to reach "
+                                          f"{len(failed_hosts)} worker(s): "
+                                          + "; ".join(h for h, _ in failed_hosts))
+
     # -- transient coverage -------------------------------------------------
-    cmd, skip = transient_command(cfg, config)
-    if cmd is None:
+    if fleet:
+        cmd, collect_dir = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+        rc, secs = timed("transient-dispatch", cmd)
+        record("transient-dispatch", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
+        if rc != 0:
+            return fail("transient-dispatch", f"distribute_pull.py exit {rc} -- a shard "
+                                              f"failed to dispatch/render; see its own log above")
+        merge_cmd = _merge_verdict_command("check_transient_coverage.py", "--merge-onsets",
+                                           "tcov_shard_*.json", collect_dir, config)
+        skip = None if merge_cmd else "fleet dispatch produced no tcov_shard_*.json to merge"
+    else:
+        merge_cmd, skip = transient_command(cfg, config)
+    if merge_cmd is None:
         record("transient", "skipped", detail=skip)
     else:
-        rc, secs = timed("transient", cmd)
-        record("transient", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
+        rc, secs = timed("transient", merge_cmd)
+        record("transient", "pass" if rc == 0 else "fail", rc, secs, cmd=merge_cmd)
         if rc != 0:
             return fail("transient", f"check_transient_coverage.py exit {rc}: the excitation does not "
                                          f"reach saturation at every corner; re-run with --resize always")
+
+    if fleet:
+        rc, out = sync_findpeak_cache(fleet["hosts"])
+        record("fleet-cache-sync-after", "pass" if rc == 0 else "warn", rc, detail=out[:300])
 
     # -- preflight ------------------------------------------------------------
     cmd, skip = preflight_command(cfg)
@@ -432,6 +639,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also run grid_adequacy.py, check-only, before sizing (opt-in)")
     ap.add_argument("--grid-target", type=float, default=0.03,
                     help="interpolation ESR --check-grid must meet (default 0.03)")
+    ap.add_argument("--workers", metavar="host1,host2,...",
+                    help="fleet mode (docs/implementation-roadmap.md item 8): shard grid "
+                        "(--check-grid) and transient-coverage probing across these hosts via "
+                        "distribute_pull.py, sync the shared onset cache before and after, and "
+                        "sync the gitignored excitation wav to every host. Mirrors "
+                        "sync_findpeak_cache.sh's own --workers flag. Either this or "
+                        "--inventory turns fleet mode on; --workers wins if both are given.")
+    ap.add_argument("--inventory", nargs="?", const="__DEFAULT__", default=None, metavar="PATH",
+                    help="fleet mode: use every host fleet_inventory.py's --probe-hosts wrote "
+                        "here, instead of an explicit --workers list, and look up each host's "
+                        "own recorded repo path from it rather than assuming "
+                        "~/work/parametric-nam. PATH is optional -- a bare --inventory means "
+                        "fleet_inventory.py's own default (~/.config/parametric-nam/fleet.toml).")
     ap.add_argument("--verify", action="store_true",
                     help="do not run anything: exit 0 only if a passing sidecar still matches")
     ap.add_argument("--dry-run", action="store_true",
@@ -467,11 +687,27 @@ def main(argv=None) -> int:
             print(f"config:      {config}\nsidecar:     {sp} ({'present' if prior else 'absent'})")
             print(f"fingerprint: {fp['fingerprint'][:16]}...  sizing: {fp['sizing_fingerprint'][:16]}...")
             print(f"excitation:  {'RE-SIZE' if resize else 'keep'} -- {why}")
-            for label, (c, s) in (("transient", transient_command(cfg, config)),
-                                  ("preflight", preflight_command(cfg))):
-                print(f"{label + ':':12s}{'SKIP -- ' + s if c is None else shlex.join(map(str, c))}")
+            fleet = None
+            if args.workers or args.inventory:
+                hosts = resolve_fleet_hosts(args.workers, args.inventory)
+                fleet = {"hosts": hosts,
+                        "repo_dirs": {h: repo_dir_for_host(h, args.inventory) for h in hosts}}
+                print(f"fleet:       {', '.join(hosts)}")
             if args.check_grid:
-                print(f"grid:        {shlex.join(map(str, grid_command(config, args.grid_target)))}")
+                if fleet:
+                    cmd, _ = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+                    print(f"grid:        {shlex.join(map(str, cmd))}  (then merge locally)")
+                else:
+                    print(f"grid:        {shlex.join(map(str, grid_command(config, args.grid_target)))}")
+            if fleet:
+                print(f"fleet-wav-sync: rsync excitation to {', '.join(fleet['hosts'])}")
+                cmd, _ = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+                print(f"{'transient:':12s}{shlex.join(map(str, cmd))}  (then merge locally)")
+            else:
+                c, s = transient_command(cfg, config)
+                print(f"{'transient:':12s}{'SKIP -- ' + s if c is None else shlex.join(map(str, c))}")
+            c, s = preflight_command(cfg)
+            print(f"{'preflight:':12s}{'SKIP -- ' + s if c is None else shlex.join(map(str, c))}")
             return 0
 
         side = run_gate(args, config, cfg, prior)
