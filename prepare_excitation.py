@@ -55,6 +55,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_pipeline import load_config, set_input_line  # noqa: E402
+from sizing_inputs import inputs_record  # noqa: E402
 from check_transient_coverage import resolve_sample_grid, _corners, _sample_interior  # noqa: E402
 from cpu_topology import physical_cpu_count  # noqa: E402
 from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
@@ -813,6 +814,17 @@ def main():
                 # other, which is the conflation that produced the broken rule in the first place.
                 "knees_v": {r["corner"]: (None if r.get("knee_v") is None else round(float(r["knee_v"]), 5))
                             for r in rows},
+                # WHAT this was sized against: the circuit bytes and the knob grid. Without it a
+                # recipe cannot say whether it still matches the config beside it -- Mesa ORANGE
+                # and RED trained on a stale excitation (6/43 and 4/43 corners failed) and the
+                # only warning was a comment in the config. See sizing_inputs.py.
+                "inputs": inputs_record(
+                    identity=identity,
+                    circuit_kind=("deck-module" if args.backend in ("ngspice-deck", "ltspice-deck")
+                                  else "schx"),
+                    knob_ranges=knob_ranges, fixed=fixed,
+                    sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
+                    conditions=cache_extra),
             }
             recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
             print(f"recorded sizing provenance into {recipe_path.name} "

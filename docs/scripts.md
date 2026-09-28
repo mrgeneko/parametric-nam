@@ -344,6 +344,18 @@ python prepare_excitation.py --backend ngspice-deck \
     --output ~/work/tmp/device_excitation.wav
 ```
 
+**What the recipe records about its own sizing** (`recipe["sizing"]["inputs"]`, added 2026-09-28,
+see `sizing_inputs.py`): the circuit's sha256 (the `.schx`, or the deck module), the knob grid
+*values* and fixed params, how many interior points were probed (`sample_grid`), and the onset
+cache's own conditions string (oversample, iterations, capture chain, solver revision) for
+forensics. The whole grid is recorded, not just its min/max, because interior points are drawn
+from every knob's full value list — editing an interior value changes what was probed. This is
+what lets a recipe say whether it still matches the config beside it. A grid or fixed-param
+difference means the sizing is not evidence about this grid; a circuit-hash difference alone is
+only advisory, since any `.schx` edit changes a content hash including ones that don't move
+saturation onset. Recipes sized before this field existed simply lack it and read as "unrecorded",
+not stale; re-running this tool adds it. `gate_config.py` (below) is the first consumer.
+
 **`--peak-max-v`** (default 40, the sweep ceiling `find_saturation_point` hunts within) needs to
 sit well above the true onset or you read a false onset off your own probe's ceiling instead of
 the real plateau — caught directly on the MOSFET-clipping pedal: `--peak-max-v 10` reported a suspicious
@@ -356,6 +368,52 @@ verifies against) but **not guaranteed**: both are sampling a non-monotonic func
 grid's true worst corner need not be one either of them probed. Two real amp channels failed such
 a check (6/43 and 4/43 corners) against an excitation whose peak had been hand-picked rather than
 measured at all.
+
+## `gate_config.py` — run the pre-generation gate, record that it passed
+
+Sequences the checks that have to happen between `scaffold_config.py` and generation, and
+writes a sidecar proving they passed for *this* circuit, grid and excitation. Design and
+rationale: [config-gate-proposal.md](config-gate-proposal.md). It is a thin sequencer over the
+tools below; it changes nothing about what any of them checks.
+
+```
+python gate_config.py --config device.config.toml [--sweep-file T3K-sweep-v3.wav]
+python gate_config.py --config device.config.toml --dry-run    # what would run, and why; writes nothing
+python gate_config.py --config device.config.toml --verify     # run nothing; exit 0 only if a passing sidecar still matches
+```
+
+**Steps, stopping at the first failure:** (0) `grid_adequacy.py`, *only* with `--check-grid`, and
+check-only — never `--apply`, which rewrites the grid and would stale a sizing that already ran;
+(1) `prepare_excitation.py`, only when needed; (2) `check_transient_coverage.py`;
+(3) `preflight.py`. A step with no mode for the config's backend is recorded as **skipped, with
+the reason**, never silently dropped. `check_input_headroom.py` is not part of the gate — it
+only warns, and step 2 is the real test of the same question.
+
+**When the excitation is re-sized** (`--resize auto`, the default). Sizing is slow, so it is not
+done speculatively: it runs if the wav is missing, or if a *previous* gate sidecar exists whose
+sizing fingerprint no longer matches (circuit, grid, oversample, backend or solver changed).
+With no previous sidecar the gate falls back on the recipe's own `sizing.inputs` block (below):
+a **grid or fixed-param mismatch** forces a re-size, a **circuit-only mismatch** is advisory (kept,
+and noted — step 2 decides), and a recipe with no such block (anything sized before it existed) is
+trusted with step 2 deciding. A prior gate outranks the recipe. `--resize always|never` override;
+`--sweep-file` is needed only if a re-size happens and the recipe's recorded source is gone.
+
+**The fingerprint** is a hash of the `.schx` (or deck module) *content*, the excitation wav
+*content*, knob ranges / fixed params / knob kinds, and the config keys that change what the checks
+measure (`oversample`, `backend`, `conv`, capture chain, …), plus the solver's source revision.
+Content, not paths, so it survives the differing layouts across machines. Training
+hyper-parameters (`epochs`, `lr`, `widths`, …) are deliberately excluded. The sidecar keeps the
+components too, so a stale gate names what changed (`sizing.schx_sha256`, `excitation_sha256`, …).
+It is also recomputed at the end and must match the value after sizing, so a circuit edited
+while a long gate was running fails the gate instead of passing on stale inputs.
+
+**Sidecar:** `<config>.gate.json` beside the config (`foo.config.toml` → `foo.config.gate.json`),
+written on pass *and* on failure (`status`, `failed_step`, `reason`). `--verify` accepts only a
+passing one. **Exit status:** 0 passed, 1 a check failed, 2 could not run.
+
+**Not yet wired in.** `run_pipeline.py` and `distribute_pull.py` do not consult the sidecar yet —
+requiring it is the next roadmap item ([implementation-roadmap.md](implementation-roadmap.md)).
+Until then, `--verify` is the hook a caller or a shell `&&` chain can use.
 
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 

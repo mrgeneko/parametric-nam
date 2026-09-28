@@ -7,6 +7,8 @@ excitation's whole calibration depends on. Exercised with find_saturation_point 
 
 See prepare_excitation.py.
 """
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -310,3 +312,46 @@ class TestSizingProvenance:
 
     def test_empty_rows_do_not_crash_the_recipe_write(self):
         assert method_summary([]) == "pre-2026-09-12/99pct-of-max"
+
+
+class TestRecipeRecordsWhatItWasSizedAgainst:
+    """recipe["sizing"]["inputs"]: the circuit bytes and the grid the onsets were measured on,
+    so a later reader can tell a recipe from a different circuit/grid apart from a current one."""
+
+    def _run(self, tmp_path, monkeypatch, range_args=("Gain=0.0,0.5,1.0",)):
+        (tmp_path / "gen_fake_ngspice.py").write_text(
+            "KNOB_NAMES = ['Gain']\ndef build_deck(**kw): return ''\n")
+        monkeypatch.setattr("prepare_excitation.worst_case_onset",
+                            lambda *a, **kw: (5.0, [{"corner": "worst", "onset_v": 5.0}]))
+        out = tmp_path / "out.wav"
+
+        def fake_run(cmd, check=True):    # stands in for build_excitation.py: writes its recipe
+            out.with_suffix(".recipe.json").write_text(json.dumps({"tool": "build_excitation.py", "args": {}}))
+        monkeypatch.setattr("prepare_excitation.subprocess.run", fake_run)
+        argv = ["prepare_excitation.py", "--backend", "ngspice-deck", "--pedal-dir", str(tmp_path),
+                "--module", "gen_fake_ngspice", "--sweep-file", "clip.wav", "--output", str(out),
+                "--fixed-params", "Level=0.5"]
+        for r in range_args:
+            argv += ["--range", r]
+        monkeypatch.setattr(sys, "argv", argv)
+        main()
+        return json.loads(out.with_suffix(".recipe.json").read_text())["sizing"]["inputs"]
+
+    def test_inputs_block_is_written(self, tmp_path, monkeypatch):
+        inp = self._run(tmp_path, monkeypatch)
+        assert inp["circuit"]["kind"] == "deck-module"
+        assert inp["circuit"]["sha256"] == hashlib.sha256((tmp_path / "gen_fake_ngspice.py").read_bytes()).hexdigest()
+        assert inp["grid"] == {"Gain": [0.0, 0.5, 1.0]}
+        assert inp["fixed"] == {"Level": 0.5}
+        assert isinstance(inp["sample_grid"], int)
+        assert "backend=ngspice-deck" in inp["conditions"]
+
+    def test_it_round_trips_through_compare(self, tmp_path, monkeypatch):
+        import sizing_inputs
+        inp = self._run(tmp_path, monkeypatch)
+        ok = sizing_inputs.compare(inp, circuit_sha256=inp["circuit"]["sha256"],
+                                   knob_ranges={"Gain": [0.0, 0.5, 1.0]}, fixed={"Level": 0.5})
+        assert ok["status"] == "match"
+        moved = sizing_inputs.compare(inp, circuit_sha256=inp["circuit"]["sha256"],
+                                      knob_ranges={"Gain": [0.0, 0.25, 0.5, 1.0]}, fixed={"Level": 0.5})
+        assert moved["status"] == "stale"

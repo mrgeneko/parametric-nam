@@ -1,6 +1,9 @@
 # Proposal: a gate script between scaffolding and generation
 
-> **STATUS: PROPOSAL. Nothing here is implemented.** Written 2026-09-23 after a live AC30
+> **STATUS (2026-09-28): sequencing step 1 is implemented as `gate_config.py`** (single-machine
+> only; see [scripts.md](scripts.md#gate_configpy--run-the-pre-generation-gate-record-that-it-passed)).
+> Steps 2–4 — making `run_pipeline.py`/`distribute_pull.py` require the sidecar, fleet mode, and
+> folding sharding into `run_pipeline.py` — are still proposals. Written 2026-09-23 after a live AC30
 > Top Boost session hit three variants of the same problem in one afternoon. See
 > [fleet-deployment-proposal.md](fleet-deployment-proposal.md) and
 > [per-item-sharding-proposal.md](per-item-sharding-proposal.md) for the existing, larger

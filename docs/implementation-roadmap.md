@@ -36,7 +36,8 @@ Sources:
       Remaining gap: no shared DNS names (aliases are per-machine) and manual key
       distribution — both fold into item 4, the generated inventory. See the status note in
       fleet §1 before retrying.
-- [ ] **2. `gate_config.py`, single-machine** (gate step 1). No dependencies. Thin sequencer:
+- [x] **2. `gate_config.py`, single-machine** (gate step 1) — **implemented 2026-09-28**, with
+      tests; `--verify` is the hook item 3 will use. No dependencies. Thin sequencer:
       `prepare_excitation` → `check_transient_coverage` → `preflight`. `grid_adequacy.py` is
       opt-in (`--check-grid`, check-only, run before sizing), not a default step.
       Writes a fingerprinted `<config>.gate.json` (hash of schx contents, excitation recipe
