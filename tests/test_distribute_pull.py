@@ -1513,9 +1513,16 @@ oversample = 8
         assert any("mkdir -p /out/slot-1" in c for c in made)
         assert any("mkdir -p /out/slot-2" in c for c in made)
 
-    def test_legacy_mode_never_mkdirs_slot_dirs(self, tmp_path, monkeypatch):
+    def test_legacy_mode_mkdirs_output_but_never_a_slot_dir(self, tmp_path, monkeypatch):
+        # Same gap as per-item's own mkdir, one level shallower: a brand-new --output with no
+        # PARENT either leaves shutil.disk_usage()'s one-level fallback missing too. Legacy
+        # mode gets ONE mkdir per worker for the plain --output -- never a "slot-N" path,
+        # which is per-item-only.
         calls, ssh_calls = self._run(monkeypatch, tmp_path, "--chunks", "6")
-        assert not any("mkdir" in " ".join(str(x) for x in c) for c in ssh_calls)
+        mkdirs = [c for c in ssh_calls if "mkdir" in " ".join(str(x) for x in c)]
+        assert len(mkdirs) == 1
+        assert "mkdir -p /out" in " ".join(str(x) for x in mkdirs[0])
+        assert not any("slot-" in str(x) for x in mkdirs[0])
 
     def test_items_override_is_used_instead_of_deriving_from_range(self, tmp_path, monkeypatch):
         # Without --items this config derives 3*2=6 -- the real assertion is that main() does

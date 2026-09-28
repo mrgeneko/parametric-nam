@@ -153,10 +153,34 @@ Sources:
       corner-by-corner PASSED report), cache-sync-after, preflight -- and a dispatch/verdict
       failure was separately confirmed to stop the gate at the right step via mutation
       testing.
-- [ ] **9. Fold shard-vs-local into `run_pipeline.py`** (gate step 4). Steps 1 and 4 of the
-      pipeline get a fleet-aware path that delegates to `distribute_pull.py`'s scheduling,
-      driven by whether an inventory is present. Do only after 8 is proven on a real device,
-      to avoid drift between two orchestration paths.
+- [x] **9. Fold shard-vs-local into `run_pipeline.py`** (gate step 4) — **implemented
+      2026-09-28**. Rescoped for the current codebase: this item's original "Steps 1 and 4"
+      meant grid-adequacy and generation, but grid-adequacy is no longer a `run_pipeline.py`
+      step at all (item 2 made it opt-in via `gate_config.py --check-grid`, itself
+      fleet-capable via item 8). Only generation (STEP 3, formerly "Step 4") remained to fold.
+      `--fleet-workers`/`--inventory` switch STEP 3 to dispatch via `distribute_pull.py --tool
+      gen_dataset` -- **explicitly opt-in**, not automatic on an inventory file's mere
+      presence (this is the most-used, most production-critical script in the repo; a silent
+      behavior change based on a file existing would be a much bigger surprise than anything
+      else on this list). Host resolution reuses `gate_config.py`'s own
+      `resolve_fleet_hosts`/`repo_dir_for_host` (item 8's functions, not a third copy);
+      `--config` expansion reuses `distribute_pull.py`'s own `gen_args_from_config` the same
+      way, rather than re-deriving STEP 3's ~40 forwarded flags a second time. Requires
+      `--config` -- no equivalent exists for a hand-typed-flags invocation.
+      **A real, general bug found building this**, not specific to `run_pipeline.py`:
+      `distribute_pull.py`'s legacy (non-per-item) dispatch never `mkdir -p`'d `--output` on
+      the worker before dispatching to it, which only ever worked because every prior
+      invocation's `--output` (or its parent) happened to already exist -- this fleet mode's
+      own fresh `~/.cache/parametric-nam/pipeline-fleet/` namespace never had, and
+      `gen_dataset_from_schx.py`'s disk-space check raised `FileNotFoundError` outright before
+      any render started. Fixed in `distribute_pull.py` itself (the same fix per-item mode's
+      own slot directories already had, one level shallower), so every future caller of the
+      legacy dispatch path benefits, not just this one. Verified against a real device on
+      `localhost` as a 1-node fleet (`duke_of_tone_distortion`): a real chunk rendered
+      end-to-end through the fleet path into the correctly-created scratch directory, with a
+      valid `params.csv` row and `.npy` file to show for it (stopped there deliberately -- the
+      full 63-combination grid wasn't needed to prove the wiring). Mutation-tested the
+      `--no-combine` forwarding and the new `mkdir -p` call (2 mutations, both caught).
 - [ ] **10. Destination-aware results** (fleet §5). Queue carries a destination so a dataset is
       collected once, where training will run.
 - [ ] **11. Pull agents, queue, dashboard** (fleet §4). Largest piece. Justified by

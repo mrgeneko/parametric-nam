@@ -6,10 +6,12 @@
 > `distribute_pull.py --tool gen_dataset` both call `--verify` and warn (not refuse) on a
 > missing/stale sidecar; `--require-gate` opts into aborting, `--skip-gate-check` silences it.
 > Refusing by default, as originally proposed, is deferred — see
-> [implementation-roadmap.md](implementation-roadmap.md) item 3. **Step 3 (fleet mode) is
-> implemented** — `--workers`/`--inventory`, sharding grid/transient-coverage via
-> `distribute_pull.py`, the excitation `.wav` sync — see roadmap item 8. Step 4 (folding
-> sharding into `run_pipeline.py`) is still a proposal. Written 2026-09-23 after a live AC30
+> [implementation-roadmap.md](implementation-roadmap.md) item 3. **Steps 3 and 4 are also
+> implemented**: step 3 (fleet mode) — `--workers`/`--inventory`, sharding
+> grid/transient-coverage via `distribute_pull.py`, the excitation `.wav` sync — see roadmap
+> item 8; step 4 (folding sharding into `run_pipeline.py`, rescoped — see roadmap item 9)
+> — `--fleet-workers`/`--inventory` dispatch STEP 3 generation via `distribute_pull.py`.
+> Written 2026-09-23 after a live AC30
 > Top Boost session hit three variants of the same problem in one afternoon. See
 > [fleet-deployment-proposal.md](fleet-deployment-proposal.md) and
 > [per-item-sharding-proposal.md](per-item-sharding-proposal.md) for the existing, larger
@@ -188,6 +190,10 @@ That's real, useful work, but it should come **after**, not alongside, this prop
    `--workers localhost`, full pass end to end). See
    [implementation-roadmap.md](implementation-roadmap.md) item 8 for exactly what shipped,
    including the verdict-check design and the two real bugs it surfaced.
-4. Fleet mode is now proven on a real device (previous step) -- fold shard-vs-local selection into
-   `run_pipeline.py` itself, reading the same inventory, retiring the manual choice between
-   the two entry points for Steps 1 and 4.
+4. ~~Fold shard-vs-local selection into `run_pipeline.py` itself, reading the same inventory,
+   retiring the manual choice between the two entry points for Steps 1 and 4.~~
+   **Implemented 2026-09-28** -- rescoped, since "Step 1" (grid adequacy) left
+   `run_pipeline.py` entirely in step 1 above. Only generation folded in
+   (`--fleet-workers`/`--inventory`); see
+   [implementation-roadmap.md](implementation-roadmap.md) item 9. All four sequencing steps
+   in this proposal are now implemented.

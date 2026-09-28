@@ -1393,6 +1393,15 @@ def main():
                                     args=(w, f"{args.output}/slot-{k}", 1), daemon=True)
                   for w in workers for k in range(w.slots)]
     else:
+        # Same gap as per-item mode's own mkdir above, just one level shallower: a brand-new
+        # --output path with no PARENT either (e.g. a namespace no prior run ever used --
+        # found for real via run_pipeline.py's fleet mode dispatching into its own fresh
+        # PIPELINE_FLEET_WORK_ROOT) leaves shutil.disk_usage()'s one-level fallback
+        # (args.output.parent) ALSO missing, and it raises FileNotFoundError outright before
+        # any render starts. mkdir -p per worker sidesteps it the same way.
+        for w in workers:
+            subprocess.run(["ssh", "-o", "BatchMode=yes", w.host, f"mkdir -p {args.output}"],
+                           capture_output=True, text=True)
         threads = [threading.Thread(target=worker_loop, args=(w, args.output, w.parallel),
                                     daemon=True) for w in workers]
     for t in threads: t.start()

@@ -87,6 +87,48 @@ def gate_check_outcome(config, ok: bool, msg: str, require_gate: bool) -> "tuple
             f"silence this message."), False
 
 
+# ---------------------------------------------------------------------------
+# Fleet mode for STEP 3 (docs/implementation-roadmap.md item 9, config-gate-proposal.md's
+# "Should run_pipeline.py decide shard-vs-local" section). --workers/--inventory delegate
+# generation to distribute_pull.py's own scheduling instead of running single-machine --
+# NOT a second copy of that scheduling logic: host resolution reuses gate_config.py's
+# resolve_fleet_hosts/repo_dir_for_host (the same functions its own fleet mode uses, item 8),
+# and the config expansion reuses distribute_pull.py's own gen_args_from_config by passing
+# --config straight through rather than re-deriving gen_cmd's ~40 flags a second time.
+# ---------------------------------------------------------------------------
+PIPELINE_FLEET_WORK_ROOT = "~/.cache/parametric-nam/pipeline-fleet"   # ON EACH WORKER -- a
+                                                                       # scratch dir separate
+                                                                       # from gate_config.py's
+                                                                       # own gate-fleet namespace
+
+
+def fleet_generate_command(config: Path, dataset_dir, hosts: "list[str]",
+                           repo_dirs: "dict[str, str]", chunks: "int | None",
+                           chunk_size: "int | None") -> "list[str]":
+    """The distribute_pull.py --tool gen_dataset invocation for fleet-mode STEP 3.
+
+    --output is a NAMESPACED REMOTE scratch dir per worker (not tied to this controller's own
+    --workspace layout at all -- a worker's home directory, and therefore what `dataset_dir`
+    would even mean there, has nothing to do with this run). --collect is the LOCAL
+    `dataset_dir` STEP 4 already expects to find results in, unchanged either way generation
+    ran. --no-combine keeps combine a single code path (STEP 4, run once, always) regardless
+    of whether STEP 3 ran single-machine or fleet. --skip-gate-check: this invocation's own
+    gate check (STEP 3's preamble, above) already ran once for this whole pipeline run;
+    distribute_pull.py re-checking it a second time would be redundant, not safer.
+    """
+    worker_flags = []
+    for h in hosts:
+        worker_flags += ["--worker", f"{h}:{repo_dirs[h]}"]
+    cmd = [PYTHON, str(HERE / "distribute_pull.py"), "--tool", "gen_dataset",
+           "--config", str(config), "--output", f"{PIPELINE_FLEET_WORK_ROOT}/{config.stem}",
+           "--collect", str(dataset_dir), "--no-combine", "--skip-gate-check", *worker_flags]
+    if chunks is not None:
+        cmd += ["--chunks", str(chunks)]
+    if chunk_size is not None:
+        cmd += ["--chunk-size", str(chunk_size)]
+    return cmd
+
+
 def apply_workspace(args) -> "list[str]":
     """Fill any unset output path from --workspace. Returns the names it defaulted.
 
@@ -1093,6 +1135,29 @@ def main():
                         "the gate is adopted; this is expected to become the default later, per "
                         "docs/implementation-roadmap.md item 3. Run `gate_config.py --config "
                         "<config>` to produce a current sidecar.")
+    g.add_argument("--fleet-workers", metavar="host1,host2,...",
+                   help="fleet mode (docs/implementation-roadmap.md item 9): STEP 3 dataset "
+                        "generation dispatches via distribute_pull.py across these hosts "
+                        "instead of rendering single-machine. Requires --config (this reuses "
+                        "distribute_pull.py's own --config expansion, not a second copy of "
+                        "it). NOT --workers -- that flag already means this pipeline's own "
+                        "single-machine render concurrency (--workers N, forwarded to "
+                        "gen_dataset_from_schx.py). Mirrors gate_config.py's --workers flag in "
+                        "spirit (a plain host list); --fleet-workers wins if both this and "
+                        "--inventory are given.")
+    g.add_argument("--inventory", nargs="?", const="__DEFAULT__", default=None, metavar="PATH",
+                   help="fleet mode: use every host fleet_inventory.py's --probe-hosts wrote "
+                        "here instead of an explicit --workers list. PATH is optional -- a "
+                        "bare --inventory means fleet_inventory.py's own default "
+                        "(~/.config/parametric-nam/fleet.toml). See --workers.")
+    g.add_argument("--fleet-chunks", type=int, default=None, metavar="N",
+                   help="fleet mode: distribute_pull.py's own --chunks (default: its own "
+                        "default, 64). See docs/scripts.md's distribute_pull.py section for "
+                        "picking a value coprime with your knob-axis sizes.")
+    g.add_argument("--fleet-chunk-size", type=int, default=None, metavar="N",
+                   help="fleet mode: distribute_pull.py's own --chunk-size (per-item dispatch "
+                        "when 1 -- see per-item-sharding-proposal.md). Default: the legacy "
+                        "--chunks-based path, unchanged, same as distribute_pull.py itself.")
     g.add_argument("--skip-preflight-check", action="store_true",
                    help="skip the STEP 2 knob-sanity preflight. Probes a handful of short clips "
                         "through the oracle and ABORTS (like the grid check, unlike the headroom "
@@ -1372,61 +1437,82 @@ def main():
 
         if run_generate:
             section("STEP 3 / 5 — Dataset Generation", fh)
-            gen_cmd = [
-                PYTHON, BATCH,
-                "--backend", args.backend,
-                "--output",  dataset_dir,
-                "--workers", args.workers,
-            ]
-            if args.schx:          gen_cmd += ["--schx",         args.schx]
-            if args.circuit:       gen_cmd += ["--circuit",      args.circuit]
-            if args.pedal_dir:     gen_cmd += ["--pedal-dir",    args.pedal_dir]
-            if args.module:        gen_cmd += ["--module",       args.module]
-            if args.probe_node != "OUT": gen_cmd += ["--probe-node", args.probe_node]
-            if args.maxstep != 3e-6: gen_cmd += ["--maxstep",    args.maxstep]
-            if args.knobs:         gen_cmd += ["--knobs",        args.knobs]
-            if args.input:         gen_cmd += ["--input",        args.input]
-            if args.values:        gen_cmd += ["--values",       args.values]
-            if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
-            if args.knob_kind:     gen_cmd += ["--knob-kind",    args.knob_kind]
-            if args.skip_transient_check: gen_cmd += ["--skip-transient-check"]
-            if args.transient_peak is not None: gen_cmd += ["--transient-peak", args.transient_peak]
-            if args.transient_margin != 1.0: gen_cmd += ["--transient-margin", args.transient_margin]
-            if args.timeout_mult != 1.0: gen_cmd += ["--timeout-mult", args.timeout_mult]
-            if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
-            if args.koren:         gen_cmd += ["--koren"]
-            if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
-            if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
-            if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
-            if args.conv:          gen_cmd += ["--conv",        args.conv]
-            if args.method:        gen_cmd += ["--method",      args.method]
-            if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
-            if args.oversample != "2": gen_cmd += ["--oversample", args.oversample]
-            if args.iterations != 256: gen_cmd += ["--iterations", str(args.iterations)]
-            if args.trunc_target != 1e-3: gen_cmd += ["--trunc-target", args.trunc_target]
-            if args.random:        gen_cmd += ["--random",       args.random]
-            if args.no_anchors:    gen_cmd += ["--no-anchors"]
-            if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
-            if args.start_rung:    gen_cmd += ["--start-rung",   args.start_rung]
-            # Forward the capture chain EXPLICITLY. run_pipeline reads config.toml via
-            # set_defaults, so a per-device override lands in `args` here -- but the renderer
-            # is a separate process with its own defaults, so an override must be passed or it
-            # is silently dropped. --no-capture-chain likewise cannot be expressed by omission,
-            # since the renderer defaults the chain ON. See capture_chain.resolve().
-            _chain = _cc_resolve(args)
-            if _chain is None:
-                gen_cmd += ["--no-capture-chain"]
+
+            if args.fleet_workers or args.inventory:
+                # Fleet mode (docs/implementation-roadmap.md item 9): delegate to
+                # distribute_pull.py's own scheduling instead of the ~40-flag single-machine
+                # gen_cmd below. Requires --config -- this reuses distribute_pull.py's own
+                # --config expansion (gen_args_from_config), not a second copy of gen_cmd.
+                if not args.config:
+                    log("ERROR: --fleet-workers/--inventory needs --config -- fleet-mode "
+                        "generation dispatches via distribute_pull.py --config, which has no "
+                        "equivalent for hand-typed flags here. Pass --config, or drop the "
+                        "fleet flags to render single-machine.", fh)
+                    sys.exit(2)
+                from gate_config import resolve_fleet_hosts, repo_dir_for_host
+                hosts = resolve_fleet_hosts(args.fleet_workers, args.inventory)
+                repo_dirs = {h: repo_dir_for_host(h, args.inventory) for h in hosts}
+                log(f"fleet mode: dispatching generation across {', '.join(hosts)} via "
+                    f"distribute_pull.py (see PIPELINE_FLEET_WORK_ROOT for each worker's "
+                    f"scratch dir)", fh)
+                gen_cmd = fleet_generate_command(args.config, dataset_dir, hosts, repo_dirs,
+                                                 args.fleet_chunks, args.fleet_chunk_size)
             else:
-                gen_cmd += ["--capture-hp-hz", _chain["corner_hz"],
-                            "--capture-order",  _chain["order"]]
-            for r in (args.ranges or []):
-                gen_cmd += ["--range", r]
-            for b in (args.bounds or []):
-                gen_cmd += ["--bounds", b]
-            for g in (args.gang or []):
-                gen_cmd += ["--gang", g]
-            for s in (args.steps or []):
-                gen_cmd += ["--steps", s]
+                gen_cmd = [
+                    PYTHON, BATCH,
+                    "--backend", args.backend,
+                    "--output",  dataset_dir,
+                    "--workers", args.workers,
+                ]
+                if args.schx:          gen_cmd += ["--schx",         args.schx]
+                if args.circuit:       gen_cmd += ["--circuit",      args.circuit]
+                if args.pedal_dir:     gen_cmd += ["--pedal-dir",    args.pedal_dir]
+                if args.module:        gen_cmd += ["--module",       args.module]
+                if args.probe_node != "OUT": gen_cmd += ["--probe-node", args.probe_node]
+                if args.maxstep != 3e-6: gen_cmd += ["--maxstep",    args.maxstep]
+                if args.knobs:         gen_cmd += ["--knobs",        args.knobs]
+                if args.input:         gen_cmd += ["--input",        args.input]
+                if args.values:        gen_cmd += ["--values",       args.values]
+                if args.fixed_params:  gen_cmd += ["--fixed-params", args.fixed_params]
+                if args.knob_kind:     gen_cmd += ["--knob-kind",    args.knob_kind]
+                if args.skip_transient_check: gen_cmd += ["--skip-transient-check"]
+                if args.transient_peak is not None: gen_cmd += ["--transient-peak", args.transient_peak]
+                if args.transient_margin != 1.0: gen_cmd += ["--transient-margin", args.transient_margin]
+                if args.timeout_mult != 1.0: gen_cmd += ["--timeout-mult", args.timeout_mult]
+                if args.speaker:       gen_cmd += ["--speaker",      args.speaker]
+                if args.koren:         gen_cmd += ["--koren"]
+                if args.ot_damp != "47k": gen_cmd += ["--ot-damp", args.ot_damp]
+                if args.ot_snub != "10n": gen_cmd += ["--ot-snub", args.ot_snub]
+                if args.nfb_comp:      gen_cmd += ["--nfb-comp",    args.nfb_comp]
+                if args.conv:          gen_cmd += ["--conv",        args.conv]
+                if args.method:        gen_cmd += ["--method",      args.method]
+                if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
+                if args.oversample != "2": gen_cmd += ["--oversample", args.oversample]
+                if args.iterations != 256: gen_cmd += ["--iterations", str(args.iterations)]
+                if args.trunc_target != 1e-3: gen_cmd += ["--trunc-target", args.trunc_target]
+                if args.random:        gen_cmd += ["--random",       args.random]
+                if args.no_anchors:    gen_cmd += ["--no-anchors"]
+                if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
+                if args.start_rung:    gen_cmd += ["--start-rung",   args.start_rung]
+                # Forward the capture chain EXPLICITLY. run_pipeline reads config.toml via
+                # set_defaults, so a per-device override lands in `args` here -- but the renderer
+                # is a separate process with its own defaults, so an override must be passed or it
+                # is silently dropped. --no-capture-chain likewise cannot be expressed by omission,
+                # since the renderer defaults the chain ON. See capture_chain.resolve().
+                _chain = _cc_resolve(args)
+                if _chain is None:
+                    gen_cmd += ["--no-capture-chain"]
+                else:
+                    gen_cmd += ["--capture-hp-hz", _chain["corner_hz"],
+                                "--capture-order",  _chain["order"]]
+                for r in (args.ranges or []):
+                    gen_cmd += ["--range", r]
+                for b in (args.bounds or []):
+                    gen_cmd += ["--bounds", b]
+                for g in (args.gang or []):
+                    gen_cmd += ["--gang", g]
+                for s in (args.steps or []):
+                    gen_cmd += ["--steps", s]
             timings["generate"] = stream_run(gen_cmd, fh, "Generation")
 
         check_missing_combinations(dataset_dir, fh, args.allow_missing_combos)

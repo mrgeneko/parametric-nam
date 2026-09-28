@@ -787,8 +787,49 @@ consume it (`fleet_inventory.load_inventory(path=None) -> {name: facts}`, `{}` i
 doesn't exist -- not an error). See [`examples/fleet.example.toml`](../examples/fleet.example.toml)
 for what a filled-in file looks like.
 
-**Not yet consumed anywhere.** `distribute_pull.py`/`run_pipeline.py` don't read this file yet;
-they still take `--worker`/`--config` directly. Wiring that in is future roadmap work.
+**Consumed via `--inventory`** by `gate_config.py`'s fleet mode (above) and `run_pipeline.py`'s
+own fleet mode (below), both through `gate_config.resolve_fleet_hosts`/`repo_dir_for_host` --
+one source of truth for fleet-host resolution, not three. `distribute_pull.py` itself still
+takes `--worker` directly, not this file.
+
+## `run_pipeline.py` fleet mode — STEP 3 dispatched across a fleet
+
+(2026-09-28, config-gate-proposal.md's "Should run_pipeline.py decide shard-vs-local" section,
+[implementation-roadmap.md](implementation-roadmap.md) item 9.) `--fleet-workers
+host1,host2,...` (a plain host list -- **not** `--workers`, which already means this
+pipeline's own single-machine render concurrency and is forwarded to
+`gen_dataset_from_schx.py` unchanged) or `--inventory [PATH]` (every host
+`fleet_inventory.py --probe-hosts` recorded) switches STEP 3 from rendering single-machine to
+dispatching via `distribute_pull.py --tool gen_dataset` across the named hosts. **Requires
+`--config`** — fleet dispatch reuses `distribute_pull.py`'s own `--config` expansion
+(`gen_args_from_config`) rather than re-deriving `gen_cmd`'s ~40 flags a second time, and that
+expansion has no equivalent for a config-less, hand-typed-flags invocation.
+
+```bash
+python run_pipeline.py --config device.config.toml --workspace ~/runs/device_run1 \
+    --fleet-workers mac-1,linux-1
+python run_pipeline.py --config device.config.toml --workspace ~/runs/device_run1 \
+    --inventory --fleet-chunk-size 1   # per-item dispatch across every inventoried host
+```
+
+Each worker gets its own namespaced scratch directory under
+`~/.cache/parametric-nam/pipeline-fleet/<config-stem>` (separate from `gate_config.py`'s own
+`gate-fleet` namespace, so the two fleet modes never collide on the same host) --
+**`--collect` is the run's own local `dataset_dir`**, the same directory STEP 4 (Combine)
+already expects results in. `--no-combine` is always passed to the dispatch, so combining
+stays the ONE code path (STEP 4, run once) regardless of whether STEP 3 rendered
+single-machine or fleet. `--fleet-chunks`/`--fleet-chunk-size` forward to
+`distribute_pull.py`'s own `--chunks`/`--chunk-size` (per-item dispatch, Phases 1-3) when
+given; omitted, distribute_pull.py's own defaults apply.
+
+**A real bug found building this**, not a hypothetical: `distribute_pull.py`'s legacy
+(non-per-item) dispatch never created `--output` on the worker before dispatching to it --
+harmless as long as `--output` (or its parent) already existed, which every prior manual
+invocation happened to have, but this fleet mode's own fresh `pipeline-fleet` namespace never
+existed anywhere before, and `gen_dataset_from_schx.py`'s disk-space check
+(`shutil.disk_usage`) raised `FileNotFoundError` outright before any render started. Fixed
+with an `ssh ... mkdir -p` per worker before dispatch, the same fix per-item mode's own slot
+directories already had (see `distribute_pull.py`'s per-item dispatch section above).
 
 ## `sync_findpeak_cache.sh` — warm the onset cache across a fleet before sharding
 

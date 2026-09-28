@@ -187,6 +187,13 @@ train — with per-step timing, a durable **release folder**, and macOS/Linux
 Why each gate exists, and what to do when one fires, is in
 [`docs/checklist.md`](docs/checklist.md).
 
+**Fleet mode** (`--fleet-workers host1,host2` or `--inventory [PATH]`,
+docs/implementation-roadmap.md item 9): STEP 3 dispatches generation across a fleet via
+`distribute_pull.py`'s own scheduling instead of rendering single-machine — Combine (STEP 4)
+stays the one code path either way. Requires `--config`. See
+[`docs/scripts.md`](docs/scripts.md#run_pipelinepy-fleet-mode) for the design and what it does
+and doesn't shard.
+
 `--workspace <dir>` puts everything one run produces under a single directory —
 `dataset/`, `checkpoints/`, `release/`, the model and the log — instead of naming
 `--dataset-dir`/`--checkpoint-dir`/`--nam-output`/`--release-dir`/`--log` separately. A
@@ -253,7 +260,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | Script | Purpose |
 |---|---|
 | `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
-| `fleet_inventory.py` | `--probe-hosts` measures per-host cores/backends/accelerator/VRAM over SSH, plus ssh user/identity file from this machine's own `ssh -G`, and writes a reviewable `~/.config/parametric-nam/fleet.toml`; `train`/`max_render_s` are always left for you to set. Not yet consumed by `distribute_pull.py`/`run_pipeline.py` |
+| `fleet_inventory.py` | `--probe-hosts` measures per-host cores/backends/accelerator/VRAM over SSH, plus ssh user/identity file from this machine's own `ssh -G`, and writes a reviewable `~/.config/parametric-nam/fleet.toml`; `train`/`max_render_s` are always left for you to set. Consumed via `--inventory` by `gate_config.py`'s and `run_pipeline.py`'s own fleet modes; `distribute_pull.py` itself still takes `--worker` directly, not the inventory |
 | `gate_config.py` | Runs the pre-generation gate in order (excitation sizing → transient coverage → preflight) and writes a fingerprinted `<config>.gate.json`; `--verify` refuses when the circuit, grid or excitation changed since it passed |
 | `preflight.py` | Pre-generation sanity gate — probes a handful of points through the oracle before a full render; also provides `--find-peak` (saturation onset) |
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |

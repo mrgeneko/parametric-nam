@@ -531,6 +531,60 @@ def test_build_train_cmd_forwards_explicit_stale_rules_including_zero():
     assert cmd[cmd.index("--stale-epochs") + 1] == "900"
 
 
+class TestFleetGenerateCommand:
+    """STEP 3 fleet dispatch (docs/implementation-roadmap.md item 9): delegates to
+    distribute_pull.py rather than re-deriving gen_cmd's ~40 flags a second time."""
+
+    def test_dispatches_gen_dataset_via_distribute_pull(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cmd = rp.fleet_generate_command(cfg, tmp_path / "dataset", ["h1"], {"h1": "/repo"},
+                                        None, None)
+        assert cmd[1].endswith("distribute_pull.py")
+        assert cmd[cmd.index("--tool") + 1] == "gen_dataset"
+        assert cmd[cmd.index("--config") + 1] == str(cfg)
+
+    def test_collect_is_the_local_dataset_dir_output_is_a_remote_scratch_dir(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        dataset_dir = tmp_path / "runs" / "my_run" / "dataset"
+        cmd = rp.fleet_generate_command(cfg, dataset_dir, ["h1"], {"h1": "/repo"}, None, None)
+        assert cmd[cmd.index("--collect") + 1] == str(dataset_dir)
+        output = cmd[cmd.index("--output") + 1]
+        assert output != str(dataset_dir)   # NOT the controller's own absolute workspace path
+        assert output.startswith("~/") and cfg.stem in output
+
+    def test_no_combine_so_step_4_stays_the_one_combine_path(self, tmp_path):
+        cmd = rp.fleet_generate_command(tmp_path / "d.config.toml", tmp_path / "ds",
+                                        ["h1"], {"h1": "/r"}, None, None)
+        assert "--no-combine" in cmd
+
+    def test_skip_gate_check_avoids_a_redundant_second_gate_check(self, tmp_path):
+        cmd = rp.fleet_generate_command(tmp_path / "d.config.toml", tmp_path / "ds",
+                                        ["h1"], {"h1": "/r"}, None, None)
+        assert "--skip-gate-check" in cmd
+
+    def test_worker_flags_built_per_host(self, tmp_path):
+        cmd = rp.fleet_generate_command(tmp_path / "d.config.toml", tmp_path / "ds",
+                                        ["h1", "h2"], {"h1": "/repo1", "h2": "/repo2"}, None, None)
+        assert cmd.count("--worker") == 2
+        assert "h1:/repo1" in cmd and "h2:/repo2" in cmd
+
+    def test_chunks_and_chunk_size_forwarded_only_when_given(self, tmp_path):
+        base = rp.fleet_generate_command(tmp_path / "d.config.toml", tmp_path / "ds",
+                                         ["h1"], {"h1": "/r"}, None, None)
+        assert "--chunks" not in base and "--chunk-size" not in base
+        full = rp.fleet_generate_command(tmp_path / "d.config.toml", tmp_path / "ds",
+                                         ["h1"], {"h1": "/r"}, 32, 1)
+        assert full[full.index("--chunks") + 1] == "32"
+        assert full[full.index("--chunk-size") + 1] == "1"
+
+    def test_different_configs_get_different_remote_scratch_dirs(self, tmp_path):
+        cmd_a = rp.fleet_generate_command(tmp_path / "amp_a.config.toml", tmp_path / "ds",
+                                          ["h1"], {"h1": "/r"}, None, None)
+        cmd_b = rp.fleet_generate_command(tmp_path / "amp_b.config.toml", tmp_path / "ds",
+                                          ["h1"], {"h1": "/r"}, None, None)
+        assert cmd_a[cmd_a.index("--output") + 1] != cmd_b[cmd_b.index("--output") + 1]
+
+
 class TestGateCheckOutcome:
     """gate_check_outcome: the WARN-vs-ABORT decision for a gate_config.py --verify result,
     isolated from the verify_gate() call itself (see test_gate_config.py) and from main()."""
