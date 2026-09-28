@@ -287,6 +287,11 @@ to the machine that would train on it, because nothing in the system expressed w
 belongs. Options: an S3-compatible store on the training host, or simply a per-job "sink host"
 that workers write to directly.
 
+> **STATUS (2026-09-28): the per-job sink host is implemented** as `distribute_pull.py
+> --collect HOST:DIR` -- see [implementation-roadmap.md](implementation-roadmap.md) item 10.
+> Workers write to it directly when they can reach it, else the shard is relayed through the
+> controller without being stored there. The S3-style store was not built.
+
 ## What not to do
 
 - **Kubernetes, Nomad, Celery** — operational burden out of proportion to a handful of

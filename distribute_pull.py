@@ -876,6 +876,23 @@ def _repair_missing(local_dir: Path, config_path, extra_args, missing_npy, repo_
     return ok
 
 
+def _check_expected(csv_idx, npy_idx, sizes, expected_count) -> bool:
+    """The exact-count and uniform-size assertions, shared by the local and sink collects.
+    Logs each violation; returns True only when there are none."""
+    ok = True
+    if len(csv_idx) != expected_count or len(npy_idx) != expected_count:
+        ok = False
+        log(f"  collect: WARNING expected {expected_count} combination(s), got "
+            f"{len(csv_idx)} params row(s) / {len(npy_idx)} .npy file(s) -- some "
+            f"combination was never rendered anywhere, not just misfiled between workers.")
+    if len(set(sizes)) > 1:
+        ok = False
+        log(f"  collect: WARNING .npy files are not all the same byte size ({sorted(set(sizes))}) "
+            f"-- one device's renders should be uniform length; this usually means a "
+            f"truncated or corrupted transfer.")
+    return ok
+
+
 def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), repair_missing=False,
             labels=None, expected_count=None):
     """Pull every worker's shard into one local directory, merging params.csv correctly.
@@ -990,21 +1007,218 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
     # anywhere. Only enforced when the caller knows N (per-item mode always does; the legacy
     # --chunks path does not always have one, so this stays opt-in).
     if expected_count is not None:
-        if len(csv_idx) != expected_count or len(npy_idx) != expected_count:
-            consistent = False
-            log(f"  collect: WARNING expected {expected_count} combination(s), got "
-                f"{len(csv_idx)} params row(s) / {len(npy_idx)} .npy file(s) -- some "
-                f"combination was never rendered anywhere, not just misfiled between workers.")
         sizes = {p.stat().st_size for p in local_dir.glob("sig/**/*.npy")}
-        if len(sizes) > 1:
+        if not _check_expected(csv_idx, npy_idx, sizes, expected_count):
             consistent = False
-            log(f"  collect: WARNING .npy files are not all the same byte size ({sorted(sizes)}) "
-                f"-- one device's renders should be uniform length; this usually means a "
-                f"truncated or corrupted transfer.")
     for f in scratch.glob("*.csv"):
         f.unlink()
     scratch.rmdir()
     return consistent
+
+
+# ---------------------------------------------------------------------------
+# Destination-aware collect (fleet-deployment-proposal.md §5, implementation-roadmap.md item
+# 10). `--collect HOST:DIR` merges the shards ON `HOST` -- the machine that will train on the
+# dataset -- instead of on this controller. The motivating run collected 19 GB onto the
+# controller and then copied it again to the trainer; nothing said where the dataset belonged.
+# Per shard, in order of preference: (a) the worker IS the sink: a local copy on that host,
+# no network at all; (b) direct: the worker rsyncs to the sink itself (needs worker->sink ssh,
+# which nothing guarantees, so it falls through on any failure); (c) relay: tar piped
+# worker -> controller -> sink, one pass, nothing written to this controller's disk.
+# ---------------------------------------------------------------------------
+_SINK_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*):(.+)$")
+
+
+def parse_collect_dest(arg: str) -> "tuple[str | None, str]":
+    """`HOST:DIR` -> (HOST, DIR); anything else -> (None, arg), i.e. a local directory. A local
+    directory whose name contains a colon needs a `./` prefix (`./data:v2`)."""
+    m = _SINK_RE.match(arg)
+    return (m.group(1), m.group(2)) if m else (None, arg)
+
+
+@dataclass
+class Sink:
+    host: str
+    dir: str
+    repo: "str | None" = None       # sink's checkout, for the remote --combine
+    target: "str | None" = None     # how a WORKER should address the sink: [user@]address
+    port: "int | None" = None
+
+
+def sink_from_inventory(host: str, dir_: str, inv: dict, repo: "str | None" = None) -> Sink:
+    e = inv.get(host) or {}
+    addr = e.get("address") or host
+    target = f"{e['user']}@{addr}" if e.get("user") else addr
+    port = int(e["port"]) if e.get("port") and int(e["port"]) != 22 else None
+    return Sink(host, dir_, repo or e.get("repo"), target, port)
+
+
+def build_sink(host, path, inventory_arg, sink_repo, workers) -> Sink:
+    """Sink for `--collect HOST:DIR`. Checkout for the remote --combine: --sink-repo, else the
+    --worker dir if the sink is also a worker, else the inventory's `repo` (only consulted when
+    --inventory was given, like every other inventory use here)."""
+    import fleet_inventory
+    inv = (fleet_inventory.load_inventory(
+               None if inventory_arg == "__DEFAULT__" else Path(inventory_arg).expanduser())
+           if inventory_arg is not None else {})
+    same = next((w.dir for w in workers if w.host == host), None)
+    return sink_from_inventory(host, path, inv, sink_repo or same)
+
+
+def _ssh_run(host: str, cmd: str, timeout: float) -> "subprocess.CompletedProcess":
+    try:
+        return subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes") + [cmd],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess([], 255, "", f"{type(e).__name__}: {e}")
+
+
+def transfer_shard_to_sink(worker_host: str, out: str, sink: Sink, sink_dir: str,
+                           direct: bool = True, timeout: float = 6 * 3600.0) -> "tuple[bool, str]":
+    """Move one worker output dir's contents (minus params.csv, which the caller merges and
+    writes LAST) into `sink_dir` on the sink. Returns (ok, how)."""
+    out = out.rstrip("/")
+    excl = "--exclude=/params.csv"
+    same_host = worker_host == sink.host
+    if same_host and out == sink_dir:
+        return True, "already in place"
+    if same_host:
+        r = _ssh_run(worker_host, f"rsync -a {excl} {_remote_quote(out)}/ {_remote_quote(sink_dir)}/",
+                     timeout)
+        if r.returncode == 0:
+            return True, "local copy on the sink"
+    elif direct and _RSYNC_SAFE.match(out) and _RSYNC_SAFE.match(sink_dir):
+        ssh_e = "ssh -o BatchMode=yes -o ConnectTimeout=8" + (f" -p {sink.port}" if sink.port else "")
+        r = _ssh_run(worker_host, f"rsync -a {excl} -e {shlex.quote(ssh_e)} {out}/ "
+                                  f"{sink.target or sink.host}:{sink_dir}/", timeout)
+        if r.returncode == 0:
+            return True, "direct worker -> sink"
+        log(f"  collect: {worker_host} could not reach the sink directly "
+            f"({r.stderr.strip()[:100] or 'rc ' + str(r.returncode)}) -- relaying through this machine")
+    try:
+        src = subprocess.Popen(
+            ssh_target.ssh_argv(worker_host, "-o", "BatchMode=yes")
+            + [f"cd {_remote_quote(out)} && COPYFILE_DISABLE=1 tar --exclude=params.csv -cf - ."],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            dst = _ssh_run_stdin(sink.host, f"tar -C {_remote_quote(sink_dir)} -xf -", src.stdout,
+                                 timeout)
+        finally:
+            src.stdout.close()
+            src.wait()
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"{type(e).__name__}: {e}"
+    if src.returncode != 0 or dst.returncode != 0:
+        return False, (dst.stderr.strip() or src.stderr.read().decode(errors="replace").strip()
+                       or f"tar exit {src.returncode}/{dst.returncode}")[:150]
+    return True, "relayed through this machine"
+
+
+def _ssh_run_stdin(host: str, cmd: str, stdin, timeout: float) -> "subprocess.CompletedProcess":
+    return subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes") + [cmd], stdin=stdin,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def list_sink_npys(sink_host: str, sink_dir: str) -> "tuple[list[int], list[int]] | None":
+    """(indices, byte sizes) of every sig/**/*.npy on the sink, or None if it can't be asked."""
+    r = _ssh_run(sink_host, f"cd {_remote_quote(sink_dir)} && [ -d sig ] && "
+                            f"find sig -name '*.npy' -exec wc -c {{}} + || true", 600)
+    if r.returncode != 0:
+        return None
+    idx, sizes = [], []
+    for ln in r.stdout.splitlines():
+        parts = ln.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        stem = posixpath.basename(parts[1].strip())[:-4]
+        if stem.isdigit():
+            idx.append(int(stem))
+            sizes.append(int(parts[0]))
+    return sorted(idx), sizes
+
+
+def combine_command(sink: Sink) -> "str | None":
+    if not sink.repo:
+        return None
+    return (f"cd {_remote_quote(sink.repo)} && ./.venv/bin/python -u gen_dataset_from_schx.py "
+            f"--combine {_remote_quote(sink.dir)}")
+
+
+def _collect_to_sink(workers, remote_out, sink: Sink, no_combine=False, labels=None,
+                     expected_count=None, direct=True) -> bool:
+    """`_collect` + combine, with the merged dataset landing on `sink` instead of here. Same
+    ordering guarantee (every params.csv is read BEFORE the merged one is written, and the
+    merged one goes LAST), same consistency checks; --repair-missing is not supported because
+    a repair renders locally."""
+    import shutil
+    import tempfile
+    labels = list(labels) if labels is not None else [w.host for w in workers]
+    sink_dir = resolve_remote_dir(sink.host, sink.dir).rstrip("/")
+    mk = _ssh_run(sink.host, f"mkdir -p {_remote_quote(sink_dir)}", 30)
+    if mk.returncode != 0:
+        log(f"  collect: cannot create {sink.host}:{sink_dir}: {mk.stderr.strip()[:150]}")
+        return False
+    scratch = Path(tempfile.mkdtemp(prefix="collect_"))
+    try:
+        got = []
+        for w, out, label in zip(workers, remote_out, labels):
+            dst = scratch / f"{label}.csv"
+            r = subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/params.csv",
+                                str(dst)], capture_output=True, text=True)
+            if r.returncode == 0 and dst.exists():
+                got.append(dst)
+            else:
+                log(f"  collect: {label} has no params.csv (empty shard?) -- skipped")
+        xfer_failed = False
+        for w, out, label in zip(workers, remote_out, labels):
+            ok, how = transfer_shard_to_sink(w.host, out, sink, sink_dir, direct=direct)
+            log(f"  collect: {label} -> {sink.host}:{sink_dir}: {how if ok else 'FAILED: ' + how}")
+            xfer_failed |= not ok
+        n_rows, csv_idx = merge_params(got, scratch / "params.csv")
+        if n_rows == 0:
+            log("  collect: no params.csv found on any worker -- nothing merged")
+            return False
+        ok, detail = sync_path_to_worker(sink.host, sink_dir, scratch / "params.csv", "params.csv")
+        if not ok:
+            log(f"  collect: could not write merged params.csv on the sink: {detail}")
+            return False
+        listing = list_sink_npys(sink.host, sink_dir)
+        if listing is None:
+            log("  collect: could not list the sink's sig/ -- not combining")
+            return False
+        npy_idx, sizes = listing
+        log(f"  collect: {len(csv_idx)} params rows, {len(npy_idx)} .npy files -> "
+            f"{sink.host}:{sink_dir}")
+        orphan_npy = sorted(set(npy_idx) - set(csv_idx))
+        orphan_csv = sorted(set(csv_idx) - set(npy_idx))
+        consistent = not orphan_npy and not orphan_csv and not xfer_failed
+        if orphan_npy:
+            log(f"  collect: WARNING {len(orphan_npy)} .npy file(s) with no params.csv row: {orphan_npy}")
+        if orphan_csv:
+            log(f"  collect: WARNING {len(orphan_csv)} params.csv row(s) with no .npy file: {orphan_csv}")
+        if xfer_failed:
+            log("  collect: WARNING at least one shard did not transfer -- see above.")
+        if expected_count is not None and not _check_expected(csv_idx, npy_idx, sizes, expected_count):
+            consistent = False
+        why = should_combine(consistent, no_combine)
+        if why is not None:
+            log(f"  collect: NOT combining -- {why}")
+            return consistent
+        cmd = combine_command(sink)
+        if cmd is None:
+            log(f"  collect: NOT combining -- no checkout known for {sink.host} (pass --sink-repo); "
+                f"run 'gen_dataset_from_schx.py --combine {sink_dir}' there when ready.")
+            return consistent
+        log(f"  combining on {sink.host} -> outputs.npy ...")
+        r = _ssh_run(sink.host, cmd, 6 * 3600.0)
+        tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-5:])
+        if r.returncode != 0:
+            log(f"  collect: combine FAILED on {sink.host} (rc {r.returncode}):\n{tail}")
+            return False
+        log(f"  combine on {sink.host} done:\n{tail}")
+        return consistent
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def should_combine(consistent: bool, no_combine: bool):
@@ -1277,12 +1491,21 @@ def main():
                          "possible -- a chunk that fails on one machine and succeeds on another "
                          "is a machine problem, not a data problem, and the resume-skip means "
                          "the retry only renders what is still missing (default 1)")
-    ap.add_argument("--collect", metavar="LOCAL_DIR", default=None,
-                    help="after rendering, pull every worker's shard into LOCAL_DIR and merge "
+    ap.add_argument("--collect", metavar="[HOST:]DIR", default=None,
+                    help="after rendering, pull every worker's shard into DIR (a local directory, "
+                         "or HOST:DIR to collect ON the machine that will train -- see "
+                         "docs/scripts.md) and merge "
                          "params.csv properly. Do NOT hand-roll this with rsync: sig/ merges "
                          "cleanly (global-index filenames) but params.csv is one file per worker "
                          "holding only that worker's rows, so a naive rsync leaves you the LAST "
                          "worker's metadata describing the whole grid.")
+    ap.add_argument("--sink-repo", metavar="DIR", default=None,
+                    help="--collect HOST:DIR: the sink's parametric-nam checkout, used to run "
+                         "--combine there. Default: that host's --worker dir, else its "
+                         "inventory `repo` (needs --inventory).")
+    ap.add_argument("--no-direct-sink", action="store_true",
+                    help="--collect HOST:DIR: skip the worker->sink rsync attempt and always "
+                         "relay through this machine.")
     ap.add_argument("--no-combine", action="store_true",
                     help="--collect: stop after merging, without building outputs.npy. Combine "
                          "NORMALISES the data and records output_scale into config.json, and for "
@@ -1365,6 +1588,12 @@ def main():
     ap.add_argument("--", dest="_sep", nargs="?", help=argparse.SUPPRESS)
     args, gen_args = ap.parse_known_args()
     configure_ssh(args.inventory)
+    sink_host, sink_path = parse_collect_dest(args.collect) if args.collect else (None, None)
+    if sink_host:
+        if args.tool != "gen_dataset":
+            ap.error("--collect HOST:DIR is only supported for --tool gen_dataset")
+        if args.repair_missing:
+            ap.error("--repair-missing renders locally, so it can't be combined with --collect HOST:DIR")
     if gen_args and gen_args[0] == "--":
         gen_args = gen_args[1:]
     job = JOBS[args.tool]
@@ -1558,6 +1787,9 @@ def main():
 
     if args.collect:
         log(f"collecting shards into {args.collect} ...")
+        sink = None
+        if sink_host:
+            sink = build_sink(sink_host, sink_path, args.inventory, args.sink_repo, workers)
         remote_out = []
         for w in workers:
             # resolve the output path ON THE WORKER: --output is commonly '~/dir', and a tilde
@@ -1578,9 +1810,17 @@ def main():
                     collect_workers.append(w)
                     collect_remote_out.append(f"{ro}/slot-{k}")
                     collect_labels.append(f"{w.host}-slot{k}")
-            job.collect(collect_workers, collect_remote_out, args.collect, args.config, extra_args,
-                       args.no_combine, args.repair_missing, labels=collect_labels,
-                       expected_count=item_count)
+            if sink:
+                _collect_to_sink(collect_workers, collect_remote_out, sink, args.no_combine,
+                                 labels=collect_labels, expected_count=item_count,
+                                 direct=not args.no_direct_sink)
+            else:
+                job.collect(collect_workers, collect_remote_out, args.collect, args.config, extra_args,
+                           args.no_combine, args.repair_missing, labels=collect_labels,
+                           expected_count=item_count)
+        elif sink:
+            _collect_to_sink(workers, remote_out, sink, args.no_combine,
+                             direct=not args.no_direct_sink)
         else:
             job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine,
                        args.repair_missing)

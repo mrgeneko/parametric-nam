@@ -695,7 +695,27 @@ Four things that are easy to get wrong:
   missing an input fails or quarantines every chunk it touches. A missing local path is a usage
   error before any ssh; no worker able to receive everything is also an error. Replaces
   `distribute_gen.sh --sync-file`; `gate_config.py`'s excitation-wav sync uses the same code.
-- **A fast-failing worker is worse than a slow one.** It drains the queue faster than healthy
+- **`--collect HOST:DIR` — collect where the dataset will be trained.** A plain `--collect DIR`
+  lands everything on this controller; if training happens elsewhere the dataset then crosses
+  the network a second time (a 19 GB dataset did exactly that). With `HOST:DIR` the merge and
+  the `--combine` happen **on HOST**, and no shard data is written to this machine (only the small per-worker
+  `params.csv` files pass through a scratch directory here, removed afterwards). Per shard, in
+  order: the worker *is* the sink, so a local copy on that host (no network); else the worker
+  rsyncs to the sink itself (`--no-direct-sink` skips this); else, if the worker can't reach
+  the sink (nothing guarantees worker-to-worker ssh), the shard is streamed worker → this
+  machine → sink as a tar pipe, in one pass, never stored here. Same
+  ordering guarantee as a local collect (every `params.csv` is read before the merged one is
+  written, and the merged one goes last, so a worker whose output dir *is* the sink can't be
+  clobbered) and the same checks, run against the sink's own `sig/`: orphan rows/`.npy`s, the
+  exact `--items` count, uniform `.npy` size. The combine runs in the sink's checkout: its
+  `--worker` dir if it is also a worker, else `--sink-repo`, else its inventory `repo` (with
+  `--inventory`); with none of those the merge still happens and the command to run is
+  printed. Only `--tool gen_dataset`, and not with `--repair-missing` (a repair renders
+  locally). A local directory whose name contains a colon needs a `./` prefix. Direct
+  worker → sink addressing uses the inventory's `address`/`user`/`port`; the controller's
+  identity file is not on the worker, so a sink that needs one falls back to the relay.
+  `run_pipeline.py` fleet mode still collects locally.
+ It drains the queue faster than healthy
   machines can take work — one that could not import a dependency killed 27 of 31 chunks in ~70 s.
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
   successes, and a chunk is not handed back to a host that already failed it.

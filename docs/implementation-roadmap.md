@@ -184,8 +184,15 @@ Sources:
       valid `params.csv` row and `.npy` file to show for it (stopped there deliberately -- the
       full 63-combination grid wasn't needed to prove the wiring). Mutation-tested the
       `--no-combine` forwarding and the new `mkdir -p` call (2 mutations, both caught).
-- [ ] **10. Destination-aware results** (fleet §5). Queue carries a destination so a dataset is
-      collected once, where training will run.
+- [x] **10. Destination-aware results** (fleet §5) — **implemented 2026-09-28** in
+      `distribute_pull.py` as `--collect HOST:DIR` (the "per-job sink host" option; there is no
+      queue yet, so the destination rides on the job, and item 11 can carry it in the queue).
+      Merge, consistency checks and `--combine` all run on the sink; per shard: local copy if the
+      worker is the sink, else worker-to-sink rsync, else a tar relay through the controller.
+      Not done: `run_pipeline.py` fleet mode still collects locally; no `train = true`-based
+      sink autodiscovery; direct worker-to-sink transfer between two *different* machines is
+      unit-tested (commands, fallback) but was only exercised for real via localhost aliases.
+      See docs/scripts.md.
 - [ ] **11. Pull agents, queue, dashboard** (fleet §4). Largest piece. Justified by
       observability and removing the controller as a single point of failure, not by
       onboarding.
