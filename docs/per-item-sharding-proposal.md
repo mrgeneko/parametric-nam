@@ -273,6 +273,11 @@ unchanged, and opens the way for the biggest piece of duplicated work in the pip
 25-corner coverage gate before rendering -- roughly 25 minutes each, ~50 minutes spent
 computing identical numbers.
 
+> **STATUS (2026-09-28): `check_transient_coverage.py` is now sharded**, via
+> `distribute_pull.py --tool check_transient_coverage` (docs/implementation-roadmap.md item
+> 8's prerequisite for `gate_config.py` fleet mode) -- `prepare_excitation.py` and
+> `preflight.py` are not, and are still open.
+
 It is an ideal registry entry: results are tiny and content-keyed on
 `sha256(ONSET_METHOD + schx bytes + params + capture tag)`, so merging is just copying JSONs
 into each worker's `~/.cache/parametric-nam/findpeak` -- collision-free by construction, no

@@ -539,6 +539,137 @@ class _FakePopen:
         pass
 
 
+class TestCheckTransientCoverageArgsFromConfig:
+    """check_transient_coverage.py takes the same one-flag --config interface as
+    grid_adequacy.py, so this builder is trivially identical to
+    grid_adequacy_args_from_config -- closes the "transient-coverage isn't sharded yet" gap
+    config-gate-proposal.md and per-item-sharding-proposal.md both flag."""
+
+    def test_repo_relative_config_path(self, tmp_path):
+        cfg = tmp_path / "amps" / "d.config.toml"
+        cfg.parent.mkdir()
+        cfg.write_text("x")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        args = dp.check_transient_coverage_args_from_config(cfg, repo)
+        assert args == ["--config", "../amps/d.config.toml"]
+
+    def test_absolute_path_kept_when_not_a_repo_sibling(self, tmp_path):
+        cfg = Path("/some/other/place/d.config.toml")
+        args = dp.check_transient_coverage_args_from_config(cfg, tmp_path)
+        assert args[0] == "--config"
+
+
+class TestTcovCornerLine:
+    """The stall-detector/pacing signal for check_transient_coverage.py's per-corner
+    completion line (_measure's own print, both sharded and unsharded). No running N/M count
+    the way GRIDADQ_PROBE_LINE has, but this fires exactly once per completed corner."""
+
+    def test_matches_a_passing_corner(self):
+        line = f'{"all-min":16} onset={"     1.234 V":>10}  OK'
+        assert dp.TCOV_CORNER_LINE.match(line)
+
+    def test_matches_a_skipped_corner_with_a_long_trailing_message(self):
+        line = (f'{"Gain=lo-solo":16} onset={"NONE":>10}  '
+               f'SKIP (every render in the sweep failed -- see stderr for why)')
+        assert dp.TCOV_CORNER_LINE.match(line)
+
+    def test_matches_a_failing_corner(self):
+        line = f'{"Volume=hi-solo":16} onset={"0.512 V":>10}  FAIL -- transient never reaches saturation here'
+        assert dp.TCOV_CORNER_LINE.match(line)
+
+    def test_does_not_match_an_unrelated_line(self):
+        assert not dp.TCOV_CORNER_LINE.match("Transient saturation coverage: Some Amp")
+
+    def test_does_not_match_the_merge_reports_summary_lines(self):
+        assert not dp.TCOV_CORNER_LINE.match("PASSED: transient content reaches saturation at every checked corner.")
+        assert not dp.TCOV_CORNER_LINE.match("FAILED: 2/25 corners never see a transient past their own onset.")
+
+
+class TestCheckTransientCoverageJob:
+    def test_registered_under_its_own_name(self):
+        assert dp.JOBS["check_transient_coverage"] is dp.CHECK_TRANSIENT_COVERAGE_JOB
+
+    def test_script_and_output_flag(self):
+        j = dp.CHECK_TRANSIENT_COVERAGE_JOB
+        assert j.script == "check_transient_coverage.py"
+        assert j.output_flag == "--emit-onsets"
+
+    def test_chunk_output_uses_a_distinct_prefix_from_grid_adequacy(self):
+        gj = dp.GRID_ADEQUACY_JOB.chunk_output("/out", "3-3/16")
+        tj = dp.CHECK_TRANSIENT_COVERAGE_JOB.chunk_output("/out", "3-3/16")
+        assert gj != tj
+        assert tj == "/out/tcov_shard_3-3_16.json"
+        assert gj == "/out/shard_3-3_16.json"
+
+    def test_collect_ignores_no_combine_and_repair_missing_like_its_siblings(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(dp, "_collect_check_transient_coverage",
+                            lambda *a: seen.setdefault("called", a))
+        dp.CHECK_TRANSIENT_COVERAGE_JOB.collect(["w"], ["/out"], "/local", "cfg.toml", [],
+                                                no_combine=True, repair_missing=True)
+        assert seen["called"] == (["w"], ["/out"], "/local", "cfg.toml", [])
+
+
+class TestCollectCheckTransientCoverage:
+    """Mirrors TestCollectLabelsAndExpectedCount's fake-rsync technique (a real local file
+    copy standing in for the network hop) so the actual merge invocation runs for real."""
+
+    class FakeW:
+        def __init__(self, host):
+            self.host = host
+
+    def _fake_rsync(self, monkeypatch):
+        import shutil
+        merge_calls = []
+        def run(cmd, **kw):
+            if cmd[0] == "rsync":
+                src_spec, dst = cmd[2], cmd[3]
+                _, _, src = src_spec.partition(":")
+                src_path = Path(src)
+                if not src_path.exists():
+                    return subprocess.CompletedProcess(cmd, 1, "", "no such file")
+                shutil.copytree(src_path, dst, dirs_exist_ok=True)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            merge_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "merged ok\n", "")
+        monkeypatch.setattr(dp.subprocess, "run", run)
+        return merge_calls
+
+    def test_merges_tcov_shard_files_not_grid_adequacys(self, tmp_path, monkeypatch):
+        merge_calls = self._fake_rsync(monkeypatch)
+        shard_dir = tmp_path / "worker_out"
+        shard_dir.mkdir()
+        (shard_dir / "tcov_shard_0-0_2.json").write_text("{}")
+        (shard_dir / "shard_0-0_2.json").write_text("{}")   # a grid_adequacy file -- must be ignored
+        local = tmp_path / "merged"
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._collect_check_transient_coverage([self.FakeW("h1")], [str(shard_dir)], local,
+                                              Path("cfg.toml"), [])
+        assert any("merging 1 shard" in m for m in logged)
+        # The actual invocation, not just the log line: check_transient_coverage.py's flag is
+        # --merge-onsets, NOT --merge (grid_adequacy.py's own flag name) -- a real, distinct
+        # mistake to guard against given how closely these two collectors mirror each other.
+        assert len(merge_calls) == 1
+        cmd = merge_calls[0]
+        assert cmd[1].endswith("check_transient_coverage.py")
+        assert "--merge-onsets" in cmd and "--merge" not in cmd   # exact-token check: distinct flags
+        assert str(local / "tcov_shard_0-0_2.json") in cmd
+        assert str(local / "shard_0-0_2.json") not in cmd   # the grid_adequacy file, excluded
+
+    def test_no_shards_found_logs_and_does_not_crash(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        local = tmp_path / "merged"
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._collect_check_transient_coverage([self.FakeW("h1")], [str(empty)], local,
+                                              Path("cfg.toml"), [])
+        assert any("nothing to merge" in m for m in logged)
+
+
 class TestJobAbstraction:
     """distribute_pull.py can dispatch either gen_dataset_from_schx.py or grid_adequacy.py,
     parameterized by a Job (script/progress_re/output_flag/build_args/chunk_output/collect)
@@ -639,10 +770,12 @@ class TestJobAbstraction:
         assert a == ["--config", os.path.relpath(cfg, tmp_path / "repo")]
 
     def test_tools_registry_has_all_jobs_and_gen_dataset_is_the_default(self):
-        assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy", "measure_truncation"}
+        assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy", "measure_truncation",
+                                "check_transient_coverage"}
         assert dp.JOBS["gen_dataset"] is dp.GEN_DATASET_JOB
         assert dp.JOBS["grid_adequacy"] is dp.GRID_ADEQUACY_JOB
         assert dp.JOBS["measure_truncation"] is dp.MEASURE_TRUNCATION_JOB
+        assert dp.JOBS["check_transient_coverage"] is dp.CHECK_TRANSIENT_COVERAGE_JOB
         assert dp.Worker("hostA:~/x:4").job is dp.GEN_DATASET_JOB
 
 

@@ -79,6 +79,15 @@ GRIDADQ_PROBE_LINE = re.compile(r"^\s*\d+/\d+\s+probes\s+done")
 # than per-render), the equivalent of GRIDADQ_PROBE_LINE for the oversample-measurement job.
 MEASURE_TRUNC_LINE = re.compile(r"^\s*\d+/\d+\s+settings\s+done")
 
+# check_transient_coverage.py's own per-corner completion line ("  all-min          onset=
+# 1.234 V  OK", printed by _measure() once per corner, in BOTH sharded and unsharded mode --
+# see that function's own docstring comment). No running N/M count the way GRIDADQ_PROBE_LINE
+# has, but "onset=" only ever appears on this one per-CORNER-COMPLETION line within a single
+# shard's own stdout (the OTHER "onset=" print, in --merge-onsets' final report, runs in a
+# separate subprocess collect() invokes directly -- run_chunk's pump() never sees it), so it
+# is an equally reliable per-item signal for the stall detector/pacing to key on.
+TCOV_CORNER_LINE = re.compile(r"^\S+.*\bonset=")
+
 
 class ComboPace:
     """Is a worker producing combinations at a rate the rest of the fleet makes plausible?
@@ -516,6 +525,19 @@ def grid_adequacy_args_from_config(config_path: Path, repo_root: Path) -> "list[
     return ["--config", _relpath_or_warn("config", config_path, repo_root)]
 
 
+def check_transient_coverage_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
+    """--config <repo-relative path> -- identical shape to grid_adequacy_args_from_config,
+    since check_transient_coverage.py takes the same one-flag-does-it-all --config interface
+    (its own --transient-peak, when not given, is auto-read from the excitation's own
+    recipe.json sidecar -- see that tool's docstring). Closes the "transient-coverage isn't
+    [sharded via distribute_pull.py] yet" gap config-gate-proposal.md and
+    per-item-sharding-proposal.md both flag, needed for gate_config.py's fleet mode
+    (docs/implementation-roadmap.md item 8) to shard it the same way it already shards
+    grid_adequacy.
+    """
+    return ["--config", _relpath_or_warn("config", config_path, repo_root)]
+
+
 def measure_truncation_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     """--config and --input, repo-relative -- the equivalent of gen_args_from_config for
     measure_truncation.py. Its [knobs]/schx come from --config already (load_device() reads
@@ -933,6 +955,38 @@ def _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_ar
             log(f"  {r.stderr.strip()}")
 
 
+def _collect_check_transient_coverage(workers, remote_out, local_dir, config_path, extra_args):
+    """Pull every worker's tcov_shard_*.json into one local directory, then run
+    check_transient_coverage.py --merge-onsets on them -- same shape as
+    _collect_grid_adequacy, different flag name (--merge-onsets, not --merge) and a distinct
+    filename prefix (tcov_shard_, not shard_) so the two tools' shard files can never collide
+    if a caller ever points both at the same --collect directory.
+
+    Same no-clobber-hazard reasoning as _collect_grid_adequacy: each shard file's name embeds
+    its own --shard spec, so every worker's output is a globally unique filename and a plain
+    whole-tree rsync from each worker is safe in any order.
+    """
+    local_dir = Path(local_dir).expanduser()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    for w, out in zip(workers, remote_out):
+        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+                       capture_output=True, text=True)
+    shards = sorted(local_dir.glob("tcov_shard_*.json"))
+    if not shards:
+        log("  collect: no tcov_shard_*.json found on any worker -- nothing to merge")
+        return
+    log(f"  collect: merging {len(shards)} shard file(s) ...")
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "check_transient_coverage.py"),
+           "--merge-onsets", *[str(s) for s in shards], "--config", str(config_path), *extra_args]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        log(f"  {line}")
+    if r.returncode != 0:
+        log(f"  collect: merge exited {r.returncode}")
+        if r.stderr.strip():
+            log(f"  {r.stderr.strip()}")
+
+
 @dataclass
 class Job:
     """Everything distribute_pull.py's scheduler needs to know about ONE renderer/analysis
@@ -1020,7 +1074,27 @@ MEASURE_TRUNCATION_JOB = Job(
         _collect_measure_truncation(workers, remote_out, local_dir, config_path, extra_args),
 )
 
-JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATION_JOB)}
+CHECK_TRANSIENT_COVERAGE_JOB = Job(
+    name="check_transient_coverage",
+    script="check_transient_coverage.py",
+    progress_re=TCOV_CORNER_LINE,
+    output_flag="--emit-onsets",
+    build_args=lambda config_path, repo_root, extra_args:
+        check_transient_coverage_args_from_config(config_path, repo_root) + extra_args,
+    chunk_output=lambda base_output, chunk: f"{base_output}/tcov_shard_{chunk.replace('/', '_')}.json",
+    # no_combine/repair_missing are GEN_DATASET_JOB-specific, same as GRID_ADEQUACY_JOB and
+    # MEASURE_TRUNCATION_JOB -- accepted and ignored here so all four jobs share one call site
+    # in main(). Closes the "transient-coverage isn't [sharded] yet" gap config-gate-
+    # proposal.md and per-item-sharding-proposal.md both flag -- needed for gate_config.py's
+    # fleet mode (docs/implementation-roadmap.md item 8) to shard this the same way it already
+    # shards grid_adequacy.
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
+                  labels=None, expected_count=None:
+        _collect_check_transient_coverage(workers, remote_out, local_dir, config_path, extra_args),
+)
+
+JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATION_JOB,
+                            CHECK_TRANSIENT_COVERAGE_JOB)}
 
 
 def main():
@@ -1046,7 +1120,12 @@ def main():
                          "measurement step) the same way -- --chunks should usually be much "
                          "smaller than the default 64 here: the grid being cut is knob "
                          "SETTINGS (probe_settings(knobs), ~2x knob count), not combinations, "
-                         "so 64 chunks over ~15 settings hands most workers nothing.")
+                         "so 64 chunks over ~15 settings hands most workers nothing. "
+                         "'check_transient_coverage' dispatches check_transient_coverage.py "
+                         "--shard --emit-onsets (the pre-generation saturation-coverage gate) "
+                         "the same way as grid_adequacy -- the grid being cut is CORNERS "
+                         "(the reduced hypercube set, see that tool's docstring), not "
+                         "combinations either.")
     ap.add_argument("--chunks", type=int, default=64,
                     help="how many pieces to cut the grid into (default 64). Each is dispatched "
                          "as --shard i-i/CHUNKS. See module docstring on sizing. Ignored when "

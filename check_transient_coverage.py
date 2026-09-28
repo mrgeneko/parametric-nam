@@ -428,6 +428,12 @@ def _check_corners(backend, identity: bytes, cache_extra: str, knob_ranges: dict
             else:
                 for n, ic in enumerate(corners):
                     results[n] = _measure(ic, scratch)
+        # mkdir the parent first -- grid_adequacy.py's own save_shard_result() already does
+        # this for the equivalent --shard-out write; this one didn't, and a sharded dispatch
+        # into a brand-new --output directory (the common case for a device's first-ever gate
+        # run) hit a raw FileNotFoundError instead of writing the shard. Found via
+        # distribute_pull.py --tool check_transient_coverage against a real target.
+        Path(emit_onsets).parent.mkdir(parents=True, exist_ok=True)
         Path(emit_onsets).write_text(json.dumps({
             "corner_total": corner_total, "solver": solver_identity(backend_name),
             "shard": shard, "rows": results,

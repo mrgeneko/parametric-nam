@@ -105,8 +105,11 @@ What `gate_config.py` *should* do, once that inventory exists: accept the same `
 / `--worker` selection `distribute_pull.py` and (eventually) `run_pipeline.py` use, and when
 a fleet is named:
 - shard its own grid-adequacy and transient-coverage probing across it (both already have
-  `--shard`; grid_adequacy is already wired into `distribute_pull.py --tool grid_adequacy`,
-  transient-coverage isn't yet — see per-item-sharding-proposal.md's open item on this),
+  `--shard`; **both now wired 2026-09-28**, `distribute_pull.py --tool grid_adequacy` and
+  `--tool check_transient_coverage` -- closing per-item-sharding-proposal.md's open item on
+  this. Found and fixed a real bug doing it: `check_transient_coverage.py --emit-onsets`
+  didn't `mkdir -p` its target's parent the way `grid_adequacy.py`'s own `--shard-out` write
+  already did, so a sharded run into a brand-new `--output` directory failed outright),
 - run `sync_findpeak_cache.sh` across the same worker set immediately before and after,
   so the union is warm for whatever runs next,
 - and — this is the one piece that's genuinely new, not just "call the existing thing" —
