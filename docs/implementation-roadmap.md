@@ -43,9 +43,14 @@ Sources:
       Writes a fingerprinted `<config>.gate.json` (hash of schx contents, excitation recipe
       fingerprint, knob ranges, oversample, backend). Exits non-zero with a specific reason,
       never silently partial.
-- [ ] **3. Require the sidecar** (gate step 2). `run_pipeline.py` and `distribute_pull.py`
-      refuse — not skip — on a missing or mismatched fingerprint. Escape hatch: `--skip-gate`,
-      loud about what it skips. Needs 2.
+- [ ] **3. Require the sidecar** (gate step 2) — **partly done 2026-09-28, warn-only.**
+      `run_pipeline.py` and `distribute_pull.py --tool gen_dataset` both call `gate_config.py
+      --verify` before generating and log a WARNING (not a refusal) when it's missing or stale.
+      `--require-gate` opts a run into aborting (exit 2) now; `--skip-gate-check` silences the
+      check. **Remaining:** flip the default from warn to refuse once the gate has been adopted
+      for a while — at that point `--require-gate` becomes the (only) default behavior and
+      `--skip-gate-check` remains as the escape hatch, matching this item's original design.
+      Needs 2 (done).
 - [ ] **4. Host inventory with `--probe-hosts`** (fleet §2). Generated, reviewable file;
       physical (not logical) core count; backends per host; accelerator, `vram_gb`, and a
       `train` flag separate from having a GPU. Also the natural home for what item 1 left

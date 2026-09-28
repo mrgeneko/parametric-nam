@@ -411,9 +411,14 @@ while a long gate was running fails the gate instead of passing on stale inputs.
 written on pass *and* on failure (`status`, `failed_step`, `reason`). `--verify` accepts only a
 passing one. **Exit status:** 0 passed, 1 a check failed, 2 could not run.
 
-**Not yet wired in.** `run_pipeline.py` and `distribute_pull.py` do not consult the sidecar yet —
-requiring it is the next roadmap item ([implementation-roadmap.md](implementation-roadmap.md)).
-Until then, `--verify` is the hook a caller or a shell `&&` chain can use.
+**Wired into `run_pipeline.py` and `distribute_pull.py --tool gen_dataset`** (2026-09-28):
+both call `--verify` before generating and **WARN, not refuse**, when it's missing or stale —
+`--require-gate` opts a run into aborting (exit 2) instead, and `--skip-gate-check` silences the
+check entirely. Warn-only is deliberately the default while the gate is adopted; see
+[implementation-roadmap.md](implementation-roadmap.md) item 3 for the plan to flip that default.
+`distribute_pull.py` checks once on the controller against `--config` as given, before any
+worker is dispatched — it says nothing about whether a worker's own checkout has the sized
+excitation synced (open item in [fleet-deployment-proposal.md](fleet-deployment-proposal.md)).
 
 ## `check_transient_coverage.py` — gate: does the excitation reach saturation everywhere?
 

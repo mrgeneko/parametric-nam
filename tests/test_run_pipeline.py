@@ -529,3 +529,32 @@ def test_build_train_cmd_forwards_explicit_stale_rules_including_zero():
         steps_per_epoch_arg=1)]
     assert cmd[cmd.index("--stale-cycles") + 1] == "0"
     assert cmd[cmd.index("--stale-epochs") + 1] == "900"
+
+
+class TestGateCheckOutcome:
+    """gate_check_outcome: the WARN-vs-ABORT decision for a gate_config.py --verify result,
+    isolated from the verify_gate() call itself (see test_gate_config.py) and from main()."""
+
+    def test_ok_never_aborts(self):
+        line, abort = rp.gate_check_outcome("dev.toml", True, "gate passed and still matches", False)
+        assert abort is False and "OK" in line and "gate passed" in line
+
+    def test_ok_never_aborts_even_with_require_gate(self):
+        assert rp.gate_check_outcome("dev.toml", True, "matches", True)[1] is False
+
+    def test_failure_without_require_gate_warns_and_does_not_abort(self):
+        line, abort = rp.gate_check_outcome("dev.toml", False, "no gate sidecar", False)
+        assert abort is False
+        assert line.startswith("WARNING:") and "no gate sidecar" in line
+        assert "--require-gate" in line and "--skip-gate-check" in line
+
+    def test_failure_with_require_gate_aborts(self):
+        line, abort = rp.gate_check_outcome("dev.toml", False, "gate is STALE", True)
+        assert abort is True
+        assert line.startswith("ERROR:") and "gate is STALE" in line
+
+    def test_config_path_is_in_the_message_for_both_outcomes(self):
+        _, a1 = rp.gate_check_outcome("amps/dev.config.toml", False, "no gate sidecar", False)
+        warn_line, _ = rp.gate_check_outcome("amps/dev.config.toml", False, "no gate sidecar", False)
+        abort_line, _ = rp.gate_check_outcome("amps/dev.config.toml", False, "no gate sidecar", True)
+        assert "amps/dev.config.toml" in warn_line and "amps/dev.config.toml" in abort_line

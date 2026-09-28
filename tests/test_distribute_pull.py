@@ -803,3 +803,86 @@ def test_collect_returns_false_not_none_when_nothing_merged(tmp_path, monkeypatc
     got = dp._collect([], [], local)
     assert got is False, f"expected False, got {got!r}"
     assert should_combine(got, no_combine=False) is not None, "must refuse to combine"
+
+
+class TestGateCheckIntegration:
+    """distribute_pull.py's own wiring of the gate check (the WARN-vs-ABORT decision itself is
+    gate_check_outcome, tested in test_run_pipeline.py). Runs main() for real against a minimal
+    config, faking only verify_gate and blocking Worker construction so nothing is actually
+    dispatched -- proves --require-gate aborts BEFORE any worker is touched, and that the other
+    flags/tool gate it correctly."""
+
+    def _cfg(self, tmp_path):
+        (tmp_path / "amps").mkdir(exist_ok=True)
+        schx = tmp_path / "amps" / "Amp.schx"
+        schx.write_text("<Schematic/>", encoding="utf-8")
+        wav = tmp_path / "amps" / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        p = tmp_path / "d.config.toml"
+        p.write_text(f'''
+schx = "{schx}"
+input = "{wav}"
+backend = "livespice"
+oversample = 8
+[knobs]
+Gain = [0.1, 1.0]
+''', encoding="utf-8")
+        return p
+
+    def _no_dispatch(self, monkeypatch):
+        def boom(*a, **kw):
+            raise AssertionError("a Worker was constructed -- dispatch was not supposed to happen")
+        monkeypatch.setattr(dp, "Worker", boom)
+
+    def _argv(self, cfg, tmp_path, *extra):
+        return ["distribute_pull.py", "--worker", "host:/tmp/x", "--config", str(cfg),
+                "--output", str(tmp_path / "out"), *extra]
+
+    def test_require_gate_aborts_before_any_worker_is_touched(self, tmp_path, monkeypatch):
+        import gate_config
+        monkeypatch.setattr(gate_config, "verify_gate", lambda *a, **kw: (False, "no gate sidecar"))
+        self._no_dispatch(monkeypatch)
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path, "--require-gate"))
+        with pytest.raises(SystemExit) as exc:
+            dp.main()
+        assert exc.value.code == 2
+
+    def test_default_warns_and_still_reaches_dispatch(self, tmp_path, monkeypatch):
+        import gate_config
+        monkeypatch.setattr(gate_config, "verify_gate", lambda *a, **kw: (False, "no gate sidecar"))
+        reached = {}
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: reached.setdefault("hit", True) or None)
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path))
+        with pytest.raises(Exception):   # goes on to fail elsewhere (no real host) -- fine
+            dp.main()
+        assert reached.get("hit") is True
+
+    def test_skip_gate_check_never_calls_verify_gate(self, tmp_path, monkeypatch):
+        import gate_config
+        def boom(*a, **kw):
+            raise AssertionError("verify_gate should not be called under --skip-gate-check")
+        monkeypatch.setattr(gate_config, "verify_gate", boom)
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: None)
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path, "--skip-gate-check"))
+        with pytest.raises(Exception):
+            dp.main()
+
+    def test_non_gen_dataset_tool_never_calls_verify_gate(self, tmp_path, monkeypatch):
+        import gate_config
+        def boom(*a, **kw):
+            raise AssertionError("verify_gate should not be called for --tool grid_adequacy")
+        monkeypatch.setattr(gate_config, "verify_gate", boom)
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: None)
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path, "--tool", "grid_adequacy"))
+        with pytest.raises(Exception):
+            dp.main()
+
+    def test_passing_gate_does_not_abort(self, tmp_path, monkeypatch):
+        import gate_config
+        monkeypatch.setattr(gate_config, "verify_gate", lambda *a, **kw: (True, "matches"))
+        reached = {}
+        monkeypatch.setattr(dp, "Worker", lambda *a, **kw: reached.setdefault("hit", True) or None)
+        monkeypatch.setattr("sys.argv", self._argv(self._cfg(tmp_path), tmp_path, "--require-gate"))
+        with pytest.raises(Exception):
+            dp.main()
+        assert reached.get("hit") is True

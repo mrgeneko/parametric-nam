@@ -67,6 +67,26 @@ WORKSPACE_LAYOUT = {
 }
 
 
+def gate_check_outcome(config, ok: bool, msg: str, require_gate: bool) -> "tuple[str, bool]":
+    """Decides the log line and whether to abort for a gate_config.py --verify result. Pure and
+    separate from the verify_gate() call itself (tested in test_gate_config.py) so the WARN-vs-
+    ABORT decision here is testable without running the rest of main().
+
+    WARN-ONLY is the current default (2026-09-28) -- see docs/implementation-roadmap.md item 3.
+    The eventual plan is to refuse by default, the way the removed grid check used to abort;
+    --require-gate opts a run into that behavior early without waiting for the default to change.
+    """
+    if ok:
+        return f"gate check: OK -- {msg}", False
+    if require_gate:
+        return (f"ERROR: gate check failed ({msg}) -- aborting (--require-gate). Run "
+                f"`gate_config.py --config {config}`, or drop --require-gate."), True
+    return (f"WARNING: gate check: {msg} -- continuing without it (warn-only for now; see "
+            f"docs/implementation-roadmap.md item 3). Run `gate_config.py --config {config}` to "
+            f"close this, pass --require-gate to abort on it instead, or --skip-gate-check to "
+            f"silence this message."), False
+
+
 def apply_workspace(args) -> "list[str]":
     """Fill any unset output path from --workspace. Returns the names it defaulted.
 
@@ -1061,6 +1081,18 @@ def main():
                         "check_input_headroom.py.")
     g.add_argument("--headroom-margin", type=float, default=0.8,
                    help="WARN if excitation peak < margin * saturation onset (default 0.8)")
+    g.add_argument("--skip-gate-check", action="store_true",
+                   help="don't check for a gate_config.py sidecar at all (see docs/config-gate-"
+                        "proposal.md, docs/implementation-roadmap.md item 3). Default is WARN "
+                        "and continue when the sidecar is missing or stale -- this flag silences "
+                        "that message entirely, e.g. for a backend/config gate_config.py cannot "
+                        "meaningfully gate.")
+    g.add_argument("--require-gate", action="store_true",
+                   help="ABORT instead of warning when gate_config.py's sidecar is missing or "
+                        "stale. Opt-in for now (2026-09-28) -- warn-only is the default while "
+                        "the gate is adopted; this is expected to become the default later, per "
+                        "docs/implementation-roadmap.md item 3. Run `gate_config.py --config "
+                        "<config>` to produce a current sidecar.")
     g.add_argument("--skip-preflight-check", action="store_true",
                    help="skip the STEP 2 knob-sanity preflight. Probes a handful of short clips "
                         "through the oracle and ABORTS (like the grid check, unlike the headroom "
@@ -1216,6 +1248,27 @@ def main():
                 log("SKIP generate: outputs.npy exists and no sig/ dir found. "
                     "Use --force-generate to redo.", fh)
                 run_generate = False
+
+        # ------------------------------------------------------------------
+        # Gate check: has gate_config.py verified this circuit/grid/excitation recently?
+        #
+        # WARN-ONLY for now (2026-09-28) -- see docs/implementation-roadmap.md item 3. The
+        # eventual plan is to REFUSE by default the way the removed grid check used to abort;
+        # today this only warns, so existing invocations that never adopted gate_config.py keep
+        # working unchanged. --require-gate opts a run into the future behavior early.
+        # Local import: gate_config.py itself imports FROM this module (load_config, git_rev),
+        # so importing it at module load time here would be circular.
+        # ------------------------------------------------------------------
+        if run_generate and args.config and not args.skip_gate_check:
+            from gate_config import verify_gate
+            try:
+                ok, gate_msg = verify_gate(args.config)
+            except Exception as e:   # never let the gate check itself crash a render
+                ok, gate_msg = False, f"gate check raised {type(e).__name__}: {e}"
+            line, abort = gate_check_outcome(args.config, ok, gate_msg, args.require_gate)
+            log(line, fh)
+            if abort:
+                sys.exit(2)
 
         # Oracle preflight: the input-headroom check, preflight and generation all need it,
         # and all are about to start if run_generate is still true here. Check before

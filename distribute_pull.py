@@ -919,6 +919,17 @@ def main():
                          "(default 3). A fast-failing worker drains the queue faster than healthy "
                          "ones can take work -- see Worker's quarantine comment for the run where "
                          "one killed 27 of 31 chunks in ~70s. 0 disables.")
+    ap.add_argument("--skip-gate-check", action="store_true",
+                    help="don't check for a gate_config.py sidecar at all (--tool gen_dataset "
+                         "with --config only). Default is WARN and continue when it's missing "
+                         "or stale -- see docs/config-gate-proposal.md, "
+                         "docs/implementation-roadmap.md item 3.")
+    ap.add_argument("--require-gate", action="store_true",
+                    help="ABORT instead of warning when gate_config.py's sidecar is missing or "
+                         "stale (--tool gen_dataset with --config only). Opt-in for now "
+                         "(2026-09-28); expected to become the default later. Run `gate_config.py "
+                         "--config <config>` on the CONTROLLER before dispatching, not per "
+                         "worker -- it needs the sized excitation, which workers may not have.")
     ap.add_argument("--", dest="_sep", nargs="?", help=argparse.SUPPRESS)
     args, gen_args = ap.parse_known_args()
     if gen_args and gen_args[0] == "--":
@@ -931,6 +942,25 @@ def main():
         # Config first, explicit flags second: argparse-style "last wins" for the renderer,
         # so --  --oversample 4  still overrides the config without editing it.
         gen_args = job.build_args(args.config, Path(__file__).resolve().parent, gen_args)
+
+        # Gate check: has gate_config.py verified this circuit/grid/excitation recently?
+        # WARN-ONLY for now (2026-09-28), same rationale and flags as run_pipeline.py -- see
+        # docs/implementation-roadmap.md item 3. Only meaningful for gen_dataset (what the gate
+        # protects); grid_adequacy/measure_truncation are themselves pre-generation checks.
+        # Checked on the CONTROLLER against args.config as given -- one check per dispatch, not
+        # per worker/chunk, and it says nothing about whether a worker's own checkout has the
+        # sized excitation synced (see fleet-deployment-proposal.md's open item on that).
+        if args.tool == "gen_dataset" and not args.skip_gate_check:
+            from gate_config import verify_gate
+            from run_pipeline import gate_check_outcome
+            try:
+                ok, gate_msg = verify_gate(args.config)
+            except Exception as e:
+                ok, gate_msg = False, f"gate check raised {type(e).__name__}: {e}"
+            line, abort = gate_check_outcome(args.config, ok, gate_msg, args.require_gate)
+            log(line)
+            if abort:
+                sys.exit(2)
     gen_args_str = " ".join(f"'{a}'" if " " in a else a for a in gen_args)
     if not gen_args_str:
         ap.error("pass --config, or the renderer's own arguments after --")
