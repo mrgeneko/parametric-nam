@@ -1,6 +1,10 @@
 # Per-item sharding: decoupling load balance from worker parallelism
 
-**Status:** proposal, not implemented. Written 2026-09-12 after the Mesa Orange
+**Status (2026-09-28): Phases 1-3 implemented** in `distribute_pull.py`
+(`--chunk-size 1`, `--slots`, `--items`) -- see
+[implementation-roadmap.md](implementation-roadmap.md) item 6 for exactly what shipped and
+what didn't (the stall-detector floor retuning and the Lifecycle section's
+`shard_ctl`/resume/reap machinery are still open). Written 2026-09-12 after the Mesa Orange
 gain/master render, which was sharded by hand across three machines and needed three
 restarts.
 

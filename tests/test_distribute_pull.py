@@ -1090,3 +1090,294 @@ Gain = [0.1, 1.0]
         with pytest.raises(Exception):   # goes on to fail elsewhere (no real host) -- fine
             dp.main()
         assert reached["backend"] == "livespice"
+
+
+# ---------------------------------------------------------------------------
+# Per-item sharding (per-item-sharding-proposal.md Phases 1-3,
+# docs/implementation-roadmap.md item 6)
+# ---------------------------------------------------------------------------
+class TestParseRangeAxes:
+    def test_space_form(self):
+        assert dp._parse_range_axes(["--range", "Gain=0.1,0.5,1.0"]) == [("Gain", 3)]
+
+    def test_equals_form(self):
+        assert dp._parse_range_axes(["--range=Gain=0.1,0.5,1.0"]) == [("Gain", 3)]
+
+    def test_multiple_ranges(self):
+        axes = dp._parse_range_axes(["--range", "Gain=0.1,0.5,1.0", "--range", "Tone=0.2,0.8"])
+        assert axes == [("Gain", 3), ("Tone", 2)]
+
+    def test_single_value_range_is_cardinality_one_not_dropped(self):
+        assert dp._parse_range_axes(["--range", "Fixed=0.5"]) == [("Fixed", 1)]
+
+    def test_non_range_args_ignored(self):
+        assert dp._parse_range_axes(["--backend", "livespice", "--oversample", "8"]) == []
+
+    def test_malformed_range_with_no_equals_is_skipped(self):
+        assert dp._parse_range_axes(["--range", "garbage"]) == []
+
+    def test_dangling_range_flag_with_no_value_is_ignored(self):
+        assert dp._parse_range_axes(["--range"]) == []
+
+    def test_knob_names_with_spaces_survive(self):
+        assert dp._parse_range_axes(["--range", "RD Gain=0.1,1.0"]) == [("RD Gain", 2)]
+
+
+class TestDeriveItemCount:
+    def test_single_axis(self):
+        assert dp.derive_item_count(["--range", "Gain=0.1,0.5,1.0"]) == 3
+
+    def test_multiple_axes_multiply(self):
+        gen_args = ["--range", "Gain=0.1,0.5,1.0", "--range", "Tone=0.2,0.8"]
+        assert dp.derive_item_count(gen_args) == 6
+
+    def test_items_override_wins_over_range(self):
+        gen_args = ["--range", "Gain=0.1,0.5,1.0"]
+        assert dp.derive_item_count(gen_args, items_override=99) == 99
+
+    def test_items_override_used_when_no_range_present(self):
+        assert dp.derive_item_count(["--backend", "cpp"], items_override=10) == 10
+
+    def test_no_range_and_no_override_raises_loudly_rather_than_guessing(self):
+        with pytest.raises(ValueError, match="could not derive"):
+            dp.derive_item_count(["--backend", "livespice"])
+
+    def test_zero_items_override_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            dp.derive_item_count([], items_override=0)
+
+    def test_negative_items_override_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            dp.derive_item_count([], items_override=-5)
+
+    def test_single_value_ranges_do_not_change_the_product(self):
+        gen_args = ["--range", "Gain=0.1,0.5,1.0", "--range", "Fixed=0.5"]
+        assert dp.derive_item_count(gen_args) == 3
+
+
+class TestWarnChunkAliasingStillWorksAfterRefactor:
+    """_warn_chunk_aliasing now delegates to _parse_range_axes (shared with
+    derive_item_count) -- confirms the refactor preserved its n_vals>=2 filtering
+    (a fixed/single-value knob can never alias, so it must stay excluded here even
+    though derive_item_count needs it counted)."""
+
+    def test_single_value_range_cannot_alias(self, monkeypatch):
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._warn_chunk_aliasing(["--range", "Fixed=0.5"], chunks=8)
+        assert logged == []
+
+    def test_still_warns_on_a_real_aliasing_axis(self, monkeypatch):
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._warn_chunk_aliasing(["--range", "Volume=0.1,0.2,0.3,0.4"], chunks=32)
+        assert any("aliasing" in m for m in logged)
+
+
+class TestCollectLabelsAndExpectedCount:
+    """_collect with `labels`/`expected_count` (Phase 3). Fakes rsync with a real local file
+    copy (dp.subprocess.run patched) instead of mocking file contents away entirely, so the
+    actual merge/consistency logic in _collect runs for real against real files -- only the
+    network transport is faked."""
+
+    class FakeW:
+        def __init__(self, host):
+            self.host = host
+
+    def _fake_rsync(self, monkeypatch):
+        import shutil
+        def run(cmd, **kw):
+            # cmd[2] is "host:/local/path" or "host:/local/path/" (rsync host:path syntax);
+            # the tests below always use a REAL local path after the colon, so this "fakes"
+            # only the network hop, not the filesystem semantics.
+            src_spec, dst = cmd[2], cmd[3]
+            _, _, src = src_spec.partition(":")
+            src_path = Path(src)
+            if not src_path.exists():
+                return subprocess.CompletedProcess(cmd, 1, "", "rsync: no such file")
+            if src.endswith("/"):
+                shutil.copytree(src_path, dst, dirs_exist_ok=True)
+            else:
+                Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, dst)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(dp.subprocess, "run", run)
+
+    def _make_shard(self, base, idx, gain, npy_bytes=b"X" * 100):
+        d = base / f"shard{idx}"
+        (d / "sig").mkdir(parents=True)
+        (d / "sig" / f"{idx}.npy").write_bytes(npy_bytes)
+        with open(d / "params.csv", "w", newline="") as f:
+            f.write(f"idx,Gain\n{idx},{gain}\n")
+        return d
+
+    def test_default_labels_are_host_backward_compatible(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1)
+        local = tmp_path / "merged"
+        ok = dp._collect([self.FakeW("h1")], [str(s0)], local)
+        assert ok is True
+        assert (local / "params.csv").read_text() == "idx,Gain\n0,0.1\n"
+
+    def test_distinct_labels_prevent_same_host_slots_from_clobbering(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1)
+        s1 = self._make_shard(tmp_path, 1, 0.9)
+        w = self.FakeW("localhost")   # SAME worker/host for both slots, on purpose
+        local = tmp_path / "merged"
+        ok = dp._collect([w, w], [str(s0), str(s1)], local,
+                         labels=["localhost-slot0", "localhost-slot1"])
+        assert ok is True
+        rows = sorted(local.glob("sig/*.npy"))
+        assert [p.stem for p in rows] == ["0", "1"]
+        assert "0,0.1" in (local / "params.csv").read_text()
+        assert "1,0.9" in (local / "params.csv").read_text()
+
+    def test_expected_count_matching_stays_consistent(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1)
+        local = tmp_path / "merged"
+        assert dp._collect([self.FakeW("h1")], [str(s0)], local, expected_count=1) is True
+
+    def test_expected_count_short_is_inconsistent(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1)
+        local = tmp_path / "merged"
+        # only 1 of 4 combinations ever rendered -- orphan-free (nothing MISFILED), but
+        # incomplete, which is exactly what expected_count catches and 1:1 checking alone can't.
+        assert dp._collect([self.FakeW("h1")], [str(s0)], local, expected_count=4) is False
+
+    def test_expected_count_none_skips_the_check_entirely(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1)
+        local = tmp_path / "merged"
+        assert dp._collect([self.FakeW("h1")], [str(s0)], local, expected_count=None) is True
+
+    def test_mismatched_npy_sizes_are_flagged(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1, npy_bytes=b"X" * 100)
+        s1 = self._make_shard(tmp_path, 1, 0.9, npy_bytes=b"X" * 50)   # different size -- truncated?
+        w = self.FakeW("localhost")
+        local = tmp_path / "merged"
+        ok = dp._collect([w, w], [str(s0), str(s1)], local,
+                         labels=["localhost-slot0", "localhost-slot1"], expected_count=2)
+        assert ok is False
+
+    def test_uniform_npy_sizes_do_not_trip_the_size_check(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        s0 = self._make_shard(tmp_path, 0, 0.1, npy_bytes=b"X" * 100)
+        s1 = self._make_shard(tmp_path, 1, 0.9, npy_bytes=b"Y" * 100)
+        w = self.FakeW("localhost")
+        local = tmp_path / "merged"
+        ok = dp._collect([w, w], [str(s0), str(s1)], local,
+                         labels=["localhost-slot0", "localhost-slot1"], expected_count=2)
+        assert ok is True
+
+
+class TestPerItemCliWiring:
+    """The dispatch-mode branch in main(): thread args are captured by patching
+    threading.Thread itself (target/args recorded, start/join are no-ops) so this tests the
+    EXACT wiring (output dirs, --workers N, thread count) without any real ssh or a full mocked
+    dispatch cycle -- the real over-the-wire mechanism this wiring drives is verified
+    separately (see the module's own real end-to-end smoke test, not part of this suite)."""
+
+    class FakeThread:
+        calls = []
+        def __init__(self, target=None, args=(), daemon=None):
+            FakeThread.calls.append((target, args))
+        def start(self): pass
+        def join(self): pass
+
+    class FakeWorker:
+        _next_host = 0
+        def __init__(self, spec, job=None):
+            parts = spec.split(":")
+            self.host, self.dir = parts[0], parts[1]
+            self.parallel = int(parts[2]) if len(parts) > 2 and parts[2] else 4
+            self.job = job
+            self.done = self.failed = 0
+            self.secs = 0.0
+            self.rate = 0.0   # real Worker.rate is a property; a plain 0.0 is enough here --
+                              # nothing in these tests exercises real dispatch, only the wiring
+                              # up to thread-spawn, but main()'s final report reads it either way
+
+    def _cfg(self, tmp_path, ranges="Gain = [0.1, 0.5, 1.0]\nTone = [0.2, 0.8]"):
+        (tmp_path / "amps").mkdir(exist_ok=True)
+        schx = tmp_path / "amps" / "Amp.schx"
+        schx.write_text("<Schematic/>", encoding="utf-8")
+        wav = tmp_path / "amps" / "exc.wav"
+        wav.write_bytes(b"RIFF")
+        p = tmp_path / "d.config.toml"
+        p.write_text(f'''
+schx = "{schx}"
+input = "{wav}"
+backend = "livespice"
+oversample = 8
+[knobs]
+{ranges}
+''', encoding="utf-8")
+        return p
+
+    def _run(self, monkeypatch, tmp_path, *extra, worker="host:/repo:4"):
+        FakeThread = type("FakeThread", (), {"calls": []})
+        def make_thread(target=None, args=(), daemon=None):
+            FakeThread.calls.append((target, args))
+            class T:
+                def start(self_s): pass
+                def join(self_s): pass
+            return T()
+        monkeypatch.setattr(dp.threading, "Thread", make_thread)
+        monkeypatch.setattr(dp, "Worker", self.FakeWorker)
+        monkeypatch.setattr(dp, "verify_workers", lambda workers, backend: workers)
+        argv = ["distribute_pull.py", "--worker", worker, "--config", str(self._cfg(tmp_path)),
+                "--output", "/out", "--skip-gate-check", *extra]
+        monkeypatch.setattr("sys.argv", argv)
+        dp.main()
+        return FakeThread.calls
+
+    def test_legacy_mode_is_unchanged_one_thread_per_worker(self, tmp_path, monkeypatch):
+        calls = self._run(monkeypatch, tmp_path, "--chunks", "6")
+        assert len(calls) == 1
+        target, args = calls[0]
+        w, output_dir, workers_flag = args
+        assert output_dir == "/out" and workers_flag == 4   # worker's own .parallel
+
+    def test_per_item_mode_spawns_slots_worth_of_threads(self, tmp_path, monkeypatch):
+        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", worker="host:/repo:3")
+        assert len(calls) == 3   # defaults to w.parallel when --slots is not given
+        for _, (w, output_dir, workers_flag) in calls:
+            assert workers_flag == 1   # always 1 in per-item mode
+        dirs = sorted(output_dir for _, (w, output_dir, workers_flag) in calls)
+        assert dirs == ["/out/slot-0", "/out/slot-1", "/out/slot-2"]
+
+    def test_slots_flag_overrides_worker_parallel(self, tmp_path, monkeypatch):
+        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--slots", "2",
+                          worker="host:/repo:8")
+        assert len(calls) == 2   # NOT 8 -- --slots overrides the worker's own parallel
+
+    def test_chunk_size_other_than_one_is_a_hard_error(self, tmp_path, monkeypatch):
+        with pytest.raises(SystemExit):
+            self._run(monkeypatch, tmp_path, "--chunk-size", "5")
+
+    def test_items_override_is_used_instead_of_deriving_from_range(self, tmp_path, monkeypatch):
+        # Without --items this config derives 3*2=6 -- the real assertion is that main() does
+        # NOT error out deriving that, i.e. --items successfully overrode it (derive_item_count
+        # itself, and its --items-wins-over-range behavior, are covered directly in
+        # TestDeriveItemCount; thread count alone can't distinguish "derived 6" from
+        # "overridden to 10" since both give 1 thread for 1 slot).
+        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--items", "10",
+                          worker="host:/repo:1")
+        assert len(calls) == 1
+
+    def test_no_range_and_no_items_is_a_clear_error_not_a_crash(self, tmp_path, monkeypatch):
+        # No --config at all (so no --range is ever built) and no --items: derive_item_count
+        # has nothing to derive from and must raise -> main() must turn that into ap.error
+        # (SystemExit), not let the ValueError propagate raw.
+        monkeypatch.setattr(dp.threading, "Thread", lambda **kw: None)
+        monkeypatch.setattr(dp, "Worker", self.FakeWorker)
+        monkeypatch.setattr(dp, "verify_workers", lambda workers, backend: workers)
+        argv = ["distribute_pull.py", "--worker", "host:/repo:1", "--output", "/out",
+                "--skip-gate-check", "--chunk-size", "1", "--", "--backend", "livespice"]
+        monkeypatch.setattr("sys.argv", argv)
+        with pytest.raises(SystemExit):
+            dp.main()

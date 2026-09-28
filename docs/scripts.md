@@ -549,8 +549,9 @@ per slot.
 
 > Where this is heading — a pull-based queue and a dashboard — is written up in
 > [fleet-deployment-proposal.md](fleet-deployment-proposal.md); most of the earlier steps
-> (mesh SSH's substitute, the generated fleet inventory, dispatch-time version verification)
-> are now implemented — see [implementation-roadmap.md](implementation-roadmap.md).
+> (mesh SSH's substitute, the generated fleet inventory, dispatch-time version verification,
+> per-item sharding) are now implemented — see
+> [implementation-roadmap.md](implementation-roadmap.md).
 
 **Takes the same `--config` as `run_pipeline.py`.** One description of a device, whether it
 renders on one machine or four:
@@ -651,6 +652,33 @@ Four things that are easy to get wrong:
   machines can take work — one that could not import a dependency killed 27 of 31 chunks in ~70 s.
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
   successes, and a chunk is not handed back to a host that already failed it.
+
+**Per-item dispatch** (2026-09-28,
+[per-item-sharding-proposal.md](per-item-sharding-proposal.md) Phases 1-3,
+[implementation-roadmap.md](implementation-roadmap.md) item 6). `--chunk-size 1` replaces the
+multi-combination `--chunks` model with K single-item dispatches per worker ("slots", `--slots
+K`, default each worker's own `PARALLEL`/core count), each into its own `<output>/slot-K` --
+so K concurrent generations never collide on `gen_dataset_from_schx.py`'s exclusive
+per-directory lock, which one giant `--workers N`-internal chunk never needed to worry about.
+The real item count comes from `--range` in the dispatched arguments (`--items N` overrides,
+for a job whose grid isn't expressed that way) and must be derivable or the run refuses to
+start -- guessing wrong silently drops combinations, guessing high just wastes ~80ms per empty
+dispatch. `--collect` walks hosts × slots and additionally checks the merged row/`.npy` count
+against the real item count and that every `.npy` is the same byte size (one device's renders
+are uniform length; a size mismatch usually means a truncated transfer).
+
+```bash
+python distribute_pull.py --worker host0:/path/to/parametric-nam \
+    --worker host1:/path/to/parametric-nam --chunk-size 1 --collect ~/my_dataset \
+    --config device.config.toml
+```
+
+**Verified against a real target, not just mocks**: two concurrent dispatches into ONE shared
+output dir collided exactly as predicted (the second refused, citing the held lock); the
+identical dispatch into per-slot dirs did not, both over a real ssh round trip. Not done: the
+stall-detector floors (`--slow-startup-floor-min`/`--slow-steady-floor-min`) are not
+auto-retuned for per-item dispatch's much-shorter expected per-dispatch time -- pass them
+explicitly, or a hang waits as long as it would have under the old chunked model.
 
 **Dispatch-time version verification** (2026-09-28,
 [fleet-deployment-proposal.md](fleet-deployment-proposal.md) step 3,

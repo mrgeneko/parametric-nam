@@ -575,6 +575,52 @@ def _collect_measure_truncation(workers, remote_out, local_dir, config_path, ext
             log(f"  {r.stderr.strip()}")
 
 
+def _parse_range_axes(gen_args: "list[str]") -> "list[tuple[str, int]]":
+    """[(knob_name, cardinality), ...] from every --range in an already-built gen_args list.
+    Shared by _warn_chunk_aliasing and derive_item_count -- one parser, one source of truth for
+    what a --range argument means. Handles both `--range X=...` and `--range=X=...` forms."""
+    ranges = []
+    for i, a in enumerate(gen_args):
+        if a == "--range" and i + 1 < len(gen_args):
+            ranges.append(gen_args[i + 1])
+        elif a.startswith("--range="):
+            ranges.append(a.split("=", 1)[1])
+    axes = []
+    for r in ranges:
+        if "=" not in r:
+            continue
+        name, vals = r.split("=", 1)
+        n_vals = len([v for v in vals.split(",") if v.strip()])
+        if n_vals >= 1:
+            axes.append((name, n_vals))
+    return axes
+
+
+def derive_item_count(gen_args: "list[str]", items_override: "int | None" = None) -> int:
+    """The real combination count a per-item run needs (per-item-sharding-proposal.md Phase 2),
+    from the SAME expanded gen_args used to dispatch -- one description of the grid, not a
+    second one this function invents independently. `items_override` (--items) is for a job
+    whose grid isn't expressed via --range at all.
+
+    MUST FAIL LOUDLY rather than guess: the proposal is explicit that too high just wastes
+    ~80ms per empty dispatch, but too low SILENTLY DROPS combinations -- there is no safe
+    default to fall back to, so an unparseable or absent grid description raises.
+    """
+    if items_override is not None:
+        if items_override <= 0:
+            raise ValueError(f"--items must be positive, got {items_override}")
+        return items_override
+    axes = _parse_range_axes(gen_args)
+    if not axes:
+        raise ValueError("could not derive an item count: no --range found in the dispatched "
+                         "arguments, and no --items override was given -- pass --items N "
+                         "explicitly for a job whose grid isn't expressed via --range")
+    count = 1
+    for _, n in axes:
+        count *= n
+    return count
+
+
 def _warn_chunk_aliasing(gen_args, chunks):
     """Warn when --chunks shares a factor with a knob axis, freezing that knob inside every shard.
 
@@ -594,20 +640,7 @@ def _warn_chunk_aliasing(gen_args, chunks):
 
     A chunk count coprime with every axis cardinality avoids it -- a prime is the easy answer.
     """
-    ranges = []
-    for i, a in enumerate(gen_args):
-        if a == "--range" and i + 1 < len(gen_args):
-            ranges.append(gen_args[i + 1])
-        elif a.startswith("--range="):
-            ranges.append(a.split("=", 1)[1])
-    axes = []
-    for r in ranges:
-        if "=" not in r:
-            continue
-        name, vals = r.split("=", 1)
-        n_vals = len([v for v in vals.split(",") if v.strip()])
-        if n_vals >= 2:
-            axes.append((name, n_vals))
+    axes = [(n, c) for n, c in _parse_range_axes(gen_args) if c >= 2]
     if not axes:
         return
     frozen = [(n, c) for n, c in axes if chunks % c == 0]
@@ -701,7 +734,8 @@ def _repair_missing(local_dir: Path, config_path, extra_args, missing_npy, repo_
     return ok
 
 
-def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), repair_missing=False):
+def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), repair_missing=False,
+            labels=None, expected_count=None):
     """Pull every worker's shard into one local directory, merging params.csv correctly.
 
     THE HALF THIS MODULE USED TO LEAVE OUT. distribute_pull schedules renders; it never
@@ -730,6 +764,20 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
     OWN attempt is what got interrupted before its row was written). Now the exact indices
     on each side of the mismatch are computed and logged by number, and --repair-missing lets
     a caller regenerate exactly those indices automatically instead of doing it by hand.
+
+    `labels` (per-item-sharding-proposal.md Phase 3): the params.csv SCRATCH FILENAME per
+    entry, defaulting to each worker's `.host`. Needed once one host can appear MULTIPLE times
+    in `workers`/`remote_out` (per-item mode's K slots, one entry per (worker, slot) sharing
+    the SAME `.host`) -- without a distinct label, slot 1's scratch copy would silently
+    overwrite slot 0's before either was merged, exactly the clobber-hazard this function
+    exists to prevent in the first place, just recreated one level down.
+
+    `expected_count` (Phase 3's other assertion): when given, `consistent` also requires the
+    merged row count and .npy count to equal it exactly, and every .npy to be the SAME byte
+    size (a real render's outputs of one device are the same duration/format; the reference
+    run this was checked against had all 24 at 39,379,328 bytes, so truncation shows up
+    immediately). Phase 0's atomic .npy writes should make a genuinely partial file
+    unreachable, so this is a second, independent line of defense, not a substitute for that.
     """
     local_dir = Path(local_dir).expanduser()
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -738,16 +786,18 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
     for f in scratch.glob("*.csv"):
         f.unlink()
 
-    # 1. params.csv FIRST, to per-worker names -- before anything can overwrite them.
+    labels = list(labels) if labels is not None else [w.host for w in workers]
+
+    # 1. params.csv FIRST, to per-entry scratch names -- before anything can overwrite them.
     got = []
-    for w, out in zip(workers, remote_out):
-        dst = scratch / f"{w.host}.csv"
+    for w, out, label in zip(workers, remote_out, labels):
+        dst = scratch / f"{label}.csv"
         r = subprocess.run(["rsync", "-a", f"{w.host}:{out}/params.csv", str(dst)],
                            capture_output=True, text=True)
         if r.returncode == 0 and dst.exists():
             got.append((w.host, dst))
         else:
-            log(f"  collect: {w.host} has no params.csv (empty shard?) -- skipped")
+            log(f"  collect: {label} has no params.csv (empty shard?) -- skipped")
 
     # 2. sig/ trees and the once-only artifacts. Safe in any order: global-index filenames.
     for w, out in zip(workers, remote_out):
@@ -791,6 +841,24 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
         elif orphan_npy and config_path is None:
             log("  collect: --repair-missing needs --config to know how to re-render -- "
                 "not attempting a repair.")
+
+    # Phase 3's other assertion (per-item-sharding-proposal.md): the exact expected count, not
+    # just internal 1:1 consistency -- an orphan-free 40-row merge from a 65-combination job is
+    # "consistent" by the checks above and still means 25 combinations were never rendered
+    # anywhere. Only enforced when the caller knows N (per-item mode always does; the legacy
+    # --chunks path does not always have one, so this stays opt-in).
+    if expected_count is not None:
+        if len(csv_idx) != expected_count or len(npy_idx) != expected_count:
+            consistent = False
+            log(f"  collect: WARNING expected {expected_count} combination(s), got "
+                f"{len(csv_idx)} params row(s) / {len(npy_idx)} .npy file(s) -- some "
+                f"combination was never rendered anywhere, not just misfiled between workers.")
+        sizes = {p.stat().st_size for p in local_dir.glob("sig/**/*.npy")}
+        if len(sizes) > 1:
+            consistent = False
+            log(f"  collect: WARNING .npy files are not all the same byte size ({sorted(sizes)}) "
+                f"-- one device's renders should be uniform length; this usually means a "
+                f"truncated or corrupted transfer.")
     for f in scratch.glob("*.csv"):
         f.unlink()
     scratch.rmdir()
@@ -878,11 +946,12 @@ class Job:
     output_flag: str           # e.g. "--output" or "--shard-out"
     build_args: "callable"     # (config_path, repo_root, extra_args) -> list[str]
     chunk_output: "callable"   # (base_output, chunk_spec) -> str, passed after output_flag
-    collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing) -> None
+    collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args, no_combine,
+                               #  repair_missing, labels=None, expected_count=None) -> None
 
 
 def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine,
-                          repair_missing):
+                          repair_missing, labels=None, expected_count=None):
     """GEN_DATASET_JOB's own collect step: merge shards, then build outputs.npy by default.
 
     --collect used to stop right after merging, leaving a directory that LOOKS finished but
@@ -892,8 +961,12 @@ def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args
     already checks rows-vs-.npy, the exact precondition combine needs. Cost Mesa Orange and
     Duke of Tone (Overdrive) a manual step each on 2026-09-07; run_pipeline.py has had a
     Combine step all along, so only this distributed path was missing it.
+
+    `labels`/`expected_count`: per-item-sharding-proposal.md Phase 3 -- see _collect's own
+    docstring. Both default to None (legacy behavior, one entry per worker, no count check).
     """
-    consistent = _collect(workers, remote_out, local_dir, config_path, extra_args, repair_missing)
+    consistent = _collect(workers, remote_out, local_dir, config_path, extra_args, repair_missing,
+                          labels=labels, expected_count=expected_count)
     why = should_combine(consistent, no_combine)
     if why is None:
         log("  combining -> outputs.npy ...")
@@ -910,9 +983,10 @@ GEN_DATASET_JOB = Job(
     build_args=lambda config_path, repo_root, extra_args:
         gen_args_from_config(config_path, repo_root) + extra_args,
     chunk_output=lambda base_output, chunk: base_output,
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
+                  labels=None, expected_count=None:
         _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine,
-                              repair_missing),
+                              repair_missing, labels=labels, expected_count=expected_count),
 )
 
 GRID_ADEQUACY_JOB = Job(
@@ -926,7 +1000,8 @@ GRID_ADEQUACY_JOB = Job(
     # no_combine/repair_missing are GEN_DATASET_JOB-specific (grid_adequacy has no "combine" or
     # per-index-repair concept at all) -- accepted and ignored here so all three jobs share one
     # call site in main().
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
+                  labels=None, expected_count=None:
         _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_args),
 )
 
@@ -940,7 +1015,8 @@ MEASURE_TRUNCATION_JOB = Job(
     chunk_output=lambda base_output, chunk: f"{base_output}/shard_{chunk.replace('/', '_')}.json",
     # no_combine/repair_missing are GEN_DATASET_JOB-specific, same as GRID_ADEQUACY_JOB --
     # accepted and ignored here so all three jobs share one call site in main().
-    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing:
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
+                  labels=None, expected_count=None:
         _collect_measure_truncation(workers, remote_out, local_dir, config_path, extra_args),
 )
 
@@ -973,7 +1049,29 @@ def main():
                          "so 64 chunks over ~15 settings hands most workers nothing.")
     ap.add_argument("--chunks", type=int, default=64,
                     help="how many pieces to cut the grid into (default 64). Each is dispatched "
-                         "as --shard i-i/CHUNKS. See module docstring on sizing.")
+                         "as --shard i-i/CHUNKS. See module docstring on sizing. Ignored when "
+                         "--chunk-size is given -- see per-item-sharding-proposal.md.")
+    ap.add_argument("--chunk-size", type=int, default=None, metavar="N",
+                    help="per-item-sharding-proposal.md Phase 1: dispatch ONE combination at a "
+                         "time per slot instead of one multi-combination chunk per worker. Only "
+                         "1 is implemented today (any other value is a hard error). Requires "
+                         "--slots (or lets it default to each worker's own PARALLEL/core count) "
+                         "and derives the real item count via --items or --range (see "
+                         "derive_item_count). Default (omitted): the original --chunks path, "
+                         "unchanged.")
+    ap.add_argument("--slots", type=int, default=None, metavar="K",
+                    help="--chunk-size 1 only: concurrent per-item dispatches PER WORKER, each "
+                         "into its own <output>/slot-K subdirectory (so K concurrent generations "
+                         "never collide on gen_dataset_from_schx's exclusive per-directory lock). "
+                         "Default: each worker's own PARALLEL/auto-detected core count -- same "
+                         "total concurrency as the legacy --workers-N-internal-to-one-chunk "
+                         "model, just restructured into K independent single-item dispatches.")
+    ap.add_argument("--items", type=int, default=None, metavar="N",
+                    help="--chunk-size 1 only: override the derived combination count instead "
+                         "of reading it from --range (needed for a job whose grid isn't "
+                         "expressed that way). Getting this WRONG is dangerous in opposite "
+                         "directions: too high just wastes ~80ms per empty dispatch, too low "
+                         "SILENTLY DROPS combinations -- see derive_item_count.")
     ap.add_argument("--output", required=True, help="output dir ON EACH WORKER")
     ap.add_argument("--retries", type=int, default=1,
                     help="re-queue a failed chunk this many times, on a DIFFERENT worker where "
@@ -1091,7 +1189,30 @@ def main():
             ap.error("every worker failed the dispatch-time version check -- nothing to "
                      "dispatch to (see the WARNINGs above). Pass --skip-version-check to "
                      "bypass, or fix the checkout(s).")
-    queue = deque(f"{i}-{i}/{args.chunks}" for i in range(args.chunks))
+    # Per-item dispatch (per-item-sharding-proposal.md, docs/implementation-roadmap.md item 6):
+    # --chunk-size 1 replaces the multi-combination --chunks path with K single-item dispatches
+    # per worker ("slots"), each into its own <output>/slot-K so K concurrent generations never
+    # collide on gen_dataset_from_schx's exclusive per-directory lock. Everything below this
+    # block -- the queue, attempts/tried_on, quarantine, retry -- is UNCHANGED either way: a
+    # per-item "chunk" is just a shard spec with TOTAL == the real combination count, so it
+    # reuses the exact same `i-i/N` machinery legacy chunking already has.
+    per_item = args.chunk_size is not None
+    item_count = None
+    if per_item:
+        if args.chunk_size != 1:
+            ap.error(f"--chunk-size {args.chunk_size}: only 1 (per-item dispatch) is "
+                     "implemented today -- see per-item-sharding-proposal.md")
+        try:
+            item_count = derive_item_count(gen_args, args.items)
+        except ValueError as e:
+            ap.error(str(e))
+        for w in workers:
+            w.slots = args.slots if args.slots else w.parallel
+        n_specs = item_count
+    else:
+        n_specs = args.chunks
+
+    queue = deque(f"{i}-{i}/{n_specs}" for i in range(n_specs))
     attempts = {c: 0 for c in queue}
     tried_on = {c: set() for c in queue}   # chunk -> hosts that have already failed it
     pace = ComboPace(slow_mult=args.slow_mult, min_samples=args.slow_min_samples,
@@ -1103,12 +1224,16 @@ def main():
     completed = failed_final = 0
     t_start = time.time()
 
-    _warn_chunk_aliasing(gen_args, args.chunks)
+    if per_item:
+        log(f"{total} combination(s) over {len(workers)} worker(s), "
+            f"{sum(w.slots for w in workers)} slot(s) total: "
+            + ", ".join(f"{w.host}(slots={w.slots})" for w in workers))
+    else:
+        _warn_chunk_aliasing(gen_args, args.chunks)
+        log(f"{total} chunks over {len(workers)} worker(s): "
+            + ", ".join(f"{w.host}(par={w.parallel})" for w in workers))
 
-    log(f"{total} chunks over {len(workers)} worker(s): "
-        + ", ".join(f"{w.host}(par={w.parallel})" for w in workers))
-
-    def worker_loop(w):
+    def worker_loop(w, output_dir, workers_flag):
         nonlocal completed, failed_final
         while True:
             with lock:
@@ -1134,8 +1259,8 @@ def main():
                 attempts[chunk] = attempts.get(chunk, 0) + 1
                 n_try = attempts[chunk]
             w.busy = True
-            rc, dt, out = w.run_chunk(chunk, f"{gen_args_str} --workers {w.parallel}",
-                                      args.output, pace=pace)
+            rc, dt, out = w.run_chunk(chunk, f"{gen_args_str} --workers {workers_flag}",
+                                      output_dir, pace=pace)
             w.busy = False
             with lock:
                 if rc == 0:
@@ -1171,7 +1296,13 @@ def main():
                         for line in out.strip().splitlines()[-3:]:
                             log(f"      {line[:110]}")
 
-    threads = [threading.Thread(target=worker_loop, args=(w,), daemon=True) for w in workers]
+    if per_item:
+        threads = [threading.Thread(target=worker_loop,
+                                    args=(w, f"{args.output}/slot-{k}", 1), daemon=True)
+                  for w in workers for k in range(w.slots)]
+    else:
+        threads = [threading.Thread(target=worker_loop, args=(w, args.output, w.parallel),
+                                    daemon=True) for w in workers]
     for t in threads: t.start()
     for t in threads: t.join()
 
@@ -1188,8 +1319,24 @@ def main():
             r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
                                 f"cd ~ && echo {args.output}"], capture_output=True, text=True)
             remote_out.append(r.stdout.strip() or args.output)
-        job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine,
-                    args.repair_missing)
+        if per_item:
+            # host x slot (Phase 3), not one entry per host: each slot rendered into its own
+            # <output>/slot-K, and needs its own scratch-csv LABEL -- collect_workers repeats
+            # the SAME Worker object per slot (only .host is read below it), which is why the
+            # label can't just be w.host again, or slot 1's params.csv would silently clobber
+            # slot 0's before either was merged. See _collect's own docstring.
+            collect_workers, collect_remote_out, collect_labels = [], [], []
+            for w, ro in zip(workers, remote_out):
+                for k in range(w.slots):
+                    collect_workers.append(w)
+                    collect_remote_out.append(f"{ro}/slot-{k}")
+                    collect_labels.append(f"{w.host}-slot{k}")
+            job.collect(collect_workers, collect_remote_out, args.collect, args.config, extra_args,
+                       args.no_combine, args.repair_missing, labels=collect_labels,
+                       expected_count=item_count)
+        else:
+            job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine,
+                       args.repair_missing)
     else:
         log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
             "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "
