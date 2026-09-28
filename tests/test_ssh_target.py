@@ -240,8 +240,10 @@ class TestEverySiteUsesTheConfig:
         monkeypatch.setattr(gc, "HERE", tmp_path)
         calls = self._capture(monkeypatch, gc)
         gc.sync_excitation_wav({"input": str(wav)}, ["h"], {"h": "/r"})
-        assert calls[0][:3] == ["ssh", "-F", str(active)]
-        assert calls[1][:4] == ["rsync", "-a", "-e", f"ssh -F {active}"]
+        ssh_calls = [c for c in calls if c[0] == "ssh"]
+        assert len(ssh_calls) >= 2 and all(c[:3] == ["ssh", "-F", str(active)] for c in ssh_calls)
+        rsync = next(c for c in calls if c[0] == "rsync")
+        assert rsync[:4] == ["rsync", "-a", "-e", f"ssh -F {active}"]
 
     @pytest.mark.parametrize("fn", ["_collect", "_collect_grid_adequacy",
                                     "_collect_check_transient_coverage", "_collect_measure_truncation"])

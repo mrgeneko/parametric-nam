@@ -612,6 +612,11 @@ path is too far outside to travel.
 > launch omitted `--backend` — whose default is `cpp` — and all four workers quarantined in
 > under a second.
 
+> **`distribute_gen.sh` is deprecated.** `distribute_pull.py` covers everything it did,
+> including `--sync-file` (below), and is dispatch-time-verified and inventory-aware. The shell
+> script is kept only until nothing references it; it does not use `ssh_target.py`, so it
+> ignores per-host `user`/`port`/`identity_file` from the inventory.
+
 `distribute_gen.sh` splits the grid **once**, up front, by core count or `--weights`, and each
 worker keeps its slice. That only works when every worker's throughput is known in advance *and
 stays constant*. On a 648-combination run neither held: one Linux box managed 43.8 combos/hr and
@@ -678,6 +683,16 @@ Four things that are easy to get wrong:
   `gen_dataset_from_schx.py`'s own per-shard knob-sensitivity check goes blind and reports the
   frozen knob as `RMS varies only 0.00% — knob may have no effect`, which reads exactly like a
   dead knob or a `param_map` typo. A prime is the easy answer; the tool warns and suggests one.
+- **`--sync-file PATH` — inputs git does not carry.** Repeatable. Pushes each file or directory
+  (a directory's *contents* land in that directory) to every worker's checkout at the same
+  repo-relative path, before any chunk is dispatched -- each worker's own `DIR`, so layouts
+  may differ. `~` in a worker dir is resolved by that worker's shell (rsync does not expand it
+  reliably across versions). Names with spaces or parentheses (`Big Muff (v2).schx`) go over
+  tar-over-ssh, since rsync's remote-path quoting differs by version. A worker that cannot
+  receive *every* path is **excluded with a warning** rather than left in the pool: a worker
+  missing an input fails or quarantines every chunk it touches. A missing local path is a usage
+  error before any ssh; no worker able to receive everything is also an error. Replaces
+  `distribute_gen.sh --sync-file`; `gate_config.py`'s excitation-wav sync uses the same code.
 - **A fast-failing worker is worse than a slow one.** It drains the queue faster than healthy
   machines can take work — one that could not import a dependency killed 27 of 31 chunks in ~70 s.
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
@@ -823,7 +838,7 @@ Include ~/.ssh/config        # everything the inventory doesn't say still applie
   `--worker HOST:DIR`; hosts need not share a layout.
 - **Aliases need no `~/.ssh/config` entry.** An inventory host name that ssh can't resolve on
   its own works, because `HostName` comes from `address`.
-- **Not covered:** `distribute_gen.sh` (the older shell distributor) and
+- **Not covered:** `distribute_gen.sh` (deprecated; use `distribute_pull.py`) and
   `fleet_inventory.py --probe-hosts` itself (which is where the values come from: it asks
   `ssh -G`, so probing uses your ssh config). `port` is recorded by the probe only when not 22.
 - A worker spec is still `HOST:DIR[:PARALLEL[:ENV]]` split on `:`, so an IPv6 literal or

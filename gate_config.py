@@ -344,6 +344,7 @@ def grid_command(config: Path, target: float) -> "list[str]":
 import fleet_inventory  # noqa: E402
 import ssh_target  # noqa: E402
 from distribute_pull import _relpath_or_warn as repo_relpath  # noqa: E402  reuse, don't reimplement
+from distribute_pull import sync_path_to_worker  # noqa: E402
 
 FLEET_WORK_ROOT = "~/.cache/parametric-nam/gate-fleet"   # ON EACH WORKER -- same
                                                           # "your machine's own state"
@@ -436,18 +437,8 @@ def sync_excitation_wav(cfg: dict, hosts: "list[str]", repo_dirs: "dict[str, str
     rel = repo_relpath("input", inp, HERE)
     results = []
     for host in hosts:
-        dest = f"{repo_dirs[host]}/{rel}"
-        mk = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes")
-                            + [f"mkdir -p $(dirname {dest})"], capture_output=True, text=True,
-                            timeout=30)
-        if mk.returncode != 0:
-            results.append((host, False, f"mkdir failed: {mk.stderr.strip()[:150]}"))
-            continue
-        r = subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), str(inp), f"{host}:{dest}"],
-                           capture_output=True,
-                           text=True, timeout=timeout)
-        results.append((host, r.returncode == 0,
-                        "ok" if r.returncode == 0 else r.stderr.strip()[:150]))
+        ok, detail = sync_path_to_worker(host, repo_dirs[host], inp, rel, timeout=timeout)
+        results.append((host, ok, detail))
     return results
 
 

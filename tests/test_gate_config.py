@@ -574,8 +574,7 @@ class TestSyncExcitationWav:
         monkeypatch.setattr(gc.subprocess, "run", fake_run)
         results = gc.sync_excitation_wav({"input": str(wav)}, ["h1"], {"h1": "/remote/repo"})
         assert results == [("h1", True, "ok")]
-        rsync_cmd = calls[1]
-        assert rsync_cmd[0] == "rsync"
+        rsync_cmd = next(c for c in calls if c[0] == "rsync")
         assert rsync_cmd[-1] == "h1:/remote/repo/amps/exc.wav"
 
     def test_per_host_failure_is_reported_not_raised(self, tmp_path, monkeypatch):

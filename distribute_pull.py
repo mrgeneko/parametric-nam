@@ -32,10 +32,11 @@ an ssh round-trip plus the renderer's own startup (schx parse and symbolic solve
 for a full amp). Default 64 chunks over a 648-combination grid is ~10 combinations each,
 where startup is a few percent of chunk runtime.
 
-NOT A REPLACEMENT for distribute_gen.sh's setup work (repo sync, --sync-file, gate). Run
-those first; this only schedules the rendering.
+It also supersedes distribute_gen.sh (deprecated): `--sync-file PATH` (repeatable) pushes
+inputs git does not carry to each worker's checkout before dispatch. Repo sync and the gate are
+still separate steps (gate_config.py / run_pipeline.py fleet mode); this schedules the rendering.
 """
-import argparse, csv, json, os, re, statistics, subprocess, sys, threading, time
+import argparse, csv, json, os, posixpath, re, shlex, statistics, subprocess, sys, threading, time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -356,6 +357,108 @@ def _relpath_or_warn(dest_label: str, v, repo_root: Path) -> str:
               f"resolve the same way on every worker. Put it in a sibling directory of "
               f"the repo, or pass --{dest_label} yourself after --.", file=sys.stderr)
     return rel
+
+
+# ---------------------------------------------------------------------------
+# Input sync (--sync-file). Pushes inputs a render needs that git does not carry -- the
+# excitation wav (gitignored), a .schx or --pedal-dir module that lives outside the worker's
+# checkout -- into each worker's OWN repo dir at the same repo-relative path, which is what
+# run_chunk's `cd <worker dir> && ...` expects. Replaces distribute_gen.sh's --sync-file.
+# ---------------------------------------------------------------------------
+_RSYNC_SAFE = re.compile(r"^[A-Za-z0-9_@%+=:,./~-]+$")
+
+
+def _remote_quote(p: str) -> str:
+    """shlex.quote for a REMOTE shell, keeping a leading `~/` unquoted so it still expands."""
+    if p.startswith("~/"):
+        return "~/" + shlex.quote(p[2:])
+    return shlex.quote(p)
+
+
+def resolve_remote_dir(host: str, path: str, timeout: float = 30.0) -> str:
+    """`path` as the worker's own shell resolves it (`~` -> its real home). rsync's host:path
+    does not reliably expand `~` (it depends on the rsync version's argument protection), so
+    resolve once and use the absolute path. Falls back to `path` unchanged if ssh fails --
+    the caller's next command then fails with a real error instead of this guessing."""
+    try:
+        r = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes")
+                           + [f"cd ~ && echo {path}"], capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return path
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else path
+
+
+def sync_path_to_worker(host: str, worker_dir: str, local_path, rel: str,
+                        timeout: float = 300.0) -> "tuple[bool, str]":
+    """Copy `local_path` (file or directory) to `<worker_dir>/<rel>` on `host`. Never raises.
+
+    A file lands at exactly that path; a directory's CONTENTS land in that directory. Names
+    with characters outside a conservative safe set (spaces, parentheses -- e.g. "Big Muff
+    (v2).schx", which distribute_gen.sh's --sync-file once had to be fixed for) go through
+    tar-over-ssh instead of rsync: rsync's remote-path quoting differs between versions
+    (old-style args are re-parsed by the remote shell, 3.2.4+ escape them), so no single
+    spelling is right for both, while a quoted `tar -xf -` command is.
+    """
+    local = Path(local_path).expanduser()
+    if not local.exists():
+        return False, f"not found locally: {local}"
+    base = resolve_remote_dir(host, worker_dir).rstrip("/")
+    dest = f"{base}/{rel}"
+    is_dir = local.is_dir()
+    dest_dir = dest if is_dir else posixpath.dirname(dest)
+    try:
+        mk = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes")
+                            + [f"mkdir -p {_remote_quote(dest_dir)}"],
+                            capture_output=True, text=True, timeout=30)
+        if mk.returncode != 0:
+            return False, f"mkdir failed: {mk.stderr.strip()[:150]}"
+        if _RSYNC_SAFE.match(dest):
+            src = str(local) + ("/" if is_dir else "")
+            r = subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), src,
+                                f"{host}:{dest}{'/' if is_dir else ''}"],
+                               capture_output=True, text=True, timeout=timeout)
+            return r.returncode == 0, "ok" if r.returncode == 0 else r.stderr.strip()[:150]
+        tar_src = ["-C", str(local), "."] if is_dir else ["-C", str(local.parent), local.name]
+        env = dict(os.environ, COPYFILE_DISABLE="1")      # bsdtar: no ._AppleDouble sidecars
+        tar = subprocess.Popen(["tar", "-cf", "-", *tar_src], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=env)
+        try:
+            r = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes")
+                               + [f"tar -C {_remote_quote(dest_dir)} -xf -"], stdin=tar.stdout,
+                               capture_output=True, text=True, timeout=timeout)
+        finally:
+            tar.stdout.close()
+            tar.wait()
+        if tar.returncode != 0 or r.returncode != 0:
+            return False, (r.stderr.strip() or tar.stderr.read().decode(errors="replace").strip()
+                           or f"tar exit {tar.returncode}/{r.returncode}")[:150]
+        return True, "ok"
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def sync_files(workers: "list", paths: "list[str]", repo_root: "Path | None" = None) -> "list":
+    """Push every `paths` entry to every worker (see sync_path_to_worker); returns the workers
+    that received ALL of them. One that failed is EXCLUDED with a WARNING, not left in the
+    pool: a worker missing an input fails or quarantines every chunk it touches, which is
+    worse than not having it (the same reasoning verify_workers applies to a stale checkout)."""
+    repo_root = repo_root or Path(__file__).resolve().parent
+    rels = {p: _relpath_or_warn("sync-file", p, repo_root) for p in paths}
+    ok_workers = []
+    for w in workers:
+        failures = []
+        for p in paths:
+            ok, detail = sync_path_to_worker(w.host, w.dir, p, rels[p])
+            if not ok:
+                failures.append(f"{p}: {detail}")
+        if failures:
+            log(f"WARNING: {w.host}: --sync-file failed, EXCLUDING this worker: "
+                + "; ".join(failures))
+        else:
+            log(f"{w.host}: synced {len(paths)} file(s)")
+            ok_workers.append(w)
+    return ok_workers
 
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1346,14 @@ def main():
                          "from this run (not abort the whole run) -- see verify_workers(). Pass "
                          "this only when a mismatch is a known false positive; it is not a "
                          "warn-only default the way --skip-gate-check is.")
+    ap.add_argument("--sync-file", action="append", default=[], metavar="PATH",
+                    help="repeatable. Push this file (or directory's contents) to every worker "
+                         "at the SAME path relative to the repo before dispatching -- for "
+                         "inputs git doesn't carry: a gitignored excitation wav, a .schx or "
+                         "--pedal-dir module outside the checkout. A worker that can't receive "
+                         "one is excluded from the run. Replaces distribute_gen.sh's flag of "
+                         "the same name. Provisioning (clone, venv, oracle build) is still a "
+                         "per-machine setup step this does not do.")
     ap.add_argument("--inventory", nargs="?", const="__DEFAULT__", default=None,
                     help="reach each --worker HOST the way the fleet inventory says: its "
                          "address/user/port/identity_file become an ssh config (ssh_target.py) "
@@ -1287,6 +1398,9 @@ def main():
     if not gen_args_str:
         ap.error("pass --config, or the renderer's own arguments after --")
 
+    missing = [p for p in args.sync_file if not Path(p).expanduser().exists()]
+    if missing:
+        ap.error(f"--sync-file not found locally: {', '.join(missing)}")
     workers = [Worker(w, job=job) for w in args.worker]
     if not args.skip_version_check:
         workers = verify_workers(workers, extract_backend(gen_args))
@@ -1294,6 +1408,11 @@ def main():
             ap.error("every worker failed the dispatch-time version check -- nothing to "
                      "dispatch to (see the WARNINGs above). Pass --skip-version-check to "
                      "bypass, or fix the checkout(s).")
+    if args.sync_file:
+        workers = sync_files(workers, args.sync_file)
+        if not workers:
+            ap.error("no worker could receive every --sync-file -- nothing to dispatch to "
+                     "(see the WARNINGs above).")
     # Per-item dispatch (per-item-sharding-proposal.md, docs/implementation-roadmap.md item 6):
     # --chunk-size 1 replaces the multi-combination --chunks path with K single-item dispatches
     # per worker ("slots"), each into its own <output>/slot-K so K concurrent generations never
