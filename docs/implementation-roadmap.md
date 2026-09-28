@@ -59,8 +59,7 @@ Sources:
       call, every time); `max_render_s` is not probed. **Not done:** the per-host SSH
       address/key/login-user piece item 1 left open -- `fleet_inventory.py` records a host's
       mesh/SSH *name* (`address`) but not a key path or login user, so `~/.ssh/config` aliases
-      are still hand-maintained. Fold that in when this item is revisited, or in item 5. Optional, so explicit `--worker` flags keep
-      working. Recorded throughput is for reporting only, never a scheduler input.
+      are still hand-maintained. Fold that in when this item is revisited, or in item 5.
 - [ ] **5. Dispatch-time version verification** (fleet step 3). Scheduler checks commit SHA and
       simulator version and refuses mismatched workers. Would have caught the 472-commit-stale
       checkout. Uses 4.
