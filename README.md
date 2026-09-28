@@ -253,6 +253,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | Script | Purpose |
 |---|---|
 | `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
+| `fleet_inventory.py` | `--probe-hosts` measures per-host cores/backends/accelerator/VRAM over SSH and writes a reviewable `~/.config/parametric-nam/fleet.toml`; `train`/`max_render_s` are always left for you to set. Not yet consumed by `distribute_pull.py`/`run_pipeline.py` |
 | `gate_config.py` | Runs the pre-generation gate in order (excitation sizing → transient coverage → preflight) and writes a fingerprinted `<config>.gate.json`; `--verify` refuses when the circuit, grid or excitation changed since it passed |
 | `preflight.py` | Pre-generation sanity gate — probes a handful of points through the oracle before a full render; also provides `--find-peak` (saturation onset) |
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |

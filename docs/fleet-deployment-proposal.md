@@ -135,6 +135,14 @@ A `--probe-hosts` mode should emit a reviewable file the way `scaffold_config.py
 device config: measured, annotated, and yours to correct. Requiring a hand-written file with
 no discoverability is a mistake this project has made before.
 
+> **STATUS (2026-09-28): implemented as `fleet_inventory.py --probe-hosts`** — see
+> [scripts.md](scripts.md#fleet_inventorypy--probe-hosts-write-a-reviewable-fleet-inventory).
+> Probes cores, backends, accelerator/GPUs/VRAM (via the worker's own venv) and the repo path.
+> `max_render_s` is NOT probed (needs a real timed render); `train` is always written `false`,
+> per this section's own point below that a GPU should not imply training eligibility. Not yet
+> consumed by `distribute_pull.py`/`run_pipeline.py` — see
+> [implementation-roadmap.md](implementation-roadmap.md) item 4/5.
+
 **It must describe accelerators, not only cores.** Everything above is render-side, and
 rendering is CPU-bound — but the same fleet also *trains*, and that is where the per-host
 facts are least discoverable and most often rediscovered by hand. The repo already contends

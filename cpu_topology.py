@@ -66,12 +66,29 @@ def _physical_cpu_count_local() -> int:
 
 
 def _physical_cpu_count_remote(host: str) -> int:
-    # Try Linux's /proc/cpuinfo first (every remote worker in this fleet is Linux so far);
-    # a Darwin remote would need `sysctl -n hw.physicalcpu` instead, added if/when that's
-    # a real target -- not guessed at here.
-    out = subprocess.run(["ssh", "-o", "ConnectTimeout=8", host, "cat", "/proc/cpuinfo"],
+    """Physical core count over SSH, Linux or Darwin.
+
+    Originally Linux-only ("every remote worker in this fleet is Linux so far") -- Darwin has
+    no /proc/cpuinfo and ships no `nproc` either, so a remote Mac used to fall all the way
+    through physical_cpu_count()'s fallback chain to a hardcoded 4, silently wrong (this Air is
+    10, the fleet's M3 Max MacBook Pro is 14). Found 2026-09-28 via fleet_inventory.py, whose
+    --probe-hosts is the first caller that plausibly probes a remote Mac (the mini's own
+    ~/.ssh/config has an `mbp` alias) rather than only ever the fleet's Linux render workers.
+
+    One SSH round trip: the remote shell picks its own branch, rather than this function
+    guessing the OS or spending a second round trip on a separate `uname` probe first.
+    """
+    script = ('if [ "$(uname -s)" = Darwin ]; then echo DARWIN; sysctl -n hw.physicalcpu; '
+              'else echo LINUX; cat /proc/cpuinfo; fi')
+    out = subprocess.run(["ssh", "-o", "ConnectTimeout=8", host, script],
                           capture_output=True, text=True, timeout=15, check=True)
-    return _parse_proc_cpuinfo(out.stdout)
+    lines = out.stdout.splitlines()
+    if not lines:
+        raise ValueError(f"empty output from remote core-count probe on {host!r}")
+    marker, payload = lines[0].strip(), "\n".join(lines[1:])
+    if marker == "DARWIN":
+        return max(1, int(payload.strip()))
+    return _parse_proc_cpuinfo(payload)
 
 
 def _parse_proc_cpuinfo(text: str) -> int:

@@ -651,6 +651,49 @@ Four things that are easy to get wrong:
   `--quarantine-after N` (default 3) benches a worker after N consecutive failures with no
   successes, and a chunk is not handed back to a host that already failed it.
 
+## `fleet_inventory.py` — probe hosts, write a reviewable fleet inventory
+
+Roadmap item 4 ([implementation-roadmap.md](implementation-roadmap.md)),
+[fleet-deployment-proposal.md](fleet-deployment-proposal.md) §2. Per-host facts (physical
+cores, which backends the oracle/simulators support, accelerator/VRAM, repo checkout path)
+used to be rediscovered by hand and typed into `--worker HOST:DIR:PARALLEL` flags every time.
+This measures them once and writes them to a TOML file, the way `scaffold_config.py` writes a
+starting device config: measured and annotated, not asserted.
+
+```bash
+python fleet_inventory.py --probe-hosts --worker mac-1 --worker linux-1:~/render/parametric-nam
+python fleet_inventory.py --probe-hosts --no-self --inventory ~/my-fleet.toml
+```
+
+**Probed, per host:** `cores` (via `cpu_topology.physical_cpu_count` -- not re-derived),
+`backends` (filesystem checks mirroring `gen_dataset_from_schx.check_oracle`'s own presence
+tests for `livespice`/`ngspice-deck`/`ltspice-deck`), `accelerator`/`gpus`/`vram_gb` (via the
+worker's own `.venv` -- the same `torch.cuda.is_available()` → ROCm-vs-CUDA-via-`torch.version.
+hip` → `torch.backends.mps.is_available()` order `checkpoint_infer.py`/`param_train.py` already
+use), and `repo` (a few candidate paths, plus any hint you gave after the host's `:`).
+
+**Not probed, on purpose** -- left blank/`false` for you to fill in:
+- `train` is always written `false`. Having a GPU does not make a host a good training host
+  (it may sleep, or be the controller) -- this is a decision this tool will not make for you.
+- `max_render_s` needs an actual timed render; not attempted here.
+- `env` gets exactly one heuristic (`DOTNET_ROOT`, if `dotnet` isn't on PATH but is found at its
+  conventional install location) -- a non-interactive SSH command doesn't reliably source the
+  same profile an interactive shell would, so anything else is left to you.
+
+A host that fails to probe at all (SSH unreachable) is skipped and reported, not written with
+guessed values. Re-running `--probe-hosts` **overwrites** the file -- it is a fresh probe, not a
+merge, matching the "review the diff, don't hand-edit and then re-probe over it" convention.
+
+**Where it lives:** `~/.config/parametric-nam/fleet.toml` by default (mirrors
+`~/.cache/parametric-nam/`'s own "your machine's state, not this repo's content" convention);
+`--inventory` overrides it. `load_inventory()` is the loader other tools will use once they
+consume it (`fleet_inventory.load_inventory(path=None) -> {name: facts}`, `{}` if the file
+doesn't exist -- not an error). See [`examples/fleet.example.toml`](../examples/fleet.example.toml)
+for what a filled-in file looks like.
+
+**Not yet consumed anywhere.** `distribute_pull.py`/`run_pipeline.py` don't read this file yet;
+they still take `--worker`/`--config` directly. Wiring that in is future roadmap work.
+
 ## `sync_findpeak_cache.sh` — warm the onset cache across a fleet before sharding
 
 ```bash

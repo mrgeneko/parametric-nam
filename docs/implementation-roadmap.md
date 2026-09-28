@@ -51,11 +51,15 @@ Sources:
       for a while — at that point `--require-gate` becomes the (only) default behavior and
       `--skip-gate-check` remains as the escape hatch, matching this item's original design.
       Needs 2 (done).
-- [ ] **4. Host inventory with `--probe-hosts`** (fleet §2). Generated, reviewable file;
-      physical (not logical) core count; backends per host; accelerator, `vram_gb`, and a
-      `train` flag separate from having a GPU. Also the natural home for what item 1 left
-      open: per-host address, key path and login user, so aliases and key setup are recorded
-      once rather than hand-maintained in each machine's `~/.ssh/config`. Optional, so explicit `--worker` flags keep
+- [x] **4. Host inventory with `--probe-hosts`** (fleet §2) — **implemented 2026-09-28** as
+      `fleet_inventory.py`. Generated, reviewable TOML; physical core count (reuses
+      `cpu_topology.physical_cpu_count`, not re-derived); backends per host (filesystem probes
+      mirroring `check_oracle`); accelerator/`gpus`/`vram_gb` via the worker's own venv+torch.
+      `train` is always written `false` (a GPU does not imply training eligibility -- human
+      call, every time); `max_render_s` is not probed. **Not done:** the per-host SSH
+      address/key/login-user piece item 1 left open -- `fleet_inventory.py` records a host's
+      mesh/SSH *name* (`address`) but not a key path or login user, so `~/.ssh/config` aliases
+      are still hand-maintained. Fold that in when this item is revisited, or in item 5. Optional, so explicit `--worker` flags keep
       working. Recorded throughput is for reporting only, never a scheduler input.
 - [ ] **5. Dispatch-time version verification** (fleet step 3). Scheduler checks commit SHA and
       simulator version and refuses mismatched workers. Would have caught the 472-commit-stale

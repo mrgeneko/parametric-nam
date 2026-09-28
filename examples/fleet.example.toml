@@ -1,0 +1,36 @@
+# Illustrative example of what fleet_inventory.py --probe-hosts generates and
+# fleet_inventory.load_inventory() reads (docs/fleet-deployment-proposal.md §2,
+# docs/implementation-roadmap.md item 4). Hand-written, not a real probe's output --
+# a generated inventory looks like this but includes only what was actually measured
+# (an unknown field is a comment, never a guessed value).
+#
+# Your own inventory is per-machine state, not project content, so it does NOT live in
+# this repo: fleet_inventory.default_inventory_path() is ~/.config/parametric-nam/fleet.toml,
+# and --inventory overrides that.
+
+[hosts."linux-1"]
+address      = "linux-1"                      # mesh DNS name -- resolves the same on every node
+repo         = "~/work/parametric-nam"
+cores        = 6                              # PHYSICAL, not logical/SMT
+backends     = ["livespice", "ngspice-schx", "ngspice-deck"]
+accelerator  = "rocm"                         # "cuda" | "rocm" | "mps" | "none"
+gpus         = 1
+vram_gb      = 16
+train        = false                          # review: set true to allow training jobs here
+
+[hosts."linux-2"]
+address      = "linux-2"
+repo         = "~/render/parametric-nam"       # a non-standard layout, recorded once
+cores        = 6
+backends     = ["ngspice-deck"]                # no livespice-cli checkout found on this host
+accelerator  = "none"
+train        = false
+env          = { DOTNET_ROOT = "~/.dotnet" }
+
+[hosts."mac-1"]
+address      = "mac-1"
+repo         = "~/work/parametric-nam"
+cores        = 8
+backends     = ["livespice", "ngspice-schx", "ngspice-deck", "ltspice-deck"]   # ltspice-deck is macOS-only
+accelerator  = "mps"
+train        = true                            # hand-edited after review: a trusted training host
