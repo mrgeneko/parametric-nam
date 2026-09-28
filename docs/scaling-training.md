@@ -2,8 +2,9 @@
 
 # Scaling training across machines
 
-Rendering already distributes: `distribute_gen.sh` splits one `--grid` across machines over
-SSH ([`docs/scripts.md`](scripts.md)). Training does not, and it is the larger cost — this
+Rendering already distributes: `distribute_pull.py` hands one `--grid` out across machines over
+SSH as workers free up ([`docs/scripts.md`](scripts.md); the older static-split
+`distribute_gen.sh` is deprecated). Training does not, and it is the larger cost — this
 repo's sibling model registry records **1,874 h across 45 runs, a median of 35.1 h each, with
 24 runs over a day and one at 143 h**. This documents what was measured about making that
 faster, and what turned out to be false.
@@ -84,7 +85,7 @@ the M3 Max. Even the fleet's slowest, fanless, thermally-throttled machine beats
 training by 3x.
 
 **Conclusion: blackbox is a render worker, not a training candidate.** Rendering (SPICE
-simulation) is CPU-bound and its 12 threads help there (see `distribute_gen.sh`); training does
+simulation) is CPU-bound and its 12 threads help there (see `distribute_pull.py`); training does
 not benefit from adding it to the fleet's training rotation.
 
 ## Option A — parallel schedule search (no code changes)

@@ -612,10 +612,12 @@ path is too far outside to travel.
 > launch omitted `--backend` — whose default is `cpp` — and all four workers quarantined in
 > under a second.
 
-> **`distribute_gen.sh` is deprecated.** `distribute_pull.py` covers everything it did,
-> including `--sync-file` (below), and is dispatch-time-verified and inventory-aware. The shell
-> script is kept only until nothing references it; it does not use `ssh_target.py`, so it
-> ignores per-host `user`/`port`/`identity_file` from the inventory.
+> **`distribute_gen.sh` is deprecated.** `distribute_pull.py` replaces it,
+> including `--sync-file` (below), and is dispatch-time-verified and inventory-aware. The one
+> thing it does not copy is `--weights` (a static split by numbers you supply): pull scheduling
+> measures throughput instead of needing it stated. The shell script is kept only until
+> nothing references it; it does not use `ssh_target.py`, so it ignores per-host
+> `user`/`port`/`identity_file` from the inventory.
 
 `distribute_gen.sh` splits the grid **once**, up front, by core count or `--weights`, and each
 worker keeps its slice. That only works when every worker's throughput is known in advance *and

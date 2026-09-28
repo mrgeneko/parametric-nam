@@ -51,6 +51,9 @@
 #                    PY (python invocation on the worker, default ".venv/bin/python" --
 #                    direct, not via `activate`, which a repo rename silently breaks)
 #
+echo "WARNING: distribute_gen.sh is DEPRECATED -- use distribute_pull.py (pull scheduling, --sync-file," >&2
+echo "         inventory-aware ssh, version checks). See docs/scripts.md." >&2
+
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
