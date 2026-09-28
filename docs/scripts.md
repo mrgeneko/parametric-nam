@@ -675,7 +675,14 @@ python distribute_pull.py --worker host0:/path/to/parametric-nam \
 
 **Verified against a real target, not just mocks**: two concurrent dispatches into ONE shared
 output dir collided exactly as predicted (the second refused, citing the held lock); the
-identical dispatch into per-slot dirs did not, both over a real ssh round trip. Not done: the
+identical dispatch into per-slot dirs did not, both over a real ssh round trip. A real device
+(`arbiter_fuzz_face`, 7 combinations, real `ngspice` oracle) rendered twice -- once legacy,
+once per-item -- produced byte-identical `outputs.npy` (Phase 5, per-item-sharding-
+proposal.md). That run also caught a real bug: per-item mode never created `<output>/slot-K`
+before dispatching to it, and the renderer's own disk-space check only falls back one
+directory level when `--output` is missing, so a brand-new `--output` path (the common case
+for a device's first render) left the slot dir AND its parent missing and raised
+`FileNotFoundError`. Fixed with `mkdir -p` per slot before any thread starts. Not done: the
 stall-detector floors (`--slow-startup-floor-min`/`--slow-steady-floor-min`) are not
 auto-retuned for per-item dispatch's much-shorter expected per-dispatch time -- pass them
 explicitly, or a hang waits as long as it would have under the old chunked model.

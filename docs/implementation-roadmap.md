@@ -107,12 +107,22 @@ Sources:
       legacy floors' full wait. The Lifecycle section's `shard_ctl`-per-slot stop/resume/reap
       machinery is not built either -- Ctrl-C behaves exactly as it did before (daemon threads,
       no per-slot runfile/manifest), unchanged from the legacy path, not a new regression.
-- [ ] **7. Validate per-item output** (sharding, Phase 5). Re-run one known-good device
-      per-item and compare `.npy` files index by index against the static-shard output. A
-      DIFFERENT real check was done while building item 6 (a real ssh round trip proving the
-      lock-collision problem and its fix, and `_collect`'s labels/expected_count against real
-      rsynced files) -- Phase 5 as literally specified (a known-good device, byte-for-byte)
-      is still open.
+- [x] **7. Validate per-item output** (sharding, Phase 5) — **done 2026-09-28**, as literally
+      specified: `arbiter_fuzz_face` (7-combination pedal, real oracle, real `ngspice` backend)
+      rendered twice through `distribute_pull.py`'s real CLI on this machine -- once legacy
+      (`--chunks 1`, `--workers 7` internal) as the static-shard reference, once per-item
+      (`--chunk-size 1 --slots 7`) -- and the two collected/combined `outputs.npy` compared:
+      identical sha256, every row bit-identical (`np.array_equal`), identical `output_scale`,
+      identical `params.csv`. Confirms Phase 1-3's determinism claim for real, not by
+      assumption.
+      **Found and fixed a real bug doing this**, not a hypothetical: per-item mode never
+      created `<output>/slot-K` before dispatching to it, and
+      `gen_dataset_from_schx.py`'s disk-space check
+      (`shutil.disk_usage(args.output.parent if not args.output.exists() else args.output)`)
+      only falls back ONE level, so a brand-new `--output` path (the common case for a
+      device's first-ever render) left both the slot dir AND its parent missing and raised
+      `FileNotFoundError` outright. Fixed with an `ssh ... mkdir -p` per slot before any
+      thread starts; regression-tested and mutation-checked.
 - [ ] **8. Gate fleet mode** (gate step 3). `--workers` or `--inventory`; calls
       `sync_findpeak_cache.sh` before and after; syncs the gitignored excitation `.wav` to
       every named worker; shards grid-adequacy and transient-coverage probing. Needs 4 and 5.

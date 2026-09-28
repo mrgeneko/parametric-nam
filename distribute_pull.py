@@ -1297,6 +1297,19 @@ def main():
                             log(f"      {line[:110]}")
 
     if per_item:
+        # Create every slot dir on its worker BEFORE dispatching to it. Found for real, not
+        # hypothetically: gen_dataset_from_schx.py's own disk-space check
+        # (shutil.disk_usage(args.output.parent if not args.output.exists() else args.output))
+        # only defends against the LEAF being missing -- it falls back one level, to the
+        # leaf's parent, and assumes THAT exists. Per-item mode nests a second level
+        # (<output>/slot-K) that legacy mode never had, so a brand-new --output path (the
+        # common case for a device's first-ever render) leaves BOTH the leaf and its parent
+        # missing, and shutil.disk_usage() raises FileNotFoundError outright. mkdir -p sidesteps
+        # the gap rather than patching the renderer's one-level fallback to be two-level.
+        for w in workers:
+            for k in range(w.slots):
+                subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
+                               f"mkdir -p {args.output}/slot-{k}"], capture_output=True, text=True)
         threads = [threading.Thread(target=worker_loop,
                                     args=(w, f"{args.output}/slot-{k}", 1), daemon=True)
                   for w in workers for k in range(w.slots)]

@@ -1329,21 +1329,26 @@ oversample = 8
         monkeypatch.setattr(dp.threading, "Thread", make_thread)
         monkeypatch.setattr(dp, "Worker", self.FakeWorker)
         monkeypatch.setattr(dp, "verify_workers", lambda workers, backend: workers)
+        ssh_calls = []
+        def fake_run(cmd, **kw):
+            ssh_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(dp.subprocess, "run", fake_run)
         argv = ["distribute_pull.py", "--worker", worker, "--config", str(self._cfg(tmp_path)),
                 "--output", "/out", "--skip-gate-check", *extra]
         monkeypatch.setattr("sys.argv", argv)
         dp.main()
-        return FakeThread.calls
+        return FakeThread.calls, ssh_calls
 
     def test_legacy_mode_is_unchanged_one_thread_per_worker(self, tmp_path, monkeypatch):
-        calls = self._run(monkeypatch, tmp_path, "--chunks", "6")
+        calls, _ = self._run(monkeypatch, tmp_path, "--chunks", "6")
         assert len(calls) == 1
         target, args = calls[0]
         w, output_dir, workers_flag = args
         assert output_dir == "/out" and workers_flag == 4   # worker's own .parallel
 
     def test_per_item_mode_spawns_slots_worth_of_threads(self, tmp_path, monkeypatch):
-        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", worker="host:/repo:3")
+        calls, _ = self._run(monkeypatch, tmp_path, "--chunk-size", "1", worker="host:/repo:3")
         assert len(calls) == 3   # defaults to w.parallel when --slots is not given
         for _, (w, output_dir, workers_flag) in calls:
             assert workers_flag == 1   # always 1 in per-item mode
@@ -1351,7 +1356,7 @@ oversample = 8
         assert dirs == ["/out/slot-0", "/out/slot-1", "/out/slot-2"]
 
     def test_slots_flag_overrides_worker_parallel(self, tmp_path, monkeypatch):
-        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--slots", "2",
+        calls, _ = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--slots", "2",
                           worker="host:/repo:8")
         assert len(calls) == 2   # NOT 8 -- --slots overrides the worker's own parallel
 
@@ -1359,13 +1364,33 @@ oversample = 8
         with pytest.raises(SystemExit):
             self._run(monkeypatch, tmp_path, "--chunk-size", "5")
 
+    def test_slot_dirs_are_mkdir_ped_before_dispatch(self, tmp_path, monkeypatch):
+        # Real bug this guards against, found by an actual end-to-end render (not a mock):
+        # gen_dataset_from_schx.py's own disk-space check only falls back ONE level when
+        # --output is missing (shutil.disk_usage(args.output.parent if ... else args.output)),
+        # so a brand-new --output path (the common case for a device's first-ever render)
+        # leaves BOTH <output>/slot-K and its parent <output> missing, and disk_usage() raised
+        # FileNotFoundError outright. Every slot dir must be created before ANY thread starts.
+        calls, ssh_calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1",
+                                     worker="host:/repo:3")
+        mkdirs = [c for c in ssh_calls if "mkdir" in " ".join(str(x) for x in c)]
+        assert len(mkdirs) == 3
+        made = sorted(" ".join(str(x) for x in c) for c in mkdirs)
+        assert any("mkdir -p /out/slot-0" in c for c in made)
+        assert any("mkdir -p /out/slot-1" in c for c in made)
+        assert any("mkdir -p /out/slot-2" in c for c in made)
+
+    def test_legacy_mode_never_mkdirs_slot_dirs(self, tmp_path, monkeypatch):
+        calls, ssh_calls = self._run(monkeypatch, tmp_path, "--chunks", "6")
+        assert not any("mkdir" in " ".join(str(x) for x in c) for c in ssh_calls)
+
     def test_items_override_is_used_instead_of_deriving_from_range(self, tmp_path, monkeypatch):
         # Without --items this config derives 3*2=6 -- the real assertion is that main() does
         # NOT error out deriving that, i.e. --items successfully overrode it (derive_item_count
         # itself, and its --items-wins-over-range behavior, are covered directly in
         # TestDeriveItemCount; thread count alone can't distinguish "derived 6" from
         # "overridden to 10" since both give 1 thread for 1 slot).
-        calls = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--items", "10",
+        calls, _ = self._run(monkeypatch, tmp_path, "--chunk-size", "1", "--items", "10",
                           worker="host:/repo:1")
         assert len(calls) == 1
 

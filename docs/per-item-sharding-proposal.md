@@ -1,12 +1,16 @@
 # Per-item sharding: decoupling load balance from worker parallelism
 
-**Status (2026-09-28): Phases 1-3 implemented** in `distribute_pull.py`
+**Status (2026-09-28): Phases 1-3 and 5 implemented** in `distribute_pull.py`
 (`--chunk-size 1`, `--slots`, `--items`) -- see
-[implementation-roadmap.md](implementation-roadmap.md) item 6 for exactly what shipped and
+[implementation-roadmap.md](implementation-roadmap.md) items 6-7 for exactly what shipped and
 what didn't (the stall-detector floor retuning and the Lifecycle section's
-`shard_ctl`/resume/reap machinery are still open). Written 2026-09-12 after the Mesa Orange
-gain/master render, which was sharded by hand across three machines and needed three
-restarts.
+`shard_ctl`/resume/reap machinery are still open; Phase 4's tests are the usual unit/mutation
+coverage, not a distinct milestone). Phase 5's own validation (a real device, per-item vs
+static-shard, byte-for-byte) also caught a real bug: a brand-new `--output` path left
+`<output>/slot-K` uncreated, and the renderer's disk-space check only defends one directory
+level, not two -- fixed with an explicit `mkdir -p` per slot before dispatch. Written
+2026-09-12 after the Mesa Orange gain/master render, which was sharded by hand across three
+machines and needed three restarts.
 
 **Relationship to [fleet-deployment-proposal.md](fleet-deployment-proposal.md).** That
 document is the larger plan for running work across machines: a mesh network, a generated
