@@ -56,10 +56,20 @@ Sources:
       `cpu_topology.physical_cpu_count`, not re-derived); backends per host (filesystem probes
       mirroring `check_oracle`); accelerator/`gpus`/`vram_gb` via the worker's own venv+torch.
       `train` is always written `false` (a GPU does not imply training eligibility -- human
-      call, every time); `max_render_s` is not probed. **Not done:** the per-host SSH
-      address/key/login-user piece item 1 left open -- `fleet_inventory.py` records a host's
-      mesh/SSH *name* (`address`) but not a key path or login user, so `~/.ssh/config` aliases
-      are still hand-maintained. Fold that in when this item is revisited, or in item 5.
+      call, every time); `max_render_s` is not probed. **The per-host SSH address/key/login-user
+      piece item 1 left open is closed as of 2026-09-28**: for a `--worker` target,
+      `user`/`identity_file` are resolved from THIS machine's own `ssh -G <alias>` (no
+      connection made -- it's what your existing `~/.ssh/config` already says), so a fleet
+      that already leans on named aliases (as the mini's own session does) gets those recorded
+      rather than re-typed. `identity_file` is written only when `ssh -G` resolves to exactly
+      one -- more than one means nothing is pinned for that alias, which isn't a fact worth
+      writing down. Finding this also surfaced and fixed two real bugs in the remote-probe
+      plumbing itself: SSH re-joins argv into one string for the remote shell to re-parse, so
+      unquoted probes silently mis-ran (`ngspice-deck` went undetected remotely) or were parsed
+      as shell syntax outright (the accelerator probe); and naive uniform quoting then broke
+      `~`-expansion for `repo` detection. Both fixed in `default_ssh`/`_ssh_quote` -- see their
+      docstrings. Verified against a real target (`--worker localhost`), not just mocks: the
+      remote probe now matches the local self-probe of the identical machine exactly.
 - [ ] **5. Dispatch-time version verification** (fleet step 3). Scheduler checks commit SHA and
       simulator version and refuses mismatched workers. Would have caught the 472-commit-stale
       checkout. Uses 4.

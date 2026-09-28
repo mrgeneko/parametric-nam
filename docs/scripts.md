@@ -670,7 +670,23 @@ python fleet_inventory.py --probe-hosts --no-self --inventory ~/my-fleet.toml
 tests for `livespice`/`ngspice-deck`/`ltspice-deck`), `accelerator`/`gpus`/`vram_gb` (via the
 worker's own `.venv` -- the same `torch.cuda.is_available()` → ROCm-vs-CUDA-via-`torch.version.
 hip` → `torch.backends.mps.is_available()` order `checkpoint_infer.py`/`param_train.py` already
-use), and `repo` (a few candidate paths, plus any hint you gave after the host's `:`).
+use), and `repo` (a few candidate paths, plus any hint you gave after the host's `:`). For a
+`--worker` target (not the local self entry), also `user`/`identity_file` -- resolved from
+**this machine's own** `ssh -G <alias>`, never probed remotely, since the question is "how
+would I reach this host", not a fact about the host itself. `identity_file` is recorded only
+when exactly one resolves; more than one means nothing is pinned for that alias (OpenSSH's own
+built-in fallback list), which isn't a fact worth writing down.
+
+**Remote argv quoting.** SSH does not preserve argv-element boundaries onto the remote host --
+everything after the hostname is joined with plain spaces and handed to the remote shell to
+re-parse (see `default_ssh`'s docstring). Every probe's argv is quoted per element before it
+crosses that boundary (`_ssh_quote`: `shlex.quote`, except a leading `~`/`~user` is left bare so
+the remote shell still tilde-expands it). Found the hard way: an unquoted `command -v ngspice`
+rejoined into four separate remote-shell tokens and silently mis-ran; the accelerator probe's
+raw Python source was parsed as shell syntax outright; and the first (uniform, non-tilde-aware)
+fix broke `repo` detection by suppressing `~` expansion entirely. All three are now covered by
+tests, and by running `--worker localhost` for real and comparing it to the local self-probe of
+the same machine.
 
 **Not probed, on purpose** -- left blank/`false` for you to fill in:
 - `train` is always written `false`. Having a GPU does not make a host a good training host

@@ -37,6 +37,79 @@ class FakeRun:
 
 
 # ---------------------------------------------------------------------------
+# quoting for the ssh boundary -- see default_ssh's own docstring for the two real regressions
+# (ngspice-deck missing remotely, `~` no longer expanding remotely) this section guards against
+# ---------------------------------------------------------------------------
+class TestSshQuote:
+    def test_plain_word_is_untouched(self):
+        assert fi._ssh_quote("ngspice") == "ngspice"
+
+    def test_string_with_a_space_is_quoted(self):
+        assert fi._ssh_quote("command -v ngspice") == "'command -v ngspice'"
+
+    def test_leading_tilde_is_left_bare_so_the_remote_shell_expands_it(self):
+        assert fi._ssh_quote("~/work/parametric-nam") == "~/work/parametric-nam"
+
+    def test_tilde_user_form_is_also_left_bare(self):
+        assert fi._ssh_quote("~gene/work") == "~gene/work"
+
+    def test_tilde_path_with_unsafe_characters_after_it_still_gets_the_rest_quoted(self):
+        out = fi._ssh_quote("~/My Work/repo")
+        assert out.startswith("~") and "My Work" in out and "'" in out
+
+    def test_bare_tilde_alone(self):
+        assert fi._ssh_quote("~") == "~"
+
+    def test_a_tilde_not_at_the_start_is_not_treated_specially(self):
+        # Only a LEADING ~ is shell tilde-expansion syntax; mid-string it's an ordinary char
+        # shlex.quote is free to wrap however it likes (it still does, since `~` isn't in its
+        # own "safe" set) -- the only contract is that a shell parses the result back to the
+        # original literal string, not that it comes back unquoted.
+        import shlex as _shlex
+        assert _shlex.split(fi._ssh_quote("a~b")) == ["a~b"]
+
+    def test_parens_and_quotes_are_safely_wrapped(self):
+        out = fi._ssh_quote("getattr(x, 'y')")
+        assert out.count("(") <= out.count("'") // 2 + 1   # wrapped, not left bare
+
+
+class TestDefaultSsh:
+    def test_local_argv_is_passed_through_unquoted(self, monkeypatch):
+        seen = {}
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(fi.subprocess, "run", fake_run)
+        fi.default_ssh(None, ["sh", "-lc", "command -v ngspice"])
+        assert seen["cmd"] == ["sh", "-lc", "command -v ngspice"]
+
+    def test_remote_argv_elements_are_individually_quoted(self, monkeypatch):
+        seen = {}
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(fi.subprocess, "run", fake_run)
+        fi.default_ssh("mac-1", ["sh", "-lc", "command -v ngspice"])
+        assert seen["cmd"][-3:] == ["sh", "-lc", "'command -v ngspice'"]
+
+    def test_remote_tilde_paths_stay_expandable(self, monkeypatch):
+        seen = {}
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(fi.subprocess, "run", fake_run)
+        fi.default_ssh("mac-1", ["test", "-e", "~/work/parametric-nam/.git"])
+        assert seen["cmd"][-1] == "~/work/parametric-nam/.git"
+
+    def test_unreachable_host_is_wrapped_not_raised_as_a_raw_oserror(self, monkeypatch):
+        def boom(cmd, **kw):
+            raise OSError("no route to host")
+        monkeypatch.setattr(fi.subprocess, "run", boom)
+        with pytest.raises(fi.Unreachable):
+            fi.default_ssh("gone", ["test", "-e", "x"])
+
+
+# ---------------------------------------------------------------------------
 # individual probes
 # ---------------------------------------------------------------------------
 class TestProbeRepo:
@@ -165,6 +238,73 @@ class TestProbeAccelerator:
         assert seen["argv0"] == "~/repo/.venv/bin/python3"
 
 
+class TestResolveSshConfig:
+    """user/identity_file: resolved from the LOCAL machine's own `ssh -G`, never over the
+    remote `run` channel the other probes use -- see the function's own docstring for why."""
+
+    def _local_run(self, stdout, rc=0):
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return cp(rc, stdout)
+        run.calls = calls
+        return run
+
+    def test_single_identity_file_is_recorded(self):
+        run = self._local_run("user gene\nhostname 1.2.3.4\nidentityfile ~/.ssh/id_ed25519_fleet\n")
+        assert fi.resolve_ssh_config("mbp", run) == {"user": "gene",
+                                                      "identity_file": "~/.ssh/id_ed25519_fleet"}
+
+    def test_multiple_identity_files_are_ambiguous_and_omitted(self):
+        # OpenSSH's own built-in fallback list (nothing explicitly configured for this alias) --
+        # this Air's real `ssh -G localhost` output, five defaults, no single answer.
+        stdout = "user gene\n" + "".join(f"identityfile ~/.ssh/{k}\n"
+                                         for k in ("id_rsa", "id_ecdsa", "id_ecdsa_sk",
+                                                  "id_ed25519", "id_ed25519_sk"))
+        out = fi.resolve_ssh_config("localhost", self._local_run(stdout))
+        assert out == {"user": "gene"}   # user is unambiguous even when identity isn't
+
+    def test_no_identityfile_line_at_all_is_just_the_user(self):
+        run = self._local_run("user gene\nhostname h\n")
+        assert fi.resolve_ssh_config("h", run) == {"user": "gene"}
+
+    def test_ssh_failing_is_empty_not_a_crash(self):
+        assert fi.resolve_ssh_config("h", self._local_run("", rc=255)) == {}
+
+    def test_ssh_binary_missing_is_empty_not_a_crash(self):
+        def boom(argv):
+            raise FileNotFoundError("ssh")
+        assert fi.resolve_ssh_config("h", boom) == {}
+
+    def test_garbled_output_is_empty_not_a_crash(self):
+        assert fi.resolve_ssh_config("h", self._local_run("not key-value\n")) == {}
+
+    def test_always_runs_ssh_dash_g_not_a_real_connection(self):
+        run = self._local_run("user gene\n")
+        fi.resolve_ssh_config("mbp", run)
+        assert run.calls == [["ssh", "-G", "mbp"]]
+
+    def test_real_localhost_lookup_does_not_crash(self):
+        """Exercises the real subprocess path (no fake), against a target every machine has."""
+        out = fi.resolve_ssh_config("localhost")
+        assert isinstance(out, dict)   # whatever this machine's own ssh -G says is fine either way
+
+
+class TestProbeHostSshConfig:
+    def test_ssh_config_is_merged_for_a_remote_target(self, monkeypatch):
+        monkeypatch.setattr(fi, "physical_cpu_count", lambda host: 4)
+        monkeypatch.setattr(fi, "resolve_ssh_config", lambda host, local_run=None: {"user": "gene"})
+        out = fi.probe_host(FakeRun(), "mbp", address="mbp")
+        assert out["user"] == "gene"
+
+    def test_local_self_entry_never_calls_resolve_ssh_config(self, monkeypatch):
+        monkeypatch.setattr(fi, "physical_cpu_count", lambda host: 4)
+        def boom(host, local_run=None):
+            raise AssertionError("resolve_ssh_config should not be called for the local host")
+        monkeypatch.setattr(fi, "resolve_ssh_config", boom)
+        fi.probe_host(FakeRun(), None, address="me")   # must not raise
+
+
 class TestEnvHint:
     def test_dotnet_on_path_needs_no_hint(self):
         run = FakeRun().when("command -v dotnet", cp(0, "/usr/bin/dotnet\n"))
@@ -256,6 +396,15 @@ class TestRenderToml:
         p = tmp_path / "fleet.toml"; p.write_text(text)
         assert fi.load_inventory(p)["h"]["env"] == {"DOTNET_ROOT": "~/.dotnet"}
         assert "env" not in fi.render_toml({"h": self.full_host()})
+
+    def test_user_and_identity_file_only_appear_when_present(self, tmp_path):
+        text = fi.render_toml({"h": self.full_host(user="gene",
+                                                    identity_file="~/.ssh/id_ed25519_fleet")})
+        p = tmp_path / "fleet.toml"; p.write_text(text)
+        loaded = fi.load_inventory(p)["h"]
+        assert loaded["user"] == "gene" and loaded["identity_file"] == "~/.ssh/id_ed25519_fleet"
+        text2 = fi.render_toml({"h": self.full_host()})
+        assert "user " not in text2 and "identity_file" not in text2
 
     def test_names_with_hyphens_and_dots_are_valid_toml_keys(self, tmp_path):
         text = fi.render_toml({"mac-1.tailnet": self.full_host()})

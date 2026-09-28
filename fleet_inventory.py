@@ -7,10 +7,13 @@
 
 Probes each host over SSH (or in-process for the local machine) for the facts the fleet doc
 says were "rediscovered by hand" during a real sharded render: physical core count, which
-backends the oracle/simulators support, accelerator and VRAM, and where the repo checkout
-lives. Writes a reviewable TOML file, the way scaffold_config.py emits a device config:
-measured and annotated, not asserted -- a fact this tool could not determine is recorded as
-such (absent, or a comment), never silently guessed.
+backends the oracle/simulators support, accelerator and VRAM, where the repo checkout lives,
+and (for a `--worker` target, resolved from the LOCAL machine's own `ssh -G`, not probed
+remotely) the login user and identity file this machine would actually use to reach it --
+closing the gap roadmap item 1 left open, that address/key/user setup stayed hand-maintained
+in each machine's own ~/.ssh/config. Writes a reviewable TOML file, the way scaffold_config.py
+emits a device config: measured and annotated, not asserted -- a fact this tool could not
+determine is recorded as such (absent, or a comment), never silently guessed.
 
 WHAT IS NOT PROBED, on purpose (annotated in the file instead, for the operator to fill in):
   * `train` -- always written `false`. The proposal is explicit that this is deliberately NOT
@@ -35,6 +38,7 @@ worker (a built venv is an onboarding prerequisite, not something this tool re-v
 import argparse
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -79,11 +83,47 @@ class Unreachable(Exception):
     """The host could not be probed at all (SSH failed outright)."""
 
 
+_TILDE_PREFIX = re.compile(r"^~[\w.-]*")   # `~` or `~user`, POSIX tilde-prefix syntax
+
+
+def _ssh_quote(s: str) -> str:
+    """shlex.quote(), except a LEADING `~`/`~user` is left OUTSIDE the quotes so the remote
+    shell still tilde-expands it -- plain shlex.quote() wraps the whole string (tilde included)
+    in literal single quotes, which suppresses every shell expansion, tilde included. Found via
+    a second real regression from the fix below: DEFAULT_REPO_CANDIDATES ("~/work/parametric-
+    nam", ...) started reporting "not found" against a real remote target the moment argv
+    elements were quoted uniformly, because `test -e '~/work/parametric-nam/.git'` tests for a
+    file literally named with a tilde character, not the home directory. For any string that
+    does not start with `~`, this is identical to shlex.quote().
+    """
+    m = _TILDE_PREFIX.match(s)
+    if not m:
+        return shlex.quote(s)
+    prefix, rest = m.group(0), s[m.end():]
+    return prefix + shlex.quote(rest) if rest else prefix
+
+
 def default_ssh(host: "str | None", argv: "list[str]", timeout: float = 15.0):
     """The real runner: local subprocess, or `ssh host <argv>` -- mirrors
-    cpu_topology.physical_cpu_count's own host=None-means-local convention."""
-    cmd = list(argv) if host is None else ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
-                                           host, *argv]
+    cpu_topology.physical_cpu_count's own host=None-means-local convention.
+
+    Remote argv elements are individually quoted with _ssh_quote (shlex.quote, tilde-preserving
+    -- see its own docstring). ssh does not preserve argv-element boundaries onto the remote
+    host: everything after `host` is joined with plain spaces into ONE string and handed to the
+    remote login shell to re-parse from scratch (see ssh(1)) -- without per-element quoting, an
+    argv element containing whitespace or shell metacharacters silently loses its grouping.
+    Confirmed two ways this actually broke, not just in theory: probing `localhost` as a remote
+    target (`--worker localhost`) found ngspice-deck missing where the LOCAL self-probe of the
+    identical machine found it present -- `_which`'s ["sh", "-lc", "command -v ngspice"]
+    rejoined into `sh -lc command -v ngspice` remotely, so `-lc`'s one required argument became
+    just "command", not "command -v ngspice"; and the accelerator probe's raw Python source
+    (parens, quotes) was parsed as shell syntax outright ("zsh: parse error near ')'"). A local
+    subprocess.run(list) never goes through a shell at all, so this only bites the remote
+    branch -- local argv elements are passed through as-is.
+    """
+    cmd = (list(argv) if host is None else
+          ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", host,
+           *[_ssh_quote(a) for a in argv]])
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
@@ -143,6 +183,14 @@ def probe_accelerator(run, host, repo: "str | None") -> dict:
     # ssh runs argv through the remote user's shell, which expands `~`; a local subprocess.run
     # does not (no shell involved), so `py` must be expanded by hand for the host=None case --
     # the exact asymmetry _test() already hides for its own existence check, above.
+    # ssh runs argv through the remote user's shell, which expands `~`; a local subprocess.run
+    # does not (no shell involved), so `py` must be expanded by hand for the host=None case --
+    # the exact asymmetry _test() already hides for its own existence check, above. Passing
+    # ACCEL_PROBE's raw Python source as one argv element is safe on BOTH paths: locally it
+    # reaches -c untouched (no shell involved at all), and remotely `run` (default_ssh, unless
+    # overridden) is responsible for quoting each argv element before it crosses the ssh
+    # boundary -- see default_ssh's own docstring for why that quoting has to live there, not
+    # per call site.
     py_run = str(Path(py).expanduser()) if host is None else py
     r = run(host, [py_run, "-c", ACCEL_PROBE])
     if r.returncode != 0 or not r.stdout.strip():
@@ -153,6 +201,49 @@ def probe_accelerator(run, host, repo: "str | None") -> dict:
         return {"accelerator": None, "note": "accelerator probe returned unparseable output"}
     if out.get("accelerator") == "unavailable":
         return {"accelerator": None, "note": out.get("error", "torch unavailable")}
+    return out
+
+
+def resolve_ssh_config(alias: str, local_run=None) -> dict:
+    """`user`/`identity_file` for `alias`, resolved from the LOCAL machine's own SSH client
+    config (`ssh -G`, no connection made -- it's OpenSSH itself reporting what it would use,
+    the same convention the mini fleet session already relies on by hand via `~/.ssh/config`
+    Host aliases). Always LOCAL, unlike every other probe in this module: it answers "how
+    would *I* reach `alias`", not a fact about the remote host itself, so it is never routed
+    through the remote `run` callable those probes use.
+
+    `identity_file` is recorded only when `ssh -G` resolves to EXACTLY ONE IdentityFile. More
+    than one means nothing was explicitly configured for this alias -- OpenSSH's own built-in
+    fallback list (id_rsa, id_ecdsa, id_ed25519, ...) it tries in order -- which is not a fact
+    about this host worth writing down (a fleet that has not pinned a key here gains nothing
+    from an inventory line that will be wrong the day the operator's default keys change).
+    `user` is always recorded when resolvable -- ssh -G never leaves it ambiguous, it is either
+    explicitly configured or the local login name.
+    """
+    run = local_run or (lambda argv: subprocess.run(argv, capture_output=True, text=True,
+                                                     timeout=8))
+    try:
+        r = run(["ssh", "-G", alias])
+    except Exception:
+        return {}
+    if r.returncode != 0:
+        return {}
+    user = None
+    identity_files = []
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, val = parts
+        if key == "user":
+            user = val
+        elif key == "identityfile":
+            identity_files.append(val)
+    out = {}
+    if user:
+        out["user"] = user
+    if len(identity_files) == 1:
+        out["identity_file"] = identity_files[0]
     return out
 
 
@@ -180,6 +271,8 @@ def probe_host(run, host: "str | None", *, address: str, repo_hint: "str | None"
         "train": False,   # always -- see module docstring
     }
     facts.update(probe_accelerator(run, host, repo))
+    if host is not None:   # nothing to resolve for the local self-entry -- see resolve_ssh_config
+        facts.update(resolve_ssh_config(host))
     env = env_hint(run, host)
     if env:
         facts["env"] = env
@@ -239,6 +332,10 @@ def render_toml(hosts: "dict[str, dict]") -> str:
         if h.get("env"):
             kv = ", ".join(f"{k} = {_toml_str(v)}" for k, v in h["env"].items())
             lines.append(f"env          = {{ {kv} }}")
+        if h.get("user"):
+            lines.append(f"user         = {_toml_str(h['user'])}   # from this machine's own ssh -G")
+        if h.get("identity_file"):
+            lines.append(f"identity_file = {_toml_str(h['identity_file'])}")
         if h.get("note"):
             lines.append(f"# {h['note']}")
         lines.append("")
