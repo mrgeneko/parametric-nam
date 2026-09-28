@@ -61,7 +61,10 @@ Sources:
       `user`/`identity_file` are resolved from THIS machine's own `ssh -G <alias>` (no
       connection made -- it's what your existing `~/.ssh/config` already says), so a fleet
       that already leans on named aliases (as the mini's own session does) gets those recorded
-      rather than re-typed. `identity_file` is written only when `ssh -G` resolves to exactly
+      rather than re-typed. **They were recorded but not yet applied** -- every dispatch was a bare
+      `ssh <name>` -- until `ssh_target.py` (2026-09-28) rendered them into the ssh config every
+      fleet ssh/rsync call now uses (per-host login/address/port/key; docs/scripts.md, "How each
+      host is reached"). `identity_file` is written only when `ssh -G` resolves to exactly
       one -- more than one means nothing is pinned for that alias, which isn't a fact worth
       writing down. Finding this also surfaced and fixed two real bugs in the remote-probe
       plumbing itself: SSH re-joins argv into one string for the remote shell to re-parse, so

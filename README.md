@@ -260,7 +260,7 @@ Full per-script reference (usage, flags, design rationale) lives in
 | Script | Purpose |
 |---|---|
 | `scaffold_config.py` | Generate a starting `config.toml` for a new circuit |
-| `fleet_inventory.py` | `--probe-hosts` measures per-host cores/backends/accelerator/VRAM over SSH, plus ssh user/identity file from this machine's own `ssh -G`, and writes a reviewable `~/.config/parametric-nam/fleet.toml`; `train`/`max_render_s` are always left for you to set. Consumed via `--inventory` by `gate_config.py`'s and `run_pipeline.py`'s own fleet modes; `distribute_pull.py` itself still takes `--worker` directly, not the inventory |
+| `fleet_inventory.py` | `--probe-hosts` measures per-host cores/backends/accelerator/VRAM over SSH, plus ssh user/identity file from this machine's own `ssh -G`, and writes a reviewable `~/.config/parametric-nam/fleet.toml`; `train`/`max_render_s` are always left for you to set. Consumed via `--inventory` by `gate_config.py`'s, `run_pipeline.py`'s and `distribute_pull.py`'s fleet modes; `ssh_target.py` turns each host's recorded `address`/`user`/`port`/`identity_file` into the ssh config every fleet ssh/rsync call uses (per-host logins; the inventory wins over `~/.ssh/config` for the fields it sets) |
 | `gate_config.py` | Runs the pre-generation gate in order (excitation sizing → transient coverage → preflight) and writes a fingerprinted `<config>.gate.json`; `--verify` refuses when the circuit, grid or excitation changed since it passed |
 | `preflight.py` | Pre-generation sanity gate — probes a handful of points through the oracle before a full render; also provides `--find-peak` (saturation onset) |
 | `grid_adequacy.py` | Measure whether a knob grid is dense enough |

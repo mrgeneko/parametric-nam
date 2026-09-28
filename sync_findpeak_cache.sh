@@ -27,7 +27,7 @@
 # silently colliding locally on each machine, same as before this script existed.
 #
 # Usage:
-#   ./sync_findpeak_cache.sh --workers optiplex7010,blackbox
+#   ./sync_findpeak_cache.sh --workers optiplex7010,blackbox [--ssh-config FILE]
 #
 # Cross-machine reproducibility of the underlying renders is the other assumption here --
 # see docs/per-item-sharding-proposal.md's "Determinism" section: bit-identical across five
@@ -37,15 +37,16 @@
 # spread it fleet-wide -- keep that in mind before scheduling this unattended.
 set -euo pipefail
 
-WORKERS="" DRY_RUN=0
+WORKERS="" DRY_RUN=0 SSH_CONFIG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --workers) WORKERS="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
+    --ssh-config) SSH_CONFIG="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
-[ -n "$WORKERS" ] || { echo "usage: $0 --workers host1,host2,... [--dry-run]" >&2; exit 2; }
+[ -n "$WORKERS" ] || { echo "usage: $0 --workers host1,host2,... [--dry-run] [--ssh-config FILE]" >&2; exit 2; }
 
 IFS=',' read -r -a WORKER_ARR <<< "$WORKERS"
 
@@ -53,6 +54,13 @@ IFS=',' read -r -a WORKER_ARR <<< "$WORKERS"
 # exactly the shape of run that silently hangs on a dropped connection otherwise.
 SSH_OPTS=(-o ServerAliveInterval=30 -o ServerAliveCountMax=3)
 export RSYNC_RSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
+# --ssh-config FILE: an OpenSSH config that maps each host NAME to its own user/address/port/
+# key (ssh_target.py renders one from the fleet inventory). Applied to every ssh AND rsync
+# call below; absent = plain `ssh HOST` through the operator's own ~/.ssh/config, as before.
+if [ -n "$SSH_CONFIG" ]; then
+  SSH_OPTS=(-F "$SSH_CONFIG" "${SSH_OPTS[@]}")
+  export RSYNC_RSH="ssh -F '$SSH_CONFIG' -o ServerAliveInterval=30 -o ServerAliveCountMax=3"   # rsync honors quotes, not backslashes
+fi
 
 LOCAL_CACHE="$HOME/.cache/parametric-nam/findpeak"
 mkdir -p "$LOCAL_CACHE"

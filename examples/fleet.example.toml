@@ -19,6 +19,8 @@ vram_gb      = 16
 train        = false                          # review: set true to allow training jobs here
 user         = "gene"   # from this machine's own ssh -G -- how *this* node reaches linux-1
 identity_file = "~/.ssh/id_ed25519_fleet"      # only recorded when ssh -G resolves to exactly one
+# user/port/identity_file/address are APPLIED to every fleet ssh/rsync call (ssh_target.py), and win
+# over ~/.ssh/config for the fields set; delete a field to fall back to your own ssh config.
 
 [hosts."linux-2"]
 address      = "linux-2"

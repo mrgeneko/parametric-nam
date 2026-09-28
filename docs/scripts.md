@@ -789,8 +789,45 @@ for what a filled-in file looks like.
 
 **Consumed via `--inventory`** by `gate_config.py`'s fleet mode (above) and `run_pipeline.py`'s
 own fleet mode (below), both through `gate_config.resolve_fleet_hosts`/`repo_dir_for_host` --
-one source of truth for fleet-host resolution, not three. `distribute_pull.py` itself still
-takes `--worker` directly, not this file.
+one source of truth for fleet-host resolution, not three -- and by `distribute_pull.py` itself
+(`--inventory [PATH]`, which those two pass along).
+
+### How each host is reached — `ssh_target.py` (per-host login, address, port, key)
+
+(2026-09-28.) The inventory's `address`/`user`/`port`/`identity_file` are **applied**, not just
+recorded. Before this, every ssh/rsync call was `ssh <host-name> ...`, so a host whose login
+differed from the others only worked if `~/.ssh/config` on the controller already had a matching
+`Host` block. Now `ssh_target.configure()` renders the inventory into an OpenSSH config
+(`~/.cache/parametric-nam/ssh/<sha16>.conf`, content-addressed, mode 0600) and **every** ssh and
+rsync call in `distribute_pull.py`, `gate_config.py` and `cpu_topology.py` adds `-F <that file>`
+(`sync_findpeak_cache.sh` takes `--ssh-config FILE`):
+
+```
+Host linux-2
+    HostName 10.0.0.7        # only when `address` differs from the inventory name
+    User chewie              # per-host login
+    Port 2222                # only when not 22
+    IdentityFile ~/.ssh/id_ed25519_fleet
+    IdentitiesOnly yes       # only alongside an IdentityFile
+Match all
+Include ~/.ssh/config        # everything the inventory doesn't say still applies (ProxyJump, ...)
+```
+
+- **Precedence: the inventory wins** over your own `~/.ssh/config` for the fields it sets (ssh
+  takes the first value it finds). To fall back to `~/.ssh/config` for a field, delete that
+  field from the inventory. A host with none of these fields gets no block.
+- **Opt-in, per invocation.** `distribute_pull.py` without `--inventory` is byte-for-byte the
+  old plain `ssh HOST`. `gate_config.py`/`run_pipeline.py` fleet mode pass `--inventory` through
+  whenever the inventory file exists.
+- **Repo path is per host too:** each worker's `repo` (inventory) becomes that host's own
+  `--worker HOST:DIR`; hosts need not share a layout.
+- **Aliases need no `~/.ssh/config` entry.** An inventory host name that ssh can't resolve on
+  its own works, because `HostName` comes from `address`.
+- **Not covered:** `distribute_gen.sh` (the older shell distributor) and
+  `fleet_inventory.py --probe-hosts` itself (which is where the values come from: it asks
+  `ssh -G`, so probing uses your ssh config). `port` is recorded by the probe only when not 22.
+- A worker spec is still `HOST:DIR[:PARALLEL[:ENV]]` split on `:`, so an IPv6 literal or
+  `host:port` can't go in the spec -- put those in the inventory (`address`/`port`).
 
 ## `run_pipeline.py` fleet mode — STEP 3 dispatched across a fleet
 

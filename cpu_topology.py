@@ -29,6 +29,8 @@ import platform
 import re
 import subprocess
 
+import ssh_target
+
 
 def physical_cpu_count(host: str = None) -> int:
     """Physical (not logical/SMT) core count, local or over SSH to `host`.
@@ -46,7 +48,7 @@ def physical_cpu_count(host: str = None) -> int:
         pass
     if host:
         try:
-            out = subprocess.run(["ssh", "-o", "ConnectTimeout=8", host, "nproc"],
+            out = subprocess.run(ssh_target.ssh_argv(host, "-o", "ConnectTimeout=8") + ["nproc"],
                                   capture_output=True, text=True, timeout=15)
             return max(1, int(out.stdout.strip()))
         except Exception:
@@ -80,7 +82,7 @@ def _physical_cpu_count_remote(host: str) -> int:
     """
     script = ('if [ "$(uname -s)" = Darwin ]; then echo DARWIN; sysctl -n hw.physicalcpu; '
               'else echo LINUX; cat /proc/cpuinfo; fi')
-    out = subprocess.run(["ssh", "-o", "ConnectTimeout=8", host, script],
+    out = subprocess.run(ssh_target.ssh_argv(host, "-o", "ConnectTimeout=8") + [script],
                           capture_output=True, text=True, timeout=15, check=True)
     lines = out.stdout.splitlines()
     if not lines:

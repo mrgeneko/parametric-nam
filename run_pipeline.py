@@ -104,7 +104,8 @@ PIPELINE_FLEET_WORK_ROOT = "~/.cache/parametric-nam/pipeline-fleet"   # ON EACH 
 
 def fleet_generate_command(config: Path, dataset_dir, hosts: "list[str]",
                            repo_dirs: "dict[str, str]", chunks: "int | None",
-                           chunk_size: "int | None") -> "list[str]":
+                           chunk_size: "int | None",
+                           inventory: "Path | None" = None) -> "list[str]":
     """The distribute_pull.py --tool gen_dataset invocation for fleet-mode STEP 3.
 
     --output is a NAMESPACED REMOTE scratch dir per worker (not tied to this controller's own
@@ -126,6 +127,8 @@ def fleet_generate_command(config: Path, dataset_dir, hosts: "list[str]",
         cmd += ["--chunks", str(chunks)]
     if chunk_size is not None:
         cmd += ["--chunk-size", str(chunk_size)]
+    if inventory:
+        cmd += ["--inventory", str(inventory)]     # per-host user/address/port/key (ssh_target.py)
     return cmd
 
 
@@ -1449,14 +1452,17 @@ def main():
                         "equivalent for hand-typed flags here. Pass --config, or drop the "
                         "fleet flags to render single-machine.", fh)
                     sys.exit(2)
-                from gate_config import resolve_fleet_hosts, repo_dir_for_host
+                from gate_config import resolve_fleet_hosts, fleet_context
                 hosts = resolve_fleet_hosts(args.fleet_workers, args.inventory)
-                repo_dirs = {h: repo_dir_for_host(h, args.inventory) for h in hosts}
+                # configure=False: this process runs no ssh itself, it only builds the command
+                fleet = fleet_context(hosts, args.inventory, configure=False)
+                repo_dirs = fleet["repo_dirs"]
                 log(f"fleet mode: dispatching generation across {', '.join(hosts)} via "
                     f"distribute_pull.py (see PIPELINE_FLEET_WORK_ROOT for each worker's "
                     f"scratch dir)", fh)
                 gen_cmd = fleet_generate_command(args.config, dataset_dir, hosts, repo_dirs,
-                                                 args.fleet_chunks, args.fleet_chunk_size)
+                                                 args.fleet_chunks, args.fleet_chunk_size,
+                                                 fleet["inventory"])
             else:
                 gen_cmd = [
                     PYTHON, BATCH,

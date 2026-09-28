@@ -43,6 +43,7 @@ from pathlib import Path
 
 from run_pipeline import load_config
 from cpu_topology import physical_cpu_count
+import ssh_target
 
 
 def log(msg):
@@ -242,8 +243,9 @@ class Worker:
         # story at all; the pattern below is still correct for it, just less consequential.
         pat = f"{re.escape(self.job.script)}.*--shard {re.escape(chunk)}"
         cmd = f"pkill -f '{pat}'; sleep 3; pkill -9 -f '{pat}'; exit 0"
-        subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                        self.host, cmd], capture_output=True, text=True, timeout=90)
+        subprocess.run(ssh_target.ssh_argv(self.host, "-o", "BatchMode=yes", "-o",
+                                           "ConnectTimeout=20") + [cmd],
+                       capture_output=True, text=True, timeout=90)
 
     def run_chunk(self, chunk, gen_args, output, pace=None, on_combo=None):
         """Run one chunk, watching it ITEM BY ITEM (a combination, or a grid_adequacy cell
@@ -261,7 +263,8 @@ class Worker:
                f"{gen_args} --shard {chunk} {self.job.output_flag} {chunk_output}")
         t0 = time.time()
         proc = subprocess.Popen(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", self.host, cmd],
+            ssh_target.ssh_argv(self.host, "-o", "BatchMode=yes", "-o",
+                                "ServerAliveInterval=60") + [cmd],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         lines: list[str] = []
         done = 0                       # combinations THIS chunk has completed
@@ -322,6 +325,19 @@ class Worker:
             self._kill_remote(chunk, output)
         return rc, dt, "\n".join(lines)
 
+
+
+def configure_ssh(inventory_arg) -> "Path | None":
+    """--inventory: None = flag absent = plain `ssh HOST` (the operator's own ~/.ssh/config);
+    "__DEFAULT__" = bare flag = the default inventory file; anything else = that path."""
+    if inventory_arg is None:
+        return None
+    cfg = ssh_target.configure(
+        None if inventory_arg == "__DEFAULT__" else Path(inventory_arg).expanduser())
+    log(f"ssh: inventory config {cfg}" if cfg
+        else "ssh: --inventory given but no host in it sets address/user/port/identity_file "
+             "-- using plain ssh")
+    return cfg
 
 def _relpath_or_warn(dest_label: str, v, repo_root: Path) -> str:
     """Rewrite an absolute path relative to repo_root, warning if it travels too far to be
@@ -418,8 +434,9 @@ def probe_worker_version(host: str, worker_dir: str, backend: "str | None",
     (None, None), which compare_versions() already treats as a refusal."""
     cmd = version_check_command(worker_dir, backend)
     try:
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(timeout)}",
-                           host, cmd], capture_output=True, text=True, timeout=timeout + 10)
+        r = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes", "-o",
+                                               f"ConnectTimeout={int(timeout)}") + [cmd],
+                           capture_output=True, text=True, timeout=timeout + 10)
     except (OSError, subprocess.TimeoutExpired):
         return None, None
     if r.returncode != 0:
@@ -567,7 +584,7 @@ def _collect_measure_truncation(workers, remote_out, local_dir, config_path, ext
     local_dir = Path(local_dir).expanduser()
     local_dir.mkdir(parents=True, exist_ok=True)
     for w, out in zip(workers, remote_out):
-        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+        subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/", str(local_dir) + "/"],
                        capture_output=True, text=True)
     shards = sorted(local_dir.glob("shard_*.json"))
     if not shards:
@@ -814,7 +831,7 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
     got = []
     for w, out, label in zip(workers, remote_out, labels):
         dst = scratch / f"{label}.csv"
-        r = subprocess.run(["rsync", "-a", f"{w.host}:{out}/params.csv", str(dst)],
+        r = subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/params.csv", str(dst)],
                            capture_output=True, text=True)
         if r.returncode == 0 and dst.exists():
             got.append((w.host, dst))
@@ -823,7 +840,7 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
 
     # 2. sig/ trees and the once-only artifacts. Safe in any order: global-index filenames.
     for w, out in zip(workers, remote_out):
-        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+        subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/", str(local_dir) + "/"],
                        capture_output=True, text=True)
 
     # 3. merged params.csv LAST, so step 2 cannot clobber it.
@@ -937,7 +954,7 @@ def _collect_grid_adequacy(workers, remote_out, local_dir, config_path, extra_ar
     local_dir = Path(local_dir).expanduser()
     local_dir.mkdir(parents=True, exist_ok=True)
     for w, out in zip(workers, remote_out):
-        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+        subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/", str(local_dir) + "/"],
                        capture_output=True, text=True)
     shards = sorted(local_dir.glob("shard_*.json"))
     if not shards:
@@ -969,7 +986,7 @@ def _collect_check_transient_coverage(workers, remote_out, local_dir, config_pat
     local_dir = Path(local_dir).expanduser()
     local_dir.mkdir(parents=True, exist_ok=True)
     for w, out in zip(workers, remote_out):
-        subprocess.run(["rsync", "-a", f"{w.host}:{out}/", str(local_dir) + "/"],
+        subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/", str(local_dir) + "/"],
                        capture_output=True, text=True)
     shards = sorted(local_dir.glob("tcov_shard_*.json"))
     if not shards:
@@ -1226,8 +1243,17 @@ def main():
                          "from this run (not abort the whole run) -- see verify_workers(). Pass "
                          "this only when a mismatch is a known false positive; it is not a "
                          "warn-only default the way --skip-gate-check is.")
+    ap.add_argument("--inventory", nargs="?", const="__DEFAULT__", default=None,
+                    help="reach each --worker HOST the way the fleet inventory says: its "
+                         "address/user/port/identity_file become an ssh config (ssh_target.py) "
+                         "used for EVERY ssh/rsync call, winning over ~/.ssh/config for the "
+                         "fields the inventory sets. Bare --inventory = "
+                         "~/.config/parametric-nam/fleet.toml. Absent = plain `ssh HOST` "
+                         "(your own ~/.ssh/config), as before. HOST must be the inventory's "
+                         "host name.")
     ap.add_argument("--", dest="_sep", nargs="?", help=argparse.SUPPRESS)
     args, gen_args = ap.parse_known_args()
+    configure_ssh(args.inventory)
     if gen_args and gen_args[0] == "--":
         gen_args = gen_args[1:]
     job = JOBS[args.tool]
@@ -1387,8 +1413,9 @@ def main():
         # the gap rather than patching the renderer's one-level fallback to be two-level.
         for w in workers:
             for k in range(w.slots):
-                subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
-                               f"mkdir -p {args.output}/slot-{k}"], capture_output=True, text=True)
+                subprocess.run(ssh_target.ssh_argv(w.host, "-o", "BatchMode=yes")
+                               + [f"mkdir -p {args.output}/slot-{k}"],
+                               capture_output=True, text=True)
         threads = [threading.Thread(target=worker_loop,
                                     args=(w, f"{args.output}/slot-{k}", 1), daemon=True)
                   for w in workers for k in range(w.slots)]
@@ -1400,8 +1427,8 @@ def main():
         # (args.output.parent) ALSO missing, and it raises FileNotFoundError outright before
         # any render starts. mkdir -p per worker sidesteps it the same way.
         for w in workers:
-            subprocess.run(["ssh", "-o", "BatchMode=yes", w.host, f"mkdir -p {args.output}"],
-                           capture_output=True, text=True)
+            subprocess.run(ssh_target.ssh_argv(w.host, "-o", "BatchMode=yes")
+                           + [f"mkdir -p {args.output}"], capture_output=True, text=True)
         threads = [threading.Thread(target=worker_loop, args=(w, args.output, w.parallel),
                                     daemon=True) for w in workers]
     for t in threads: t.start()
@@ -1417,8 +1444,8 @@ def main():
             # resolve the output path ON THE WORKER: --output is commonly '~/dir', and a tilde
             # inside an rsync host:path argument is NOT expanded (that silently transferred
             # nothing on an earlier run), so ask the remote shell what it means.
-            r = subprocess.run(["ssh", "-o", "BatchMode=yes", w.host,
-                                f"cd ~ && echo {args.output}"], capture_output=True, text=True)
+            r = subprocess.run(ssh_target.ssh_argv(w.host, "-o", "BatchMode=yes")
+                               + [f"cd ~ && echo {args.output}"], capture_output=True, text=True)
             remote_out.append(r.stdout.strip() or args.output)
         if per_item:
             # host x slot (Phase 3), not one entry per host: each slot rendered into its own

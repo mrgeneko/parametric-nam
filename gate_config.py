@@ -342,6 +342,7 @@ def grid_command(config: Path, target: float) -> "list[str]":
 # call, not duplicated logic, and it gives gate_config.py its own real exit code to gate on.
 # ---------------------------------------------------------------------------
 import fleet_inventory  # noqa: E402
+import ssh_target  # noqa: E402
 from distribute_pull import _relpath_or_warn as repo_relpath  # noqa: E402  reuse, don't reimplement
 
 FLEET_WORK_ROOT = "~/.cache/parametric-nam/gate-fleet"   # ON EACH WORKER -- same
@@ -386,11 +387,29 @@ def repo_dir_for_host(host: str, inventory_arg, default: str = "~/work/parametri
     return (inv.get(host) or {}).get("repo") or default
 
 
-def sync_findpeak_cache(hosts: "list[str]", timeout: float = 600.0) -> "tuple[int, str]":
+def fleet_context(hosts: "list[str]", inventory_arg, *, configure: bool = True) -> dict:
+    """Everything fleet mode needs about `hosts`: their repo dirs, plus the inventory FILE (None
+    when it doesn't exist) that distribute_pull.py --inventory and this module's own ssh/rsync
+    calls use to reach each host with the inventory's own user/address/port/identity_file
+    (ssh_target.py). `configure=False` (--dry-run) computes the same answer without writing
+    the generated ssh config."""
+    inv_path = _normalize_inventory_arg(inventory_arg) or fleet_inventory.default_inventory_path()
+    inv_path = inv_path if inv_path.is_file() else None
+    if configure:
+        ssh_target.configure(inv_path) if inv_path else ssh_target.reset()
+    return {"hosts": hosts,
+            "repo_dirs": {h: repo_dir_for_host(h, inventory_arg) for h in hosts},
+            "inventory": inv_path}
+
+
+def sync_findpeak_cache(hosts: "list[str]", timeout: float = 600.0,
+                        ssh_config: "Path | None" = None) -> "tuple[int, str]":
     """Runs sync_findpeak_cache.sh --workers h1,h2,... . Never raises -- this is an
     optimization (warms the shared onset cache so a sharded probe hits it instead of
     re-measuring), not a correctness requirement; a failure here should not fail the gate."""
     cmd = [str(HERE / "sync_findpeak_cache.sh"), "--workers", ",".join(hosts)]
+    if ssh_config:
+        cmd += ["--ssh-config", str(ssh_config)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, (r.stdout + r.stderr).strip()
@@ -418,13 +437,14 @@ def sync_excitation_wav(cfg: dict, hosts: "list[str]", repo_dirs: "dict[str, str
     results = []
     for host in hosts:
         dest = f"{repo_dirs[host]}/{rel}"
-        mk = subprocess.run(["ssh", "-o", "BatchMode=yes", host,
-                             f"mkdir -p $(dirname {dest})"], capture_output=True, text=True,
+        mk = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes")
+                            + [f"mkdir -p $(dirname {dest})"], capture_output=True, text=True,
                             timeout=30)
         if mk.returncode != 0:
             results.append((host, False, f"mkdir failed: {mk.stderr.strip()[:150]}"))
             continue
-        r = subprocess.run(["rsync", "-a", str(inp), f"{host}:{dest}"], capture_output=True,
+        r = subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), str(inp), f"{host}:{dest}"],
+                           capture_output=True,
                            text=True, timeout=timeout)
         results.append((host, r.returncode == 0,
                         "ok" if r.returncode == 0 else r.stderr.strip()[:150]))
@@ -432,7 +452,8 @@ def sync_excitation_wav(cfg: dict, hosts: "list[str]", repo_dirs: "dict[str, str
 
 
 def _dispatch_command(tool: str, config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
-                      work_subdir: str, chunks: int) -> "tuple[list[str], Path]":
+                      work_subdir: str, chunks: int,
+                      inventory: "Path | None" = None) -> "tuple[list[str], Path]":
     """One distribute_pull.py --tool TOOL invocation across `hosts`. Returns (cmd, local_collect_dir)."""
     local_collect = (Path.home() / ".cache" / "parametric-nam" / "gate-fleet" /
                      config.stem / work_subdir)
@@ -442,6 +463,8 @@ def _dispatch_command(tool: str, config: Path, hosts: "list[str]", repo_dirs: "d
     cmd = [PYTHON, str(HERE / "distribute_pull.py"), "--tool", tool, "--config", str(config),
            "--chunks", str(chunks), "--output", f"{FLEET_WORK_ROOT}/{config.stem}/{work_subdir}",
            "--collect", str(local_collect), "--skip-gate-check", *worker_flags]
+    if inventory:
+        cmd += ["--inventory", str(inventory)]
     return cmd, local_collect
 
 
@@ -460,13 +483,14 @@ def _merge_verdict_command(tool_script: str, merge_flag: str, shard_glob: str,
 
 
 def grid_command_fleet(config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
-                       chunks: int = 16) -> "tuple[list[str], Path]":
-    return _dispatch_command("grid_adequacy", config, hosts, repo_dirs, "grid", chunks)
+                       chunks: int = 16, inventory: "Path | None" = None) -> "tuple[list[str], Path]":
+    return _dispatch_command("grid_adequacy", config, hosts, repo_dirs, "grid", chunks, inventory)
 
 
 def transient_command_fleet(config: Path, hosts: "list[str]", repo_dirs: "dict[str, str]",
-                            chunks: int = 16) -> "tuple[list[str], Path]":
-    return _dispatch_command("check_transient_coverage", config, hosts, repo_dirs, "transient", chunks)
+                            chunks: int = 16, inventory: "Path | None" = None) -> "tuple[list[str], Path]":
+    return _dispatch_command("check_transient_coverage", config, hosts, repo_dirs, "transient",
+                             chunks, inventory)
 
 
 # ---------------------------------------------------------------------------
@@ -511,16 +535,16 @@ def run_gate(args, config: Path, cfg: dict, prior: "dict | None") -> dict:
     fleet = None
     if getattr(args, "workers", None) or getattr(args, "inventory", None):
         hosts = resolve_fleet_hosts(args.workers, args.inventory)
-        fleet = {"hosts": hosts,
-                "repo_dirs": {h: repo_dir_for_host(h, args.inventory) for h in hosts}}
-        rc, out = sync_findpeak_cache(hosts)
+        fleet = fleet_context(hosts, args.inventory)
+        rc, out = sync_findpeak_cache(hosts, ssh_config=ssh_target.active_config())
         record("fleet-cache-sync", "pass" if rc == 0 else "warn", rc, detail=out[:300])
         # non-fatal by design -- see sync_findpeak_cache's own docstring: an optimization,
         # not a correctness requirement, so a failure here does not fail the gate.
 
     if args.check_grid:
         if fleet:
-            cmd, collect_dir = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+            cmd, collect_dir = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"],
+                                                  inventory=fleet["inventory"])
             rc, secs = timed("grid-dispatch", cmd)
             record("grid-dispatch", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
             if rc != 0:
@@ -570,7 +594,8 @@ def run_gate(args, config: Path, cfg: dict, prior: "dict | None") -> dict:
 
     # -- transient coverage -------------------------------------------------
     if fleet:
-        cmd, collect_dir = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+        cmd, collect_dir = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"],
+                                                   inventory=fleet["inventory"])
         rc, secs = timed("transient-dispatch", cmd)
         record("transient-dispatch", "pass" if rc == 0 else "fail", rc, secs, cmd=cmd)
         if rc != 0:
@@ -690,18 +715,19 @@ def main(argv=None) -> int:
             fleet = None
             if args.workers or args.inventory:
                 hosts = resolve_fleet_hosts(args.workers, args.inventory)
-                fleet = {"hosts": hosts,
-                        "repo_dirs": {h: repo_dir_for_host(h, args.inventory) for h in hosts}}
+                fleet = fleet_context(hosts, args.inventory, configure=False)
                 print(f"fleet:       {', '.join(hosts)}")
             if args.check_grid:
                 if fleet:
-                    cmd, _ = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+                    cmd, _ = grid_command_fleet(config, fleet["hosts"], fleet["repo_dirs"],
+                                                inventory=fleet["inventory"])
                     print(f"grid:        {shlex.join(map(str, cmd))}  (then merge locally)")
                 else:
                     print(f"grid:        {shlex.join(map(str, grid_command(config, args.grid_target)))}")
             if fleet:
                 print(f"fleet-wav-sync: rsync excitation to {', '.join(fleet['hosts'])}")
-                cmd, _ = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"])
+                cmd, _ = transient_command_fleet(config, fleet["hosts"], fleet["repo_dirs"],
+                                                 inventory=fleet["inventory"])
                 print(f"{'transient:':12s}{shlex.join(map(str, cmd))}  (then merge locally)")
             else:
                 c, s = transient_command(cfg, config)

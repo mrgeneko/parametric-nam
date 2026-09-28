@@ -43,3 +43,18 @@ class _MockFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 # Install once, before any `import nam` in the test session.
 if not any(isinstance(f, _MockFinder) for f in sys.meta_path):
     sys.meta_path.insert(0, _MockFinder())
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ssh_target(tmp_path, monkeypatch):
+    """ssh_target keeps one process-global "active config"; without this a test that configures
+    it (directly, or via gate_config.fleet_context) would leak `-F <file>` into every later
+    test's ssh/rsync argv assertions, and would write into the real ~/.cache."""
+    import ssh_target
+    monkeypatch.setattr(ssh_target, "default_cache_dir", lambda: tmp_path / "ssh-cache")
+    ssh_target.reset()
+    yield
+    ssh_target.reset()

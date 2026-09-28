@@ -217,8 +217,10 @@ def resolve_ssh_config(alias: str, local_run=None) -> dict:
     fallback list (id_rsa, id_ecdsa, id_ed25519, ...) it tries in order -- which is not a fact
     about this host worth writing down (a fleet that has not pinned a key here gains nothing
     from an inventory line that will be wrong the day the operator's default keys change).
-    `user` is always recorded when resolvable -- ssh -G never leaves it ambiguous, it is either
-    explicitly configured or the local login name.
+    `port` is recorded only when it isn't the default 22. `user` is always recorded when
+    resolvable -- ssh -G never leaves it ambiguous, it is either explicitly configured or the
+    local login name. These fields are not just documentation: ssh_target.py turns them into
+    the ssh config every fleet ssh/rsync call uses.
     """
     run = local_run or (lambda argv: subprocess.run(argv, capture_output=True, text=True,
                                                      timeout=8))
@@ -230,6 +232,7 @@ def resolve_ssh_config(alias: str, local_run=None) -> dict:
         return {}
     user = None
     identity_files = []
+    out = {}
     for line in r.stdout.splitlines():
         parts = line.split(None, 1)
         if len(parts) != 2:
@@ -239,7 +242,8 @@ def resolve_ssh_config(alias: str, local_run=None) -> dict:
             user = val
         elif key == "identityfile":
             identity_files.append(val)
-    out = {}
+        elif key == "port" and val.isdigit() and int(val) != 22:
+            out["port"] = int(val)
     if user:
         out["user"] = user
     if len(identity_files) == 1:
@@ -334,6 +338,8 @@ def render_toml(hosts: "dict[str, dict]") -> str:
             lines.append(f"env          = {{ {kv} }}")
         if h.get("user"):
             lines.append(f"user         = {_toml_str(h['user'])}   # from this machine's own ssh -G")
+        if h.get("port"):
+            lines.append(f"port         = {int(h['port'])}")
         if h.get("identity_file"):
             lines.append(f"identity_file = {_toml_str(h['identity_file'])}")
         if h.get("note"):
