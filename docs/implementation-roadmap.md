@@ -215,12 +215,24 @@ Sources:
       and venv, and neither has Docker/Podman, so an image would mean installing a container
       runtime on two working hosts. Revisit if Linux machines are added often. Native on macOS
       regardless.
-- [ ] **11b. Multi-machine fleet run** (follow-up to 10/11). Not done: item 11's agents and
-      item 10's worker-to-sink transfer have only been exercised on localhost. Needs a window
-      when `blackbox` and `optiplex7010` are idle (they were both running a Vox AC30 render on
-      2026-09-28 and are 18 commits behind the controller, so updating their checkouts mid-run
-      would change code under the job). Plan: fast-forward both checkouts, `fleet_ctl.py
-      start-agents` on each, submit a small job, `--collect` from one Linux host to the other.
+- [x] **11b. Multi-machine fleet run** (follow-up to 10/11) -- **implemented 2026-09-29** on
+      `thinkcentre-m920q` (i5-8400, new addition to the Tailscale fleet, replacing a 35W
+      i5-8700T that was slow at this), the first time item 11's agent/coordinator and item
+      10's collect ran between genuinely different machines rather than localhost aliases.
+      Coordinator on the controller bound to its Tailscale IP; agent on thinkcentre-m920q
+      over Tailscale; a real 2-combination ngspice render (Arbiter Fuzz Face); collected back
+      over rsync. ~108s/combination wall time on the i5-8400 (2 parallel slots, oversample=8);
+      no comparable same-session baseline from the old i5-8700T to compare against.
+      `blackbox`/`optiplex7010` were mid-render throughout and never touched.
+      Two real bugs found and fixed along the way (both pushed, both covered by new tests):
+      `_parse_range_axes` was multiplying a repeated `--range KNOB=...` instead of treating
+      it as an override, inflating the derived chunk count for the documented
+      `--config ... -- --range KNOB=...` override pattern; and `_collect`/`_collect_to_sink`
+      discarded rsync's stderr on failure, so a real connectivity/auth failure read exactly
+      like an ordinary empty shard. Also: `ngspice` and `livespice` backends both need
+      `livespice_cli` built (parses the `.schx` format; ngspice only simulates), and its
+      apphost needs `DOTNET_ROOT` set for a framework-dependent build -- `PATH` alone isn't
+      enough, worth remembering for future Linux workers.
 
 ## Training track (independent of the above)
 
