@@ -210,8 +210,17 @@ Sources:
       uses `distribute_pull.py`); the remote-train leg; no agent auto-update; the dashboard is
       read-only (cancel/unquarantine are CLI). Worker-to-sink transfer between two genuinely
       different machines is still only exercised via localhost aliases (carried from item 10).
-- [ ] **12. Linux worker image** (fleet §3). Only if Linux machines are added often enough to
-      pay for it. Native on macOS regardless.
+- [ ] **12. Linux worker image** (fleet §3). **Decided not to build (2026-09-28).** The Linux
+      workers are `blackbox` and `optiplex7010`; both already run natively with a repo checkout
+      and venv, and neither has Docker/Podman, so an image would mean installing a container
+      runtime on two working hosts. Revisit if Linux machines are added often. Native on macOS
+      regardless.
+- [ ] **11b. Multi-machine fleet run** (follow-up to 10/11). Not done: item 11's agents and
+      item 10's worker-to-sink transfer have only been exercised on localhost. Needs a window
+      when `blackbox` and `optiplex7010` are idle (they were both running a Vox AC30 render on
+      2026-09-28 and are 18 commits behind the controller, so updating their checkouts mid-run
+      would change code under the job). Plan: fast-forward both checkouts, `fleet_ctl.py
+      start-agents` on each, submit a small job, `--collect` from one Linux host to the other.
 
 ## Training track (independent of the above)
 
