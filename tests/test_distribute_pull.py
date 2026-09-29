@@ -940,6 +940,28 @@ def test_collect_returns_false_not_none_when_nothing_merged(tmp_path, monkeypatc
     assert should_combine(got, no_combine=False) is not None, "must refuse to combine"
 
 
+def test_collect_surfaces_rsync_stderr_instead_of_hiding_it(tmp_path, monkeypatch):
+    """A real rsync failure (bad hostname, refused connection, permission denied) must not
+    read the same as an ordinary empty/failed shard -- found live running fleet_ctl.py
+    against a genuinely different machine (roadmap item 11b): a worker registered under a
+    name ssh couldn't resolve made every collect look like 'nothing rendered', when the
+    render had actually succeeded and only the rsync fetch was broken."""
+    import distribute_pull as dp
+    logged = []
+    monkeypatch.setattr(dp, "log", logged.append)
+    local = tmp_path / "ds"; (local / "sig").mkdir(parents=True)
+
+    class FakeW:
+        def __init__(self, host):
+            self.host = host
+
+    monkeypatch.setattr(dp.subprocess, "run", lambda *a, **k: __import__("types").SimpleNamespace(
+        returncode=255, stdout="",
+        stderr="ssh: Could not resolve hostname thinkcentre: nodename nor servname provided\n"))
+    dp._collect([FakeW("thinkcentre")], ["/tmp/out"], local)
+    assert any("Could not resolve hostname" in m for m in logged), logged
+
+
 class TestGateCheckIntegration:
     """distribute_pull.py's own wiring of the gate check (the WARN-vs-ABORT decision itself is
     gate_check_outcome, tested in test_run_pipeline.py). Runs main() for real against a minimal

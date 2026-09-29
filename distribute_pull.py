@@ -967,7 +967,8 @@ def _collect(workers, remote_out, local_dir, config_path=None, extra_args=(), re
         if r.returncode == 0 and dst.exists():
             got.append((w.host, dst))
         else:
-            log(f"  collect: {label} has no params.csv (empty shard?) -- skipped")
+            reason = (r.stderr or "").strip().splitlines()[-1:] or ["no output"]
+            log(f"  collect: {label} has no params.csv -- skipped ({reason[0][:150]})")
 
     # 2. sig/ trees and the once-only artifacts. Safe in any order: global-index filenames.
     for w, out in zip(workers, remote_out):
@@ -1179,7 +1180,8 @@ def _collect_to_sink(workers, remote_out, sink: Sink, no_combine=False, labels=N
             if r.returncode == 0 and dst.exists():
                 got.append(dst)
             else:
-                log(f"  collect: {label} has no params.csv (empty shard?) -- skipped")
+                reason = (r.stderr or "").strip().splitlines()[-1:] or ["no output"]
+                log(f"  collect: {label} has no params.csv -- skipped ({reason[0][:150]})")
         xfer_failed = False
         for w, out, label in zip(workers, remote_out, labels):
             ok, how = transfer_shard_to_sink(w.host, out, sink, sink_dir, direct=direct)
