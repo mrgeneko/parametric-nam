@@ -193,9 +193,23 @@ Sources:
       sink autodiscovery; direct worker-to-sink transfer between two *different* machines is
       unit-tested (commands, fallback) but was only exercised for real via localhost aliases.
       See docs/scripts.md.
-- [ ] **11. Pull agents, queue, dashboard** (fleet §4). Largest piece. Justified by
-      observability and removing the controller as a single point of failure, not by
-      onboarding.
+- [x] **11. Pull agents, queue, dashboard** (fleet §4) — **implemented 2026-09-28** as
+      `fleet_queue.py` (SQLite state and every scheduling rule), `fleet_coordinator.py` (stdlib
+      HTTP service + dashboard), `fleet_agent.py` (worker daemon), `fleet_client.py` and
+      `fleet_ctl.py` (operator CLI). The rules are ported from `distribute_pull.py`, not
+      redesigned: retries go to a different worker, N failures with no success quarantines,
+      version pin per job, whole-chunk jobs only on slot 0. `distribute_pull.py`'s collect
+      block was extracted to `run_collect` and is shared, so `--collect HOST:DIR` (item 10) works
+      unchanged. Tested against real HTTP, SQLite, subprocess renderers and localhost ssh
+      (coordinator killed mid-render, lease loss, cancel, slow-abandon, stop-release, version
+      refusal, real collect to a sink); 12 mutations of the scheduling/auth/shutdown rules, the
+      two that survived (`release(block=...)`) got their own tests. See docs/scripts.md.
+      Not done: no ssh reverse-tunnel helper (plain HTTP: use loopback + tunnel, or a trusted
+      LAN); fleet-wide combo-rate pacing lives in coordinator memory, so a restart makes the
+      fleet "cold" until it re-learns; no `run_pipeline.py` fleet mode over the queue (it still
+      uses `distribute_pull.py`); the remote-train leg; no agent auto-update; the dashboard is
+      read-only (cancel/unquarantine are CLI). Worker-to-sink transfer between two genuinely
+      different machines is still only exercised via localhost aliases (carried from item 10).
 - [ ] **12. Linux worker image** (fleet §3). Only if Linux machines are added often enough to
       pay for it. Native on macOS regardless.
 

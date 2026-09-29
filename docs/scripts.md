@@ -768,6 +768,59 @@ worker fails, the run refuses to start rather than silently rendering with zero 
 `--skip-version-check` opts out. Does not read item 4's inventory file — `--worker HOST:DIR`
 already carries what this needs.
 
+## `fleet_ctl.py` — pull agents, a durable queue, and a dashboard
+
+The alternative to `distribute_pull.py` when the controller must not be a single point of
+failure or you want live observability. Workers poll a coordinator, lease one chunk, heartbeat
+while it renders, and report. The queue is SQLite (WAL) behind a small stdlib HTTP service;
+the coordinator can be killed and restarted mid-render and nothing is lost (agents keep
+rendering while it is down and deliver the result afterwards).
+
+```bash
+# 1. coordinator (any machine; state in fleet.db, token file is created with mode 600)
+python fleet_ctl.py serve -- --db fleet.db --bind 127.0.0.1 --port 8765
+
+# 2. start agents on the workers (ssh: installs the token via stdin, launches with nohup)
+python fleet_ctl.py start-agents --worker fw:/path/to/parametric-nam:4 \
+    --worker fs:/path/to/parametric-nam:8 --agent-url http://coordinator:8765 --inventory
+
+# 3. submit; args after -- are the renderer's, exactly as for distribute_pull.py
+python fleet_ctl.py submit --config device.config.toml --output /data/run1 \
+    --chunk-size 1 --wait --collect sink:/data/run1 -- --range Drive=0,1,2
+
+python fleet_ctl.py status --watch        # or open http://coordinator:8765/#TOKEN
+python fleet_ctl.py collect JOB --dest sink:/data/run1
+python fleet_ctl.py cancel JOB ; python fleet_ctl.py unquarantine WORKER
+python fleet_ctl.py stop-agents --worker fw:/path/to/parametric-nam
+```
+
+Scheduling rules are the ones `distribute_pull.py` uses: chunks are `i-i/N`; a failed chunk is
+retried on a *different* worker (falling back to one that already failed it only when nothing
+else is pending); `--retries` bounds attempts; a worker that fails N times in a row without a
+success is quarantined (`unquarantine` to reinstate); an expired lease counts as a failed
+attempt but does not blame the worker; a job pins this checkout's commit and solver, and an
+agent that does not match refuses it (released without spending an attempt, and not offered
+that job again). Per-item jobs (`--chunk-size 1`) use one renderer per slot in
+`<output>/slot-K`; whole-chunk jobs are served to slot 0 only, with `--workers parallel`.
+
+**Agent behaviour.** The renderer runs in its own process group. A heartbeat every
+`--heartbeat-s` reports progress; if the coordinator says the lease is gone the renderer is
+killed and nothing is reported; if the coordinator is merely unreachable the renderer keeps
+going and the result is retried (up to 15 min). SIGTERM releases the chunk back to the queue
+without costing an attempt. Renderers orphaned by a killed agent are cleared before the next
+chunk (they would otherwise hold the output lock).
+
+**Collect** reuses `distribute_pull.py`'s `run_collect`, so `--collect [HOST:]DIR`, direct
+worker-to-sink rsync, `--no-combine`, `--repair-missing` all behave identically. Only
+(worker, slot) directories that actually completed a chunk are read. If a lease is lost late
+and two workers render the same item, the merge dedupes on the global index.
+
+**Security.** Bearer token, constant-time compare, plain HTTP. Bind to loopback and reach it
+through an ssh tunnel, or use a trusted LAN/mesh VPN; do not expose it. The dashboard page
+itself is public and static; it reads the token from the URL *fragment* (never sent to the
+server) and polls `/api/status`. Coordinator pacing state (fleet-wide combo rate used to
+abandon a chunk that is far slower than its peers) is held in memory only.
+
 ## `fleet_inventory.py` — probe hosts, write a reviewable fleet inventory
 
 Roadmap item 4 ([implementation-roadmap.md](implementation-roadmap.md)),

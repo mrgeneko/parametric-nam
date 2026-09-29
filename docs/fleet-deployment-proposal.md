@@ -242,6 +242,11 @@ place:
 Keep SSH for bootstrap — starting the agent and shipping the repo. It works, and the mesh VPN
 already provides the network.
 
+> **STATUS (2026-09-28): implemented** as `fleet_coordinator.py` / `fleet_agent.py` /
+> `fleet_ctl.py` -- see [scripts.md](scripts.md#fleet_ctlpy--pull-agents-a-durable-queue-and-a-dashboard).
+> Leases, heartbeats and the dashboard are as described; SSH is kept for `start-agents`,
+> `stop-agents` and result collection. Fleet-wide pacing is in coordinator memory only.
+
 ### 4a. Warm the shared cache before sharding
 
 Saturation-onset measurements are cached per machine at `~/.cache/parametric-nam/findpeak`,

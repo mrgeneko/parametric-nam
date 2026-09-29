@@ -1431,6 +1431,62 @@ JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATI
                             CHECK_TRANSIENT_COVERAGE_JOB)}
 
 
+def run_collect(job, workers, output, collect_dest, *, per_item, item_count, config, extra_args,
+                no_combine, repair_missing, inventory, sink_repo, no_direct_sink,
+                slot_pairs=None):
+    """Pull every worker's shard into `collect_dest` ([HOST:]DIR) and merge/combine.
+
+    Shared by distribute_pull's own main() and fleet_ctl.py's `collect`. `slot_pairs` (per-item
+    only) is the explicit [(Worker, slot)] list whose <output>/slot-K holds finished work; the
+    default is every slot of every worker, which is what a push run created up front. The pull
+    fleet passes only the (worker, slot) pairs that actually completed a chunk, since its
+    agents create slot dirs lazily.
+    """
+    log(f"collecting shards into {collect_dest} ...")
+    sink_host, sink_path = parse_collect_dest(collect_dest)
+    sink = None
+    if sink_host:
+        sink = build_sink(sink_host, sink_path, inventory, sink_repo, workers)
+    resolved = {}
+    for w in workers:
+        if w.host in resolved:
+            continue
+        # resolve the output path ON THE WORKER: --output is commonly '~/dir', and a tilde
+        # inside an rsync host:path argument is NOT expanded (that silently transferred
+        # nothing on an earlier run), so ask the remote shell what it means.
+        r = subprocess.run(ssh_target.ssh_argv(w.host, "-o", "BatchMode=yes")
+                           + [f"cd ~ && echo {output}"], capture_output=True, text=True)
+        resolved[w.host] = r.stdout.strip() or output
+    if per_item:
+        # host x slot (Phase 3), not one entry per host: each slot rendered into its own
+        # <output>/slot-K, and needs its own scratch-csv LABEL -- collect_workers repeats
+        # the SAME Worker object per slot (only .host is read below it), which is why the
+        # label can't just be w.host again, or slot 1's params.csv would silently clobber
+        # slot 0's before either was merged. See _collect's own docstring.
+        if slot_pairs is None:
+            slot_pairs = [(w, k) for w in workers for k in range(w.slots)]
+        collect_workers, collect_remote_out, collect_labels = [], [], []
+        for w, k in slot_pairs:
+            collect_workers.append(w)
+            collect_remote_out.append(f"{resolved[w.host]}/slot-{k}")
+            collect_labels.append(f"{w.host}-slot{k}")
+        if sink:
+            _collect_to_sink(collect_workers, collect_remote_out, sink, no_combine,
+                             labels=collect_labels, expected_count=item_count,
+                             direct=not no_direct_sink)
+        else:
+            job.collect(collect_workers, collect_remote_out, collect_dest, config, extra_args,
+                        no_combine, repair_missing, labels=collect_labels,
+                        expected_count=item_count)
+    else:
+        remote_out = [resolved[w.host] for w in workers]
+        if sink:
+            _collect_to_sink(workers, remote_out, sink, no_combine, direct=not no_direct_sink)
+        else:
+            job.collect(workers, remote_out, collect_dest, config, extra_args, no_combine,
+                        repair_missing)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1786,44 +1842,11 @@ def main():
     log(f"done in {elapsed:.2f} h -- {completed} chunk(s) ok, {failed_final} failed")
 
     if args.collect:
-        log(f"collecting shards into {args.collect} ...")
-        sink = None
-        if sink_host:
-            sink = build_sink(sink_host, sink_path, args.inventory, args.sink_repo, workers)
-        remote_out = []
-        for w in workers:
-            # resolve the output path ON THE WORKER: --output is commonly '~/dir', and a tilde
-            # inside an rsync host:path argument is NOT expanded (that silently transferred
-            # nothing on an earlier run), so ask the remote shell what it means.
-            r = subprocess.run(ssh_target.ssh_argv(w.host, "-o", "BatchMode=yes")
-                               + [f"cd ~ && echo {args.output}"], capture_output=True, text=True)
-            remote_out.append(r.stdout.strip() or args.output)
-        if per_item:
-            # host x slot (Phase 3), not one entry per host: each slot rendered into its own
-            # <output>/slot-K, and needs its own scratch-csv LABEL -- collect_workers repeats
-            # the SAME Worker object per slot (only .host is read below it), which is why the
-            # label can't just be w.host again, or slot 1's params.csv would silently clobber
-            # slot 0's before either was merged. See _collect's own docstring.
-            collect_workers, collect_remote_out, collect_labels = [], [], []
-            for w, ro in zip(workers, remote_out):
-                for k in range(w.slots):
-                    collect_workers.append(w)
-                    collect_remote_out.append(f"{ro}/slot-{k}")
-                    collect_labels.append(f"{w.host}-slot{k}")
-            if sink:
-                _collect_to_sink(collect_workers, collect_remote_out, sink, args.no_combine,
-                                 labels=collect_labels, expected_count=item_count,
-                                 direct=not args.no_direct_sink)
-            else:
-                job.collect(collect_workers, collect_remote_out, args.collect, args.config, extra_args,
-                           args.no_combine, args.repair_missing, labels=collect_labels,
-                           expected_count=item_count)
-        elif sink:
-            _collect_to_sink(workers, remote_out, sink, args.no_combine,
-                             direct=not args.no_direct_sink)
-        else:
-            job.collect(workers, remote_out, args.collect, args.config, extra_args, args.no_combine,
-                       args.repair_missing)
+        run_collect(job, workers, args.output, args.collect, per_item=per_item,
+                    item_count=item_count, config=args.config, extra_args=extra_args,
+                    no_combine=args.no_combine, repair_missing=args.repair_missing,
+                    inventory=args.inventory, sink_repo=args.sink_repo,
+                    no_direct_sink=args.no_direct_sink)
     else:
         log("NOTE: no --collect given. Merging by hand is a trap -- sig/ rsyncs cleanly "
             "(global-index filenames) but params.csv is ONE FILE PER WORKER holding only that "
