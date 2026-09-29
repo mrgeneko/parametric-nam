@@ -1255,6 +1255,20 @@ class TestParseRangeAxes:
     def test_knob_names_with_spaces_survive(self):
         assert dp._parse_range_axes(["--range", "RD Gain=0.1,1.0"]) == [("RD Gain", 2)]
 
+    def test_repeated_knob_overrides_rather_than_multiplies(self):
+        """A config's own --range Gain=... followed by an extra --range Gain=... (an override
+        passed after `--`, e.g. `fleet_ctl.py submit --config ... -- --range Gain=0.5,0.9`)
+        must behave like gen_dataset_from_schx.py's own last-one-wins parsing, not add a
+        second Gain axis -- multiplying gave a chunk count that didn't match the real grid."""
+        axes = dp._parse_range_axes(["--range", "Gain=0.1,0.15,0.25,0.5,0.75,0.9,1.0",
+                                     "--range", "Gain=0.5,0.9"])
+        assert axes == [("Gain", 2)]
+
+    def test_repeated_knob_keeps_its_original_position(self):
+        axes = dp._parse_range_axes(["--range", "Gain=0.1,0.5,1.0", "--range", "Tone=0.2,0.8",
+                                     "--range", "Gain=0.5,0.9"])
+        assert axes == [("Gain", 2), ("Tone", 2)]
+
 
 class TestDeriveItemCount:
     def test_single_axis(self):
@@ -1286,6 +1300,10 @@ class TestDeriveItemCount:
     def test_single_value_ranges_do_not_change_the_product(self):
         gen_args = ["--range", "Gain=0.1,0.5,1.0", "--range", "Fixed=0.5"]
         assert dp.derive_item_count(gen_args) == 3
+
+    def test_overriding_a_configs_range_shrinks_the_count_not_multiplies_it(self):
+        gen_args = ["--range", "Fuzz=0.1,0.15,0.25,0.5,0.75,0.95,1.0", "--range", "Fuzz=0.5,0.9"]
+        assert dp.derive_item_count(gen_args) == 2
 
 
 class TestWarnChunkAliasingStillWorksAfterRefactor:

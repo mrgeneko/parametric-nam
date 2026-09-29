@@ -720,22 +720,33 @@ def _collect_measure_truncation(workers, remote_out, local_dir, config_path, ext
 def _parse_range_axes(gen_args: "list[str]") -> "list[tuple[str, int]]":
     """[(knob_name, cardinality), ...] from every --range in an already-built gen_args list.
     Shared by _warn_chunk_aliasing and derive_item_count -- one parser, one source of truth for
-    what a --range argument means. Handles both `--range X=...` and `--range=X=...` forms."""
+    what a --range argument means. Handles both `--range X=...` and `--range=X=...` forms.
+
+    A repeated --range for the SAME knob keeps only the last occurrence, not both: that
+    matches gen_dataset_from_schx.py's own last-one-wins parsing (values_per_knob[kname] = ...
+    in a loop), which is how a config's own --range is meant to be overridden by an extra
+    --range passed after `--` (documented usage, e.g. `fleet_ctl.py submit --config ... --
+    --range Drive=0,1,2`). Treating both as separate axes silently multiplied the derived
+    item count instead of overriding it.
+    """
     ranges = []
     for i, a in enumerate(gen_args):
         if a == "--range" and i + 1 < len(gen_args):
             ranges.append(gen_args[i + 1])
         elif a.startswith("--range="):
             ranges.append(a.split("=", 1)[1])
-    axes = []
+    axes = {}
+    order = []
     for r in ranges:
         if "=" not in r:
             continue
         name, vals = r.split("=", 1)
         n_vals = len([v for v in vals.split(",") if v.strip()])
         if n_vals >= 1:
-            axes.append((name, n_vals))
-    return axes
+            if name not in axes:
+                order.append(name)
+            axes[name] = n_vals
+    return [(name, axes[name]) for name in order]
 
 
 def derive_item_count(gen_args: "list[str]", items_override: "int | None" = None) -> int:
