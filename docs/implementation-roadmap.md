@@ -264,11 +264,21 @@ Sources:
       changed nothing -- lower than the CPU's rated 65W, but no longer collapsing to ~800MHz.
       **thinkcentre-m920q is back to 6 workers** for `fleet_ctl.py start-agents`/
       `distribute_pull.py --worker` (its auto-derived physical core count is correct again).
-      Estimated throughput (clock-based via `turbostat`, not yet confirmed by a real timed
-      render): ~75% more than the 2-worker/full-turbo config, ~2.5x the original throttled
-      6-worker config. If `m920q-power.service` is ever stopped or the machine reimaged, it
-      reverts to the 2-worker PROCHOT-limited state -- check `systemctl status m920q-power`
-      before trusting 6 workers again.
+      **Measured 2026-09-30** (real `livespice_cli` renders of the AC30 circuit, same short
+      clip, not a clock estimate): a worker-count sweep at 1/3/4/5/6 parallel workers gave
+      86.8/246.9/275.7/293.4/289.9 combos/hour -- throughput peaks around 5 workers but is
+      within ~1% of 6 (single-trial measurement, not averaged; the 35W cap is already fully
+      engaged by 4-5 workers, so there's little to gain or lose between 5 and 6). Recommend
+      **6 workers** regardless: it matches the physical core count exactly, keeps
+      `cpu_topology.physical_cpu_count`'s auto-derived value correct with no override needed,
+      and the difference from the 5-worker peak is noise-level. Single-core comparison
+      against optiplex7010 (i5-12400) on the identical clip: 41.49s vs 22.30s, a real ~1.86x
+      per-core gap. At 6 parallel workers the gap widens to ~3.0x total throughput (74.5s vs
+      24.64s wall clock) because thinkcentre scales worse under load (~56% parallel
+      efficiency 1-to-6-workers) than optiplex (~90%) -- the 35W cap costs more as more cores
+      engage. If `m920q-power.service` is ever stopped or the machine reimaged, it reverts to
+      the 2-worker PROCHOT-limited state -- check `systemctl status m920q-power` before
+      trusting 6 workers again.
 
 ## Training track (independent of the above)
 
