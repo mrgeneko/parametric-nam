@@ -233,6 +233,27 @@ Sources:
       `livespice_cli` built (parses the `.schx` format; ngspice only simulates), and its
       apphost needs `DOTNET_ROOT` set for a framework-dependent build -- `PATH` alone isn't
       enough, worth remembering for future Linux workers.
+      **Follow-up (2026-09-29): thinkcentre-m920q is hardware power-limited to 2 concurrent
+      render workers, not its 6 physical cores.** Diagnosed jointly with a second Claude
+      session running on that machine directly: under sustained load with 3+ cores busy, the
+      board asserts PROCHOT (confirmed via `MSR_IA32_PACKAGE_THERM_STATUS` and
+      `MSR_IA32_POWER_CTL`) and clamps all cores to ~800MHz even though actual package power
+      draw is only ~6.5W -- far below its RAPL limits (PL1 65W/PL2 122W) and with no thermal
+      event (cool the whole time). Not fixed by cpufreq governor, RAPL limits, or the BIOS
+      acoustic/thermal-performance toggle; not caused by the power adapter (a genuine 230W
+      Lenovo unit was already connected). Likely cause: this ThinkCentre Tiny chassis is only
+      Lenovo-validated for 35W T-series CPUs, and the embedded controller's PROCHOT policy
+      for this board was never designed for a 65W part running many cores at once. At 2
+      workers the chip holds full turbo (3.3-3.9GHz); real measured AC30 render time (single
+      combo, oversample=8) was ~50min/combo at 2 workers vs ~24min/combo on optiplex7010
+      (i5-12400) at 6 workers -- about 6x optiplex's total throughput on this circuit (a ~2x
+      per-core generational gap plus the 3x worker-count ceiling). `fleet_ctl.py start-agents`
+      must be given `--worker thinkcentre-m920q:DIR:2` explicitly for this host -- its
+      auto-derived physical core count (6, via `cpu_topology.physical_cpu_count`) is wrong
+      for it specifically. Not investigated further: an MSR workaround
+      (`wrmsr -a 0x1fc 0x2c005c`, clearing the bit that makes the CPU honor the board's
+      PROCHOT signal) was identified but deliberately not applied -- untested, and risky on a
+      board never validated for this CPU's power draw.
 
 ## Training track (independent of the above)
 
