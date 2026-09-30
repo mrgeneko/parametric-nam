@@ -254,6 +254,20 @@ Sources:
       (`wrmsr -a 0x1fc 0x2c005c`, clearing the bit that makes the CPU honor the board's
       PROCHOT signal) was identified but deliberately not applied -- untested, and risky on a
       board never validated for this CPU's power draw.
+      **Fix (2026-09-30): the MSR workaround above was applied, persistently, via a new
+      `m920q-power.service`** (boot-time systemd unit, with a resume hook for after suspend)
+      that clears the PROCHOT-honoring bit and sets firmware power limits to 35W long-term /
+      45W burst. Under full 6-core load this now holds ~2.27GHz on every core at 35.0W
+      package power, 73-75C (confirmed via `turbostat`). 35W is a hard firmware ceiling --
+      `EDP_OTHER` is reported as the active limit, and raising the configured limit to 45W
+      changed nothing -- lower than the CPU's rated 65W, but no longer collapsing to ~800MHz.
+      **thinkcentre-m920q is back to 6 workers** for `fleet_ctl.py start-agents`/
+      `distribute_pull.py --worker` (its auto-derived physical core count is correct again).
+      Estimated throughput (clock-based via `turbostat`, not yet confirmed by a real timed
+      render): ~75% more than the 2-worker/full-turbo config, ~2.5x the original throttled
+      6-worker config. If `m920q-power.service` is ever stopped or the machine reimaged, it
+      reverts to the 2-worker PROCHOT-limited state -- check `systemctl status m920q-power`
+      before trusting 6 workers again.
 
 ## Training track (independent of the above)
 
