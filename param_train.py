@@ -1802,6 +1802,19 @@ def cap_sgdr_cycle(scheduler, max_period):
     return True
 
 
+def restart_decay_factor(completed_cycle_len, restart_period, restart_decay):
+    """Ceiling-decay factor for a just-finished SGDR cycle, scaled by its length.
+
+    `restart_decay` is the decay factor per `restart_period`-worth of epochs, raised to the
+    power of how many of those the completed cycle actually spanned. This keeps the
+    PER-EPOCH decay rate constant as --restart-mult grows cycle lengths, instead of the
+    same flat per-restart factor firing less and less often as cycles get longer -- at
+    --restart-mult 1 (cycle length always == restart_period) this is identical to applying
+    `restart_decay` flat at every restart, the historical behavior.
+    """
+    return restart_decay ** (completed_cycle_len / restart_period)
+
+
 def restore_scheduler_on_resume(scheduler, optimizer, ckpt, open_ended, make_scheduler,
                                 max_period=0):
     """Reconstruct `scheduler` to match a resumed checkpoint's true position.
@@ -2711,7 +2724,8 @@ def main():
         log_w = csv.writer(log_f)
         if needs_header:
             log_w.writerow(["epoch", "train_loss", "val_loss",
-                            *[f"val_esr_{wlabel[lbl]}" for lbl in labels], "lr", "elapsed_s"])
+                            *[f"val_esr_{wlabel[lbl]}" for lbl in labels], "lr", "elapsed_s",
+                            "cycle_t_cur", "cycle_t_i", "eta_max"])
 
     _watchdog_open(ckpt_dir)
     t0 = time.time()
@@ -2818,7 +2832,9 @@ def main():
         if log_csv is not None:
             log_w.writerow([epoch, f"{train_loss:.8f}", f"{val_loss:.8f}",
                             *[f"{esr_by[lbl]:.8f}" for lbl in labels],
-                            f"{lr_now:.2e}", f"{elapsed:.1f}"])
+                            f"{lr_now:.2e}", f"{elapsed:.1f}",
+                            getattr(scheduler, "T_cur", ""), getattr(scheduler, "T_i", ""),
+                            f"{optimizer.param_groups[0]['initial_lr']:.3e}"])
             log_f.flush()
 
         # Save checkpoint every epoch (overwrite previous to save disk space)
@@ -2854,20 +2870,45 @@ def main():
         cycle_ended = getattr(scheduler, "T_cur", None) == 0
 
         # SGDR restart-ceiling decay (--restart-decay < 1.0): shrink eta_max for every
-        # param group by the same factor at each restart, preserving the FiLM group's
-        # relative multiplier. Written into optimizer.param_groups[i]['initial_lr'] (not
-        # just scheduler.base_lrs) so a future --resume reconstructs the decayed ceiling
-        # correctly -- CosineAnnealingWarmRestarts.__init__ reads base_lrs from
-        # 'initial_lr' when last_epoch != -1 (see make_scheduler() above), and that key is
-        # a plain dict entry that round-trips through optimizer.state_dict()/load_state_dict().
+        # param group at each restart, preserving the FiLM group's relative multiplier.
+        # Written into optimizer.param_groups[i]['initial_lr'] (not just scheduler.base_lrs)
+        # so a future --resume reconstructs the decayed ceiling correctly --
+        # CosineAnnealingWarmRestarts.__init__ reads base_lrs from 'initial_lr' when
+        # last_epoch != -1 (see make_scheduler() above), and that key is a plain dict entry
+        # that round-trips through optimizer.state_dict()/load_state_dict().
         # One cycle's peak epoch (T_cur==0) still reports the previous cycle's eta_max --
         # this fires after scheduler.step() already applied it for the current epoch --
         # so decay effectively starts from each cycle's *second* epoch, a one-epoch lag
         # that doesn't matter at a 50-epoch restart period.
+        #
+        # SCALED BY COMPLETED CYCLE LENGTH, not applied flat per restart. --restart-decay is
+        # the decay factor per --restart-period-worth of epochs, raised to the power of how
+        # many of those the cycle that just ended actually spanned -- so the *per-epoch*
+        # decay rate stays constant as --restart-mult grows cycles, instead of the decay
+        # EVENT staying constant while it fires less and less often. A flat 0.97/restart
+        # under mult=2 decays the ceiling far slower in epoch terms than the same 0.97 did
+        # under the historical flat-50 (mult=1) schedule -- 5 restarts by epoch 1550 (0.97^5
+        # = 0.86x) vs. the 31 restarts flat-50 would have had by then (0.97^31 = 0.17x) --
+        # and OR120's own log shows ESR at lr~1e-4 (0.00487) already within 6% of the
+        # eventual best at lr~1e-6 (0.00457), with lr below ~1e-6 buying nothing further, so
+        # a ceiling that decays this slowly spends much of a long cycle re-descending through
+        # a range that isn't earning its keep.
+        #
+        # scheduler.T_i already reflects THIS restart's step()-applied T_mult growth (see
+        # cap_sgdr_cycle's own ordering note below) -- dividing it back out recovers the
+        # length of the cycle that just ended, correctly even when that cycle was itself
+        # capped by --restart-max-period.
         if cycle_ended and args.restart_decay != 1.0:
+            completed_cycle_len = scheduler.T_i / max(1, args.restart_mult)
+            decay_factor = restart_decay_factor(completed_cycle_len, args.restart_period,
+                                                 args.restart_decay)
             for group in optimizer.param_groups:
-                group["initial_lr"] *= args.restart_decay
+                group["initial_lr"] *= decay_factor
             scheduler.base_lrs = [group["initial_lr"] for group in optimizer.param_groups]
+            print(f"  [restart] cycle_len={completed_cycle_len:.0f}  "
+                  f"decay_factor={decay_factor:.4f}  "
+                  f"eta_max[0] -> {optimizer.param_groups[0]['initial_lr']:.3e}",
+                  file=sys.stderr, flush=True)
 
         # SGDR cycle-length cap (--restart-max-period > 0): stop --restart-mult's geometric
         # growth at a fixed ceiling. See cap_sgdr_cycle() for why assigning T_i directly is
