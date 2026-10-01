@@ -60,9 +60,23 @@ def _find_livespice_cli() -> Path:
 
     So there is now one: mrgeneko/livespice-cli, a small standalone public repo (extracted from
     hotspice/oracle/, which used to build the identical binary in place -- see its history if you
-    need the "why here, not there" reasoning). It builds against PRISTINE LiveSPICE, never a
-    patched fork, because an oracle built from the thing under test is not an oracle. This repo has
-    no functional dependency on hotspice itself -- only on this small CLI wrapper.
+    need the "why here, not there" reasoning). It builds against the mrgeneko/LiveSPICE fork, not
+    upstream LiveSPICE as-is, because upstream has physics bugs and an oracle should not inherit
+    them: the CenterTapTransformer's ampere-turns equation was missing a factor of 2 (load power came
+    out at 2x the power entering the winding), and the pentode computes plate current from the PLATE
+    voltage, so it cannot fit datasheet currents or reach real-tube current at low plate voltage.
+
+    The fork's rule: it carries only documented physics fixes, each recorded in its commit history
+    and checked against the previous binary, and a change that alters existing behaviour is added
+    as an opt-in model switch that is bit-identical by default (Pentode.Model: PlateScaled, the
+    original equation, unless a schematic sets Model="Koren"). A schematic that opts in is only
+    valid on a livespice_cli built with that switch; an older build ignores the attribute and
+    renders it wrongly, so the sidecar says "partial" until every render machine has rebuilt.
+
+    What keeps this an oracle is independence from the thing under test, not an unmodified solver:
+    the C++ emitter (hotspice) is tested against it, and it is never built from the emitter's own
+    sources. This repo has no functional dependency on hotspice itself -- only on this small CLI
+    wrapper.
 
     Order: $LIVESPICE_CLI, then a sibling livespice-cli checkout, then the local legacy copy.
     """
