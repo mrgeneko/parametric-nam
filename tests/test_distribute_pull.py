@@ -670,6 +670,135 @@ class TestCollectCheckTransientCoverage:
         assert any("nothing to merge" in m for m in logged)
 
 
+class TestPrepareExcitationArgsFromConfig:
+    """Unlike check_transient_coverage_args_from_config's bare --config, prepare_excitation.py's
+    own --backend is required=True at the argparse level and is NOT read from --config by that
+    script itself -- omitting it fails every shard identically (the same Mesa RED
+    "omitted --backend" failure mode gen_args_from_config's own docstring describes), so this
+    builder must derive it explicitly rather than leave it to the caller's -- args."""
+
+    def test_repo_relative_config_path_and_backend_derived(self, tmp_path):
+        cfg = tmp_path / "amps" / "d.config.toml"
+        cfg.parent.mkdir()
+        cfg.write_text('backend = "livespice"\n', encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        args = dp.prepare_excitation_args_from_config(cfg, repo)
+        assert args == ["--config", "../amps/d.config.toml", "--backend", "livespice"]
+
+    def test_omits_backend_when_config_has_none(self, tmp_path):
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text("x = 1\n", encoding="utf-8")
+        args = dp.prepare_excitation_args_from_config(cfg, tmp_path / "repo")
+        assert args == ["--config", os.path.relpath(cfg, tmp_path / "repo")]
+
+    def test_extra_args_appended_by_the_job_not_the_builder(self, tmp_path):
+        # Mirrors MEASURE_TRUNCATION_JOB's own split: the bare function returns config/backend
+        # only; --sweep-file/--output (no config.toml equivalent) arrive via build_args' own
+        # "+ extra_args", same as every other job.
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text('backend = "livespice"\n', encoding="utf-8")
+        a2 = dp.PREPARE_EXCITATION_JOB.build_args(cfg, tmp_path / "repo",
+                                                   ["--sweep-file", "x.wav"])
+        assert a2[-2:] == ["--sweep-file", "x.wav"]
+
+
+class TestPrepareExcitationJob:
+    def test_registered_under_its_own_name(self):
+        assert dp.JOBS["prepare_excitation"] is dp.PREPARE_EXCITATION_JOB
+
+    def test_script_and_output_flag(self):
+        j = dp.PREPARE_EXCITATION_JOB
+        assert j.script == "prepare_excitation.py"
+        assert j.output_flag == "--emit-onsets"
+
+    def test_shares_the_onset_progress_line_with_check_transient_coverage(self):
+        # Same "onset=" per-corner print, same reasoning -- see TCOV_CORNER_LINE's own
+        # docstring on why that pattern is already tool-agnostic.
+        assert dp.PREPARE_EXCITATION_JOB.progress_re is dp.TCOV_CORNER_LINE
+
+    def test_chunk_output_uses_a_distinct_prefix_from_its_siblings(self):
+        gj = dp.GRID_ADEQUACY_JOB.chunk_output("/out", "3-3/16")
+        tj = dp.CHECK_TRANSIENT_COVERAGE_JOB.chunk_output("/out", "3-3/16")
+        pj = dp.PREPARE_EXCITATION_JOB.chunk_output("/out", "3-3/16")
+        assert len({gj, tj, pj}) == 3
+        assert pj == "/out/pexc_shard_3-3_16.json"
+
+    def test_collect_ignores_no_combine_and_repair_missing_like_its_siblings(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(dp, "_collect_prepare_excitation",
+                            lambda *a: seen.setdefault("called", a))
+        dp.PREPARE_EXCITATION_JOB.collect(["w"], ["/out"], "/local", "cfg.toml", [],
+                                          no_combine=True, repair_missing=True)
+        assert seen["called"] == (["w"], ["/out"], "/local", "cfg.toml", [])
+
+
+class TestCollectPrepareExcitation:
+    """Mirrors TestCollectCheckTransientCoverage's fake-rsync technique so the actual merge
+    invocation runs for real."""
+
+    class FakeW:
+        def __init__(self, host):
+            self.host = host
+
+    def _fake_rsync(self, monkeypatch):
+        import shutil
+        merge_calls = []
+        def run(cmd, **kw):
+            if cmd[0] == "rsync":
+                src_spec, dst = cmd[2], cmd[3]
+                _, _, src = src_spec.partition(":")
+                src_path = Path(src)
+                if not src_path.exists():
+                    return subprocess.CompletedProcess(cmd, 1, "", "no such file")
+                shutil.copytree(src_path, dst, dirs_exist_ok=True)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            merge_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "merged ok\n", "")
+        monkeypatch.setattr(dp.subprocess, "run", run)
+        return merge_calls
+
+    def test_merges_pexc_shard_files_not_its_siblings(self, tmp_path, monkeypatch):
+        merge_calls = self._fake_rsync(monkeypatch)
+        shard_dir = tmp_path / "worker_out"
+        shard_dir.mkdir()
+        (shard_dir / "pexc_shard_0-0_2.json").write_text("{}")
+        (shard_dir / "tcov_shard_0-0_2.json").write_text("{}")   # a sibling job's file -- ignored
+        (shard_dir / "shard_0-0_2.json").write_text("{}")        # grid_adequacy's file -- ignored
+        local = tmp_path / "merged"
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text('backend = "livespice"\n', encoding="utf-8")
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._collect_prepare_excitation([self.FakeW("h1")], [str(shard_dir)], local,
+                                       cfg, ["--sweep-file", "x.wav"])
+        assert any("merging 1 shard" in m for m in logged)
+        assert len(merge_calls) == 1
+        cmd = merge_calls[0]
+        assert cmd[1].endswith("prepare_excitation.py")
+        assert "--merge-onsets" in cmd
+        assert str(local / "pexc_shard_0-0_2.json") in cmd
+        assert str(local / "tcov_shard_0-0_2.json") not in cmd
+        assert str(local / "shard_0-0_2.json") not in cmd
+        # --backend is derived from --config directly (not repo-relative -- this subprocess
+        # runs locally, see the function's own docstring), and extra_args (--sweep-file) still
+        # makes it through.
+        assert "--backend" in cmd and "livespice" in cmd
+        assert "--sweep-file" in cmd and "x.wav" in cmd
+
+    def test_no_shards_found_logs_and_does_not_crash(self, tmp_path, monkeypatch):
+        self._fake_rsync(monkeypatch)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        local = tmp_path / "merged"
+        cfg = tmp_path / "d.config.toml"
+        cfg.write_text("x = 1\n", encoding="utf-8")
+        logged = []
+        monkeypatch.setattr(dp, "log", logged.append)
+        dp._collect_prepare_excitation([self.FakeW("h1")], [str(empty)], local, cfg, [])
+        assert any("nothing to merge" in m for m in logged)
+
+
 class TestJobAbstraction:
     """distribute_pull.py can dispatch either gen_dataset_from_schx.py or grid_adequacy.py,
     parameterized by a Job (script/progress_re/output_flag/build_args/chunk_output/collect)
@@ -771,11 +900,12 @@ class TestJobAbstraction:
 
     def test_tools_registry_has_all_jobs_and_gen_dataset_is_the_default(self):
         assert set(dp.JOBS) == {"gen_dataset", "grid_adequacy", "measure_truncation",
-                                "check_transient_coverage"}
+                                "check_transient_coverage", "prepare_excitation"}
         assert dp.JOBS["gen_dataset"] is dp.GEN_DATASET_JOB
         assert dp.JOBS["grid_adequacy"] is dp.GRID_ADEQUACY_JOB
         assert dp.JOBS["measure_truncation"] is dp.MEASURE_TRUNCATION_JOB
         assert dp.JOBS["check_transient_coverage"] is dp.CHECK_TRANSIENT_COVERAGE_JOB
+        assert dp.JOBS["prepare_excitation"] is dp.PREPARE_EXCITATION_JOB
         assert dp.Worker("hostA:~/x:4").job is dp.GEN_DATASET_JOB
 
 

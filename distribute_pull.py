@@ -658,6 +658,29 @@ def check_transient_coverage_args_from_config(config_path: Path, repo_root: Path
     return ["--config", _relpath_or_warn("config", config_path, repo_root)]
 
 
+def prepare_excitation_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
+    """--config/--backend from the config -- --backend is derived explicitly (unlike
+    check_transient_coverage_args_from_config's bare --config) because prepare_excitation.py's
+    own --backend is `required=True` at the argparse level and is NOT read from --config the
+    way check_transient_coverage.py's is; omitting it fails every shard identically, the same
+    Mesa RED "omitted --backend" failure mode gen_args_from_config's docstring describes.
+
+    --sweep-file has no config.toml equivalent -- a device's persistent config does not
+    remember which capture clip it was last sized against -- and --output is required
+    unconditionally by prepare_excitation.py's own argparse even for a --emit-onsets shard
+    that never writes it (see its main(): `if worst is None: return 0` right after the shard
+    file is written). Both must be passed after -- by the caller, same as a single-machine
+    `prepare_excitation.py --config ... -- --sweep-file ... --output ...` already needs them.
+    _collect_prepare_excitation reuses this same function for its own --merge-onsets command,
+    so --backend is derived identically for the shard dispatch and the final sizing/build.
+    """
+    cfg = load_config(config_path)
+    out = ["--config", _relpath_or_warn("config", config_path, repo_root)]
+    if cfg.get("backend"):
+        out += ["--backend", str(cfg["backend"])]
+    return out
+
+
 def measure_truncation_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     """--config and --input, repo-relative -- the equivalent of gen_args_from_config for
     measure_truncation.py. Its [knobs]/schx come from --config already (load_device() reads
@@ -1334,6 +1357,50 @@ def _collect_check_transient_coverage(workers, remote_out, local_dir, config_pat
             log(f"  {r.stderr.strip()}")
 
 
+def _collect_prepare_excitation(workers, remote_out, local_dir, config_path, extra_args):
+    """Pull every worker's pexc_shard_*.json into one local directory, then run
+    prepare_excitation.py --merge-onsets on them -- same shape as
+    _collect_check_transient_coverage, distinct filename prefix (pexc_shard_, not shard_ or
+    tcov_shard_) so no two of this module's four sharded tools can ever collide in one
+    --collect directory.
+
+    UNLIKE check_transient_coverage's merge (verify + report), this one ALSO SIZES AND BUILDS:
+    prepare_excitation.py's own --merge-onsets branch computes the worst-case onset across the
+    verified union and calls build_excitation.py from it (see that branch's own docstring
+    comment, "MERGE MODE ... skip rendering entirely and size from the verified union") -- so
+    the finished excitation.wav and the config.toml update are a side effect of this collect
+    step, not a separate manual run afterward.
+
+    --backend is derived from --config directly here (not via
+    prepare_excitation_args_from_config, whose repo-relative path rewriting is for a WORKER's
+    `cd <worker dir> && ...` dispatch -- this subprocess runs locally, same as every other
+    collect function's plain `str(config_path)`), so the merge command cannot silently omit it
+    even if the caller's own -- args forgot to repeat it.
+    """
+    local_dir = Path(local_dir).expanduser()
+    local_dir.mkdir(parents=True, exist_ok=True)
+    for w, out in zip(workers, remote_out):
+        subprocess.run(["rsync", "-a", *ssh_target.rsync_e(), f"{w.host}:{out}/", str(local_dir) + "/"],
+                       capture_output=True, text=True)
+    shards = sorted(local_dir.glob("pexc_shard_*.json"))
+    if not shards:
+        log("  collect: no pexc_shard_*.json found on any worker -- nothing to merge")
+        return
+    log(f"  collect: merging {len(shards)} shard file(s) and sizing the excitation ...")
+    cfg = load_config(config_path)
+    backend_args = ["--backend", str(cfg["backend"])] if cfg.get("backend") else []
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "prepare_excitation.py"),
+           "--merge-onsets", *[str(s) for s in shards], "--config", str(config_path),
+           *backend_args, *extra_args]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        log(f"  {line}")
+    if r.returncode != 0:
+        log(f"  collect: merge exited {r.returncode}")
+        if r.stderr.strip():
+            log(f"  {r.stderr.strip()}")
+
+
 @dataclass
 class Job:
     """Everything distribute_pull.py's scheduler needs to know about ONE renderer/analysis
@@ -1440,8 +1507,29 @@ CHECK_TRANSIENT_COVERAGE_JOB = Job(
         _collect_check_transient_coverage(workers, remote_out, local_dir, config_path, extra_args),
 )
 
+PREPARE_EXCITATION_JOB = Job(
+    name="prepare_excitation",
+    script="prepare_excitation.py",
+    progress_re=TCOV_CORNER_LINE,   # same "onset=" per-corner line, see that constant's own
+                                     # docstring on why it is already tool-agnostic.
+    output_flag="--emit-onsets",
+    build_args=lambda config_path, repo_root, extra_args:
+        prepare_excitation_args_from_config(config_path, repo_root) + extra_args,
+    chunk_output=lambda base_output, chunk: f"{base_output}/pexc_shard_{chunk.replace('/', '_')}.json",
+    # no_combine/repair_missing are GEN_DATASET_JOB-specific, same as the other three jobs --
+    # accepted and ignored here so all five jobs share one call site in main(). This is the
+    # SIZING pass CHECK_TRANSIENT_COVERAGE_JOB's own addition left undone (that job only
+    # covers the pre-generation VERIFICATION gate, re-checking an excitation already built) --
+    # some devices' corner-onset sizing has itself been slow single-machine (e.g. AC30's own
+    # 107-corner pass), and this is the same fix for that half: shard the corners, not just the
+    # check of them, across the fleet instead of serially on the controller alone.
+    collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
+                  labels=None, expected_count=None:
+        _collect_prepare_excitation(workers, remote_out, local_dir, config_path, extra_args),
+)
+
 JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATION_JOB,
-                            CHECK_TRANSIENT_COVERAGE_JOB)}
+                            CHECK_TRANSIENT_COVERAGE_JOB, PREPARE_EXCITATION_JOB)}
 
 
 def run_collect(job, workers, output, collect_dest, *, per_item, item_count, config, extra_args,
@@ -1528,7 +1616,13 @@ def main():
                          "--shard --emit-onsets (the pre-generation saturation-coverage gate) "
                          "the same way as grid_adequacy -- the grid being cut is CORNERS "
                          "(the reduced hypercube set, see that tool's docstring), not "
-                         "combinations either.")
+                         "combinations either. 'prepare_excitation' shards THAT tool's own "
+                         "worst-case-onset SIZING pass the same way (not just the later "
+                         "verification gate) -- --collect's merge also runs build_excitation.py "
+                         "from the verified union, so the finished excitation.wav and the "
+                         "config.toml update are produced by --collect itself, not a separate "
+                         "manual step. Needs --sweep-file (and usually --output) after --, "
+                         "same as a single-machine prepare_excitation.py invocation would.")
     ap.add_argument("--chunks", type=int, default=64,
                     help="how many pieces to cut the grid into (default 64). Each is dispatched "
                          "as --shard i-i/CHUNKS. See module docstring on sizing. Ignored when "
