@@ -1416,6 +1416,16 @@ class Job:
     chunk_output: "callable"   # (base_output, chunk_spec) -> str, passed after output_flag
     collect: "callable"        # (workers, remote_out, local_dir, config_path, extra_args, no_combine,
                                #  repair_missing, labels=None, expected_count=None) -> None
+    workers_flag: str = "--workers"   # the CLI flag this script uses for its own internal
+                                       # concurrency -- gen_dataset_from_schx.py/grid_adequacy.py/
+                                       # measure_truncation.py all happen to spell it "--workers",
+                                       # but prepare_excitation.py spells it "--corner-workers"
+                                       # (find_saturation_point() is per-CORNER, not per-combination).
+                                       # worker_loop appends f"{workers_flag} {count}" generically --
+                                       # without this override every PREPARE_EXCITATION_JOB dispatch
+                                       # fails argparse with "unrecognized arguments: --workers N"
+                                       # (found 2026-10-02 scaffolding Ampeg SVT Full sag reactive,
+                                       # the first real device to shard this tool).
 
 
 def _collect_gen_dataset(workers, remote_out, local_dir, config_path, extra_args, no_combine,
@@ -1526,6 +1536,7 @@ PREPARE_EXCITATION_JOB = Job(
     collect=lambda workers, remote_out, local_dir, config_path, extra_args, no_combine, repair_missing,
                   labels=None, expected_count=None:
         _collect_prepare_excitation(workers, remote_out, local_dir, config_path, extra_args),
+    workers_flag="--corner-workers",
 )
 
 JOBS = {j.name: j for j in (GEN_DATASET_JOB, GRID_ADEQUACY_JOB, MEASURE_TRUNCATION_JOB,
@@ -1875,7 +1886,7 @@ def main():
                 attempts[chunk] = attempts.get(chunk, 0) + 1
                 n_try = attempts[chunk]
             w.busy = True
-            rc, dt, out = w.run_chunk(chunk, f"{gen_args_str} --workers {workers_flag}",
+            rc, dt, out = w.run_chunk(chunk, f"{gen_args_str} {job.workers_flag} {workers_flag}",
                                       output_dir, pace=pace)
             w.busy = False
             with lock:
