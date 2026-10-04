@@ -37,7 +37,7 @@ WHERE the worst was. "All knobs at max" is not reliably the stiff setting: the r
 is ReverseLinear, so all-max is MINIMUM drive.
 
 Usage:
-    ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav \
+    ./measure_truncation.py --input examples/T3K-sweep-v3.wav \
         --config ../parametric-nam-models/pedals/mypedal/config.toml
 
 `--config` is the same TOML `run_pipeline.py`/`grid_adequacy.py` take (schx + knobs come straight
@@ -47,7 +47,7 @@ re-deriving the shared oversample floor, or auditing every device after a measur
 change; see internal engineering notes) and is just as easy from the outside:
 
     for f in ../parametric-nam-models/*/*/config.toml*; do
-        ./measure_truncation.py --input ../sweep-files/sweep60_composite.wav --config "$f"
+        ./measure_truncation.py --input examples/T3K-sweep-v3.wav --config "$f"
     done
 
 RESUMING AN INTERRUPTED RUN (--checkpoint).
