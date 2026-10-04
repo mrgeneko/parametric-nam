@@ -61,7 +61,7 @@ from cpu_topology import physical_cpu_count  # noqa: E402
 from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_resolve,  # noqa: E402
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
-                                    cache_findpeak, scratch_dir)
+                                    cache_findpeak, scratch_dir, _linear_region_top)
 from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 
@@ -185,11 +185,58 @@ def merge_onset_shards(paths):
     return [rows[i] for i in range(total)]
 
 
+# Default for onset pruning (see plan_onset_refinement). On by default since 2026-10-04: a
+# replay of 437 floor-limited corners from 13 cached sizing batches (other amps) would have
+# skipped the downward extension for 385 of them (88%). The Powerball E645 is the known
+# exception -- every one of its corners is floor-limited, so nothing prunes and it costs one
+# extra no-extension pass; use --min-start-v (or --sweep-start-v) for that case. Opt out with
+# --no-prune-onset.
+DEFAULT_PRUNE_ONSET_MARGIN = 0.5
+
+
+def knee_at_floor(sat):
+    """True when a find-peak curve's linear region is NOT resolved: the knee is still at the
+    lowest probe, so the true knee lies below the sweep floor. Same test find_saturation_point
+    uses to decide whether to extend downward -- computed from the stored curve, so cache
+    entries written before this existed classify correctly too."""
+    curve = (sat or {}).get("curve")
+    if not curve or len(curve) < 2:
+        return False
+    return _linear_region_top([tuple(p) for p in curve]) == curve[0][0]
+
+
+def plan_onset_refinement(pass1, margin):
+    """Decide which corners need the expensive downward extension after a no-extension pass.
+
+    `pass1` is {corner_index: (onset_v_or_None, sat)}. Returns (floor_idx, refine_idx,
+    resolved_max): floor_idx = corners whose knee sits at the sweep floor; resolved_max = the
+    highest onset among corners whose knee WAS found inside the sweep (None if there are none);
+    refine_idx = the floor-limited corners that still need extending.
+
+    WHY THIS IS SAFE. The excitation is sized from the MAXIMUM onset over all corners. A
+    floor-limited corner's pass-1 onset is already a real number (its saturation level lies
+    inside the sweep); extension only refines the knee below it. So a floor-limited corner
+    whose pass-1 onset is well below the highest resolved onset cannot become the maximum and
+    is not extended. `margin` (e.g. 0.5) is the safety factor on that comparison -- extension
+    moves the ceiling median a little, so we refine anything within 1/margin of the maximum.
+    A corner whose pass-1 onset is None is ALWAYS refined (never pruned on missing data), and
+    if no corner is resolved at all there is no maximum to compare to, so every floor-limited
+    corner is refined. Never prunes more than the data supports."""
+    floor_idx = {i for i, (o, s) in pass1.items() if o is None or knee_at_floor(s)}
+    resolved = [o for i, (o, s) in pass1.items() if i not in floor_idx and o is not None]
+    resolved_max = max(resolved) if resolved else None
+    refine = sorted(i for i in floor_idx
+                    if pass1[i][0] is None or resolved_max is None
+                    or pass1[i][0] >= margin * resolved_max)
+    return floor_idx, refine, resolved_max
+
+
 def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                       peak_max_v=40.0, no_cache=False, full_hypercube=None, quiet=False,
                       lead_silence_s=0.0, max_corners=None, sample_grid=0, capture=None,
                       corner_workers=1, shard=None, emit_onsets=None, backend_name="livespice",
-                      min_start_v=1e-9, start_v=0.005):
+                      min_start_v=1e-9, start_v=0.005,
+                      prune_onset_margin=DEFAULT_PRUNE_ONSET_MARGIN):
     """Find the worst-case (highest) saturation onset across every corner of knob_ranges.
     Reuses find_saturation_point.py directly (not check_transient_coverage.check_coverage --
     that function's pass/fail comparison against a transient_peak doesn't apply to this
@@ -246,20 +293,23 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     # down as corner_workers rises, keeping the product roughly constant.
     sweep_workers = max(1, 8 // max(1, corner_workers))
 
-    def _measure(idx_label_vals, amp_executor=None):
+    def _measure(idx_label_vals, amp_executor=None, min_start=None, key_suffix=""):
         idx, (label, vals) = idx_label_vals
         params = dict(vals); params.update(fixed)
-        cpath = findpeak_cache_key(identity, params, cache_extra)
+        # key_suffix keeps a prune pass-1 result (no downward extension) from being served to,
+        # or overwriting, a normal full-extension result for the same corner.
+        cpath = findpeak_cache_key(identity, params, cache_extra + key_suffix)
         if cpath.exists() and not no_cache:
             sat = json.loads(cpath.read_text())
         else:
-            ctmp = Path(tmp) / f"corner_{idx:04d}" if corner_workers > 1 else tmp
+            ctmp = Path(tmp) / f"corner_{idx:04d}{key_suffix}" if corner_workers > 1 else tmp
             if corner_workers > 1:
                 Path(ctmp).mkdir(parents=True, exist_ok=True)
             sat = find_saturation_point(backend, params, str(ctmp), max_v=peak_max_v,
                                          lead_silence_s=lead_silence_s, capture=capture,
                                          workers=sweep_workers, executor=amp_executor,
-                                         min_start_v=min_start_v, start_v=start_v)
+                                         min_start_v=(min_start_v if min_start is None else min_start),
+                                         start_v=start_v)
             cache_findpeak(cpath, sat)
         return label, params, sat
 
@@ -297,24 +347,64 @@ def worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
     # is now ever constructed from a worker thread. --corner-workers 1 is untouched (it never
     # had more than one pool alive to begin with) and remains a safe fallback if this
     # resurfaces in some other shape.
-    results = [None] * len(corners)
-    if corner_workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        amp_pool_size = max(1, corner_workers * sweep_workers)
-        with ThreadPoolExecutor(max_workers=amp_pool_size) as amp_ex, \
-             ThreadPoolExecutor(max_workers=corner_workers) as ex:
-            futs = {ex.submit(_measure, (i, c), amp_ex): i for i, c in enumerate(corners)}
-            for n, fut in enumerate(as_completed(futs), 1):
-                label, params, sat = fut.result()
-                results[futs[fut]] = (label, params, sat, _report(label, sat, n, len(corners)))
+    def _run_pass(items, min_start=None, key_suffix=""):
+        """Measure `items` ([(corner_index, corner), ...]); returns {corner_index: (label,
+        params, sat, onset)}. One pass is the whole old loop; pruning runs two."""
+        out = {}
+        if corner_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            amp_pool_size = max(1, corner_workers * sweep_workers)
+            with ThreadPoolExecutor(max_workers=amp_pool_size) as amp_ex, \
+                 ThreadPoolExecutor(max_workers=corner_workers) as ex:
+                futs = {ex.submit(_measure, it, amp_ex, min_start, key_suffix): it[0] for it in items}
+                for n, fut in enumerate(as_completed(futs), 1):
+                    label, params, sat = fut.result()
+                    out[futs[fut]] = (label, params, sat, _report(label, sat, n, len(items)))
+        else:
+            for n, it in enumerate(items, 1):
+                label, params, sat = _measure(it, None, min_start, key_suffix)
+                out[it[0]] = (label, params, sat, _report(label, sat, n, len(items)))
+        return out
+
+    all_items = list(enumerate(corners))
+    pruned_idx = set()
+    # Pruning needs (a) the whole corner set in one process -- a shard cannot see the global
+    # maximum -- and (b) an extension to skip: if min_start_v >= start_v the sweep never
+    # extends downward, so pass 1 would just be the normal run.
+    if prune_onset_margin is not None and shard_index is not None:
+        if not quiet:
+            print("  onset pruning skipped under --shard: it compares each corner to the "
+                  "maximum over ALL corners, which one shard cannot see.")
+        prune_onset_margin = None
+    if prune_onset_margin is not None and min_start_v >= start_v:
+        prune_onset_margin = None
+    if prune_onset_margin is None:
+        res = _run_pass(all_items)
     else:
-        for i, c in enumerate(corners):
-            label, params, sat = _measure((i, c))
-            results[i] = (label, params, sat, _report(label, sat, i + 1, len(corners)))
+        # PASS 1: every corner with NO downward extension (min_start = start_v => the
+        # extension loop breaks at once). Costs one 20-point sweep per corner.
+        if not quiet:
+            print(f"  onset pass 1: {len(all_items)} corner(s), no downward extension ...")
+        res = _run_pass(all_items, min_start=start_v, key_suffix="|prune-pass1")
+        floor_idx, refine_idx, resolved_max = plan_onset_refinement(
+            {i: (r[3], r[2]) for i, r in res.items()}, prune_onset_margin)
+        pruned_idx = floor_idx - set(refine_idx)
+        if not quiet:
+            print(f"  pruning: {len(floor_idx)} corner(s) have the knee at the sweep floor; resolved "
+                  f"max onset = " + ("none" if resolved_max is None else f"{resolved_max:.4f} V")
+                  + f"; extending {len(refine_idx)}, skipping {len(pruned_idx)} (pass-1 onset < "
+                  f"{prune_onset_margin:g} x that max, so extension cannot make them the worst case)")
+        if refine_idx:
+            res.update(_run_pass([(i, corners[i]) for i in refine_idx]))
+    results = [res[i] for i in range(len(corners))]
+
 
     rows = []
-    for label, params, sat, onset in results:
+    for ci, (label, params, sat, onset) in enumerate(results):
         rows.append({"corner": label, "params": params, "onset_v": onset,
+                     # Present only when pruning skipped this corner's downward extension: its
+                     # onset is the pass-1 (no-extension) value, deliberately not refined.
+                     **({"pruned_unrefined": True} if ci in pruned_idx else {}),
                      # Recorded per corner, not once per run: a sizing pass can mix freshly
                      # measured corners with cache hits, and if those were written by different
                      # code the run is not internally consistent. Better to see the mixture in
@@ -600,6 +690,20 @@ def main():
                          "missing or duplicated corner index, a solver-build mismatch, or a "
                          "corner-count disagreement -- each of which would otherwise yield a "
                          "silently mis-sized excitation.")
+    ap.add_argument("--prune-onset-margin", type=float, default=DEFAULT_PRUNE_ONSET_MARGIN,
+                    metavar="F",
+                    help="two-pass onset sizing (default: %(default)s): measure every corner with "
+                         "NO downward extension first, then extend only floor-limited corners "
+                         "whose pass-1 onset is >= F x the highest onset among corners whose knee "
+                         "was found in range. The excitation is sized from the MAX onset, so a "
+                         "corner far below it cannot matter; extending it down is pure cost. "
+                         "Replay on 13 cached amp batches: 88%% of floor-limited corners skipped. "
+                         "Not useful (but harmless: one extra pass) when EVERY corner is "
+                         "floor-limited, e.g. the ENGL Powerball E645. Ignored under --shard. "
+                         "Pruned corners keep their pass-1 onset, marked pruned_unrefined.")
+    ap.add_argument("--no-prune-onset", action="store_true",
+                    help="opt out of onset pruning: extend every floor-limited corner downward, "
+                         "as before 2026-10-04. Use to reproduce an older sizing exactly.")
     ap.add_argument("--corner-workers", type=int, default=None, metavar="N",
                     help="measure this many knob corners concurrently (default: auto, "
                          "physical_cpu_count()//4 capped at 6). Corners are independent, so this is the "
@@ -727,6 +831,8 @@ def main():
         worst, rows = worst_case_onset(backend, identity, cache_extra, knob_ranges, fixed, tmp,
                                         peak_max_v=args.peak_max_v, no_cache=args.no_cache,
                                         min_start_v=args.min_start_v, start_v=args.sweep_start_v,
+                                        prune_onset_margin=(None if args.no_prune_onset
+                                                            else args.prune_onset_margin),
                                         capture=_capture,
                                         corner_workers=(args.corner_workers if args.corner_workers
                                                         else max(1, min(6, physical_cpu_count() // 4))),
@@ -798,6 +904,13 @@ def main():
                 "onset_method": method_summary(rows),
                 "worst_case_onset_v": round(float(worst), 4),
                 "corner_count": len(rows),
+                # Whether downward extension was skipped for corners that could not be the
+                # worst case. None = every corner fully extended (old behaviour / --no-prune-onset
+                # / merged shards, which cannot prune).
+                "onset_pruning": (None if (args.no_prune_onset or args.merge_onsets)
+                                  else {"margin": args.prune_onset_margin,
+                                        "corners_pruned": sum(1 for r in rows
+                                                              if r.get("pruned_unrefined"))}),
                 "corner_set": ("structural-only (DEPRECATED --no-full-hypercube: cannot represent "
                                "mixed low/high corners)" if args.no_full_hypercube
                                else f"budgeted (--max-corners {args.max_corners})"
