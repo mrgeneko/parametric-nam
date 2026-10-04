@@ -366,7 +366,8 @@ def _print_oversample_table(candidates: tuple, r: dict):
 def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
                         sweep_dur_cap: float, n_knobs: int = 0, workers: int = 4,
                         backend: str = "livespice", deck_args: dict = None,
-                        knob_ranges: dict = None, chain: dict = None) -> bool:
+                        knob_ranges: dict = None, chain: dict = None,
+                        extra_args: list = None) -> bool:
     """Build a properly-calibrated excitation via prepare_excitation.py (which measures
     this circuit's REAL saturation onset across the knob grid's corners, rather than
     pointing `input` at a raw downloaded sweep with no calibration behind it at all --
@@ -428,6 +429,9 @@ def _prepare_excitation(config_path: Path, sweep_file: Path, output_wav: Path,
     # on the same machine. Divided by 4 because find_saturation_point() fans out its own
     # amplitude sweep underneath; see --corner-workers' help for the product argument.
     cmd += ["--corner-workers", str(max(1, min(6, workers // 4)))]
+    # Onset-sizing overrides (--onset-floor-v / --onset-start-v / --onset-oversample). Forwarded
+    # verbatim to prepare_excitation.py; empty by default, so the sizing pass is unchanged.
+    cmd += list(extra_args or [])
     # Probe the grid INTERIOR too, not just corners -- see _interior_sample_budget.
     budget = _interior_sample_budget(n_knobs)
     if budget:
@@ -498,6 +502,27 @@ def main() -> None:
     ap.add_argument("--ref-os", type=int, default=32)
     ap.add_argument("--probe-s", type=float, default=10.0)
     ap.add_argument("--workers", type=int, default=max(1, (_os.cpu_count() or 4) - 2))
+    ap.add_argument("--onset-floor-v", type=float, default=None, metavar="V",
+                    help="forwarded as prepare_excitation.py --min-start-v: stop the onset sweep's "
+                         "downward extension at this input level. Default: that tool's own 1e-9. "
+                         "On a very high-gain amp some corners have an input-INDEPENDENT output "
+                         "floor, so measured gain (out/in) keeps 'falling' as input shrinks and the "
+                         "sweep chases it down to nV -- measured on the ENGL Powerball E645 "
+                         "(LEAD_LO), 2026-10-04: 10 of 40 corners sat at ~0.07-4.5 V RMS output "
+                         "from 1-14 nV of input, and the onset stage took ~10.8 h. Set this above "
+                         "the highest corner's real knee (those corners' knees were 0.1-0.2 mV, so "
+                         "e.g. 5e-5) -- measure the floor with a tiny-input render first, "
+                         "see prepare_excitation.py --min-start-v.")
+    ap.add_argument("--onset-start-v", type=float, default=None, metavar="V",
+                    help="forwarded as prepare_excitation.py --sweep-start-v (initial sweep floor; "
+                         "default there 0.005). Starting nearer a high-gain amp's knee avoids the "
+                         "first 100x extension at every corner.")
+    ap.add_argument("--onset-oversample", type=int, default=None, metavar="N",
+                    help="forwarded as prepare_excitation.py --oversample for the onset sweep only. "
+                         "Onset is a LEVEL estimate, not a fidelity measurement, so a lower value "
+                         "than the config's (cost scales ~linearly with it) is plausible -- but "
+                         "verify against the config's oversample at a few corners first; not yet "
+                         "validated.")
     ap.add_argument("--oversample-results", nargs="+", metavar="PATH",
                     help="skip the local oversample-measurement sweep and score from these "
                          "measure_truncation.py --emit files instead (e.g. collected by "
@@ -651,8 +676,16 @@ def main() -> None:
                                      backend="ngspice-deck", deck_args=deck_args,
                                      knob_ranges=knob_ranges, chain=_chain)
         else:
+            _onset_args = []
+            if args.onset_floor_v is not None:
+                _onset_args += ["--min-start-v", f"{args.onset_floor_v:g}"]
+            if args.onset_start_v is not None:
+                _onset_args += ["--sweep-start-v", f"{args.onset_start_v:g}"]
+            if args.onset_oversample is not None:
+                _onset_args += ["--oversample", str(args.onset_oversample)]
             ok = _prepare_excitation(output, Path(args.input), excitation_wav,
-                                     args.sweep_dur_cap, n_knobs=len(names), workers=args.workers)
+                                     args.sweep_dur_cap, n_knobs=len(names), workers=args.workers,
+                                     extra_args=_onset_args)
         if ok and excitation_wav.exists():
             # prepare_excitation.py already pointed `input` here, and its line carries the
             # measured worst-case onset and corner count that this function does not have.
