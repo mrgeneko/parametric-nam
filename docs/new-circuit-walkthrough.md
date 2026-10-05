@@ -364,6 +364,20 @@ in `docs/scaling-training.md` for the full comparison and the tradeoff. Pass
 behavior exactly, or `--restart-mult 1` to opt out of growth entirely and keep cycle length
 reliably under 750.
 
+**`--restart-lr-floor` (default `1e-6`, on since 2026-10-05).** A cycle restarts early as soon as
+its cosine LR would fall below the floor, instead of crawling down to ~0. Measured on 6 completed
+cycles of 400+ epochs (3 runs): the epochs below 1e-6 are 4.3% of a cycle (up to 5.8% at 1200
+epochs), the cycle's best smoothed ESR sat at LR 3e-6..5e-5 (median 1e-5) and never below 1e-6,
+and ESR already equalled the cycle's final level once LR dropped under 1e-5. The default only
+trims that dead tail: about 4% off every cycle (cycle lengths 49, 97, 193, 386, 771, then 1156
+at the 1200 cap), roughly 25 minutes per 1200-epoch cycle. Do **not** raise it casually: 1e-5
+would save 14-19% but clips the region where long cycles put their best checkpoint (3.5e-6 on the
+1200-epoch cycle). It is an ordinary restart as far as `--restart-decay`, `--restart-max-period`,
+cycle checkpoints and `--stale-*` are concerned, and decay is scaled by the cycle's actual
+(shorter) length. It switches itself off while the decayed peak LR is below 10x the floor, so a
+very long run cannot degenerate into back-to-back restarts. `--restart-lr-floor 0` restores full
+cosine cycles exactly. Ignored with `--epochs > 0`.
+
 ---
 
 ## What ends up where

@@ -1862,6 +1862,55 @@ def cap_sgdr_cycle(scheduler, max_period):
     return True
 
 
+#: Default --restart-lr-floor: restart an SGDR cycle early once its LR would fall below this.
+#: 1e-6 on measured data (2026-10-05, 6 completed cycles of 400+ epochs on 3 runs): the epochs
+#: below 1e-6 are 4.3% of a cycle (up to 5.8% at 1200) and the cycle's best smoothed ESR never
+#: landed below 1e-6 (it sat at 3e-6..5e-5, median 1e-5) -- smoothed ESR already equals the
+#: cycle's final level by then. 1e-5 would save 14-19% but clips the region where long cycles
+#: put their best (3.5e-6 on the 1200-epoch cycle), so it is deliberately NOT the default.
+DEFAULT_RESTART_LR_FLOOR = 1e-6
+
+#: Early restart is skipped when the cycle's peak LR is below this multiple of the floor. The
+#: peak decays (--restart-decay) toward the floor over a long run; without this guard the LR
+#: would fall under the floor within a few epochs of every restart and the schedule would
+#: degenerate into back-to-back restarts.
+RESTART_FLOOR_MIN_RATIO = 10.0
+
+
+def early_restart_at_floor(scheduler, optimizer, floor):
+    """Restart the SGDR cycle NOW if the LR just set for the next epoch is below `floor`.
+
+    Call right after scheduler.step(), before anything consumes the new LR. Forces exactly the
+    wrap CosineAnnealingWarmRestarts.step() performs at a cycle's natural end (T_cur -> 0,
+    T_i *= T_mult) and pushes the peak LR into the param groups, so everything downstream that
+    keys off `T_cur == 0` -- restart decay, the max-period cap, cycle checkpoints, the stale
+    rule -- treats it as an ordinary restart, and resume needs no new state (T_cur/T_i are
+    already saved).
+
+    Returns (completed_epochs, nominal_T_i, lr_before) when it restarted, else None.
+    `completed_epochs` is how long the cycle ACTUALLY ran (shorter than T_i), which is what the
+    decay scaling should use.
+
+    No-ops: floor <= 0; not a SGDR scheduler; the cycle just restarted on its own (T_cur == 0);
+    LR still at/above the floor; or the cycle's peak is within RESTART_FLOOR_MIN_RATIO of the
+    floor (see that constant).
+    """
+    if floor is None or floor <= 0 or getattr(scheduler, "T_cur", None) is None:
+        return None
+    if scheduler.T_cur == 0:
+        return None
+    lr_now = optimizer.param_groups[0]["lr"]
+    if lr_now >= floor or scheduler.base_lrs[0] < RESTART_FLOOR_MIN_RATIO * floor:
+        return None
+    completed, nominal = int(scheduler.T_cur), scheduler.T_i
+    scheduler.T_cur = 0
+    scheduler.T_i = scheduler.T_i * scheduler.T_mult
+    for group, base in zip(optimizer.param_groups, scheduler.base_lrs):
+        group["lr"] = base                       # get_lr() at T_cur == 0 is exactly the peak
+    scheduler._last_lr = [g["lr"] for g in optimizer.param_groups]
+    return completed, nominal, lr_now
+
+
 def restart_decay_factor(completed_cycle_len, restart_period, restart_decay):
     """Ceiling-decay factor for a just-finished SGDR cycle, scaled by its length.
 
@@ -2158,6 +2207,19 @@ def main():
                          "of the old 0.1 x 1. The boutique dual-channel amp's production runs used 0.02 without "
                          "issue; halving the split also returns ~5%% of the step budget to "
                          "actual training.")
+    ap.add_argument("--restart-lr-floor", type=float, default=DEFAULT_RESTART_LR_FLOOR,
+                    metavar="LR",
+                    help="Open-ended SGDR: restart a cycle EARLY as soon as its LR would fall below "
+                         "this (default: %(default)g; 0 restores full cosine cycles to ~0). The "
+                         "cosine tail below 1e-6 is ~4-6%% of a cycle and bought nothing "
+                         "measurable: on 6 completed cycles the best smoothed ESR sat at LR "
+                         "3e-6..5e-5 and never below 1e-6. 1e-5 would save 14-19%% but cuts into "
+                         "where long cycles put their best, so do not raise it casually. The "
+                         "early restart is an ordinary restart (decay, --restart-max-period, "
+                         "cycle checkpoints and --stale-* all see it); decay is scaled by the "
+                         "cycle's ACTUAL length. Skipped while the cycle's peak LR is < 10x this "
+                         "floor, so a heavily decayed ceiling cannot degenerate into "
+                         "back-to-back restarts. Ignored with --epochs > 0.")
     ap.add_argument("--fixed-val-windows", action="store_true",
                     help="Validate on FIXED crop windows (seeded per combo and per --val-passes "
                          "pass) instead of fresh random crops every epoch. Random crops make the "
@@ -2850,6 +2912,12 @@ def main():
             torch.mps.synchronize()
         _watchdog_disarm()
         scheduler.step()
+        _early_restart = (early_restart_at_floor(scheduler, optimizer, args.restart_lr_floor)
+                          if open_ended else None)
+        if _early_restart is not None:
+            print(f"  [restart] early: lr {_early_restart[2]:.2e} < --restart-lr-floor "
+                  f"{args.restart_lr_floor:g} after {_early_restart[0]} of {_early_restart[1]:.0f} "
+                  f"cycle epochs", file=sys.stderr, flush=True)
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
 
         # --- per-tier best-checkpointing: each width's optimum lands at a
@@ -2986,7 +3054,8 @@ def main():
         # length of the cycle that just ended, correctly even when that cycle was itself
         # capped by --restart-max-period.
         if cycle_ended and args.restart_decay != 1.0:
-            completed_cycle_len = scheduler.T_i / max(1, args.restart_mult)
+            completed_cycle_len = (_early_restart[0] if _early_restart is not None
+                                   else scheduler.T_i / max(1, args.restart_mult))
             decay_factor = restart_decay_factor(completed_cycle_len, args.restart_period,
                                                  args.restart_decay)
             for group in optimizer.param_groups:
