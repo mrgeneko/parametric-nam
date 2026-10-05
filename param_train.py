@@ -1010,7 +1010,17 @@ class ParamDataset(torch.utils.data.Dataset):
         return len(self.samples) * self.repeats
 
     def __getitem__(self, idx):
-        real_idx = idx % len(self.samples)
+        return self.item_at(idx % len(self.samples), None)
+
+    def sig_len_for(self, real_idx: int) -> int:
+        """Usable signal length for one combo -- what a crop start is drawn against."""
+        combo_idx, _ = self.samples[real_idx]
+        return min(len(self.inp), self.outputs[combo_idx].shape[0])
+
+    def item_at(self, real_idx: int, start):
+        """One (input, target, params) crop for combo `real_idx`. `start=None` draws a RANDOM
+        crop (the historical behaviour, used for training); an int pins the window, which is
+        how FixedWindowVal makes every validation epoch score the same audio."""
         combo_idx, params = self.samples[real_idx]
 
         inp = self.inp
@@ -1018,7 +1028,9 @@ class ParamDataset(torch.utils.data.Dataset):
 
         sig_len = min(len(inp), out_row.shape[0])
         if sig_len > self.crop_len:
-            start = np.random.randint(0, sig_len - self.crop_len)
+            if start is None:
+                start = np.random.randint(0, sig_len - self.crop_len)
+            start = min(int(start), sig_len - self.crop_len)
             inp = inp[start:start + self.crop_len]
             out = out_row[start:start + self.crop_len].astype(np.float32)
         else:
@@ -1030,6 +1042,52 @@ class ParamDataset(torch.utils.data.Dataset):
         out_t = torch.from_numpy(out.copy()).float().unsqueeze(0)
         params_t = torch.tensor([params[n] for n in self.param_names]).float()
         return inp_t, out_t, params_t
+
+
+class FixedWindowVal(torch.utils.data.Dataset):
+    """Validation view whose crop windows are FIXED, so every epoch scores the same audio.
+
+    ParamDataset re-crops randomly on every __getitem__ call, including for the val split, so
+    two validations of IDENTICAL weights differ: on deluxe_tubes2_c12q_v2 the 11 epochs with
+    lr < 1e-8 (weights unchanged) read w8 ESR 0.0084 .. 0.0179 (~26% CV), 2026-10-05. The
+    "new best if lower" rule then picks the luckiest crop draw, and the saved best ESR is
+    optimistic. With fixed windows an ESR difference between epochs is a WEIGHT difference,
+    which makes taking the lowest ESR the right rule. NAM's own trainer validates on fixed
+    windows for the same reason.
+
+    One item per val index (grouped_random_split keeps >=1 val sample for EVERY knob combo, so
+    every combo is scored every epoch). `passes` windows per item, each its own deterministic
+    start drawn from (seed, combo index, pass); validate() calls set_pass(k) before pass k, so
+    --val-passes N means N different but FIXED windows per combo, not N identical readings.
+    """
+    def __init__(self, dataset: "ParamDataset", indices, seed: int = 0, passes: int = 1):
+        self.dataset = dataset
+        self.indices = list(indices)
+        self.seed = int(seed)
+        self.passes = max(1, int(passes))
+        self.current_pass = 0
+        self._starts = {}                    # (real_idx, pass) -> start, drawn once
+
+    def set_pass(self, k: int):
+        self.current_pass = int(k) % self.passes
+
+    def window_start(self, real_idx: int, k: int):
+        sig_len = self.dataset.sig_len_for(real_idx)
+        span = sig_len - self.dataset.crop_len
+        if span <= 0:
+            return 0
+        key = (real_idx, k)
+        if key not in self._starts:
+            rng = np.random.default_rng([self.seed, int(real_idx), int(k)])
+            self._starts[key] = int(rng.integers(0, span))
+        return self._starts[key]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, i):
+        real_idx = self.indices[i] % len(self.dataset.samples)
+        return self.dataset.item_at(real_idx, self.window_start(real_idx, self.current_pass))
 
 
 # ---------------------------------------------------------------------------
@@ -1412,7 +1470,9 @@ def validate(model, loader, criterion, device, val_passes: int = 1):
     esr_sums = None
     n = 0
     with torch.no_grad():
-        for _ in range(max(1, val_passes)):
+        for _pass in range(max(1, val_passes)):
+            if hasattr(loader.dataset, "set_pass"):
+                loader.dataset.set_pass(_pass)     # FixedWindowVal: pass k = its own fixed windows
             for inp, out, params in loader:
                 inp, out, params = inp.to(device), out.to(device), params.to(device)
                 if slimmable:
@@ -2098,6 +2158,16 @@ def main():
                          "of the old 0.1 x 1. The boutique dual-channel amp's production runs used 0.02 without "
                          "issue; halving the split also returns ~5%% of the step budget to "
                          "actual training.")
+    ap.add_argument("--fixed-val-windows", action="store_true",
+                    help="Validate on FIXED crop windows (seeded per combo and per --val-passes "
+                         "pass) instead of fresh random crops every epoch. Random crops make the "
+                         "same weights score differently each epoch (~26%% CV measured at frozen "
+                         "weights), so 'new best if lower' picks the luckiest draw and the saved "
+                         "best ESR is optimistic; fixed windows make epoch-to-epoch differences "
+                         "real. Every knob combo is still in every validation pass. Default off "
+                         "(prior behaviour). Reported ESRs are not directly comparable to runs "
+                         "without it, and a RESUME that toggles it keeps the old best values "
+                         "(warned) because they were measured on different windows.")
     ap.add_argument("--val-passes", type=int, default=4,
                     help="Repeat the full validation pass this many times per epoch and "
                          "average -- ParamDataset re-crops randomly on every call, so this is "
@@ -2419,7 +2489,14 @@ def main():
         val_indices = [train_indices.pop()]
     n_train, n_val = len(train_indices), len(val_indices)
     train_ds = torch.utils.data.Subset(dataset, train_indices)
-    val_ds = torch.utils.data.Subset(dataset, val_indices)
+    if args.fixed_val_windows:
+        val_ds = FixedWindowVal(dataset, val_indices, seed=args.seed, passes=args.val_passes)
+        print(f"  --fixed-val-windows: {len(val_ds)} val sample(s) x {val_ds.passes} fixed window(s) "
+              f"(seed {args.seed}) scored identically every epoch; "
+              f"{len({i % n_combos for i in val_indices})}/{n_combos} knob combos covered",
+              file=sys.stderr)
+    else:
+        val_ds = torch.utils.data.Subset(dataset, val_indices)
     # drop_last=True on BOTH loaders: 2026-07-21, the dual-drive boutique pedal (train 3554, val 394 --
     # neither divides evenly by batch_size=64) hung on MPS within 1-2 epochs, fresh or
     # resumed, while the mid-boost overdrive pedal (train 3456, val 384 -- BOTH exact multiples of 64) never did,
@@ -2658,6 +2735,16 @@ def main():
                      f"history. Re-render to match, or start a fresh run.")
         print(f"  Resumed at epoch {ckpt['epoch']}, best ESR (full) {best_esr['full']:.6f}",
               file=sys.stderr)
+        _was_fixed = bool((ckpt.get("args_dict") or {}).get("fixed_val_windows", False))
+        if _was_fixed != bool(args.fixed_val_windows):
+            print(f"  WARNING: this resume {'ENABLES' if args.fixed_val_windows else 'DISABLES'} "
+                  f"--fixed-val-windows but the checkpoint was validated "
+                  f"{'on fixed' if _was_fixed else 'on random'} windows. The stored best ESR "
+                  f"({best_esr['full']:.6f}) was measured on different audio, so new bests are "
+                  f"compared against a number that is not comparable (random-window bests are "
+                  f"biased low, so few new bests will mint after turning fixed windows on). "
+                  f"Best files are NOT reset, to avoid replacing a good export with a worse "
+                  f"model; start a fresh run to get clean fixed-window bests.", file=sys.stderr)
 
     open_ended = (args.epochs == 0)
 
