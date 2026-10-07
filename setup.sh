@@ -12,12 +12,12 @@
 #
 # THE ORACLE LIVES IN mrgeneko/livespice-cli, NOT HERE.
 # This repo used to vendor its own livespice_cli plus a patched LiveSPICE submodule. The copy
-# drifted from hotspice's emitter-testing copy: a fix making an unknown --params name a hard
+# drifted from the C++ emitter project's testing copy: a fix making an unknown --params name a hard
 # error (instead of silently rendering at the defaults, so every "swept" combination comes out
 # IDENTICAL and the trainer learns the knob does nothing) landed in one and not the other. Two
 # tools built from one schematic, disagreeing about what the device's knobs ARE. There is now
-# exactly one, in its own small standalone repo (originally extracted from hotspice/oracle/, which
-# has no other functional connection to this project) — it builds against PRISTINE upstream
+# exactly one, in its own small standalone repo (originally extracted from that emitter project's oracle/
+# directory, which has no other functional connection to this project) — it builds against PRISTINE upstream
 # LiveSPICE, never a patched fork, because an oracle built from the thing under test is not an
 # oracle.
 #
@@ -29,7 +29,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
-ORACLE_REPO="${LIVESPICE_CLI_REPO:-${LIVESPICE_EMITTER:-${HOTSPICE:-$REPO/../livespice-cli}}}"   # LIVESPICE_EMITTER/HOTSPICE: old names, still honoured
+ORACLE_REPO="${LIVESPICE_CLI_REPO:-${LIVESPICE_EMITTER:-$REPO/../livespice-cli}}"   # LIVESPICE_EMITTER: an old name, still honoured
 BUILD_CLI=1
 for a in "$@"; do [ "$a" = "--no-cli" ] && BUILD_CLI=0; done
 

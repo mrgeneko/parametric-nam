@@ -37,8 +37,6 @@ def test_portable_rewrites_a_path_under_each_known_sibling_repo():
             "${SWEEP_FILES:-$HOME/work/sweep-files}/sweep120s.wav",
         rp.HERE.parent / "livespice-cli" / "publish" / "livespice_cli":
             "${LIVESPICE_CLI_REPO:-$HOME/work/livespice-cli}/publish/livespice_cli",
-        rp.HERE.parent / "hotspice" / "oracle":
-            "${HOTSPICE:-$HOME/work/hotspice}/oracle",
     }
     for path, expected in cases.items():
         assert rp.portable(path) == expected

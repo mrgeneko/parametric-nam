@@ -442,8 +442,8 @@ duplicates do: a fix making an unknown `--params` name a hard error (instead of 
 rendering at the defaults, so every "swept" combination comes out **identical** and the trainer
 learns the knob does nothing) landed in one copy and not the other. Two tools built from one
 schematic, disagreeing about what the device's knobs *are*. There is now exactly one. (It was
-originally extracted from `hotspice/oracle/` — same reasoning, promoted to its own repo since it
-has no other functional connection to this project or to hotspice's emitter.)
+originally extracted from a C++ emitter project's `oracle/` directory — same reasoning, promoted to its own repo since it
+has no other functional connection to this project or to that emitter.)
 
 ```bash
 git clone --recurse-submodules https://github.com/mrgeneko/livespice-cli   # as a SIBLING of this repo

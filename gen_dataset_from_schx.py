@@ -51,7 +51,7 @@ HARNESS = HERE / "harness/build_o3/harness"
 def _find_livespice_cli() -> Path:
     """Resolve THE oracle -- there must be exactly one.
 
-    This repo used to carry its own livespice_cli, a near-copy of hotspice's. The two
+    This repo used to carry its own livespice_cli, a near-copy of the C++ emitter project's. The two
     drifted, as duplicates do: a fix that makes an unknown --params name a hard error (rather than
     silently rendering at the defaults, so that every "swept" combination comes out IDENTICAL and
     the trainer learns the knob does nothing) landed in one copy and not the other. Two tools built
@@ -59,8 +59,8 @@ def _find_livespice_cli() -> Path:
     emitter's ParamExtractor had.
 
     So there is now one: mrgeneko/livespice-cli, a small standalone public repo (extracted from
-    hotspice/oracle/, which used to build the identical binary in place -- see its history if you
-    need the "why here, not there" reasoning). It builds against the mrgeneko/LiveSPICE fork, not
+    the emitter project's oracle/ directory, which used to build the identical binary in place --
+    see its history if you need the "why here, not there" reasoning). It builds against the mrgeneko/LiveSPICE fork, not
     upstream LiveSPICE as-is, because upstream has physics bugs and an oracle should not inherit
     them: the CenterTapTransformer's ampere-turns equation was missing a factor of 2 (load power came
     out at 2x the power entering the winding), and the pentode computes plate current from the PLATE
@@ -74,8 +74,8 @@ def _find_livespice_cli() -> Path:
     renders it wrongly, so the sidecar says "partial" until every render machine has rebuilt.
 
     What keeps this an oracle is independence from the thing under test, not an unmodified solver:
-    the C++ emitter (hotspice) is tested against it, and it is never built from the emitter's own
-    sources. This repo has no functional dependency on hotspice itself -- only on this small CLI
+    the C++ emitter is tested against it, and it is never built from the emitter's own
+    sources. This repo has no functional dependency on the emitter itself -- only on this small CLI
     wrapper.
 
     Order: $LIVESPICE_CLI, then a sibling livespice-cli checkout, then the local legacy copy.
@@ -496,7 +496,7 @@ SPIKE_BULK_RATIO = 2.0
 # ratio checks. Found on the reverse-linear-drive pedal (sweep-v3-declicked.wav, Dist<=0.4/Tone>=0.6): a real,
 # smooth, cross-solver-agreeing circuit response to genuine near-Nyquist sweep content (~12kHz,
 # only 4 samples/cycle at 48kHz -- confirmed against BOTH the raw pre-decimation ngspice trace
-# and an independent hotspice-emitted C++ solve, neither of which show any sign of non-
+# and an independent emitted-C++ solve, neither of which show any sign of non-
 # convergence) peaks at ~0.3-0.38 -- comparable to or below this SAME circuit's own normal
 # full-dataset peak range (0.06-1.0 across the 48-combo dataset built on the old sweepv5.wav
 # excitation, removed from this repo 2026-08-28 -- see README, "The sweep file"). The ratio checks
@@ -881,7 +881,7 @@ def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> li
     looks: livespice_cli DEFAULTS TO 8 NEWTON ITERATIONS and 8 is not enough for stiff circuits.
     The mid-hump overdrive pedal needs 45 -- at the default the SOLVER SILENTLY STOPS SHORT and hands back a
     converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
-    nothing reports it. (See hotspice, which now measures the cap per circuit.)
+    nothing reports it. (The C++ emitter now measures the cap per circuit.)
     """
     if backend == "livespice":
         os_ = oversample or 2
