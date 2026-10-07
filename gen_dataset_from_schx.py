@@ -536,7 +536,7 @@ def rail_bound(schx_path: str) -> "float | None":
       * an amp with an output transformer produces output well BELOW its rail (the SVT's
         theoretical ceiling is 49 V rms from a 695 V supply), so a moderately wrong render
         there still passes. This catches catastrophe, not inaccuracy.
-      * a circuit with no Rail component gets no bound at all.
+      * a circuit with no Rail or VoltageSource component gets no bound at all.
     Measured margins on real renders: Duke 0.2 V against a 9 V rail, Mesa Orange 8.6 V against
     450 V. The failure it catches is 193x over.
 
@@ -550,6 +550,11 @@ def rail_bound(schx_path: str) -> "float | None":
         return None
     rails = [abs(float(m.group(1)))
              for m in re.finditer(r'Circuit\.Rail[^/]*?Voltage="(-?[\d.]+)\s*V?"', text)]
+    # An amp whose supply is an AC mains source through a rectifier ('(sag ac)' builds) declares that supply as a VoltageSource whose
+    # Voltage is an expression such as "495*Sin[314.159265*t] V", not as a Rail. Its peak is the leading number. Without it the only Rail
+    # is the bias supply (-38 V), and a 100 W amp that legitimately sustains 40+ V RMS is rejected as "exceeding the supply rail".
+    rails += [abs(float(m.group(1)))
+              for m in re.finditer(r'Circuit\.VoltageSource[^/]*?Voltage="(-?[\d.]+)', text)]
     if not rails:
         return None
     m = re.search(r'Circuit\.Speaker[^/]*?V0dBFS="(-?[\d.]+)\s*V?"', text)

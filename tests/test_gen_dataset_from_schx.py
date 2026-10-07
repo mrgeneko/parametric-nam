@@ -675,6 +675,18 @@ def test_bound_is_scaled_by_the_speakers_v0dbfs(tmp_path):
     assert g.rail_bound(str(_schx_with(tmp_path, ["420 V"], v0dbfs="100 V"))) == 4.2
 
 
+def test_an_ac_supply_voltage_source_counts_toward_the_bound(tmp_path):
+    # An '(sag ac)' amp's supply is a VoltageSource with an expression, and the only Rail is the -38 V bias supply. Before this the bound was
+    # 38 V and a 100 W amp's legitimate 40+ V RMS output was rejected as "exceeding the supply rail".
+    p = _schx_with(tmp_path, ["-38 V"])
+    p.write_text(p.read_text().replace(
+        "</Schematic>",
+        '<Component _Type="Circuit.VoltageSource, Circuit, Version=1.0.0.0" Voltage="495*Sin[314.159265*t] V" />\n</Schematic>'))
+    assert g.rail_bound(str(p)) == 495.0
+    p.write_text(p.read_text().replace('Voltage="495*Sin', 'Voltage="-495*Sin'))
+    assert g.rail_bound(str(p)) == 495.0          # the sign of a source is irrelevant
+
+
 def test_no_rail_means_no_bound(tmp_path):
     # Absence of evidence: a circuit that declares no supply gets no absolute check, rather
     # than a made-up one.
