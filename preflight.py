@@ -143,6 +143,8 @@ def _build_backend(args):
         identity = Path(args.schx).read_bytes()
         cache_extra = (f"os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
                        f"|solver={solver_identity('livespice')}") + cache_tag(_capture)
+        if args.lead_silence_s:   # only when set, so existing cache entries stay valid
+            cache_extra += f"|lead={args.lead_silence_s:g}"
         return backend, knobs, identity, cache_extra
     if args.backend == "ngspice":
         # The GENERIC schx-translated path (ngspice/schx_to_ngspice.py via NgspiceSchxBackend),
@@ -203,6 +205,16 @@ def _build_backend(args):
     sys.exit(f"unknown --backend {args.backend!r}")
 
 
+def resolve_lead_silence(backend, requested):
+    """Seconds of unscored silence to prepend to every probe. ngspice-deck defaults to 3 s (its cold-start README note), livespice to
+    0 and only uses a lead-in when asked (an AC-front-end amp needs >= 6 s), the other backends never do."""
+    if backend == "ngspice-deck":
+        return 3.0 if requested is None else requested
+    if backend == "livespice":
+        return requested or 0.0
+    return 0.0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", required=True,
@@ -229,9 +241,11 @@ def main():
     ap.add_argument("--exclude-knob", action="append", default=[],
                      help="[ngspice-deck, ltspice-deck] knob to exclude from the swept check (repeatable) -- "
                           "e.g. a 0/1 toggle, not a continuous sweep; build_deck's own default applies")
-    ap.add_argument("--lead-silence-s", type=float, default=3.0,
-                     help="[ngspice-deck] silence prepended before probe content -- see this repo's "
-                          "README ('Known issue: excitation needs a silent lead-in'). 0 to disable. "
+    ap.add_argument("--lead-silence-s", type=float, default=None,
+                     help="[ngspice-deck, default 3 s; livespice, default 0] silence prepended before probe content, "
+                          "rendered but unscored -- see this repo's README ('Known issue: excitation needs a silent "
+                          "lead-in'). 0 to disable. For livespice it is for builds with a slow cold start, e.g. an "
+                          "AC-front-end '(sag ac)' amp that needs >= 6 s to settle: pass 6. "
                           "Not used for ltspice-deck -- LTspice's own .ic/uic bias hints replace the "
                           "need for a cold-start settling lead-in, see ltspice_spicelib.py.")
     ap.add_argument("--out-scale", type=float, default=0.05,
@@ -327,9 +341,9 @@ def main():
     print(f"Preflight ({args.backend}): {Path(args.schx).name if args.schx else args.module}  "
           f"knobs={knobs}  fixed={fixed or '-'}")
     print(f"  probe {args.seconds:.0f}s @ {vin:.3f}V"
-          f"{f'  (+{args.lead_silence_s:.0f}s lead-silence, unscored)' if args.backend == 'ngspice' else ''}\n")
+          f"{f'  (+{args.lead_silence_s:.0f}s lead-silence, unscored)' if args.backend in ('ngspice', 'livespice') and args.lead_silence_s else ''}\n")
 
-    lead_silence_s = args.lead_silence_s if args.backend == "ngspice-deck" else 0.0
+    lead_silence_s = resolve_lead_silence(args.backend, args.lead_silence_s)
     lead_n = int(lead_silence_s * SR)
     probe_raw = np.concatenate([np.zeros(lead_n, dtype=np.float32), xprobe]) if lead_n else xprobe
     base_handle = backend.prepare_input(probe_raw, SR, vin, scratch, "native")
