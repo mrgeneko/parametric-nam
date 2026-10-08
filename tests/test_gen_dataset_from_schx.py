@@ -912,3 +912,82 @@ def test_iterations_cli_default_is_256_and_settable():
     import sys as _sys
     ap_src = open(g.__file__).read()
     assert '"--iterations", type=int, default=256' in ap_src
+
+
+# --------------------------------------------------------------------------- Newton convergence report
+
+_STATS_LINE = ("newton: solves=9331200 unconverged=101 (0.0011%) severe=100 first_sample=294792 "
+               "last_sample=441570 max_abs_output=18.12 line_search=8")
+
+
+def test_parse_newton_stats_reads_livespice_clis_report():
+    s = g._parse_newton_stats("some banner\n" + _STATS_LINE + "\nDSP load: 3%\n")
+    assert s == dict(solves=9331200, unconverged=101, severe=100, first=294792, last=441570)
+
+
+def test_parse_newton_stats_is_none_without_a_report():
+    assert g._parse_newton_stats("") is None
+    assert g._parse_newton_stats("no stats here") is None
+
+
+def test_newton_failure_is_empty_for_a_clean_render():
+    clean = dict(solves=9331200, unconverged=0, severe=0, first=-1, last=-1)
+    assert g._newton_failure(clean, 4) == ""
+
+
+def test_newton_failure_on_any_severe_solve_even_below_the_fraction():
+    s = dict(solves=10**9, unconverged=1, severe=1, first=5, last=5)   # 1e-9 of solves, but severe
+    assert g._newton_failure(s, 4).startswith("newton:")
+
+
+def test_newton_failure_on_fraction_above_the_limit_but_not_below(monkeypatch):
+    monkeypatch.setattr(g, "NEWTON_MAX_FRACTION", 1e-6)
+    over = dict(solves=1_000_000, unconverged=2, severe=0, first=1, last=2)    # 2e-6
+    under = dict(solves=10_000_000, unconverged=2, severe=0, first=1, last=2)  # 2e-7
+    assert g._newton_failure(over, 4)
+    assert g._newton_failure(under, 4) == ""
+
+
+def test_newton_failure_is_a_convergence_failure_so_the_ladder_escalates():
+    assert g._is_convergence_failure(g._newton_failure(dict(solves=100, unconverged=50, severe=50, first=0, last=9), 4))
+
+
+def test_ladder_escalates_on_a_newton_failure_that_falls_with_oversample(tmp_path, monkeypatch):
+    counts = iter([1000, 100, 0])
+    seen = []
+
+    def fake_render_once(idx, params, out_dir, input_wav, backend, *a, **kw):
+        n = next(counts); seen.append(n)
+        if n == 0:
+            return _result(idx, ok=True)
+        r = _result(idx, error=f"newton: {n} unconverged solves (5 severe) of 99 at oversample 4, from sample 1 to 2")
+        r.newton_unconverged = n
+        return r
+
+    monkeypatch.setattr(g, "_render_once", fake_render_once)
+    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "livespice")
+    assert r.ok and seen == [1000, 100, 0]
+
+
+def test_ladder_stops_when_newton_failures_do_not_halve_with_oversample(tmp_path, monkeypatch):
+    counts = iter([1593, 1143, 816, 700, 600])
+    seen = []
+
+    def fake_render_once(idx, params, out_dir, input_wav, backend, *a, **kw):
+        n = next(counts); seen.append(n)
+        r = _result(idx, error=f"newton: {n} unconverged solves (5 severe) of 99 at oversample 4, from sample 1 to 2")
+        r.newton_unconverged = n
+        return r
+
+    monkeypatch.setattr(g, "_render_once", fake_render_once)
+    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "livespice")
+    assert not r.ok
+    assert seen == [1593, 1143], "1593 -> 1143 is not a halving: the ladder must stop instead of burning every rung"
+    assert "not escalating" in r.error
+
+
+def test_ls_solver_args_follow_the_trust_region_setting(monkeypatch):
+    monkeypatch.setattr(g, "TRUST_REGION_V", 30.0)
+    assert g._ls_solver_args() == ["--trust-region", "30"]
+    monkeypatch.setattr(g, "TRUST_REGION_V", 0.0)
+    assert g._ls_solver_args() == []

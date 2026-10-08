@@ -480,6 +480,7 @@ class Result:
     # Recorded per row because it is a property of THE DATA: "this combination rendered, but
     # the solver was uneasy at this corner" is exactly what the next person needs.
     warnings: str = ""
+    newton_unconverged: int = -1   # unconverged Newton solves in the render (livespice_cli report); -1 = no report
 
 
 # Single-sample solver-overshoot spike detector (see _finalize_wav). A sample is flagged as a spike
@@ -863,8 +864,59 @@ def _run_ngspice(idx, params, path, out_wav, expected_frames, timeout_s,
 # 107 combinations, nearly all on spike errors that had never been given a single retry.
 _CONVERGENCE_FAILURE = re.compile(
     r"diverg|NaN|Inf|timestep too small|singular|convergence|no convergence|"
-    r"unstable|crest|truncated|timeout|iteration|spike|overshoot",
+    r"unstable|crest|truncated|timeout|iteration|spike|overshoot|newton:",
     re.IGNORECASE)
+
+
+# ---- Newton convergence report -------------------------------------------------------------
+# livespice_cli prints one line on stderr after every render:
+#     newton: solves=9331200 unconverged=101 (0.0011%) severe=100 first_sample=294792 last_sample=441570 ...
+# An "unconverged" solve ran out of iterations; "severe" ones were still taking a step of more than a volt
+# when they did. Until this existed nothing read the line, so a render with a hundred such solves came
+# back as a clean file (it ended up in params.csv's `warnings` column and nowhere else). A render whose
+# unconverged fraction is above NEWTON_MAX_FRACTION, or that has ANY severe solve, now FAILS, and the
+# retry ladder escalates it like any other convergence failure -- unless more oversample is not
+# helping (see _render_with_ladder). --newton-check warn|off restores the old behaviour.
+_NEWTON_STATS = re.compile(
+    r"newton: solves=(\d+) unconverged=(\d+) \(([\d.]+)%\) severe=(\d+) first_sample=(-?\d+) last_sample=(-?\d+)")
+NEWTON_MAX_FRACTION = 1e-6     # unconverged / solves above this fails the render
+NEWTON_CHECK = "fail"          # off | warn | fail
+# Per-iteration Newton step limit in volts, passed to livespice_cli --trust-region (0 = off, the default). A step whose
+# norm exceeds it is scaled down, direction kept. It is CIRCUIT-SPECIFIC, so it is opt-in per device (`trust_region`
+# in a config, or --trust-region V). Measured with livespice_cli at 4x, 9.7 s stress signal:
+#   Ampeg SVT preamp, Volume 0.8      : 101 unconverged solves off, 0 at 10 / 30 / 60 V; output unchanged
+#                                       (ESR 1.03e-3 against a 16x render either way), so it no longer needs 8x;
+#   Ampeg SVT preamp, all knobs up    : 1593 off, 755 at 30 V (it halves them; oversample does not help);
+#   Ampeg SVT Full, defaults / V=0.8  : 0 off, 0 at 30 and 100 V;
+#   Fender Deluxe Reverb Full (tubes2): 12 off, 1740 at 30 V (WORSE: a power amp's plate steps are legitimately larger);
+#   Soldano SLO-100 Crunch Full       : 0 off, 81 at 30 V (WORSE);
+#   JCM800 / Tweed preambles, AC30    : 0 either way, output identical to rounding.
+# So pick it per circuit, and read the `newton:` report (--newton-check) to see whether it helped.
+TRUST_REGION_V = 0.0
+
+
+def _ls_solver_args() -> list:
+    """Solver flags every livespice_cli render of this run shares (probe, audit and dataset renders must agree)."""
+    return ["--trust-region", f"{TRUST_REGION_V:g}"] if TRUST_REGION_V > 0 else []
+
+
+def _parse_newton_stats(stderr: str):
+    m = _NEWTON_STATS.search(stderr or "")
+    if not m:
+        return None
+    return dict(solves=int(m.group(1)), unconverged=int(m.group(2)), severe=int(m.group(4)),
+                first=int(m.group(5)), last=int(m.group(6)))
+
+
+def _newton_failure(stats: dict, oversample: int) -> str:
+    """The error for a render whose Newton solves failed, or "" if it is clean enough."""
+    if not stats or not stats["solves"]:
+        return ""
+    frac = stats["unconverged"] / stats["solves"]
+    if stats["severe"] > 0 or frac > NEWTON_MAX_FRACTION:
+        return (f"newton: {stats['unconverged']} unconverged solves ({stats['severe']} severe) of "
+                f"{stats['solves']} at oversample {oversample}, from sample {stats['first']} to {stats['last']}")
+    return ""
 
 
 def _is_convergence_failure(err: str) -> bool:
@@ -1056,6 +1108,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
     rungs = [dict()] if no_retry else _rungs(backend, oversample, ng, iterations)
     start = min(max(start_rung, 0), len(rungs) - 1)
     last = None
+    prev_newton = None
     for i in range(start, len(rungs)):
         rung = rungs[i]
         os_i = rung.get("oversample", oversample)
@@ -1072,6 +1125,16 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 print(f"  [{idx}] converged on rung {i}: {_rung_str(rung)}", file=sys.stderr)
             return r
         last = r
+        # Newton failures that do not fall as the timestep shrinks are a different class (a wrong root,
+        # not a step that was too big): the Ampeg SVT preamp's all-knobs-up corner has 1593 unconverged
+        # solves at 4x, 1143 at 8x and 816 at 16x. Climbing the ladder further only buys hours, so stop
+        # when the count has not at least halved and say so; the combination stays a visible hole.
+        if r.error.startswith("newton:") and r.newton_unconverged >= 0:
+            if prev_newton is not None and r.newton_unconverged * 2 > prev_newton:
+                r.error += (f" [not escalating: unconverged solves did not halve with oversample "
+                            f"({prev_newton} -> {r.newton_unconverged}); the failure does not depend on the timestep]")
+                return r
+            prev_newton = r.newton_unconverged
         # Only a CONVERGENCE failure is worth another attempt. A bad knob name or a missing file
         # fails identically on every rung; retrying it just burns the clock.
         if not _is_convergence_failure(r.error):
@@ -1326,7 +1389,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             swept = fmt_params(params, param_map)
             all_params = f"{fixed_params},{swept}" if fixed_params else swept
             args = [str(LIVESPICE_CLI), "--input", str(input_wav), "--output", str(out_wav),
-                    "--circuit", schx, "--params", all_params,
+                    "--circuit", schx, "--params", all_params, *_ls_solver_args(),
                     # --progress turns the wall-clock timeout into a STALL detector: see
                     # _run_with_stall_detect. Harmless if an older livespice_cli ignores it --
                     # use_stall only engages when the flag is present AND lines arrive, and a
@@ -1377,6 +1440,15 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             # Zero exit is NOT silence. Keep whatever the oracle warned about; _finalize_wav
             # threads it onto the Result below.
             warned = _oracle_warnings(stderr)
+            nstats = _parse_newton_stats(stderr) if backend == "livespice" else None
+            if nstats and NEWTON_CHECK != "off":
+                _nf = _newton_failure(nstats, oversample)
+                if _nf and NEWTON_CHECK == "fail":
+                    _r = Result(idx, error=_nf)
+                    _r.newton_unconverged = nstats["unconverged"]
+                    return _r
+                if _nf:
+                    warned = (_nf + " | " + warned)[:300]
             dsp = proc_t = -1.0
             for line in stdout.splitlines():
                 if "DSP load:" in line:
@@ -1389,6 +1461,8 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         res = _finalize_wav(idx, path, out_wav, expected_frames, max_crest, dsp, proc_t,
                             warmup_s=warmup_s, rail_rms=rail_rms, capture=capture)
         res.warnings = warned
+        if nstats:
+            res.newton_unconverged = nstats["unconverged"]
         return res
 
     except Exception as e:
@@ -1748,7 +1822,7 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
             with os.fdopen(fd, "w") as f:
                 for j in chunk:
                     f.write(json.dumps(j) + "\n")
-            a = [str(LIVESPICE_CLI), "--circuit", schx, "--jobs", jl]
+            a = [str(LIVESPICE_CLI), "--circuit", schx, "--jobs", jl, *_ls_solver_args()]
             if speaker:
                 a += ["--speaker", speaker]
             r = subprocess.run(a, capture_output=True, text=True)
@@ -1787,7 +1861,7 @@ def _livespice_batch(schx: str, jobs: list, workers: int = None, speaker: str = 
         def single(j):
             a = [str(LIVESPICE_CLI), "--circuit", schx, "--input", j["input"],
                  "--output", j["output"], "--params", j["params"],
-                 "--oversample", str(j["oversample"]), "--iterations", str(j["iterations"])]
+                 "--oversample", str(j["oversample"]), "--iterations", str(j["iterations"]), *_ls_solver_args()]
             if speaker:
                 a += ["--speaker", speaker]
             r = subprocess.run(a, capture_output=True, text=True)
@@ -1981,7 +2055,7 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
             else:
                 a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
                      "--circuit", schx, "--params", allp,
-                     "--oversample", str(os_), "--iterations", str(iterations)]
+                     "--oversample", str(os_), "--iterations", str(iterations), *_ls_solver_args()]
                 if speaker:
                     a += ["--speaker", speaker]
                 r = subprocess.run(a, capture_output=True, text=True)
@@ -2488,6 +2562,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2701,6 +2776,17 @@ def main():
                     help="livespice: Newton iteration cap for every rung of the retry ladder (default 256). "
                          "Raise it for a circuit whose hot corners converge to a wrong root at 256 -- more "
                          "iterations at the same timestep, which the oversample ladder never tries.")
+    ap.add_argument("--trust-region", type=float, default=0.0, metavar="V",
+                    help="livespice: limit each Newton step to a norm of V volts (livespice_cli --trust-region); default 0 = off, "
+                         "settable per device as `trust_region` in a config. Circuit-specific: it took the Ampeg SVT "
+                         "preamp's 4x render from 101 unconverged solves to 0 (output unchanged) but made a Deluxe Reverb "
+                         "full amp go from 12 to 1740 -- see the TRUST_REGION_V comment in gen_dataset_from_schx.py.")
+    ap.add_argument("--newton-check", choices=["off", "warn", "fail"], default="fail",
+                    help="livespice: what to do with livespice_cli's unconverged-solve report. fail (default): a render "
+                         "with any severe unconverged solve, or an unconverged fraction above --newton-max-fraction, "
+                         "fails and the ladder escalates it; warn: record it in `warnings` and keep the render; off: ignore.")
+    ap.add_argument("--newton-max-fraction", type=float, default=NEWTON_MAX_FRACTION, metavar="F",
+                    help="unconverged / solves above which a render fails under --newton-check fail (default 1e-6)")
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
@@ -2766,6 +2852,8 @@ def main():
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    NEWTON_CHECK, NEWTON_MAX_FRACTION = args.newton_check, args.newton_max_fraction
+    TRUST_REGION_V = max(0.0, args.trust_region)
 
     if args.list:
         return list_circuits()

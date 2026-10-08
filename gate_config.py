@@ -70,7 +70,7 @@ PYTHON = sys.executable
 
 # Config keys that change what the gated tools MEASURE. Anything not listed (training
 # hyper-parameters, output paths, patience, ...) can change without invalidating a gate.
-SIZING_KEYS = ("schx", "backend", "oversample", "iterations", "conv", "method", "maxstep",
+SIZING_KEYS = ("schx", "backend", "oversample", "iterations", "trust_region", "newton_check", "conv", "method", "maxstep",
                "pedal_dir", "module", "probe_node", "capture_hp_hz", "capture_order",
                "capture_chain", "no_capture_chain", "out_scale", "lead_silence_s", "circuit",
                "knobs", "ranges", "fixed_params")

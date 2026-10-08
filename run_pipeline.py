@@ -553,6 +553,8 @@ def reproduce_command(args, repeats=None, have_config=False):
     if args.knobs:         c.append(f'    --knobs "{args.knobs}" \\')
     if args.oversample != "2": c.append(f'    --oversample {args.oversample} \\')
     if getattr(args, "iterations", 256) != 256: c.append(f'    --iterations {args.iterations} \\')
+    if getattr(args, "trust_region", 0.0): c.append(f'    --trust-region {args.trust_region:g} \\')
+    if getattr(args, "newton_check", "fail") != "fail": c.append(f'    --newton-check {args.newton_check} \\')
     if args.trunc_target != 1e-3: c.append(f'    --trunc-target {args.trunc_target} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
@@ -988,6 +990,12 @@ def main():
     g.add_argument("--iterations",   type=int, default=256,
                    help="livespice Newton iteration cap for every retry rung (default 256). Forwarded to "
                         "gen_dataset_from_schx.py --iterations; settable per device as `iterations` in a config.")
+    g.add_argument("--trust-region", type=float, default=0.0, dest="trust_region", metavar="V",
+                   help="livespice: limit each Newton step to a norm of V volts (default 0 = off). Circuit-specific; forwarded to "
+                        "gen_dataset_from_schx.py --trust-region; settable per device as `trust_region` in a config.")
+    g.add_argument("--newton-check", choices=["off", "warn", "fail"], default="fail", dest="newton_check",
+                   help="livespice: what to do with livespice_cli's unconverged-solve report (default fail). Forwarded to "
+                        "gen_dataset_from_schx.py --newton-check; settable per device as `newton_check` in a config.")
     g.add_argument("--oversample",   type=str, default="2",
                    help="oversampling factor, or 'auto' to measure the truncation-error-minimizing "
                         "value per circuit (ngspice and livespice both supported -- see "
@@ -1494,6 +1502,8 @@ def main():
                 if args.input_upsample: gen_cmd += ["--input-upsample", args.input_upsample]
                 if args.oversample != "2": gen_cmd += ["--oversample", args.oversample]
                 if args.iterations != 256: gen_cmd += ["--iterations", str(args.iterations)]
+                if getattr(args, "trust_region", 0.0): gen_cmd += ["--trust-region", f"{args.trust_region:g}"]
+                if getattr(args, "newton_check", "fail") != "fail": gen_cmd += ["--newton-check", args.newton_check]
                 if args.trunc_target != 1e-3: gen_cmd += ["--trunc-target", args.trunc_target]
                 if args.random:        gen_cmd += ["--random",       args.random]
                 if args.no_anchors:    gen_cmd += ["--no-anchors"]
