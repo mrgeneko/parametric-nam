@@ -991,3 +991,53 @@ def test_ls_solver_args_follow_the_trust_region_setting(monkeypatch):
     assert g._ls_solver_args() == ["--trust-region", "30"]
     monkeypatch.setattr(g, "TRUST_REGION_V", 0.0)
     assert g._ls_solver_args() == []
+
+
+# --------------------------------------------------------------------------- cm backend
+
+def test_cm_rungs_double_oversample_to_32_and_quadruple_iterations_last():
+    rungs = g._rungs("cm", 2, None)
+    assert [r["oversample"] for r in rungs] == [2, 4, 8, 16, 32]
+    assert rungs[-1]["iterations"] == 4 * rungs[0]["iterations"]
+
+
+def test_cm_circuit_problem_detects_missing_and_stale(tmp_path):
+    import hashlib, json
+    schx = tmp_path / "amp.schx"
+    schx.write_text("<Schematic/>")
+    assert "not found" in g._cm_circuit_problem(str(schx))
+    cm = tmp_path / "amp.cm.json"
+    cm.write_text(json.dumps({"source": {"sha256": "0" * 64}}))
+    assert "STALE" in g._cm_circuit_problem(str(schx))
+    cm.write_text(json.dumps({"source": {"sha256": hashlib.sha256(schx.read_bytes()).hexdigest()}}))
+    assert g._cm_circuit_problem(str(schx)) == ""
+
+
+def _stub_cm_run(tmp_path, metrics):
+    """A stand-in renderer: writes a tiny wav and the given metrics JSON, records its argv."""
+    import json, sys
+    script = tmp_path / "stub_cm_run.py"
+    script.write_text(
+        "import sys, json, wave, struct\n"
+        "a = sys.argv\n"
+        "open(a[0] + '.argv', 'w').write(json.dumps(a[1:]))\n"
+        f"json.dump({metrics!r}, open(a[a.index('--metrics') + 1], 'w'))\n"
+        "print('PROGRESS 1/1', file=sys.stderr)\n"
+        "w = wave.open(a[3], 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000)\n"
+        "w.writeframes(struct.pack('<h', 100) * 4800); w.close()\n")
+    return script
+
+
+def test_cm_render_once_reports_divergence_as_newton_failure(tmp_path, monkeypatch):
+    import sys
+    stub = _stub_cm_run(tmp_path, dict(solves=100, unconverged=3, severe=1, divergences=2, dc_converged=1))
+    wrapper = tmp_path / "cm_run"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {stub} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(g, "CM_RUN", wrapper)
+    (tmp_path / "in.wav").write_bytes(b"")
+    g.sig_path(tmp_path, 0).parent.mkdir(parents=True, exist_ok=True)
+    r = g._render_once(0, {}, tmp_path, tmp_path / "in.wav", "cm", schx=str(tmp_path / "amp.schx"),
+                       param_map={}, expected_frames=4800, oversample=4, iterations=256)
+    assert not r.ok
+    assert r.error.startswith("newton:") and g._is_convergence_failure(r.error)

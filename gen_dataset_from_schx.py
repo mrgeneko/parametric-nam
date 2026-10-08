@@ -101,6 +101,58 @@ def _find_livespice_cli() -> Path:
 LIVESPICE_CLI = _find_livespice_cli()
 
 
+def _find_cm_run() -> Path:
+    """The `cm_run`-compatible renderer for --backend cm: $CM_RUN, else `cm_run` on PATH.
+
+    The contract (flags and outputs this tool relies on) is: `cm_run CIRCUIT.cm.json in.wav out.wav
+    --prepared off --os N --tol-rel X --tables off --resampler fir-linear --iterations N
+    --knob Name=V... [--output NAME] --metrics FILE.json --progress`; it writes a float32 mono wav, prints
+    `PROGRESS done/total` lines on stderr and writes a metrics JSON with solves, unconverged, severe,
+    divergences, rescues, rescued, max_iterations and dc_converged."""
+    env = os.environ.get("CM_RUN")
+    if env:
+        return Path(env)
+    found = shutil.which("cm_run")
+    return Path(found) if found else Path("cm_run")
+
+
+CM_RUN = _find_cm_run()
+
+
+def _cm_circuit_for(schx: str) -> Path:
+    """The circuit file --backend cm renders: the schematic's own stem with .cm.json."""
+    return Path(schx).with_suffix(".cm.json")
+
+
+def _cm_circuit_problem(schx: str) -> str:
+    """"" if the .cm.json next to this schematic was converted from exactly this schematic, else why not.
+
+    A stale circuit file would render the OLD circuit and say nothing: it records the schematic's SHA-256
+    and that is compared here, at startup, before any render."""
+    import hashlib
+    cm = _cm_circuit_for(schx)
+    if not cm.exists():
+        return f"{cm.name} not found next to {Path(schx).name}: convert the schematic first"
+    try:
+        recorded = json.loads(cm.read_text()).get("source", {}).get("sha256", "")
+    except (OSError, ValueError):
+        return f"{cm.name} is not readable JSON"
+    actual = hashlib.sha256(Path(schx).read_bytes()).hexdigest()
+    if recorded != actual:
+        return (f"{cm.name} is STALE: it was converted from a different version of {Path(schx).name} "
+                f"(recorded sha256 {recorded[:12] or 'none'}, the schematic is {actual[:12]}); convert it again")
+    return ""
+
+
+def _cm_stats(metrics_path) -> dict:
+    """cm_run's --metrics file as the stats dict _newton_failure() reads, plus the extras."""
+    j = json.loads(Path(metrics_path).read_text())
+    return dict(solves=int(j.get("solves", 0)), unconverged=int(j.get("unconverged", 0)), severe=int(j.get("severe", 0)),
+                first=int(j.get("first_bad_sample", -1)), last=-1, divergences=int(j.get("divergences", 0)),
+                dc_converged=int(j.get("dc_converged", 1)), rescues=int(j.get("rescues", 0)), rescued=int(j.get("rescued", 0)),
+                max_iterations=int(j.get("max_iterations", 0)))
+
+
 def check_oracle(backend: str) -> None:
     """Preflight: does this backend's oracle/harness actually exist? Exits with a
     clear, actionable message (built vs. not built vs. wrong path) if not -- instead
@@ -113,6 +165,9 @@ def check_oracle(backend: str) -> None:
     front, covering every step that will need the oracle), grid_adequacy.py."""
     if backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
+        sys.exit(1)
+    if backend == "cm" and not (CM_RUN.exists() or shutil.which(str(CM_RUN))):
+        print(f"ERROR: cm_run not found ({CM_RUN}). Point $CM_RUN at a cm_run-compatible renderer.", file=sys.stderr)
         sys.exit(1)
     if backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
         env = os.environ.get("LIVESPICE_CLI")
@@ -940,6 +995,17 @@ def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> li
     converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
     nothing reports it. (The C++ emitter now measures the cap per circuit.)
     """
+    if backend == "cm":
+        # cm_run's solver already has a line search, a damped rescue pass and junction limiting, so the ladder
+        # is only oversample (doubling from the start value to 32x), with 4x the iterations on the last rung.
+        rungs, o = [], oversample or 4
+        while True:
+            rungs.append(dict(oversample=o, iterations=iterations))
+            if o >= 32:
+                break
+            o *= 2
+        rungs[-1] = dict(rungs[-1], iterations=iterations * 4)
+        return rungs
     if backend == "livespice":
         os_ = oversample or 2
         # RUNG 0 IS ALREADY 256 ITERATIONS, and that is not paranoia -- it is a bug fix.
@@ -1145,7 +1211,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # guaranteed to -- and a hopeless combination used to burn timeout_s x n_rungs
         # (hours) before failing. ngspice is exempt: its rungs change method/damping at
         # roughly equal solver cost, so a retry there can genuinely win.
-        if "timeout" in r.error.lower() and backend in ("livespice", "cpp"):
+        if "timeout" in r.error.lower() and backend in ("livespice", "cpp", "cm"):
             r.error = f"{r.error} [not escalating: higher rungs are strictly slower]"
             return r
         if i + 1 < len(rungs):
@@ -1404,6 +1470,20 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             # a converged-LOOKING answer that is 5.8e-03 wrong, silently. Not a crash: worse.
             if iterations:
                 args += ["--iterations", str(iterations)]
+        elif backend == "cm":
+            swept = fmt_params(params, param_map)
+            all_params = f"{fixed_params},{swept}" if fixed_params else swept
+            cm_metrics = out_wav.with_suffix(".cm_metrics.json")
+            args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
+                    "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", "off",
+                    "--resampler", "fir-linear", "--iterations", str(iterations or 256),
+                    "--metrics", str(cm_metrics), "--progress"]
+            for kv in filter(None, all_params.split(",")):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    args += ["--knob", f"{k}={v}"]
+            if speaker:
+                args += ["--output", speaker]
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 
@@ -1419,7 +1499,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # against a FIXED budget they were guaranteed to fail -- against a stall detector they
         # are not). TOTAL_CEILING stays as a backstop for the one case a stall detector cannot
         # see: a live-lock that keeps emitting chunks forever.
-        use_stall = (backend in ("livespice", "cpp")) and "--progress" in args
+        use_stall = (backend in ("livespice", "cpp", "cm")) and "--progress" in args
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with _procs_lock:
             _active_procs.add(proc)
@@ -1441,6 +1521,24 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             # threads it onto the Result below.
             warned = _oracle_warnings(stderr)
             nstats = _parse_newton_stats(stderr) if backend == "livespice" else None
+            if backend == "cm":
+                try:
+                    nstats = _cm_stats(cm_metrics)
+                except (OSError, ValueError) as e:
+                    return Result(idx, error=f"cm_run wrote no usable metrics file: {e}")
+                finally:
+                    try:
+                        cm_metrics.unlink()
+                    except OSError:
+                        pass
+                if nstats["divergences"] or not nstats["dc_converged"]:
+                    _r = Result(idx, error=("newton: " + ("start-up DC point did not converge" if not nstats["dc_converged"]
+                                                          else f"{nstats['divergences']} diverged samples")
+                                            + f" at oversample {oversample}"))
+                    _r.newton_unconverged = max(nstats["unconverged"], nstats["divergences"])
+                    return _r
+                warned = "" if not (nstats["unconverged"] or nstats["rescues"]) else (f"cm: unconverged={nstats['unconverged']} severe={nstats['severe']} rescued={nstats['rescued']}/{nstats['rescues']} "
+                          f"max_iterations={nstats['max_iterations']}")
             if nstats and NEWTON_CHECK != "off":
                 _nf = _newton_failure(nstats, oversample)
                 if _nf and NEWTON_CHECK == "fail":
@@ -2562,7 +2660,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
-    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2575,7 +2673,9 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck"], default="cpp")
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "cm"], default="cpp")
+    ap.add_argument("--cm-run", type=Path, default=None,
+                    help="cm_run-compatible renderer for --backend cm (default: $CM_RUN, then cm_run on PATH)")
     ap.add_argument("--no-retry", action="store_true",
                     help="Do NOT escalate solver settings when a combination fails to converge. "
                          "By default a failed render is retried with a stiffer solve (more Newton "
@@ -2852,6 +2952,8 @@ def main():
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    if args.cm_run:
+        CM_RUN = args.cm_run
     NEWTON_CHECK, NEWTON_MAX_FRACTION = args.newton_check, args.newton_max_fraction
     TRUST_REGION_V = max(0.0, args.trust_region)
 
@@ -2867,12 +2969,16 @@ def main():
     param_map = None
     schx = None
 
-    if args.backend in ("livespice", "ngspice"):
+    if args.backend in ("livespice", "ngspice", "cm"):
         if not args.schx:
             ap.error(f"--schx is required for --backend {args.backend}")
         if not args.schx.exists():
             ap.error(f"schx not found: {args.schx}")
         schx = str(args.schx)
+        if args.backend == "cm":
+            _why = _cm_circuit_problem(schx)
+            if _why:
+                ap.error(_why)
         check_backend(args.schx, args.backend, ap)
         control_map = parse_schx_controls(schx)
 
@@ -3024,6 +3130,9 @@ def main():
             ap.error("--oversample auto does not apply to --backend ngspice-deck: there is no "
                      "supersample+decimate step in this path (unlike the schx-translated ngspice "
                      "backend) for it to measure. Use --maxstep to control solver fidelity.")
+        if args.backend == "cm":
+            ap.error("--oversample auto is not available for --backend cm: the cm ladder already doubles the "
+                     "oversample until the solver reports no unconverged or diverged solves.")
         if args.backend == "livespice":
             args.oversample = choose_oversample(
                 schx, knobs, combos, in_wav, param_map, args.fixed_params,
