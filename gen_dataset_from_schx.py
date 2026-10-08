@@ -170,6 +170,29 @@ def _cm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, pa
     return args
 
 
+def renderer_identity(backend: str) -> dict:
+    """Which renderer produced a dataset, recorded in config.json (the manifest) so a dataset can be traced to a solver revision.
+
+    name: the backend; version: its revision string, or "unidentified" when it cannot be read; profile: the numerics profile of
+    the solver, where the backend has one ("physical" for cm). A dataset is only comparable sample-for-sample with another
+    rendered by the same name, version and profile. esr_vs_oracle is null until a validation step fills it (an independent
+    renderer's ESR on the same input); the backends here do not compute it themselves."""
+    ident = {"name": backend, "version": "unidentified", "profile": None, "esr_vs_oracle": None}
+    try:
+        if backend == "cm":
+            r = subprocess.run([str(CM_RUN), "--build-info"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                ident["version"] = r.stdout.strip().splitlines()[0]
+            ident["profile"] = "physical"
+        elif backend == "livespice":
+            from prepare_excitation import solver_identity
+            ident["version"] = solver_identity("livespice")
+            ident["profile"] = "livespice"
+    except Exception:
+        pass
+    return ident
+
+
 def _cm_stats(metrics_path) -> dict:
     """cm_run's --metrics file as the stats dict _newton_failure() reads, plus the extras."""
     j = json.loads(Path(metrics_path).read_text())
@@ -3407,6 +3430,7 @@ def main():
 
     (out_dir / "config.json").write_text(json.dumps({
         "backend": args.backend,
+        "renderer": renderer_identity(args.backend),
         "circuit": circuit_label,
         "schx": schx,
         "knobs": knobs,

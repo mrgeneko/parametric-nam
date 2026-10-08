@@ -7,6 +7,10 @@ circuit file. It sits next to `livespice` (same schematic, same knob names, same
 differs in two ways that matter for dataset generation: it is several times faster on tube amps, and
 it uses a **physical** numerics profile instead of LiveSPICE's.
 
+> **Availability.** The renderer this backend drives is not yet publicly released, so `--backend cm` is only usable where
+> a `cm_run`-compatible executable and the matching `.cm.json` circuit files are available. Every other backend is
+> unaffected, and the tests use stub renderers.
+
 ## Setup
 
 * The renderer is any executable that follows the contract below. Point `--cm-run PATH` or `$CM_RUN`
@@ -69,6 +73,12 @@ circuit's declared mains phase, whichever way the render starts (this is why a r
 a cycle "late"; the output stays aligned with the input). With that, the circuit file's "prepared state" and a
 lead-in are equivalent (ESR below 1e-8 on the test amp at 44.1 and 48 kHz); `--cm-lead-in` is kept because it
 needs nothing from the file.
+
+## What is recorded
+
+`config.json` carries a `renderer` block: `name`, `version` (from `cm_run --build-info`, one line), `profile`
+(`physical`) and `esr_vs_oracle` (null until a validation step fills it in with an independent renderer's ESR on the same
+input). Compare datasets only when name, version and profile agree.
 
 ## Not comparable sample-for-sample with `livespice` data
 

@@ -1086,3 +1086,15 @@ def test_cm_probe_backend_builds_the_cm_run_command(tmp_path, monkeypatch):
     assert y is not None and a[0] == "/x/cm_run" and a[1].endswith("amp.cm.json") and a[2] == "in.wav"
     assert a[a.index("--os") + 1] == "4" and a[a.index("--lead-in") + 1] == "2"
     assert [a[i + 1] for i, x in enumerate(a) if x == "--knob"] == ["Gain=0.5", "Mid Range=0.25"]
+
+
+def test_renderer_identity_cm_reads_build_info_and_other_backends_degrade(tmp_path, monkeypatch):
+    script = tmp_path / "cm_run"
+    script.write_text("#!/bin/sh\necho 'libcm abc1234'\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(g, "CM_RUN", script)
+    r = g.renderer_identity("cm")
+    assert r["name"] == "cm" and r["version"] == "libcm abc1234" and r["profile"] == "physical" and r["esr_vs_oracle"] is None
+    monkeypatch.setattr(g, "CM_RUN", tmp_path / "missing")
+    assert g.renderer_identity("cm")["version"] == "unidentified"
+    assert g.renderer_identity("cpp") == {"name": "cpp", "version": "unidentified", "profile": None, "esr_vs_oracle": None}
