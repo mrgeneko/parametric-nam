@@ -75,6 +75,10 @@ checked as before, whatever the step between two candidates. Typical picks on th
 1x, a combo amp 1-2x, a high-gain amp or the Metal Zone 2x. The retry ladder after a failed render still doubles
 from the chosen rate (a start of 1, 3 or 6 gives 1/2/4/8/16/32, 3/6/12/24/32 or 6/12/24/32).
 
+For this backend the probe uses at least 16 windows of 2 s (32 s in all): a calibrated excitation's error sits in its loud, swept
+passages, and 4 windows missed it (on a combo amp with its sized excitation the probe read 5e-4 at 1x from 4 windows and 1.5e-2 from 8 or more,
+and the full dataset showed 1.9e-2: the pick went from 1x to 2x).
+
 The probe estimates the whole-signal ESR of the sampled windows, which is what a model is fitted against; the renderer's
 tuning tables report the worst case over a set of knob settings, so they may ask for a rate or two more.
 
@@ -103,7 +107,10 @@ needs nothing from the file.
 `oracle_check.py --dataset DIR` fills it (or `run_pipeline.py --oracle-check N` does, after combining): it re-renders N
 combinations (the first, the last and the middle of the grid) with an independent renderer (livespice-cli) over the first 40 s of
 the same input, through the same capture chain, and records the oracle, its version, the median and maximum ESR, the ESR after the
-best single gain and the gain. On the TS-9 it reads about 1-2e-3 (cm against livespice).
+best single gain, the gain, and the ESR after a cabinet-like low-pass (4th-order, 5 kHz): a hot swept excitation puts most of the
+full-band difference above 6 kHz, which a guitar cabinet removes, so the cabinet figure is the one to read against an audibility threshold.
+On the TS-9 it reads about 1-2e-3 full-band (cm against livespice); on a combo amp (Deluxe, sag ac) with its sized excitation 3-4e-2
+full-band and 4-8e-3 through the cabinet low-pass.
 
 ## Not comparable sample-for-sample with `livespice` data
 

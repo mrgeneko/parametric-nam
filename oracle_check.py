@@ -8,11 +8,14 @@ generation; `esr_vs_oracle` is null until something compares the dataset with a 
 that: it picks `--n` combinations of the dataset (the first, the last and the middle of params.csv, so both ends of every knob
 and the centre are in), re-renders the first `--seconds` of the same input through the oracle with the same knob values and the
 same capture chain, undoes the dataset's output scaling, and compares from 1 s on (the same warm-up the dataset's checks skip).
-ESR is reported per combination, and again after the best single gain (a pure level difference is a different finding from a
-shape difference). The result is written into `renderer.esr_vs_oracle` of config.json:
+ESR is reported per combination, after the best single gain (a pure level difference is a different finding from a shape
+difference), and **after a cabinet-like low-pass** (`--cab-hz`, a 4th-order Butterworth, 5 kHz by default). The full-band figure
+is dominated by content above 6 kHz on a hot, swept excitation (on the Deluxe 84 % of the difference was above 6.4 kHz) that a guitar
+cabinet removes, so the figure to read against an audibility threshold is the cabinet one. The result is written into `renderer.esr_vs_oracle` of config.json:
 
   {"oracle": "livespice", "oracle_version": ..., "oracle_oversample": 8, "n": 3, "seconds": 40, "esr_median": ..., "esr_max": ...,
-   "esr_gain_fit_median": ..., "gain_median": ..., "combinations": [idx, ...], "date": ...}
+   "esr_gain_fit_median": ..., "esr_cabinet_median": ..., "esr_cabinet_max": ..., "cabinet_hz": 5000, "gain_median": ...,
+   "combinations": [idx, ...], "date": ...}
 
 Oracles: `livespice` (livespice-cli). A dataset rendered by livespice compared with livespice would measure nothing, so that is
 refused. What the number means: the ESR between two renderers' answers for the same circuit, knobs and input -- for the cm
@@ -58,6 +61,12 @@ def esr_pair(a: np.ndarray, b: np.ndarray, skip: int) -> "tuple[float, float, fl
     return esr, float(((g * a - b) ** 2).sum()) / den, g
 
 
+def cabinet_lowpass(y: np.ndarray, sr: int, hz: float) -> np.ndarray:
+    """A cabinet-like roll-off: 4th-order Butterworth low-pass. Generic on purpose (no speaker IR): it only has to remove what a guitar cabinet removes."""
+    from scipy.signal import butter, sosfilt
+    return sosfilt(butter(4, hz, "low", fs=sr, output="sos"), y)
+
+
 def oracle_identity(oracle: str) -> str:
     from prepare_excitation import solver_identity
     return solver_identity(oracle)
@@ -86,6 +95,11 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--seconds", type=float, default=40.0)
     ap.add_argument("--oracle-oversample", type=int, default=8)
+    ap.add_argument("--cab-hz", type=float, default=5000.0, help="corner of the cabinet-like low-pass for the audible-band ESR (default 5000)")
+    ap.add_argument("--oracle-lead-in", type=float, default=8.0, metavar="S",
+                    help="seconds of silence run through the oracle before the input (then dropped): a circuit with a supply that sags or a "
+                         "mains source needs several seconds to settle, and an oracle that starts cold would be scored on its own start-up "
+                         "(default 8; the dataset's renders have their own lead-in). 0 = start cold")
     ap.add_argument("--no-write", action="store_true", help="print the result, leave config.json alone")
     args = ap.parse_args()
 
@@ -112,7 +126,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         clip = td / "clip.wav"
-        sf.write(str(clip), x[:n_samples], sr, subtype="FLOAT")
+        lead = int(max(0.0, args.oracle_lead_in) * sr)
+        lead -= lead % int(round(sr / 10))   # a whole number of tenths of a second: 50 and 60 Hz mains both come back to their starting phase
+        sf.write(str(clip), np.concatenate([np.zeros(lead, dtype="float32"), x[:n_samples]]), sr, subtype="FLOAT")
         for k in pick_rows(ok_rows, args.n):
             r = ok_rows[k]
             params = {name: float(r[name]) for name in cfg["knobs"]}
@@ -120,20 +136,24 @@ def main() -> int:
             render_oracle(args.oracle, cfg, clip, params, out, args.oracle_oversample)
             y, _ = sf.read(str(out), dtype="float64")
             y = y if y.ndim == 1 else y[:, 0]
+            y = y[lead:]
             if chain:
                 from capture_chain import capture_chain as _chain
                 y = _chain(y, sr, corner_hz=chain["corner_hz"], order=chain["order"])
             ds = np.asarray(outputs[int(r["idx"])][: len(y)], dtype=np.float64) / scale
             e, eg, g = esr_pair(ds, y, int(1.0 * sr))
-            results.append((e, eg, g)); idxs.append(int(r["idx"]))
+            ec = esr_pair(cabinet_lowpass(ds, sr, args.cab_hz), cabinet_lowpass(y, sr, args.cab_hz), int(1.0 * sr))[0]
+            results.append((e, eg, g, ec)); idxs.append(int(r["idx"]))
             label = ", ".join(f"{kname}={params[kname]:g}" for kname in cfg["knobs"])
-            print(f"  idx {int(r['idx']):<4} {label:<40} ESR {e:.3e}   after best gain {eg:.3e} (gain {g:.4f})")
+            print(f"  idx {int(r['idx']):<4} {label:<40} ESR {e:.3e}   after best gain {eg:.3e} (gain {g:.4f})   after {args.cab_hz:g} Hz cabinet low-pass {ec:.3e}")
     es = [r[0] for r in results]
     rec = {"oracle": args.oracle, "oracle_version": oracle_identity(args.oracle), "oracle_oversample": args.oracle_oversample,
-           "n": len(results), "seconds": round(n_samples / sr, 2), "esr_median": float(np.median(es)), "esr_max": float(np.max(es)),
-           "esr_gain_fit_median": float(np.median([r[1] for r in results])), "gain_median": float(np.median([r[2] for r in results])),
+           "n": len(results), "seconds": round(n_samples / sr, 2), "oracle_lead_in": round(lead / sr, 2), "esr_median": float(np.median(es)), "esr_max": float(np.max(es)),
+           "esr_gain_fit_median": float(np.median([r[1] for r in results])),
+           "esr_cabinet_median": float(np.median([r[3] for r in results])), "esr_cabinet_max": float(np.max([r[3] for r in results])), "cabinet_hz": args.cab_hz, "gain_median": float(np.median([r[2] for r in results])),
            "combinations": idxs, "date": datetime.datetime.now().isoformat(timespec="seconds")}
-    print(f"\n{backend} vs {args.oracle}: ESR median {rec['esr_median']:.3e}, max {rec['esr_max']:.3e}")
+    print(f"\n{backend} vs {args.oracle}: ESR median {rec['esr_median']:.3e}, max {rec['esr_max']:.3e}; after the {args.cab_hz:g} Hz cabinet low-pass "
+          f"median {rec['esr_cabinet_median']:.3e}, max {rec['esr_cabinet_max']:.3e}")
     if not args.no_write:
         cfg.setdefault("renderer", {})["esr_vs_oracle"] = rec
         cfg_path.write_text(json.dumps(cfg, indent=2))

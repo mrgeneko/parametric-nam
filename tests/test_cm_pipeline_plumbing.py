@@ -107,6 +107,7 @@ def test_oracle_check_records_into_the_manifest_and_refuses_the_same_renderer(tm
     rec = json.loads((tmp_path / "config.json").read_text())["renderer"]["esr_vs_oracle"]
     assert rec["oracle"] == "livespice" and rec["oracle_version"] == "livespice:test" and rec["n"] == 3
     assert abs(rec["gain_median"] - 1.0 / 1.01) < 1e-3 and rec["esr_median"] < 1e-3      # a 1 % level error: ESR 1e-4
+    assert rec["cabinet_hz"] == 5000.0 and 0 <= rec["esr_cabinet_median"] <= rec["esr_cabinet_max"] < 1e-3
     cfg["backend"] = "livespice"
     (tmp_path / "config.json").write_text(json.dumps(cfg))
     with pytest.raises(SystemExit):

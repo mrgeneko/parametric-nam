@@ -2068,6 +2068,13 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
     """
     import tempfile
 
+    if backend == "cm":
+        # cm renders are cheap, and 4 x 2 s windows are too sparse for a calibrated excitation: its error lives in the loud, high-frequency
+        # chirps and the hot sweep passages. Measured on the Deluxe (sag ac) with its sized excitation, truncation at 1x: 5.3e-4 from 4 windows
+        # (pick: 1x), 1.5e-2 from 8, 1.7e-2 from 16 and 1.4e-2 from 32 x 1 s (pick: 2x); the full 40 s of the actual dataset showed 1.9e-2 at 1x
+        # for a random combination. So at least 16 windows (32 s of probe) for this backend.
+        probe_s, n_windows = max(probe_s, 32.0), max(n_windows, 16)
+
     if backend == "ngspice":
         # ngspice is an adaptive-timestep offline solver: a render costs ~10-100x a livespice one, so
         # probe against a nearer reference or `auto` costs more than the dataset.
