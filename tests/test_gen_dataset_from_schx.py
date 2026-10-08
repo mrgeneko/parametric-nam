@@ -1098,3 +1098,42 @@ def test_renderer_identity_cm_reads_build_info_and_other_backends_degrade(tmp_pa
     monkeypatch.setattr(g, "CM_RUN", tmp_path / "missing")
     assert g.renderer_identity("cm")["version"] == "unidentified"
     assert g.renderer_identity("cpp") == {"name": "cpp", "version": "unidentified", "profile": None, "esr_vs_oracle": None}
+
+
+def test_cm_retry_ladder_doubles_from_any_start_and_ends_at_32():
+    assert [r["oversample"] for r in g._rungs("cm", 1, None)] == [1, 2, 4, 8, 16, 32]
+    assert [r["oversample"] for r in g._rungs("cm", 3, None)] == [3, 6, 12, 24, 32]
+    assert [r["oversample"] for r in g._rungs("cm", 6, None)] == [6, 12, 24, 32]
+
+
+def test_cm_auto_ladder_is_the_measured_factors_and_tables_default_on():
+    assert g.CM_AUTO_LADDER == (1, 2, 3, 4, 6, 8, 16)
+    assert g.CM_TABLES == "on"
+    a = g._cm_args("amp.schx", "in.wav", "out.wav", 3, 256, "", progress=False)
+    assert a[a.index("--tables") + 1] == "on" and a[a.index("--os") + 1] == "3"
+
+
+def test_choose_oversample_cm_walks_the_ladder_and_stops_at_the_first_that_meets_the_target(tmp_path, monkeypatch):
+    import numpy as np, soundfile as sf
+    sr = 48000
+    x = (0.3 * np.sin(2 * np.pi * 220 * np.arange(sr * 12) / sr)).astype("float32")
+    wav = tmp_path / "in.wav"; sf.write(wav, x, sr, subtype="FLOAT")
+    err = {1: 1e-1, 2: 2e-2, 3: 5e-3, 4: 1e-3, 6: 1e-4, 8: 1e-5, 16: 1e-6, 32: 0.0}   # truncation ESR of each rate against the 32x render
+    rendered = []
+
+    def fake_run(args, **kw):
+        o = int(args[args.index("--os") + 1]); rendered.append(o)
+        sig = np.asarray(x[: sr * 2], dtype="float64")
+        out = sig * (1.0 + (err[o] ** 0.5))   # an amplitude error whose ESR against the 32x render is err[o]
+        sf.write(args[3], out.astype("float32"), sr, subtype="FLOAT")
+
+        class R:
+            returncode = 0; stderr = ""
+        return R()
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    monkeypatch.setattr(g, "CM_RUN", tmp_path / "cm_run")
+    got = g.choose_oversample(str(tmp_path / "a.schx"), ["k"], [{"k": 0.1}, {"k": 0.9}], wav, {"k": "K"}, None, None, 6e-3,
+                              probe_s=2.0, n_windows=1, backend="cm", workers=2)
+    assert got == 3                       # 5e-3 <= 6e-3 < 2e-2: the first rate of 1, 2, 3 under the target
+    assert 32 in rendered and 4 not in rendered and 6 not in rendered   # the reference, then nothing past the pick

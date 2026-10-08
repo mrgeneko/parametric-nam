@@ -57,10 +57,22 @@ knob whose value is the position index.
 
 ## `--oversample auto`
 
-Same measurement as for `livespice`: renders a stratified sample of windows at each power of two and
-at a 32x reference, and chooses the lowest rate whose truncation ESR is under `--trunc-target`
-(default 1e-3). With this backend the truncation is usually well below that at 2x or 4x, which is why
-datasets rendered here need lower rates than `livespice` ones.
+Same measurement as for `livespice`: renders a stratified sample of windows at each candidate rate and at a 32x
+reference, and chooses the lowest rate whose truncation ESR is under `--trunc-target`. For this backend the candidates
+are the factors the renderer's tuning measures, cheapest first, **1, 2, 3, 4, 6, 8, 16**, and the default target is
+**6e-3** (an ESR difference below about 0.006 is taken as inaudible; `livespice` keeps 1e-3). The fall per doubling is
+checked as before, whatever the step between two candidates. Typical picks on the T3K sweep: a pedal such as the TS-9
+1x, a combo amp 1-2x, a high-gain amp or the Metal Zone 2x. The retry ladder after a failed render still doubles
+from the chosen rate (a start of 1, 3 or 6 gives 1/2/4/8/16/32, 3/6/12/24/32 or 6/12/24/32).
+
+The probe estimates the whole-signal ESR of the sampled windows, which is what a model is fitted against; the renderer's
+tuning tables report the worst case over a set of knob settings, so they may ask for a rate or two more.
+
+## Tube tables
+
+`--cm-tables on|off` (default **on**): the renderer's tabulated tube characteristics, 1.12-1.20x faster on the tube amps
+measured (Deluxe, Tweed, Mesa, ENGL, Bogner, Hiwatt, SVT, JCM800), with the output within ESR 4e-6 of the exact
+equations; outside a table's range the exact equations are used. `off` renders with the exact equations throughout.
 
 ## Start-up
 

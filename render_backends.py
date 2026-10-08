@@ -192,7 +192,7 @@ class CmBackend:
     def _render_one(self, params, in_wav, scratch, tag):
         out = f"{scratch}/pf_{tag}.wav"
         args = [_find_cm_run_exe(), self.circuit, in_wav, out, "--prepared", "off", "--os", str(self.oversample),
-                "--tol-rel", "1e-4", "--tables", "off", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
+                "--tol-rel", "1e-4", "--tables", "on", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
         if self.lead_in > 0:
             args += ["--lead-in", f"{self.lead_in:g}"]
         for k, v in params.items():

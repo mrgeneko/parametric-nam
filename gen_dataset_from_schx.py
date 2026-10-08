@@ -31,7 +31,7 @@ Post-processing:
         → training_data/outputs.npy   (float32, shape [N_combos, N_samples])
 """
 
-import atexit, argparse, csv, fcntl, hashlib, json, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time
+import atexit, argparse, csv, fcntl, hashlib, json, math, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -122,6 +122,8 @@ CM_RUN = _find_cm_run()
 # a sag/ac amp, ESR against the settled render 0.37 in the first second, 8e-3 in the second, 2e-7 from 2 s; amps with a slow
 # supply need longer. The file's prepared state also removes it but leaves a steady ~1e-5 offset, so it is not used.
 CM_LEAD_IN_S = 6.0
+CM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
+CM_TABLES = "on"   # cm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
 
 
 def _cm_circuit_for(schx: str) -> Path:
@@ -153,7 +155,7 @@ def _cm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, pa
              metrics=None, progress: bool = True, lead_in: float = 0.0) -> list:
     """The cm_run command line for one render (see _find_cm_run for the contract)."""
     args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
-            "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", "off",
+            "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", CM_TABLES,
             "--resampler", "fir-linear", "--iterations", str(iterations or 256)]
     if metrics:
         args += ["--metrics", str(metrics)]
@@ -1047,13 +1049,13 @@ def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> li
     """
     if backend == "cm":
         # cm_run's solver already has a line search, a damped rescue pass and junction limiting, so the ladder
-        # is only oversample (doubling from the start value to 32x), with 4x the iterations on the last rung.
+        # is only oversample (doubling from the start value, which may be 1, 3 or 6, up to 32x), with 4x the iterations on the last rung.
         rungs, o = [], oversample or 4
         while True:
             rungs.append(dict(oversample=o, iterations=iterations))
             if o >= 32:
                 break
-            o *= 2
+            o = min(o * 2, 32)
         rungs[-1] = dict(rungs[-1], iterations=iterations * 4)
         return rungs
     if backend == "livespice":
@@ -2255,9 +2257,10 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
 
         prewarm([ref_os])          # the expensive ones, all up front
 
-        prev_d = None
-        os_ = 2
-        while os_ < ref_os:
+        prev_d, prev_os = None, None
+        # cm: the factors cm_tune measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
+        cands = [o for o in CM_AUTO_LADDER if o < ref_os] if backend == "cm" else [2 ** k for k in range(1, 12) if 2 ** k < ref_os]
+        for os_ in cands:
             prewarm([os_])
             # Pool across windows (whole-file ESR estimate), take the WORST knob setting --
             # "all knobs at max" is not reliably the stiff one, so we probed both ends of each.
@@ -2292,7 +2295,8 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                     f"fix the convergence (or pass an explicit --oversample) rather than trusting a "
                     f"number that was never computed.")
 
-            ratio = (prev_d / worst) if (prev_d and worst > 0) else None
+            # the fall per doubling, whatever the step between the two rates (the error goes as the step squared, so a 2 -> 3 step is worth 2.25x)
+            ratio = ((prev_d / worst) ** (1.0 / math.log2(os_ / prev_os))) if (prev_d and worst > 0 and prev_os) else None
             note = f"   (falling {ratio:.1f}x per doubling)" if ratio else ""
             at = ("  at " + ", ".join(f"{k}={v:g}" for k, v in sorted(worst_at.items()))) \
                  if worst_at else ""
@@ -2313,8 +2317,7 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                       file=sys.stderr)
                 return os_ * 2
 
-            prev_d = worst
-            os_ *= 2
+            prev_d, prev_os = worst, os_
 
     # Nothing below ref_os met the target. We cannot honestly measure ref_os against itself, so this
     # is the ceiling: say the target was not met rather than implying it was.
@@ -2708,7 +2711,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
-    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN, CM_LEAD_IN_S
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN, CM_LEAD_IN_S, CM_TABLES
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2722,6 +2725,9 @@ def main():
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
     ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "cm"], default="cpp")
+    ap.add_argument("--cm-tables", choices=["on", "off"], default=None,
+                    help="--backend cm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
+                         "the exact equations; exact equations are used outside a table's range). off = the exact equations throughout")
     ap.add_argument("--cm-lead-in", type=float, default=None, metavar="S",
                     help="--backend cm: seconds of silence run through the circuit before the input so the render starts settled "
                          "(discarded from the output; default 6, 0 = start cold like livespice)")
@@ -2951,8 +2957,9 @@ def main():
                          "truncation measured against a converged reference is under --trunc-target, "
                          "probing both ends of every knob. See internal engineering notes and "
                          "measure_truncation.py.")
-    ap.add_argument("--trunc-target", type=float, default=1e-3,
-                    help="With --oversample auto: the truncation ESR to get under (default 1e-3). "
+    ap.add_argument("--trunc-target", type=float, default=None,
+                    help="With --oversample auto: the truncation ESR to get under (default 1e-3; 6e-3 for --backend cm, "
+                         "below which an ESR difference is taken as inaudible, and where the ladder is 1/2/3/4/6/8/16). "
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
                          "not the limiting factor. A model cannot be more right than its target.")
     ap.add_argument("--timeout-mult", type=float, default=1.0,
@@ -3007,6 +3014,10 @@ def main():
         CM_RUN = args.cm_run
     if args.cm_lead_in is not None:
         CM_LEAD_IN_S = max(0.0, args.cm_lead_in)
+    if args.cm_tables is not None:
+        CM_TABLES = args.cm_tables
+    if args.trunc_target is None:
+        args.trunc_target = 6e-3 if args.backend == "cm" else 1e-3
     NEWTON_CHECK = args.newton_check
     NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (CM_NEWTON_MAX_FRACTION if args.backend == "cm" else NEWTON_MAX_FRACTION)
     TRUST_REGION_V = max(0.0, args.trust_region)
