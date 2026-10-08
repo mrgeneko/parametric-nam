@@ -114,14 +114,23 @@ full-band and 4-8e-3 through the cabinet low-pass.
 
 ## Not comparable sample-for-sample with `livespice` data
 
-The renderer's default profile is physical, LiveSPICE's is not, and the two differ systematically:
-on four test circuits (a pedal, a bass preamp, a tube combo amp, a cabinet amp) the ESR between a
-`livespice` render and the `cm` render was 2e-3 to 5e-3 at the same oversample, and it did **not**
-shrink at oversample 32 (3-5e-3), so it is a model difference, not truncation. Run in its LiveSPICE
-compatibility mode the renderer reproduces `livespice` to about 1e-6 at the same oversample and
-to 1e-14 at 32x, which confirms that units, pot tapers, knob mapping and the default speaker agree;
-the physical profile is the one used here. Compare a model trained on `livespice` data with data from
-this backend by ESR on the same input, not by identity.
+On the same circuit, knobs and input the two renders differ, mostly above 6 kHz, and the cause is the **resampler**, not the circuit
+numerics. `livespice` interpolates the input linearly up to the oversampled rate and takes the **plain average** of each output
+sample's oversampled values back down: a boxcar over one output period, whose response droops (about -0.6 dB at 10 kHz and -2.6 dB at
+20 kHz, whatever the oversample) and which rejects aliases poorly. This backend uses a linear-phase FIR resampler, flat to near
+Nyquist with strong alias rejection. Measured on a combo amp (Deluxe, sag ac) with its sized excitation, one combination, oversample 8
+on both sides: this backend's default against `livespice` ESR 3.9e-2 (84 % of the difference above 6.4 kHz); the same circuit with the
+numerics profile left at "physical" but `livespice`'s resampler, 1e-7; `livespice`'s numerics with this backend's FIR resampler, 3.9e-2
+again. The physical-versus-LiveSPICE numerics profile (thermal voltage, op-amp output resistance) is a negligible part of the
+difference on that circuit. On the TS-9 the gap is ESR 9e-4 to 2e-3, on the combo amp 3e-3 to 4e-2 depending on how hot the
+excitation is, and it does not shrink with oversample (the boxcar is one output period wide at any rate). Through a cabinet-like 5 kHz
+low-pass the combo amp's figure is 4e-3 to 8e-3.
+
+Which is closer to a real capture: an audio interface's converter filter is flat to about 20 kHz and rejects what lies above, which the FIR
+resembles and the boxcar does not; the cm render therefore leaves out the aliasing and the droop `livespice` adds. That is an expectation from the
+filters, not a comparison with hardware, which has not been done. Either way, compare a model trained on `livespice` data with data from this
+backend by ESR on the same input, not by identity. Run in its LiveSPICE compatibility mode (`--compat livespice --resampler livespice`) the renderer
+reproduces `livespice` to 1e-6 or better at the same oversample, which confirms that units, pot tapers, knob mapping and the default speaker agree.
 
 ## Not covered
 
