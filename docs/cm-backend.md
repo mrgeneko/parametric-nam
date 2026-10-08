@@ -64,9 +64,11 @@ A cold start has a settling transient (coupling capacitors, a supply that sags).
 ESR against the settled render was 0.37 in the first second, 8e-3 in the second and 2e-7 from 2 s.
 The backend runs `--cm-lead-in` seconds (default **6**) of silence through the circuit first and
 discards them, so the output stays sample-aligned with the input and starts settled. `0` starts cold
-like `livespice`. The circuit file's "prepared state" would be equivalent, but it stores a different mains phase at the
-first input sample (a constant offset of 0.14 rad on the test amp: ESR 1.6e-5 against a lead-in, 3e-12
-once the phase is aligned), so mixing the two start modes in one dataset is avoided. Use one throughout.
+like `livespice`. The renderer aligns the mains phase: it adds just enough silent lead-in that the first kept sample sees the
+circuit's declared mains phase, whichever way the render starts (this is why a render can start a fraction of
+a cycle "late"; the output stays aligned with the input). With that, the circuit file's "prepared state" and a
+lead-in are equivalent (ESR below 1e-8 on the test amp at 44.1 and 48 kHz); `--cm-lead-in` is kept because it
+needs nothing from the file.
 
 ## Not comparable sample-for-sample with `livespice` data
 
