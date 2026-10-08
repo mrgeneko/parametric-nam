@@ -833,6 +833,21 @@ def main():
                                              corner_workers=args.corner_workers,
                                              shard=args.shard, emit_onsets=args.emit_onsets)
         schx_or_module = module
+    elif backend_name == "cm":
+        schx = str(cfg["schx"])
+        oversample = args.oversample or cfg.get("oversample", 2)
+        oversample = 2 if str(oversample).lower() == "auto" else int(oversample)   # "auto" in a config: probe at 2x
+        result = check_coverage_cm(schx, knob_ranges, fixed, oversample, transient_peak,
+                                   margin=args.margin, iterations=args.iterations,
+                                   peak_max_v=args.peak_max_v, no_cache=args.no_cache,
+                                   min_start_v=args.min_start_v, start_v=args.sweep_start_v,
+                                   full_hypercube=(False if args.no_full_hypercube else None),
+                                   max_corners=args.max_corners,
+                                   sample_grid=resolve_sample_grid(args.sample_grid, knob_ranges),
+                                   capture=_capture, workers=args.workers,
+                                   corner_workers=args.corner_workers,
+                                   shard=args.shard, emit_onsets=args.emit_onsets)
+        schx_or_module = schx
     elif backend_name == "ngspice":
         # Previously fell into the `else` branch below, which hardcodes LiveSpiceBackend --
         # silently checking coverage against the wrong solver for exactly the circuits that

@@ -615,6 +615,14 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
         out += ["--fixed-params", str(cfg["fixed_params"])]
     if cfg.get("oversample") is not None:
         out += ["--oversample", str(cfg["oversample"])]
+    # cm backend: the worker finds its own cm_run ($CM_RUN, then PATH: the controller's path means nothing there), so only the
+    # settings that change what is rendered are forwarded
+    if cfg.get("cm_lead_in") is not None:
+        out += ["--cm-lead-in", str(cfg["cm_lead_in"])]
+    if cfg.get("cm_tables"):
+        out += ["--cm-tables", str(cfg["cm_tables"])]
+    if cfg.get("trunc_target") is not None:
+        out += ["--trunc-target", str(cfg["trunc_target"])]
     # Device-model overrides (a real datasheet-fitted transistor's bjt_vaf/bjt_rb/...) --
     # without this, a sharded dispatch renders through the generic model regardless of what
     # the config declares, silently disagreeing with a single-machine run_pipeline.py render

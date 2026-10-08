@@ -173,6 +173,17 @@ def _find_cm_run_exe():
     return shutil.which("cm_run") or "cm_run"
 
 
+def cm_solver_identity() -> str:
+    """A fingerprint of the cm renderer (`cm_run --build-info`), for onset caches and shard merges; "cm:unidentified" when it cannot be read."""
+    try:
+        r = subprocess.run([_find_cm_run_exe(), "--build-info"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return "cm:" + r.stdout.strip().splitlines()[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "cm:unidentified"
+
+
 class CmBackend:
     """Renders via a cm_run-compatible executable (one subprocess per render) from the .cm.json beside the .schx.
 
@@ -202,7 +213,8 @@ class CmBackend:
             y, _ = sf.read(out, dtype="float32")
             return y[:, 0] if y.ndim > 1 else y
         except Exception:
-            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}\n")
+            tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
+            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}" + (f"  [cm_run: {tail[:200]}]" if tail else "") + "\n")
             return None
 
     render_many = LiveSpiceBackend.render_many

@@ -26,6 +26,16 @@ python gen_dataset_from_schx.py --backend cm --schx amp.schx --knobs Gain,Tone \
     --input sweep.wav --output ./training_data --oversample auto
 ```
 
+## In the pipeline
+
+The backend is selectable wherever a backend is: `run_pipeline.py --backend cm` (or `backend = "cm"` in a device config),
+`scaffold_config.py --backend cm` (writes `oversample = "auto"`, sizes the excitation with cm probes), `prepare_excitation.py`,
+`preflight.py`, `check_transient_coverage.py`, `check_input_headroom.py`, `grid_adequacy.py` and `gate_config.py`. The probe
+renders of the sizing, coverage, preflight and grid steps go through the same renderer (the saturation onsets they measure
+agree with livespice's to the sweep's resolution). Config keys: `cm_run`, `cm_lead_in`, `cm_tables`, `trunc_target`
+(`oversample = "auto"` is resolved at render time; the probes use 2x, where the onsets do not move). Fleet mode forwards
+`cm_lead_in`, `cm_tables` and `trunc_target` to the workers, each of which finds its own renderer via `$CM_RUN` or `PATH`.
+
 ## The renderer contract
 
 ```

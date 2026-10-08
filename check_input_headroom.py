@@ -103,10 +103,11 @@ def main() -> int:
     inp = os.path.expanduser(cfg["input"])
     knobs = ",".join(cfg["knobs"].keys())
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
+    backend = "cm" if cfg.get("backend") == "cm" else "livespice"   # the probes run on the backend the dataset will use
     oversample = args.oversample
     if oversample is None:
-        ov = cfg.get("oversample", 8)
-        oversample = 8 if str(ov).strip().lower() == "auto" else int(ov)
+        ov = cfg.get("oversample", 2 if backend == "cm" else 8)
+        oversample = (2 if backend == "cm" else 8) if str(ov).strip().lower() == "auto" else int(ov)   # 'auto' is chosen at render time; the saturation ceiling does not move with the rate
 
     print(f"Checking whether {Path(inp).name} reaches {Path(schx).name}'s own saturation ceiling "
           f"(knobs at default 0.5 -- see this tool's docstring for what that does and doesn't tell you)\n")
@@ -114,7 +115,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as scratch:
         json_path = Path(scratch) / "preflight.json"
         cmd = [sys.executable, str(HERE / "preflight.py"),
-               "--backend", "livespice",
+               "--backend", backend,
                "--schx", schx, "--knobs", knobs, "--input", inp,
                "--oversample", str(oversample), "--find-peak",
                "--peak-max-v", str(args.peak_max_v), "--json", str(json_path)]

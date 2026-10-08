@@ -555,7 +555,10 @@ def reproduce_command(args, repeats=None, have_config=False):
     if getattr(args, "iterations", 256) != 256: c.append(f'    --iterations {args.iterations} \\')
     if getattr(args, "trust_region", 0.0): c.append(f'    --trust-region {args.trust_region:g} \\')
     if getattr(args, "newton_check", "fail") != "fail": c.append(f'    --newton-check {args.newton_check} \\')
-    if args.trunc_target != 1e-3: c.append(f'    --trunc-target {args.trunc_target} \\')
+    if args.trunc_target is not None: c.append(f'    --trunc-target {args.trunc_target} \\')
+    if getattr(args, "cm_run", None): c.append(f'    --cm-run "{portable(args.cm_run)}" \\')
+    if getattr(args, "cm_lead_in", None) is not None: c.append(f'    --cm-lead-in {args.cm_lead_in:g} \\')
+    if getattr(args, "cm_tables", None): c.append(f'    --cm-tables {args.cm_tables} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
     if getattr(args, "koren", False): c.append('    --koren \\')
@@ -949,7 +952,7 @@ def main():
 
     # --- generation (gen_dataset_from_schx.py) ---
     g = ap.add_argument_group("generation")
-    g.add_argument("--backend",      choices=["cpp", "livespice", "ngspice", "ngspice-deck"], default="livespice")
+    g.add_argument("--backend",      choices=["cpp", "livespice", "cm", "ngspice", "ngspice-deck"], default="livespice")
     g.add_argument("--koren",        action="store_true",
                    help="ngspice: Koren triode model (softer, for stiff amps)")
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
@@ -990,6 +993,13 @@ def main():
     g.add_argument("--iterations",   type=int, default=256,
                    help="livespice Newton iteration cap for every retry rung (default 256). Forwarded to "
                         "gen_dataset_from_schx.py --iterations; settable per device as `iterations` in a config.")
+    g.add_argument("--cm-run", type=Path, default=None, dest="cm_run", metavar="PATH",
+                   help="cm: the cm_run-compatible renderer (default: $CM_RUN, then cm_run on PATH). Forwarded to gen_dataset_from_schx.py "
+                        "--cm-run and exported as $CM_RUN for the preflight and coverage steps; settable per device as `cm_run` in a config.")
+    g.add_argument("--cm-lead-in", type=float, default=None, dest="cm_lead_in", metavar="S",
+                   help="cm: seconds of silence run through the circuit before the input (default 6, 0 = cold start); settable as `cm_lead_in`.")
+    g.add_argument("--cm-tables", choices=["on", "off"], default=None, dest="cm_tables",
+                   help="cm: tabulated tube characteristics (default on); settable as `cm_tables`.")
     g.add_argument("--trust-region", type=float, default=0.0, dest="trust_region", metavar="V",
                    help="livespice: limit each Newton step to a norm of V volts (default 0 = off). Circuit-specific; forwarded to "
                         "gen_dataset_from_schx.py --trust-region; settable per device as `trust_region` in a config.")
@@ -1001,7 +1011,7 @@ def main():
                         "value per circuit (ngspice and livespice both supported -- see "
                         "gen_dataset_from_schx.py --oversample auto). Default 2; high-gain amps need more "
                         "for stability, e.g. the stiff amp head's Lead full circuit = 32.")
-    g.add_argument("--trunc-target", type=float, default=1e-3,
+    g.add_argument("--trunc-target", type=float, default=None,
                    help="with --oversample auto: the truncation ESR to get under (default 1e-3)")
     g.add_argument("--random",       type=int, metavar="N",
                    help="N random combinations instead of a grid (for high knob counts)")
@@ -1350,6 +1360,10 @@ def main():
         # any of them, not after the first render fails deep into one -- confirmed
         # that's a raw subprocess FileNotFoundError with no useful message otherwise.
         if run_generate:
+            if args.backend == "cm" and getattr(args, "cm_run", None):
+                os.environ["CM_RUN"] = str(args.cm_run)   # the preflight, coverage and sizing steps find the renderer the same way
+                import gen_dataset_from_schx as _gen
+                _gen.CM_RUN = args.cm_run                 # and check_oracle below, which reads the module's own copy
             check_oracle(args.backend)
 
         # ------------------------------------------------------------------
@@ -1407,12 +1421,12 @@ def main():
         # kind of thing that renders and trains "successfully" and produces a plausible-looking but
         # wrong model, discovered only much later (see preflight.py's own docstring).
         # ------------------------------------------------------------------
-        if (run_generate and args.config and args.backend == "livespice" and args.schx
+        if (run_generate and args.config and args.backend in ("livespice", "cm") and args.schx
                 and args.input and not args.skip_preflight_check):
             section("STEP 2 / 5 — Preflight", fh)
             log("Checking that every knob is alive and moves the right direction, and that the "
                 "input-level calibration is plausible. Pass --skip-preflight-check to skip.", fh)
-            cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", "livespice",
+            cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", args.backend,
                    "--schx", str(args.schx), "--input", str(args.input)]
             if args.knobs:
                 cmd += ["--knobs", args.knobs]
@@ -1504,7 +1518,10 @@ def main():
                 if args.iterations != 256: gen_cmd += ["--iterations", str(args.iterations)]
                 if getattr(args, "trust_region", 0.0): gen_cmd += ["--trust-region", f"{args.trust_region:g}"]
                 if getattr(args, "newton_check", "fail") != "fail": gen_cmd += ["--newton-check", args.newton_check]
-                if args.trunc_target != 1e-3: gen_cmd += ["--trunc-target", args.trunc_target]
+                if args.trunc_target is not None: gen_cmd += ["--trunc-target", args.trunc_target]
+                if getattr(args, "cm_run", None): gen_cmd += ["--cm-run", args.cm_run]
+                if getattr(args, "cm_lead_in", None) is not None: gen_cmd += ["--cm-lead-in", f"{args.cm_lead_in:g}"]
+                if getattr(args, "cm_tables", None): gen_cmd += ["--cm-tables", args.cm_tables]
                 if args.random:        gen_cmd += ["--random",       args.random]
                 if args.no_anchors:    gen_cmd += ["--no-anchors"]
                 if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
