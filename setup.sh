@@ -17,9 +17,9 @@
 # IDENTICAL and the trainer learns the knob does nothing) landed in one and not the other. Two
 # tools built from one schematic, disagreeing about what the device's knobs ARE. There is now
 # exactly one, in its own small standalone repo (originally extracted from that emitter project's oracle/
-# directory, which has no other functional connection to this project) — it builds against PRISTINE upstream
-# LiveSPICE, never a patched fork, because an oracle built from the thing under test is not an
-# oracle.
+# directory, which has no other functional connection to this project) — it builds against the
+# mrgeneko/LiveSPICE fork pinned in its extern/LiveSPICE submodule: upstream plus nine commits to the solver and component models
+# (README.md, "The oracle"), not stock upstream LiveSPICE.
 #
 # The micro-sign patch is gone too: livespice_cli now normalises U+00B5 MICRO SIGN -> U+03BC GREEK
 # MU when it loads a schematic. (Upstream's Quantity parser knows U+03BC but not U+00B5, so it reads

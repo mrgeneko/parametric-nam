@@ -461,16 +461,27 @@ submodule; a plain clone leaves it empty and the build fails.)
 `../livespice-cli/publish/livespice_cli`. Set the env var if your checkout lives
 elsewhere.
 
-The oracle builds against **pristine upstream LiveSPICE**, never a patched fork — an oracle built
-from the thing under test is not an oracle — and `build.sh` warns if it finds fork markers in the
-submodule (a sign the pin points somewhere other than pristine upstream).
+The oracle builds against **a fork of LiveSPICE, not stock upstream**: the `extern/LiveSPICE`
+submodule of `livespice-cli` points at [`mrgeneko/LiveSPICE`](https://github.com/mrgeneko/LiveSPICE),
+which at the pinned commit (`67b95b5`, 2026-10-03) is upstream `dsharlet/LiveSPICE` master plus nine
+commits and nothing upstream lacks. They are changes to LiveSPICE's own solver and component models:
+Newton-solver diagnostics (always-on convergence counters, residual-monitored backtracking, an opt-in
+trust region — what `--newton-check` and `--trust-region` use); pentode model selection (plate-scaled
+by default, or Koren) and opt-in interelectrode capacitance; the `CenterTapTransformer`
+ampere-turns equation (upstream is missing a factor of 2); the `JFET` triode-region current
+(matching SPICE level 1); a capacitor-current variable; and an export-to-C tool this project does not
+use. A circuit with pentodes, a centre-tapped transformer or a JFET therefore does **not** render
+identically on stock upstream LiveSPICE, and for those components the oracle is the fork's. (The
+older rule here was "pristine upstream only, because an oracle built from the thing under test is
+not an oracle"; the fork's changes were made to LiveSPICE, not to this toolchain, but they were
+made while debugging against it, so the independence is weaker than that rule asked for. `build.sh`'s
+fork-marker guard only looks at `Potentiometer.cs`, so it does not notice any of this.)
 
 > **The micro-sign patch is gone, and deliberately.** LiveSPICE's `Quantity` parser knows
 > `U+03BC GREEK MU` (and ASCII `u`) but *not* `U+00B5 MICRO SIGN`, so upstream reads `4.7µF`
 > written with U+00B5 as **4.7 farads** — no throw, no warning, every capacitor a dead short, and
-> the simulation confidently wrong. We used to patch a vendored LiveSPICE fork, which is
-> incompatible with keeping the oracle pristine. `livespice_cli` now **normalises U+00B5 → U+03BC
-> when it loads the schematic**, so both encodings render bit-identically and no fork is needed.
+> the simulation confidently wrong. `livespice_cli` **normalises U+00B5 → U+03BC when it loads the
+> schematic**, so both encodings render bit-identically and this needs no change to LiveSPICE itself.
 > (Our library currently uses U+03BC in 6 of 23 files and U+00B5 in none — but U+00B5 is what most
 > editors emit, so this was one save-from-the-wrong-tool away from a corrupted dataset.)
 
@@ -570,8 +581,9 @@ The copyright and license notices these projects require are in [`THIRD_PARTY_NO
 This toolchain builds on several open-source projects and published models:
 
 - **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
-  circuit simulator `livespice_cli` builds against (pristine, pinned in
-  [`livespice-cli`](https://github.com/mrgeneko/livespice-cli)'s `extern/LiveSPICE` submodule),
+  circuit simulator `livespice_cli` builds against (a fork, `mrgeneko/LiveSPICE`, upstream plus nine
+  commits, pinned in [`livespice-cli`](https://github.com/mrgeneko/livespice-cli)'s `extern/LiveSPICE`
+  submodule; see "The oracle" above for what differs),
   and the reference for the tube-model equations. The ngspice backend's tube
   subcircuits are **ported from LiveSPICE's `Triode.cs` / `Pentode.cs`**.
 - **[ngspice](https://ngspice.sourceforge.io/)** (BSD) — the adaptive-timestep SPICE

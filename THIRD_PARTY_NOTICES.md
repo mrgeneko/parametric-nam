@@ -117,7 +117,8 @@ release archive), their own license terms apply to that distribution.
   backend. Generated decks refer to the op-amp library in *your* installation (`UniversalOpAmp2.lib`); that library is not copied here.
 - **spicelib** (GPL-3.0, <https://github.com/nunobrum/spicelib>): an optional dependency of the ngspice and LTspice backends only
   (`requirements-ngspice.txt`), installed from PyPI and kept out of `requirements.txt` for that reason.
-- **livespice-cli** (<https://github.com/mrgeneko/livespice-cli>, MIT) and the LiveSPICE it builds against: a separate repository, built
-  by `setup.sh` into a sibling directory.
+- **livespice-cli** (<https://github.com/mrgeneko/livespice-cli>, MIT) and the LiveSPICE it builds against (the fork
+  `mrgeneko/LiveSPICE`, which keeps LiveSPICE's MIT license and copyright notice in its `LICENSE`): a separate repository, built by
+  `setup.sh` into a sibling directory.
 - **Xyce**: `patches/xyce-superbuild-fixes.patch` is a patch for Xyce's build script, whose context lines come from Xyce (a separate
   project under its own licence). It is not part of the toolchain.
