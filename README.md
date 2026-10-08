@@ -565,6 +565,8 @@ ngspice where they are optional.
 
 ## Credits & Attribution
 
+The copyright and license notices these projects require are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 This toolchain builds on several open-source projects and published models:
 
 - **[LiveSPICE](https://github.com/dsharlet/LiveSPICE)** (Dillon Sharlet, MIT) — the
