@@ -65,7 +65,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak)
-from render_backends import (LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+from render_backends import (CmBackend, LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 # NOT imported at module level: prepare_excitation.py imports FROM this module
 # (resolve_sample_grid/_corners/_sample_interior), so a top-level import here would be
@@ -499,6 +499,30 @@ def check_coverage(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
                            max_corners=max_corners, sample_grid=sample_grid, workers=workers,
                            corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
                            backend_name="livespice")
+
+
+def check_coverage_cm(schx: str, knob_ranges: dict, fixed: dict, oversample: int,
+                      transient_peak: float, margin: float = 1.0, iterations: int = 256,
+                      peak_max_v: float = 40.0, no_cache: bool = False, quiet: bool = False,
+                      full_hypercube: "bool | None" = None, max_corners: "int | None" = None,
+                      sample_grid: int = 0, capture: dict = None, workers: int = 8,
+                      min_start_v: float = 1e-9, start_v: float = 0.005,
+                      corner_workers: int = 1, shard: str = None, emit_onsets: str = None) -> "dict | None":
+    """[--backend cm] The same check as check_coverage(), with the onsets measured by the cm_run-compatible
+    renderer (the .cm.json beside the .schx) instead of livespice-cli: the saturation onset is then the one
+    of the solver the dataset is rendered with, and the probes cost a fraction of livespice's."""
+    from render_backends import _find_cm_run_exe
+    backend = CmBackend(schx, oversample=oversample, iterations=iterations)
+    identity = Path(schx).read_bytes() + Path(schx).with_suffix(".cm.json").read_bytes()
+    cache_extra = (f"backend=cm|os={oversample}|it={iterations}|maxv={peak_max_v}|minv={min_start_v}"
+                   f"|startv={start_v}|solver=cm:{Path(_find_cm_run_exe()).name}") + cache_tag(capture)
+    return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,
+                           capture=capture, min_start_v=min_start_v, start_v=start_v,
+                           label=Path(schx).name, margin=margin, peak_max_v=peak_max_v,
+                           no_cache=no_cache, quiet=quiet, full_hypercube=full_hypercube,
+                           max_corners=max_corners, sample_grid=sample_grid, workers=workers,
+                           corner_workers=corner_workers, shard=shard, emit_onsets=emit_onsets,
+                           backend_name="cm")
 
 
 def check_coverage_ngspice(schx: str, knob_ranges: dict, fixed: dict, oversample: int,

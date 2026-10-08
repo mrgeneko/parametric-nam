@@ -30,6 +30,7 @@ Adding a third backend (e.g. LTspice) means writing one class implementing these
 not another ~300-line copy of preflight.py's checks.
 """
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -162,6 +163,49 @@ class LiveSpiceBackend:
             for f in futs:
                 out[futs[f]] = f.result()
         return out
+
+
+def _find_cm_run_exe():
+    """$CM_RUN, else `cm_run` on PATH (the same lookup gen_dataset_from_schx.py's --backend cm uses)."""
+    env = os.environ.get("CM_RUN")
+    if env:
+        return env
+    return shutil.which("cm_run") or "cm_run"
+
+
+class CmBackend:
+    """Renders via a cm_run-compatible executable (one subprocess per render) from the .cm.json beside the .schx.
+
+    The coverage probes of --backend cm run through this, so the saturation onsets are measured with the
+    renderer the dataset will use. A short silent lead-in (cm_run --lead-in, discarded from the output) lets
+    the supply settle before the probe tone, as a cold start would otherwise ring into the first cycles."""
+
+    def __init__(self, schx, oversample=2, iterations=256, workers=None, lead_in=2.0):
+        self.circuit = str(Path(schx).with_suffix(".cm.json"))
+        self.oversample = oversample
+        self.iterations = iterations
+        self.workers = workers
+        self.lead_in = lead_in
+
+    prepare_input = LiveSpiceBackend.prepare_input
+
+    def _render_one(self, params, in_wav, scratch, tag):
+        out = f"{scratch}/pf_{tag}.wav"
+        args = [_find_cm_run_exe(), self.circuit, in_wav, out, "--prepared", "off", "--os", str(self.oversample),
+                "--tol-rel", "1e-4", "--tables", "off", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
+        if self.lead_in > 0:
+            args += ["--lead-in", f"{self.lead_in:g}"]
+        for k, v in params.items():
+            args += ["--knob", f"{k}={v}"]
+        r = subprocess.run(args, capture_output=True, text=True)
+        try:
+            y, _ = sf.read(out, dtype="float32")
+            return y[:, 0] if y.ndim > 1 else y
+        except Exception:
+            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}\n")
+            return None
+
+    render_many = LiveSpiceBackend.render_many
 
 
 class NgspiceBackend:

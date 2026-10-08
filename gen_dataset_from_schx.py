@@ -3241,15 +3241,10 @@ def main():
     # runaway there, found only after a full ~16h training run. Only supported for the
     # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
-    # --backend cm runs the same gate: onset of saturation is a property of the circuit and the probe renders go through livespice-cli
-    # (the only probe renderer; the physical-profile difference moves an onset by far less than the gate's margin). Without
-    # livespice-cli installed the gate cannot run, and a skipped gate must be asked for.
-    if (args.backend == "cm" and not args.skip_transient_check and not args.random and not LIVESPICE_CLI.exists()):
-        print("Transient check: the coverage gate probes with livespice-cli, which was not found "
-              f"({LIVESPICE_CLI}). Install it (or set $LIVESPICE_CLI), or pass --skip-transient-check.", file=sys.stderr)
-        sys.exit(1)
+    # --backend cm runs the same gate, with the onsets measured by the same cm_run-compatible renderer as the dataset
+    # (check_coverage_cm), on a few corners at a time.
     if not args.skip_transient_check and args.backend in ("livespice", "cm") and not args.random:
-        from check_transient_coverage import (check_coverage, _transient_peak_from_recipe,
+        from check_transient_coverage import (check_coverage, check_coverage_cm, _transient_peak_from_recipe,
                                               interior_sample_budget as _interior_budget)
         transient_peak = args.transient_peak
         if transient_peak is None:
@@ -3276,10 +3271,12 @@ def main():
         # SAME capture chain the render below will use: this gate compares each corner's
         # saturation onset against the excitation's transient peak, and an onset measured on
         # the raw node is not the onset of the signal that actually becomes the target.
-        result = check_coverage(schx, values_per_knob, fixed_kv,
-                                args.oversample, transient_peak, margin=args.transient_margin,
-                                sample_grid=sample_grid, capture=_capture_cfg(args),
-                                min_start_v=args.min_start_v, start_v=args.sweep_start_v)
+        _gate = check_coverage_cm if args.backend == "cm" else check_coverage
+        _gate_extra = dict(corner_workers=4) if args.backend == "cm" else {}
+        result = _gate(schx, values_per_knob, fixed_kv,
+                       args.oversample, transient_peak, margin=args.transient_margin,
+                       sample_grid=sample_grid, capture=_capture_cfg(args),
+                       min_start_v=args.min_start_v, start_v=args.sweep_start_v, **_gate_extra)
         print()
         if not result["ok"]:
             print("Transient check FAILED -- refusing to start generation (--skip-transient-check "

@@ -762,8 +762,8 @@ def test_transient_gate_forwards_sweep_start_v_and_min_start_v():
     src = Path(__file__).parent.parent.joinpath("gen_dataset_from_schx.py").read_text()
     assert '"--sweep-start-v"' in src, "gen_dataset_from_schx.py must expose --sweep-start-v"
     assert '"--min-start-v"' in src, "gen_dataset_from_schx.py must expose --min-start-v"
-    m = re.search(r"result = check_coverage\((?:[^()]|\([^()]*\))*\)", src, re.DOTALL)
-    assert m, "could not find the check_coverage(...) call site"
+    m = re.search(r"result = _gate\((?:[^()]|\([^()]*\))*\)", src, re.DOTALL)   # _gate is check_coverage, or check_coverage_cm for --backend cm
+    assert m, "could not find the coverage-gate call site"
     call = m.group(0)
     assert "min_start_v=args.min_start_v" in call, \
         "check_coverage() call must forward args.min_start_v"
@@ -1062,3 +1062,27 @@ def test_cm_args_probe_form_has_no_progress_or_lead_in():
 def test_cm_failure_fraction_default_is_looser_than_livespice():
     assert g.CM_NEWTON_MAX_FRACTION > g.NEWTON_MAX_FRACTION
     assert g._newton_failure(dict(solves=10_000_000, unconverged=50, severe=0, first=1, last=2), 4) != ""   # 5e-6: over the livespice limit
+
+
+def test_cm_probe_backend_builds_the_cm_run_command(tmp_path, monkeypatch):
+    import render_backends as rb
+    calls = []
+
+    class R:  # a finished process whose output file the stub writes
+        returncode = 0
+        stderr = ""
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        import numpy as np, soundfile as sf
+        sf.write(args[3], np.zeros(100, dtype="float32"), 48000, subtype="FLOAT")
+        return R()
+
+    monkeypatch.setattr(rb.subprocess, "run", fake_run)
+    monkeypatch.setenv("CM_RUN", "/x/cm_run")
+    b = rb.CmBackend(str(tmp_path / "amp.schx"), oversample=4, lead_in=2.0)
+    y = b._render_one({"Gain": 0.5, "Mid Range": 0.25}, "in.wav", str(tmp_path), "t0")
+    a = calls[0]
+    assert y is not None and a[0] == "/x/cm_run" and a[1].endswith("amp.cm.json") and a[2] == "in.wav"
+    assert a[a.index("--os") + 1] == "4" and a[a.index("--lead-in") + 1] == "2"
+    assert [a[i + 1] for i, x in enumerate(a) if x == "--knob"] == ["Gain=0.5", "Mid Range=0.25"]

@@ -14,8 +14,8 @@ it uses a **physical** numerics profile instead of LiveSPICE's.
 * The circuit is `<stem>.cm.json` **beside the `.schx`**. It records the SHA-256 of the schematic it
   was converted from; the backend refuses a file that does not match, at start-up, before any render.
   Convert the schematic again if you edit it.
-* The transient/saturation coverage gate still runs for this backend. It probes with `livespice-cli`
-  (saturation onset is a property of the circuit), so install it or pass `--skip-transient-check`.
+* The transient/saturation coverage gate runs for this backend too, with the saturation onsets measured
+  by the same renderer (`--skip-transient-check` to bypass it).
 
 ```
 python gen_dataset_from_schx.py --backend cm --schx amp.schx --knobs Gain,Tone \
