@@ -99,8 +99,11 @@ needs nothing from the file.
 ## What is recorded
 
 `config.json` carries a `renderer` block: `name`, `version` (from `cm_run --build-info`, one line), `profile`
-(`physical`) and `esr_vs_oracle` (null until a validation step fills it in with an independent renderer's ESR on the same
-input). Compare datasets only when name, version and profile agree.
+(`physical`) and `esr_vs_oracle`. Compare datasets only when name, version and profile agree. `esr_vs_oracle` is null until
+`oracle_check.py --dataset DIR` fills it (or `run_pipeline.py --oracle-check N` does, after combining): it re-renders N
+combinations (the first, the last and the middle of the grid) with an independent renderer (livespice-cli) over the first 40 s of
+the same input, through the same capture chain, and records the oracle, its version, the median and maximum ESR, the ESR after the
+best single gain and the gain. On the TS-9 it reads about 1-2e-3 (cm against livespice).
 
 ## Not comparable sample-for-sample with `livespice` data
 

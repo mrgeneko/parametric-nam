@@ -62,3 +62,52 @@ def test_every_tool_that_picks_a_backend_offers_cm():
     for f in ("run_pipeline.py", "prepare_excitation.py", "preflight.py", "scaffold_config.py"):
         src = (HERE / f).read_text()
         assert '"cm"' in src, f"{f} does not offer the cm backend"
+
+
+def test_oracle_check_picks_both_ends_and_the_centre():
+    import oracle_check
+    assert oracle_check.pick_rows(list(range(10)), 3) == [0, 5, 9]
+    assert oracle_check.pick_rows(list(range(2)), 3) == [0, 1]
+    assert oracle_check.pick_rows(list(range(100)), 5) == [0, 25, 50, 74, 99]
+
+
+def test_oracle_check_esr_and_gain_fit():
+    import numpy as np, oracle_check
+    rng = np.random.default_rng(0)
+    b = rng.standard_normal(1000)
+    e, eg, g = oracle_check.esr_pair(2.0 * b, b, 0)       # a pure level difference: ESR 1, gone after the gain fit
+    assert abs(e - 1.0) < 1e-9 and eg < 1e-12 and abs(g - 0.5) < 1e-9
+    e, eg, g = oracle_check.esr_pair(b + 0.01 * rng.standard_normal(1000), b, 0)
+    assert 5e-5 < e < 2e-4 and abs(g - 1.0) < 0.01
+
+
+def test_oracle_check_records_into_the_manifest_and_refuses_the_same_renderer(tmp_path, monkeypatch, capsys):
+    import json, numpy as np, soundfile as sf, oracle_check
+    sr = 48000
+    t = np.arange(sr * 3) / sr
+    x = (0.3 * np.sin(2 * np.pi * 220 * t)).astype("float32")
+    sf.write(tmp_path / "in.wav", x, sr, subtype="FLOAT")
+    (tmp_path / "amp.schx").write_text("<x/>")
+    rows = [dict(idx=i, ok=1, Gain=g) for i, g in enumerate((0.1, 0.5, 0.9))]
+    (tmp_path / "params.csv").write_text("idx,Gain,ok\n" + "\n".join(f"{r['idx']},{r['Gain']},1" for r in rows) + "\n")
+    outputs = np.stack([x * 1.01 * (r["Gain"] + 0.5) * 0.5 for r in rows])   # the dataset: 'scaled' by 0.5 (output_scale)
+    np.save(tmp_path / "outputs.npy", outputs)
+    cfg = {"backend": "cm", "schx": str(tmp_path / "amp.schx"), "knobs": ["Gain"], "param_map": {"Gain": "Gain"}, "input_wav": str(tmp_path / "in.wav"),
+           "output_scale": 0.5, "capture_chain": None, "renderer": {"name": "cm", "esr_vs_oracle": None}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+
+    def fake_oracle(oracle, cfg_, in_wav, params, out_wav, oversample):
+        y, _ = sf.read(str(in_wav), dtype="float32")
+        sf.write(str(out_wav), (y * (params["Gain"] + 0.5)).astype("float32"), sr, subtype="FLOAT")
+
+    monkeypatch.setattr(oracle_check, "render_oracle", fake_oracle)
+    monkeypatch.setattr(oracle_check, "oracle_identity", lambda o: "livespice:test")
+    monkeypatch.setattr(sys, "argv", ["oracle_check.py", "--dataset", str(tmp_path), "--n", "3", "--seconds", "3"])
+    assert oracle_check.main() == 0
+    rec = json.loads((tmp_path / "config.json").read_text())["renderer"]["esr_vs_oracle"]
+    assert rec["oracle"] == "livespice" and rec["oracle_version"] == "livespice:test" and rec["n"] == 3
+    assert abs(rec["gain_median"] - 1.0 / 1.01) < 1e-3 and rec["esr_median"] < 1e-3      # a 1 % level error: ESR 1e-4
+    cfg["backend"] = "livespice"
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    with pytest.raises(SystemExit):
+        oracle_check.main()

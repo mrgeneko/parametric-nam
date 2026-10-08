@@ -993,6 +993,9 @@ def main():
     g.add_argument("--iterations",   type=int, default=256,
                    help="livespice Newton iteration cap for every retry rung (default 256). Forwarded to "
                         "gen_dataset_from_schx.py --iterations; settable per device as `iterations` in a config.")
+    g.add_argument("--oracle-check", type=int, default=0, dest="oracle_check", metavar="N",
+                   help="after combining, re-render N combinations of the dataset with an independent renderer (livespice-cli) and record the "
+                        "ESR in the dataset's config.json (renderer.esr_vs_oracle); see oracle_check.py. 0 = off (default).")
     g.add_argument("--cm-run", type=Path, default=None, dest="cm_run", metavar="PATH",
                    help="cm: the cm_run-compatible renderer (default: $CM_RUN, then cm_run on PATH). Forwarded to gen_dataset_from_schx.py "
                         "--cm-run and exported as $CM_RUN for the preflight and coverage steps; settable per device as `cm_run` in a config.")
@@ -1565,6 +1568,12 @@ def main():
         if run_combine:
             section("STEP 4 / 5 — Combine", fh)
             timings["combine"] = stream_run([PYTHON, BATCH, "--combine", dataset_dir], fh, "Combine")
+
+        # Optional: compare the finished dataset with an independent renderer and record the ESR in its manifest (oracle_check.py).
+        # Not run when the dataset was rendered by the oracle itself (nothing to compare).
+        if getattr(args, "oracle_check", 0) and args.backend != "livespice" and Path(dataset_dir, "outputs.npy").exists():
+            section("Oracle check", fh)
+            stream_run([PYTHON, str(HERE / "oracle_check.py"), "--dataset", dataset_dir, "--n", str(args.oracle_check)], fh, "Oracle check")
 
         # ------------------------------------------------------------------
         # Step 5: Train
