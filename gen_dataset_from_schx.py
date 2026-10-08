@@ -934,6 +934,7 @@ _CONVERGENCE_FAILURE = re.compile(
 # helping (see _render_with_ladder). --newton-check warn|off restores the old behaviour.
 _NEWTON_STATS = re.compile(
     r"newton: solves=(\d+) unconverged=(\d+) \(([\d.]+)%\) severe=(\d+) first_sample=(-?\d+) last_sample=(-?\d+)")
+CM_NEWTON_MAX_FRACTION = 1e-5  # --backend cm default
 NEWTON_MAX_FRACTION = 1e-6     # unconverged / solves above this fails the render
 NEWTON_CHECK = "fail"          # off | warn | fail
 # Per-iteration Newton step limit in volts, passed to livespice_cli --trust-region (0 = off, the default). A step whose
@@ -2885,8 +2886,8 @@ def main():
                     help="livespice: what to do with livespice_cli's unconverged-solve report. fail (default): a render "
                          "with any severe unconverged solve, or an unconverged fraction above --newton-max-fraction, "
                          "fails and the ladder escalates it; warn: record it in `warnings` and keep the render; off: ignore.")
-    ap.add_argument("--newton-max-fraction", type=float, default=NEWTON_MAX_FRACTION, metavar="F",
-                    help="unconverged / solves above which a render fails under --newton-check fail (default 1e-6)")
+    ap.add_argument("--newton-max-fraction", type=float, default=None, metavar="F",
+                    help="unconverged / solves above which a render fails under --newton-check fail (default 1e-6; 1e-5 for --backend cm, whose solver rescues and limits its own hard steps: a fleet-wide count over 127 circuits showed isolated unconverged solves up to ~3e-6 that a higher oversample did not remove)")
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
@@ -2954,7 +2955,8 @@ def main():
     args = ap.parse_args()
     if args.cm_run:
         CM_RUN = args.cm_run
-    NEWTON_CHECK, NEWTON_MAX_FRACTION = args.newton_check, args.newton_max_fraction
+    NEWTON_CHECK = args.newton_check
+    NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (CM_NEWTON_MAX_FRACTION if args.backend == "cm" else NEWTON_MAX_FRACTION)
     TRUST_REGION_V = max(0.0, args.trust_region)
 
     if args.list:
