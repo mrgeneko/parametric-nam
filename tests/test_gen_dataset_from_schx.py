@@ -1041,3 +1041,24 @@ def test_cm_render_once_reports_divergence_as_newton_failure(tmp_path, monkeypat
                        param_map={}, expected_frames=4800, oversample=4, iterations=256)
     assert not r.ok
     assert r.error.startswith("newton:") and g._is_convergence_failure(r.error)
+
+
+def test_cm_args_carry_knobs_speaker_lead_in_and_metrics(tmp_path):
+    a = g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "Gain=0.5,Mid Range=0.25", "Cab 1",
+                   metrics=tmp_path / "m.json", lead_in=6.0)
+    assert a[1] == "amp.cm.json" and a[2:4] == ["in.wav", "out.wav"]
+    assert a[a.index("--os") + 1] == "4" and a[a.index("--iterations") + 1] == "256"
+    knobs = [a[i + 1] for i, x in enumerate(a) if x == "--knob"]
+    assert knobs == ["Gain=0.5", "Mid Range=0.25"]
+    assert a[a.index("--output") + 1] == "Cab 1"
+    assert a[a.index("--lead-in") + 1] == "6" and "--progress" in a and "--metrics" in a
+
+
+def test_cm_args_probe_form_has_no_progress_or_lead_in():
+    a = g._cm_args("amp.schx", "in.wav", "out.wav", 8, 256, "", progress=False)
+    assert "--progress" not in a and "--lead-in" not in a and "--knob" not in a and "--output" not in a
+
+
+def test_cm_failure_fraction_default_is_looser_than_livespice():
+    assert g.CM_NEWTON_MAX_FRACTION > g.NEWTON_MAX_FRACTION
+    assert g._newton_failure(dict(solves=10_000_000, unconverged=50, severe=0, first=1, last=2), 4) != ""   # 5e-6: over the livespice limit

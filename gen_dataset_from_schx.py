@@ -117,6 +117,11 @@ def _find_cm_run() -> Path:
 
 
 CM_RUN = _find_cm_run()
+# Seconds of silence --backend cm runs through the circuit before the input (cm_run --lead-in; discarded from the output, so
+# the render stays sample-aligned with the input). A cold start has a settling transient (supply sag, coupling caps): measured on
+# a sag/ac amp, ESR against the settled render 0.37 in the first second, 8e-3 in the second, 2e-7 from 2 s; amps with a slow
+# supply need longer. The file's prepared state also removes it but leaves a steady ~1e-5 offset, so it is not used.
+CM_LEAD_IN_S = 6.0
 
 
 def _cm_circuit_for(schx: str) -> Path:
@@ -142,6 +147,27 @@ def _cm_circuit_problem(schx: str) -> str:
         return (f"{cm.name} is STALE: it was converted from a different version of {Path(schx).name} "
                 f"(recorded sha256 {recorded[:12] or 'none'}, the schematic is {actual[:12]}); convert it again")
     return ""
+
+
+def _cm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, params: str, speaker: str = None,
+             metrics=None, progress: bool = True, lead_in: float = 0.0) -> list:
+    """The cm_run command line for one render (see _find_cm_run for the contract)."""
+    args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
+            "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", "off",
+            "--resampler", "fir-linear", "--iterations", str(iterations or 256)]
+    if metrics:
+        args += ["--metrics", str(metrics)]
+    if progress:
+        args += ["--progress"]
+    if lead_in > 0:
+        args += ["--lead-in", f"{lead_in:g}"]
+    for kv in filter(None, params.split(",")):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            args += ["--knob", f"{k}={v}"]
+    if speaker:
+        args += ["--output", speaker]
+    return args
 
 
 def _cm_stats(metrics_path) -> dict:
@@ -1475,16 +1501,8 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             swept = fmt_params(params, param_map)
             all_params = f"{fixed_params},{swept}" if fixed_params else swept
             cm_metrics = out_wav.with_suffix(".cm_metrics.json")
-            args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
-                    "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", "off",
-                    "--resampler", "fir-linear", "--iterations", str(iterations or 256),
-                    "--metrics", str(cm_metrics), "--progress"]
-            for kv in filter(None, all_params.split(",")):
-                if "=" in kv:
-                    k, v = kv.split("=", 1)
-                    args += ["--knob", f"{k}={v}"]
-            if speaker:
-                args += ["--output", speaker]
+            args = _cm_args(schx, input_wav, out_wav, oversample, iterations, all_params, speaker,
+                            metrics=cm_metrics, lead_in=CM_LEAD_IN_S)
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 
@@ -2151,6 +2169,12 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                     print(f"    probe render FAILED at oversample={os_}, "
                           f"{', '.join(f'{k}={x:g}' for k, x in sorted(p.items()))}: "
                           f"{getattr(fail, 'error', 'no output')}", file=sys.stderr)
+            elif backend == "cm":
+                r = subprocess.run(_cm_args(schx, clip, w, os_, iterations, allp, speaker, progress=False),
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and w.exists():
+                    d, _ = sf.read(str(w))
+                    v = np.asarray(d, dtype=np.float64)
             else:
                 a = [str(LIVESPICE_CLI), "--input", str(clip), "--output", str(w),
                      "--circuit", schx, "--params", allp,
@@ -2661,7 +2685,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
-    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN, CM_LEAD_IN_S
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2675,6 +2699,9 @@ def main():
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
     ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "cm"], default="cpp")
+    ap.add_argument("--cm-lead-in", type=float, default=None, metavar="S",
+                    help="--backend cm: seconds of silence run through the circuit before the input so the render starts settled "
+                         "(discarded from the output; default 6, 0 = start cold like livespice)")
     ap.add_argument("--cm-run", type=Path, default=None,
                     help="cm_run-compatible renderer for --backend cm (default: $CM_RUN, then cm_run on PATH)")
     ap.add_argument("--no-retry", action="store_true",
@@ -2955,6 +2982,8 @@ def main():
     args = ap.parse_args()
     if args.cm_run:
         CM_RUN = args.cm_run
+    if args.cm_lead_in is not None:
+        CM_LEAD_IN_S = max(0.0, args.cm_lead_in)
     NEWTON_CHECK = args.newton_check
     NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (CM_NEWTON_MAX_FRACTION if args.backend == "cm" else NEWTON_MAX_FRACTION)
     TRUST_REGION_V = max(0.0, args.trust_region)
@@ -3132,13 +3161,10 @@ def main():
             ap.error("--oversample auto does not apply to --backend ngspice-deck: there is no "
                      "supersample+decimate step in this path (unlike the schx-translated ngspice "
                      "backend) for it to measure. Use --maxstep to control solver fidelity.")
-        if args.backend == "cm":
-            ap.error("--oversample auto is not available for --backend cm: the cm ladder already doubles the "
-                     "oversample until the solver reports no unconverged or diverged solves.")
-        if args.backend == "livespice":
+        if args.backend in ("livespice", "cm"):
             args.oversample = choose_oversample(
                 schx, knobs, combos, in_wav, param_map, args.fixed_params,
-                args.speaker, args.trunc_target, backend="livespice",
+                args.speaker, args.trunc_target, backend=args.backend,
                 workers=args.workers)
             _auto_os = False
         else:
@@ -3215,7 +3241,14 @@ def main():
     # runaway there, found only after a full ~16h training run. Only supported for the
     # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
-    if not args.skip_transient_check and args.backend == "livespice" and not args.random:
+    # --backend cm runs the same gate: onset of saturation is a property of the circuit and the probe renders go through livespice-cli
+    # (the only probe renderer; the physical-profile difference moves an onset by far less than the gate's margin). Without
+    # livespice-cli installed the gate cannot run, and a skipped gate must be asked for.
+    if (args.backend == "cm" and not args.skip_transient_check and not args.random and not LIVESPICE_CLI.exists()):
+        print("Transient check: the coverage gate probes with livespice-cli, which was not found "
+              f"({LIVESPICE_CLI}). Install it (or set $LIVESPICE_CLI), or pass --skip-transient-check.", file=sys.stderr)
+        sys.exit(1)
+    if not args.skip_transient_check and args.backend in ("livespice", "cm") and not args.random:
         from check_transient_coverage import (check_coverage, _transient_peak_from_recipe,
                                               interior_sample_budget as _interior_budget)
         transient_peak = args.transient_peak
