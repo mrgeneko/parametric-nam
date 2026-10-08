@@ -116,8 +116,9 @@ full-band and 4-8e-3 through the cabinet low-pass.
 
 On the same circuit, knobs and input the two renders differ, mostly above 6 kHz, and the cause is the **resampler**, not the circuit
 numerics. `livespice` interpolates the input linearly up to the oversampled rate and takes the **plain average** of each output
-sample's oversampled values back down: a boxcar over one output period, whose response droops (about -0.6 dB at 10 kHz and -2.6 dB at
-20 kHz, whatever the oversample) and which rejects aliases poorly. This backend uses a linear-phase FIR resampler, flat to near
+sample's oversampled values back down: a boxcar over one output period. The linear interpolation and the average together droop the path by about 1.9 dB at 10 kHz,
+4.2 dB at 15 kHz and 7.8 dB at 20 kHz (4x; the average alone is 0.6, 1.4 and 2.5 dB, and it does not narrow as the oversample
+rises), and the average rejects aliases poorly (about 6 dB at 30 kHz, which folds to 18 kHz). This backend uses a linear-phase FIR resampler, flat to near
 Nyquist with strong alias rejection. Measured on a combo amp (Deluxe, sag ac) with its sized excitation, one combination, oversample 8
 on both sides: this backend's default against `livespice` ESR 3.9e-2 (84 % of the difference above 6.4 kHz); the same circuit with the
 numerics profile left at "physical" but `livespice`'s resampler, 1e-7; `livespice`'s numerics with this backend's FIR resampler, 3.9e-2
@@ -129,7 +130,7 @@ low-pass the combo amp's figure is 4e-3 to 8e-3.
 Which is closer to a real capture: an audio interface's converter filter is flat to about 20 kHz and rejects what lies above, which the FIR
 resembles and the boxcar does not; the cm render therefore leaves out the aliasing and the droop `livespice` adds. That is an expectation from the
 filters, not a comparison with hardware, which has not been done. Either way, compare a model trained on `livespice` data with data from this
-backend by ESR on the same input, not by identity. Run in its LiveSPICE compatibility mode (`--compat livespice --resampler livespice`) the renderer
+backend by ESR on the same input, not by identity. Run in the renderer's oracle mode for LiveSPICE (`cm_run --oracle-livespice`, for equivalence checks only; the standalone `--resampler livespice` was removed) the renderer
 reproduces `livespice` to 1e-6 or better at the same oversample, which confirms that units, pot tapers, knob mapping and the default speaker agree.
 
 ## Not covered
