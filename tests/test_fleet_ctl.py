@@ -198,7 +198,13 @@ class TestAgentCommands:
         pid = int((fake_repo / ".fleet_agent.pid").read_text())
         time.sleep(0.5)
         assert "stopped" in self.run(fleet_ctl.agent_stop_command(d), "/").stdout
-        time.sleep(0.5)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
         assert not (fake_repo / ".fleet_agent.pid").exists()
@@ -318,6 +324,11 @@ class TestRealEndToEnd:
 
     def test_start_and_stop_agents_over_ssh(self, env, monkeypatch, capsys):
         (env.repo / "fleet_agent.py").write_text("import time\ntime.sleep(60)\n")
+        # start-agents launches ./.venv/bin/python in the worker dir: without one the command fails at once and the pid
+        # recorded for it is a dead process that merely hasn't been reaped yet, so the liveness check below passed or
+        # failed on a race (it failed under CPU load)
+        (env.repo / ".venv" / "bin").mkdir(parents=True)
+        (env.repo / ".venv" / "bin" / "python").symlink_to(sys.executable)
         tokdst = env.base / "installed.token"
         monkeypatch.setattr(fleet_ctl, "agent_token_command",
                             lambda: f"cat > {tokdst}")     # never touch this machine's real token
