@@ -82,6 +82,11 @@ and the full dataset showed 1.9e-2: the pick went from 1x to 2x).
 The probe estimates the whole-signal ESR of the sampled windows, which is what a model is fitted against; the renderer's
 tuning tables report the worst case over a set of knob settings, so they may ask for a rate or two more.
 
+**The file's quality table is a floor (2026-10-09).** The probe samples a few windows at a few knob settings; the file's
+`quality.measured.cells` are worst case over `cm_tune`'s knob plan and the stress signal. The ladder therefore starts at the
+cheapest robust cell (tolerance 1e-4, the default filter, this backend's tables setting) whose ESR is within `--trunc-target`,
+and never below it. Found on the HM-2: the probe picked 1x, where the table reads ESR 1.59.
+
 ## Tube tables
 
 `--cm-tables on|off` (default **on**): the renderer's tabulated tube characteristics, 1.12-1.20x faster on the tube amps
@@ -109,6 +114,11 @@ rendering per combination: 3 % with the 190 s T3K sweep, about 20 % with a 20 s 
 a cold start.
 
 ## What is recorded
+
+`params.csv` carries each combination's render cost from `cm_run`'s metrics: `proc_time` is the wall seconds of the render
+and `dsp_load` is 100 / the real-time factor (they were -1 before 2026-10-09; the `livespice` path parses the same two from
+its oracle's stdout).
+
 
 `config.json` carries a `renderer` block: `name`, `version` (from `cm_run --build-info`, one line), `profile`
 (`physical`) and `esr_vs_oracle`. Compare datasets only when name, version and profile agree. `esr_vs_oracle` is null until

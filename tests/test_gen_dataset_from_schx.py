@@ -1225,3 +1225,23 @@ def test_cm_prepared_state_probe_is_cached_per_circuit(tmp_path, monkeypatch):
         monkeypatch.setattr(g, "CM_RUN", _fake_cm_run(tmp_path / ("other%d" % used), 1 - used) if (tmp_path / ("other%d" % used)).mkdir() is None else None)
         assert g._cm_prepared_state_usable(schx) is expect
     g._cm_prepared_cache.clear()
+
+
+def test_cm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
+    schx = tmp_path / "amp.schx"; schx.write_text("<x/>")
+    cells = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1.59},
+             {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 3.0e-3},
+             {"oversample": 4, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 2.4e-4},
+             {"oversample": 1, "tol_rel": 1e-2, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1e-9}]   # the wrong tolerance: ignored
+    (tmp_path / "amp.cm.json").write_text(json.dumps({"quality": {"measured": {"cells": cells}}}))
+    monkeypatch.setattr(g, "CM_TABLES", "on")
+    assert g._cm_table_floor(str(schx), 6e-3) == 2
+    assert g._cm_table_floor(str(schx), 1e-3) == 4
+    assert g._cm_table_floor(str(schx), 1e-6) == 1          # nothing qualifies: no floor
+    assert g._cm_table_floor(str(tmp_path / "none.schx"), 6e-3) == 1
+
+
+def test_cm_stats_carry_the_render_cost(tmp_path):
+    m = tmp_path / "m.json"; m.write_text(json.dumps({"solves": 10, "wall_seconds": 12.5, "realtime_factor": 4.0}))
+    st = g._cm_stats(m)
+    assert st["wall_seconds"] == 12.5 and st["realtime_factor"] == 4.0

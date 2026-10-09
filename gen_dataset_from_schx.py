@@ -237,7 +237,27 @@ def _cm_stats(metrics_path) -> dict:
     return dict(solves=int(j.get("solves", 0)), unconverged=int(j.get("unconverged", 0)), severe=int(j.get("severe", 0)),
                 first=int(j.get("first_bad_sample", -1)), last=-1, divergences=int(j.get("divergences", 0)),
                 dc_converged=int(j.get("dc_converged", 1)), rescues=int(j.get("rescues", 0)), rescued=int(j.get("rescued", 0)),
-                max_iterations=int(j.get("max_iterations", 0)))
+                max_iterations=int(j.get("max_iterations", 0)),
+                # render cost, for params.csv's proc_time / dsp_load (the livespice path parses these from stdout)
+                wall_seconds=float(j.get("wall_seconds", -1.0)), realtime_factor=float(j.get("realtime_factor", 0.0)))
+
+
+def _cm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
+    """The lowest oversample the circuit file's own quality table allows at the backend's tolerance: the cheapest ROBUST cell (no divergence, no
+    severe unconverged solve, finite) at that tolerance, the default 24-sample filter and this backend's tables setting whose ESR is within
+    `target`. The table is worst case over cm_tune's knob plan and the stress signal, so it is more conservative than the auto probe's sampled
+    windows at a few settings: the probe once picked 1x for a pedal whose table reads ESR 1.59 at 1x (the HM-2, 2026-10-09). 1 when the file
+    has no usable table (no floor)."""
+    try:
+        d = json.loads(_cm_circuit_for(schx).read_text())
+        cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
+    except (OSError, ValueError):
+        return 1
+    want_tables = CM_TABLES == "on"
+    ok = [c["oversample"] for c in cells
+          if c.get("robust") and abs(c.get("tol_rel", 0) - tol_rel) < 1e-12 and c.get("fir_half_length", 24) == 24
+          and bool(c.get("tables", False)) == want_tables and c.get("esr", 1e9) <= target]
+    return min(ok) if ok else 1
 
 
 def check_oracle(backend: str) -> None:
@@ -1694,6 +1714,9 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 if _nf:
                     warned = (_nf + " | " + warned)[:300]
             dsp = proc_t = -1.0
+            if backend == "cm" and nstats:   # cm_run's metrics: render seconds and the DSP load as 100 / realtime factor
+                proc_t = nstats.get("wall_seconds", -1.0)
+                dsp = 100.0 / nstats["realtime_factor"] if nstats.get("realtime_factor", 0) > 0 else -1.0
             for line in stdout.splitlines():
                 if "DSP load:" in line:
                     dsp = float(line.split()[2].rstrip("%"))
@@ -2368,7 +2391,10 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
 
         prev_d, prev_os = None, None
         # cm: the factors cm_tune measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
-        cands = [o for o in CM_AUTO_LADDER if o < ref_os] if backend == "cm" else [2 ** k for k in range(1, 12) if 2 ** k < ref_os]
+        floor_os = _cm_table_floor(schx, target) if backend == "cm" else 1
+        if floor_os > 1:
+            print(f"  cm: the circuit file's quality table allows no rate below {floor_os}x within ESR {target:g} (robust cells at tolerance 1e-4); starting the ladder there")
+        cands = [o for o in CM_AUTO_LADDER if floor_os <= o < ref_os] if backend == "cm" else [2 ** k for k in range(1, 12) if 2 ** k < ref_os]
         for os_ in cands:
             prewarm([os_])
             # Pool across windows (whole-file ESR estimate), take the WORST knob setting --
