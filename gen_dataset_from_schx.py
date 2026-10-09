@@ -3097,8 +3097,8 @@ def main():
                          "probing both ends of every knob. See internal engineering notes and "
                          "measure_truncation.py.")
     ap.add_argument("--trunc-target", type=float, default=None,
-                    help="With --oversample auto: the truncation ESR to get under (default 1e-3; 6e-3 for --backend cm, "
-                         "below which an ESR difference is taken as inaudible, and where the ladder is 1/2/3/4/6/8/16). "
+                    help="With --oversample auto: the truncation ESR to get under (default 1e-3 for every backend; "
+                         "with --backend cm the ladder is 1/2/3/4/6/8/16). "
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
                          "not the limiting factor. A model cannot be more right than its target.")
     ap.add_argument("--timeout-mult", type=float, default=1.0,
@@ -3156,7 +3156,7 @@ def main():
     if args.cm_tables is not None:
         CM_TABLES = args.cm_tables
     if args.trunc_target is None:
-        args.trunc_target = 6e-3 if args.backend == "cm" else 1e-3
+        args.trunc_target = 1e-3   # the same target for every backend (cm was 6e-3 from 2026-10-08 to 2026-10-09)
     NEWTON_CHECK = args.newton_check
     NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (CM_NEWTON_MAX_FRACTION if args.backend == "cm" else NEWTON_MAX_FRACTION)
     TRUST_REGION_V = max(0.0, args.trust_region)

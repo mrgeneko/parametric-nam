@@ -623,8 +623,8 @@ def main() -> None:
         text = _replace_line(text, "oversample", f"oversample = {oversample}   # {comment}")
     elif args.backend == "cm":
         # no measurement here: gen_dataset_from_schx.py --oversample auto picks the rate when it renders (the cm ladder 1/2/3/4/6/8/16
-        # against a 32x reference, target 6e-3); the corner sweeps below probe at 2x, where the saturation onset does not move
-        text = _replace_line(text, "oversample", 'oversample = "auto"   # chosen at render time (cm: 1/2/3/4/6/8/16, truncation target 6e-3)')
+        # against a 32x reference, target 1e-3); the corner sweeps below probe at 2x, where the saturation onset does not move
+        text = _replace_line(text, "oversample", 'oversample = "auto"   # chosen at render time (cm: 1/2/3/4/6/8/16, truncation target 1e-3)')
     # else: leave the template's placeholder oversample + comment untouched -- ngspice
     # tuning is a different question (see ngspice/README.md), not this tool's job.
 

@@ -70,10 +70,14 @@ knob whose value is the position index.
 Same measurement as for `livespice`: renders a stratified sample of windows at each candidate rate and at a 32x
 reference, and chooses the lowest rate whose truncation ESR is under `--trunc-target`. For this backend the candidates
 are the factors the renderer's tuning measures, cheapest first, **1, 2, 3, 4, 6, 8, 16**, and the default target is
-**6e-3** (an ESR difference below about 0.006 is taken as inaudible; `livespice` keeps 1e-3). The fall per doubling is
-checked as before, whatever the step between two candidates. Typical picks on the T3K sweep: a pedal such as the TS-9
-1x, a combo amp 1-2x, a high-gain amp or the Metal Zone 2x. The retry ladder after a failed render still doubles
-from the chosen rate (a start of 1, 3 or 6 gives 1/2/4/8/16/32, 3/6/12/24/32 or 6/12/24/32).
+**1e-3**, the same as `livespice` (the backend used 6e-3, an audibility line, on 2026-10-08/09; the faster renderer makes the
+stricter target affordable). The fall per doubling is checked as before, whatever the step between two candidates. What the
+circuit files' quality tables (worst case over the typical-knob plan and the stress signal, tolerance 1e-4) allow at 1e-3 over
+the 121 files with a table: 1x for 13, 2x for 27, 3x for 31, 4x for 24, 6x for 19, 8x for 5 (at 6e-3 it was 1x 36, 2x 50,
+3x 28, 4x 5, 6x 1); the TS-9 stays at 1x, the Deluxe Reverb goes from 2x to 3x, the SVT Full from 2x to 4x, the JCM800
+preamp from 3x to 4x, the ENGL from 4x to 8x. Two files have no robust cell at 1e-3 (the Dumble, the EVH 5150), so their ladder
+starts at the top measured rate. The retry ladder after a failed render still doubles from the chosen rate (a start of 1, 3
+or 6 gives 1/2/4/8/16/32, 3/6/12/24/32 or 6/12/24/32).
 
 For this backend the probe uses at least 16 windows of 2 s (32 s in all): a calibrated excitation's error sits in its loud, swept
 passages, and 4 windows missed it (on a combo amp with its sized excitation the probe read 5e-4 at 1x from 4 windows and 1.5e-2 from 8 or more,
