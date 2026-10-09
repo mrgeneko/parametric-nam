@@ -491,15 +491,20 @@ def extract_backend(gen_args: "list[str]") -> "str | None":
         return None
 
 
-def version_check_command(worker_dir: str, backend: "str | None") -> str:
+def version_check_command(worker_dir: str, backend: "str | None", env: str = "") -> str:
     """One remote command, one ssh round trip: the worker's own commit SHA, then its own
     prepare_excitation.solver_identity() -- self-invoked on the worker rather than
     re-implemented here in shell, so this automatically stays in sync with that function's own
     logic and output format. Self-invocation is safe here (unlike fleet_inventory.py's own
     bootstrapping probes, which deliberately avoid it): a dispatch is about to send real render
     work to this exact checkout, so it is guaranteed to already exist as a working venv, not
-    something this check needs to discover the hard way."""
-    return (f"cd {worker_dir} && git rev-parse HEAD && "
+    something this check needs to discover the hard way.
+
+    `env` is the worker's own ENV field ("VAR=value"), exported first exactly as the render command does: without it the
+    probe cannot see a $CM_RUN / $DOTNET_ROOT that the worker only gets through that field, and reports the solver as
+    unidentified for a worker that would render correctly."""
+    pre = f"export {env} && " if env else ""
+    return (f"{pre}cd {worker_dir} && git rev-parse HEAD && "
            f"./.venv/bin/python3 -c \"from prepare_excitation import solver_identity; "
            f"print(solver_identity({(backend or 'cpp')!r}))\"")
 
@@ -532,10 +537,10 @@ def compare_versions(worker_sha, controller_sha, worker_solver, controller_solve
 
 
 def probe_worker_version(host: str, worker_dir: str, backend: "str | None",
-                         timeout: float = 20.0) -> "tuple[str | None, str | None]":
+                         timeout: float = 20.0, env: str = "") -> "tuple[str | None, str | None]":
     """The real ssh round trip. Never raises -- an unreachable/broken worker comes back as
     (None, None), which compare_versions() already treats as a refusal."""
-    cmd = version_check_command(worker_dir, backend)
+    cmd = version_check_command(worker_dir, backend, env)
     try:
         r = subprocess.run(ssh_target.ssh_argv(host, "-o", "BatchMode=yes", "-o",
                                                f"ConnectTimeout={int(timeout)}") + [cmd],
@@ -563,7 +568,7 @@ def verify_workers(workers: "list", backend: "str | None") -> "list":
         controller_solver = solver_identity(backend)      # import footprint light otherwise
     kept = []
     for w in workers:
-        wsha, wsolver = probe_worker_version(w.host, w.dir, backend)
+        wsha, wsolver = probe_worker_version(w.host, w.dir, backend, env=w.env)
         ok, reason = compare_versions(wsha, controller_sha, wsolver, controller_solver)
         if ok:
             log(f"{w.host}: version check OK -- {reason}")

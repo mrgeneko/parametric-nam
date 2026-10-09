@@ -1279,26 +1279,26 @@ class TestProbeWorkerVersion:
 class TestVerifyWorkers:
     class FakeWorker:
         def __init__(self, host, d):
-            self.host, self.dir = host, d
+            self.host, self.dir, self.env = host, d, ""
 
     def test_matching_workers_are_kept(self, monkeypatch):
         import prepare_excitation
         monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
-        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b: ("abc123def456", "livespice:x"))
+        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b, env="": ("abc123def456", "livespice:x"))
         monkeypatch.setattr(prepare_excitation, "solver_identity", lambda backend: "livespice:x")
         w = self.FakeWorker("h1", "/r")
         assert dp.verify_workers([w], "livespice") == [w]
 
     def test_mismatched_worker_is_excluded_not_fatal_here(self, monkeypatch):
         monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
-        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b: ("zzz999999999", None))
+        monkeypatch.setattr(dp, "probe_worker_version", lambda host, d, b, env="": ("zzz999999999", None))
         w = self.FakeWorker("h1", "/r")
         kept = dp.verify_workers([w], None)
         assert kept == []   # verify_workers only filters; main() decides whether that's fatal
 
     def test_mixed_fleet_keeps_only_the_matching_one(self, monkeypatch):
         monkeypatch.setattr(dp, "local_commit_sha", lambda: "abc123def456")
-        def fake_probe(host, d, b):
+        def fake_probe(host, d, b, env=""):
             return ("abc123def456", None) if host == "good" else ("zzz999999999", None)
         monkeypatch.setattr(dp, "probe_worker_version", fake_probe)
         good, bad = self.FakeWorker("good", "/r"), self.FakeWorker("bad", "/r")
@@ -1716,3 +1716,10 @@ oversample = 8
         monkeypatch.setattr("sys.argv", argv)
         with pytest.raises(SystemExit):
             dp.main()
+
+
+def test_version_check_exports_the_workers_env_first():
+    import distribute_pull as dp
+    cmd = dp.version_check_command("/r", "cm", "CM_RUN=/w/cm_run")
+    assert cmd.startswith("export CM_RUN=/w/cm_run && cd /r && ")
+    assert dp.version_check_command("/r", "cm").startswith("cd /r && ")
