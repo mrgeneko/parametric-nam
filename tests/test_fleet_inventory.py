@@ -150,6 +150,14 @@ class TestProbeBackends:
         run = FakeRun().when("livespice_cli", cp(0))   # would match if repo were used anyway
         assert "livespice" not in fi.probe_backends(run, "h", None)
 
+    def test_cm_from_login_path(self):
+        run = FakeRun().when("cm_run --build-info", cp(0, "libcm\n"))
+        assert "cm" in fi.probe_backends(run, "h", None)
+
+    def test_cm_that_fails_to_run_is_absent(self):
+        run = FakeRun().when("cm_run --build-info", cp(127, ""))
+        assert "cm" not in fi.probe_backends(run, "h", None)
+
     def test_ngspice_deck_from_path(self):
         run = FakeRun().when("command -v ngspice", cp(0, "/usr/bin/ngspice\n"))
         assert "ngspice-deck" in fi.probe_backends(run, "h", None)
