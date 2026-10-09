@@ -253,11 +253,15 @@ def _cm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
         cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
     except (OSError, ValueError):
         return 1
-    want_tables = CM_TABLES == "on"
-    ok = [c["oversample"] for c in cells
-          if c.get("robust") and abs(c.get("tol_rel", 0) - tol_rel) < 1e-12 and c.get("fir_half_length", 24) == 24
-          and bool(c.get("tables", False)) == want_tables and c.get("esr", 1e9) <= target]
-    return min(ok) if ok else 1
+    # cm_tune measures the tables axis only at the live preset's tolerance, so at this backend's tolerance the cells are usually the exact-equation
+    # ones; the tables move ESR by 1e-10..6e-6, nothing the floor can see, so any tables setting counts. Found on the Deluxe c12q: with the
+    # tables setting required, no cell matched, there was no floor and the probe picked 1x where the table reads 1.5e-2.
+    at_tol = [c for c in cells if abs(c.get("tol_rel", 0) - tol_rel) < 1e-12 and c.get("fir_half_length", 24) == 24]
+    if not at_tol:
+        return 1
+    if not any(c.get("robust") and c.get("esr", 1e9) <= target for c in at_tol):
+        return max(c["oversample"] for c in at_tol) if at_tol else 1   # nothing measured meets the target: start the ladder at the top measured rate
+    return min(c["oversample"] for c in at_tol if c.get("robust") and c.get("esr", 1e9) <= target)
 
 
 def check_oracle(backend: str) -> None:

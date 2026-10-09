@@ -1237,7 +1237,12 @@ def test_cm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "CM_TABLES", "on")
     assert g._cm_table_floor(str(schx), 6e-3) == 2
     assert g._cm_table_floor(str(schx), 1e-3) == 4
-    assert g._cm_table_floor(str(schx), 1e-6) == 1          # nothing qualifies: no floor
+    assert g._cm_table_floor(str(schx), 1e-6) == 4          # nothing measured meets the target: the ladder starts at the top measured rate
+    # the tables axis is measured only at the live tolerance: cells without tables still set the floor (the Deluxe c12q case)
+    cells2 = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 1.5e-2},
+              {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 2.3e-3}]
+    (tmp_path / "amp.cm.json").write_text(json.dumps({"quality": {"measured": {"cells": cells2}}}))
+    assert g._cm_table_floor(str(schx), 6e-3) == 2
     assert g._cm_table_floor(str(tmp_path / "none.schx"), 6e-3) == 1
 
 
