@@ -137,7 +137,7 @@ else
   for cand in "$REPO/../NeuralAmpModelerCore" "$REPO"/../*/NeuralAmpModelerCore; do
     [ -d "$cand" ] || continue
     if [ -x "$cand/build/tools/render_parametric" ]; then RP="$cand/build/tools/render_parametric"; break; fi
-    [ -z "$NAMCORE_SRC" ] && NAMCORE_SRC="$cand"
+    [ -z "${NAMCORE_SRC:-}" ] && NAMCORE_SRC="$cand"
   done
   if [ -n "$RP" ]; then
     echo "    already built: $RP"
