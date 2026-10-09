@@ -96,9 +96,17 @@ The backend runs `--cm-lead-in` seconds (default **6**) of silence through the c
 discards them, so the output stays sample-aligned with the input and starts settled. `0` starts cold
 like `livespice`. The renderer aligns the mains phase: it adds just enough silent lead-in that the first kept sample sees the
 circuit's declared mains phase, whichever way the render starts (this is why a render can start a fraction of
-a cycle "late"; the output stays aligned with the input). With that, the circuit file's "prepared state" and a
-lead-in are equivalent (ESR below 1e-8 on the test amp at 44.1 and 48 kHz); `--cm-lead-in` is kept because it
-needs nothing from the file.
+a cycle "late"; the output stays aligned with the input).
+
+**Prepared state (2026-10-09).** When the circuit file carries a prepared (settled) state the renderer accepts (its
+`cm_prepare` output for this netlist and measurement version), the render starts from it with a **0.5 s** lead-in
+instead of the 6 s. Measured on four sag/ac amps (Deluxe, JCM800 power amp, AC30, Twin; three knob settings each; 10 s of
+T3K at 4x) against a 20 s lead-in: the 6 s lead-in is within 4e-9 ESR, 2 s within 1.5e-4, the prepared state alone within
+4e-7 (the first second 1.4e-6), the prepared state plus 0.5 s within 3e-10 everywhere. Whether a file's state is valid is
+known only to the renderer, so the backend probes it once per circuit (a render of a few milliseconds of silence, reading
+`prepared_state_used` from the metrics) and falls back to the 6 s lead-in for files without one. The saving is 5.5 s of
+rendering per combination: 3 % with the 190 s T3K sweep, about 20 % with a 20 s excitation. `--cm-lead-in 0` still means
+a cold start.
 
 ## What is recorded
 

@@ -120,8 +120,13 @@ CM_RUN = _find_cm_run()
 # Seconds of silence --backend cm runs through the circuit before the input (cm_run --lead-in; discarded from the output, so
 # the render stays sample-aligned with the input). A cold start has a settling transient (supply sag, coupling caps): measured on
 # a sag/ac amp, ESR against the settled render 0.37 in the first second, 8e-3 in the second, 2e-7 from 2 s; amps with a slow
-# supply need longer. The file's prepared state also removes it but leaves a steady ~1e-5 offset, so it is not used.
+# supply need longer. When the circuit file has a valid prepared (settled) state the render starts from it with CM_LEAD_IN_PREPARED_S
+# instead: measured 2026-10-09 on four sag/ac amps against a 20 s lead-in, the 6 s lead-in is within 4e-9 ESR, the prepared state
+# plus 0.5 s within 3e-10 (the prepared state alone 4e-7, from the mains-phase alignment and the resampler history). Whether a
+# file's state is valid is known only to the renderer (the file's hash and measurement version), so it is probed once per circuit
+# (_cm_prepared_state_usable) rather than guessed from the file.
 CM_LEAD_IN_S = 6.0
+CM_LEAD_IN_PREPARED_S = 0.5
 CM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
 CM_TABLES = "on"   # cm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
 
@@ -152,10 +157,11 @@ def _cm_circuit_problem(schx: str) -> str:
 
 
 def _cm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, params: str, speaker: str = None,
-             metrics=None, progress: bool = True, lead_in: float = 0.0) -> list:
-    """The cm_run command line for one render (see _find_cm_run for the contract)."""
+             metrics=None, progress: bool = True, lead_in: float = 0.0, prepared: bool = False) -> list:
+    """The cm_run command line for one render (see _find_cm_run for the contract). prepared: start from the file's prepared state
+    (cm_run --prepared auto; it falls back to the DC point when the file has none, which is why the caller probes first)."""
     args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
-            "--prepared", "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", CM_TABLES,
+            "--prepared", "auto" if prepared else "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", CM_TABLES,
             "--resampler", "fir-linear", "--iterations", str(iterations or 256)]
     if metrics:
         args += ["--metrics", str(metrics)]
@@ -193,6 +199,36 @@ def renderer_identity(backend: str) -> dict:
     except Exception:
         pass
     return ident
+
+
+_cm_prepared_cache: dict = {}
+_cm_prepared_lock = threading.Lock()
+
+
+def _cm_prepared_state_usable(schx: str) -> bool:
+    """Does the renderer accept this circuit file's prepared state? Probed once per circuit (a render of a few milliseconds of silence
+    with --prepared auto, reading prepared_state_used from the metrics), cached for the run. False on any failure, which just means the
+    long lead-in is used."""
+    key = str(_cm_circuit_for(schx))
+    with _cm_prepared_lock:
+        if key in _cm_prepared_cache:
+            return _cm_prepared_cache[key]
+        ok = False
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                probe_in = Path(td) / "probe.wav"
+                import soundfile as sf
+                sf.write(str(probe_in), np.zeros(256, dtype=np.float32), 48000, subtype="FLOAT")
+                metrics = Path(td) / "probe.json"
+                r = subprocess.run(_cm_args(schx, probe_in, Path(td) / "probe_out.wav", 2, 64, "", metrics=metrics, progress=False, prepared=True),
+                                   capture_output=True, text=True, timeout=600)
+                if r.returncode == 0 and metrics.exists():
+                    ok = int(json.loads(metrics.read_text()).get("prepared_state_used", 0)) == 1
+        except Exception:
+            ok = False
+        _cm_prepared_cache[key] = ok
+        return ok
 
 
 def _cm_stats(metrics_path) -> dict:
@@ -1591,8 +1627,9 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             swept = fmt_params(params, param_map)
             all_params = f"{fixed_params},{swept}" if fixed_params else swept
             cm_metrics = out_wav.with_suffix(".cm_metrics.json")
+            prepared = CM_LEAD_IN_S > 0 and _cm_prepared_state_usable(schx)   # --cm-lead-in 0 means a cold start, as before
             args = _cm_args(schx, input_wav, out_wav, oversample, iterations, all_params, speaker,
-                            metrics=cm_metrics, lead_in=CM_LEAD_IN_S)
+                            metrics=cm_metrics, lead_in=CM_LEAD_IN_PREPARED_S if prepared else CM_LEAD_IN_S, prepared=prepared)
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 

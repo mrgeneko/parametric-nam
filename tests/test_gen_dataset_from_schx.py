@@ -1194,3 +1194,34 @@ def test_cm_sidecar_entry_overrides_the_json(tmp_path):
     refused, err = _cm_check(tmp_path, _cells(True),
                              sidecar='cm = { valid = false, reason = "hand-declared" }\n')
     assert refused and "hand-declared" in err
+
+
+# --- prepared-state start (docs/cm-backend.md, Start-up) -------------------------------------
+
+def _fake_cm_run(tmp_path, used):
+    """A cm_run stand-in that writes the output wav and a metrics file saying whether the prepared state was used."""
+    script = tmp_path / "cm_run"
+    script.write_text("#!/bin/sh\n" + 'out=""; m=""; while [ $# -gt 0 ]; do case "$1" in --metrics) m="$2"; shift;; esac; [ -z "$out" ] && [ "${1%.wav}" != "$1" ] && [ -n "$seen_in" ] && out="$1"; [ "${1%.wav}" != "$1" ] && seen_in=1; shift; done\n'
+                      + 'cp "$(dirname "$0")/probe_template.wav" "$out" 2>/dev/null || : ; [ -n "$m" ] && printf \'{"prepared_state_used": %d, "solves": 1}\' ' + str(used) + ' > "$m"\nexit 0\n')
+    script.chmod(0o755)
+    import soundfile as sf
+    sf.write(str(tmp_path / "probe_template.wav"), np.zeros(10, dtype="float32"), 48000, subtype="FLOAT")
+    return script
+
+
+def test_cm_args_prepared_switches_the_start(tmp_path):
+    a = g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "", prepared=True)
+    assert a[a.index("--prepared") + 1] == "auto"
+    assert g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "")[g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "").index("--prepared") + 1] == "off"
+
+
+def test_cm_prepared_state_probe_is_cached_per_circuit(tmp_path, monkeypatch):
+    for used, expect in ((1, True), (0, False)):
+        monkeypatch.setattr(g, "CM_RUN", _fake_cm_run(tmp_path / str(used), used) if (tmp_path / str(used)).mkdir() is None else None)
+        g._cm_prepared_cache.clear()
+        schx = str(tmp_path / ("amp%d.schx" % used))
+        assert g._cm_prepared_state_usable(schx) is expect
+        # cached: a renderer that now says the opposite is not consulted again
+        monkeypatch.setattr(g, "CM_RUN", _fake_cm_run(tmp_path / ("other%d" % used), 1 - used) if (tmp_path / ("other%d" % used)).mkdir() is None else None)
+        assert g._cm_prepared_state_usable(schx) is expect
+    g._cm_prepared_cache.clear()
