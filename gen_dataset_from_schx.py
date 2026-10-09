@@ -324,6 +324,8 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     # identical to someone who is not, and a device that genuinely cannot be rendered on the
     # chosen backend renders "successfully" into a wrong dataset.
     sidecar = schx.with_suffix(".backends.toml")
+    if backend == "cm":
+        return _check_backend_cm(schx, sidecar, ap)
     if not sidecar.exists():
         print(f"note: no {sidecar.name} beside this .schx -- nothing is checking whether "
               f"{backend!r} can faithfully render it. Write one (see a device repo's "
@@ -345,8 +347,71 @@ def check_backend(schx: Path, backend: str, ap) -> None:
 # Backends that may legitimately appear as a key. Not all are renderable by THIS script
 # (--backend is cpp/livespice/ngspice); ltspice/*-deck verdicts are recorded for the deck
 # tooling, so an unknown key is not by itself an error.
-_KNOWN_BACKENDS = ("livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
+_KNOWN_BACKENDS = ("cm", "livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
 _VERDICT_KEYS = ("valid", "reason")
+
+
+def _cm_verdict_from_json(schx: Path) -> dict | None:
+    """Derive a cm verdict from <stem>.cm.json (the measured quality table), or None if absent.
+
+    Unlike the other backends, libcm's validity IS derivable: cm_tune records per-cell robustness
+    (finite, no divergences, no severe unconverged steps). Valid if at least one measured cell is
+    robust; invalid if cells were measured and none is. A table whose source sha256 no longer
+    matches the .schx is reported as stale in the reason (still valid -- the engine imports the
+    .schx directly -- but the measured numbers no longer describe it).
+    """
+    import hashlib
+    import json
+    cj = schx.with_suffix(".cm.json")
+    if not cj.exists():
+        return None
+    try:
+        d = json.loads(cj.read_text())
+    except Exception as e:
+        return {"valid": "partial", "reason": f"{cj.name} failed to parse ({e}); no measured verdict."}
+    cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
+    stale = ""
+    sha = (d.get("source") or {}).get("sha256")
+    try:
+        if sha and sha != hashlib.sha256(schx.read_bytes()).hexdigest():
+            stale = f" {cj.name} is STALE (source sha256 differs from the .schx); re-run cm_tune."
+    except OSError:
+        pass
+    if not cells:
+        return {"valid": True, "reason": f"{cj.name} has no measured cells; imported directly.{stale}"}
+    robust = [c for c in cells if c.get("robust")]
+    if not robust:
+        return {"valid": False,
+                "reason": f"none of the {len(cells)} measured cells in {cj.name} is robust "
+                          f"(divergence/unconverged/non-finite at every setting).{stale}"}
+    return {"valid": True, "reason": f"{len(robust)}/{len(cells)} measured cells robust in {cj.name}.{stale}"}
+
+
+def _check_backend_cm(schx: Path, sidecar: Path, ap) -> None:
+    """cm verdict: an explicit `cm = {...}` in the sidecar wins; else derived from <stem>.cm.json;
+    else announced as unchecked (libcm imports the .schx directly, so absence is not a refusal)."""
+    specs = {}
+    if sidecar.exists():
+        try:
+            import tomllib
+            specs = tomllib.loads(sidecar.read_text())
+        except Exception as e:
+            print(f"note: {sidecar.name} failed to parse ({e}); ignoring it for the cm verdict.",
+                  file=sys.stderr)
+            specs = {}
+        else:
+            _lint_backend_sidecar(specs, sidecar.name)
+    if not specs.get("cm"):
+        derived = _cm_verdict_from_json(schx)
+        if derived is None:
+            print(f"note: no cm verdict for {schx.stem} (no `cm` entry in {sidecar.name}, no "
+                  f"{schx.stem}.cm.json) -- assumed valid.", file=sys.stderr)
+            return
+        specs = dict(specs, cm=derived)
+        sidecar_name = schx.with_suffix(".cm.json").name
+    else:
+        sidecar_name = sidecar.name
+    return _apply_backend_verdict(specs, "cm", schx.stem, sidecar_name, ap)
 
 
 def _lint_backend_sidecar(specs: dict, name: str) -> None:

@@ -1137,3 +1137,60 @@ def test_choose_oversample_cm_walks_the_ladder_and_stops_at_the_first_that_meets
                               probe_s=2.0, n_windows=1, backend="cm", workers=2)
     assert got == 3                       # 5e-3 <= 6e-3 < 2e-2: the first rate of 1, 2, 3 under the target
     assert 32 in rendered and 4 not in rendered and 6 not in rendered   # the reference, then nothing past the pick
+
+
+# --- cm verdict derived from <stem>.cm.json -------------------------------------------------
+
+def _cm_check(tmp_path, cm_json=None, sidecar=None, schx_bytes=b"x"):
+    import hashlib
+    schx = tmp_path / "dev.schx"
+    schx.write_bytes(schx_bytes)
+    if cm_json is not None:
+        cm_json.setdefault("source", {"sha256": hashlib.sha256(schx_bytes).hexdigest()})
+        (tmp_path / "dev.cm.json").write_text(json.dumps(cm_json))
+    if sidecar is not None:
+        (tmp_path / "dev.backends.toml").write_text(sidecar)
+    err = io.StringIO()
+    ap = argparse.ArgumentParser()
+    with contextlib.redirect_stderr(err):
+        try:
+            g.check_backend(schx, "cm", ap)
+            refused = False
+        except SystemExit:
+            refused = True
+    return refused, err.getvalue()
+
+
+def _cells(*robust):
+    return {"quality": {"measured": {"cells": [{"robust": r} for r in robust]}}}
+
+
+def test_cm_is_a_known_backend_key(tmp_path):
+    refused, err = _cm_check(tmp_path, sidecar='cm = { valid = true }\n')
+    assert not refused and "typo" not in err
+
+
+def test_cm_without_json_or_sidecar_is_assumed_valid_and_says_so(tmp_path):
+    refused, err = _cm_check(tmp_path)
+    assert not refused and "assumed valid" in err
+
+
+def test_cm_valid_when_some_measured_cell_is_robust(tmp_path):
+    refused, err = _cm_check(tmp_path, _cells(False, True))
+    assert not refused and "1/2 measured cells robust" in err
+
+
+def test_cm_refused_when_no_measured_cell_is_robust(tmp_path):
+    refused, err = _cm_check(tmp_path, _cells(False, False))
+    assert refused and "none of the 2 measured cells" in err
+
+
+def test_cm_stale_table_is_flagged(tmp_path):
+    refused, err = _cm_check(tmp_path, dict(_cells(True), source={"sha256": "0" * 64}))
+    assert not refused and "STALE" in err
+
+
+def test_cm_sidecar_entry_overrides_the_json(tmp_path):
+    refused, err = _cm_check(tmp_path, _cells(True),
+                             sidecar='cm = { valid = false, reason = "hand-declared" }\n')
+    assert refused and "hand-declared" in err
