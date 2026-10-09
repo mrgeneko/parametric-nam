@@ -133,7 +133,17 @@ filters, not a comparison with hardware, which has not been done. Either way, co
 backend by ESR on the same input, not by identity. Run in the renderer's oracle mode for LiveSPICE (`cm_run --oracle-livespice`, for equivalence checks only; the standalone `--resampler livespice` was removed) the renderer
 reproduces `livespice` to 1e-6 or better at the same oversample, which confirms that units, pot tapers, knob mapping and the default speaker agree.
 
+## Running on a fleet
+
+`distribute_pull.py` renders `--backend cm` chunks on workers the same way as any backend, with these conditions:
+
+* **`cm_run` on each worker.** A worker finds its own renderer: `$CM_RUN`, else `cm_run` on the PATH of the shell that runs the chunk (the controller's path means nothing there). Either put a `cm_run` where a non-interactive ssh command finds it, or give the worker `HOST:DIR:PARALLEL:CM_RUN=/path/to/cm_run`; the dispatch-time version check exports that field too. `fleet_inventory.py` lists `cm` for a host where `sh -lc "cm_run --build-info"` succeeds.
+* **The same libcm build everywhere.** The version check compares the worker's `cm_run --build-info` with the controller's and refuses a worker that differs. A source tree copied to a worker has no git, so write the commit beside the sources before building (`git rev-parse --short=12 HEAD > COMMIT`, plus `-dirty` if the tree was); otherwise the build reports `unknown` and the worker is refused.
+* **The excitation's recipe on each worker.** See "The transient check needs the excitation's recipe on every worker" in [`scripts.md`](scripts.md#distribute_pullpy--hand-rendering-chunks-out-as-workers-free-up): `--sync-file` the wav and its `.recipe.json`, or pass `-- --transient-peak V` / `-- --skip-transient-check`.
+
+Output does not depend on the worker: the same grid rendered on Apple silicon, an AMD Ryzen and two Intel cores agreed to ESR 1e-15 or better (TS-9 at oversample 2; Deluxe Full at oversample 4 with tables).
+
 ## Not covered
 
-* `measure_truncation.py` still drives `livespice`; use `--oversample auto` for this backend.
+* `measure_truncation.py` still drives `livespice` and stays until livespice is deprecated; use `--oversample auto` for this backend.
 * Hand-written decks (`ngspice-deck`, `ltspice-deck`) stay on their own backends.

@@ -120,5 +120,3 @@ release archive), their own license terms apply to that distribution.
 - **livespice-cli** (<https://github.com/mrgeneko/livespice-cli>, MIT) and the LiveSPICE it builds against (the fork
   `mrgeneko/LiveSPICE`, which keeps LiveSPICE's MIT license and copyright notice in its `LICENSE`): a separate repository, built by
   `setup.sh` into a sibling directory.
-- **Xyce**: `patches/xyce-superbuild-fixes.patch` is a patch for Xyce's build script, whose context lines come from Xyce (a separate
-  project under its own licence). It is not part of the toolchain.

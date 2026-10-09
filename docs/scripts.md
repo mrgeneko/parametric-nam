@@ -695,6 +695,17 @@ Four things that are easy to get wrong:
   missing an input fails or quarantines every chunk it touches. A missing local path is a usage
   error before any ssh; no worker able to receive everything is also an error. Replaces
   `distribute_gen.sh --sync-file`; `gate_config.py`'s excitation-wav sync uses the same code.
+- **The transient check needs the excitation's recipe on every worker.** Each chunk is an ordinary
+  `gen_dataset_from_schx.py` run, and that run refuses to start unless it knows the excitation's
+  transient peak (the `--sweep-peak` that `build_excitation.py` used): it reads it from
+  `<input>.recipe.json` beside the input wav, or from `--transient-peak`. With neither, every
+  chunk exits 1 with `Transient check: SKIPPED -- no --transient-peak given and no <name>.recipe.json
+  sidecar found`, and after three such failures the worker is quarantined. The input wav is
+  normally gitignored, so `--sync-file` it, **and `--sync-file` its `.recipe.json` too**; the two
+  must land next to each other. When the input has no recipe (a clip cut for a test, say), pass
+  `-- --transient-peak V` after the separator, or `-- --skip-transient-check` to render
+  unchecked. This is the same for every backend, `cm` included. A skipped check is not a
+  verified one: use it for tests, not for a dataset you will train on.
 - **`--collect HOST:DIR` — collect where the dataset will be trained.** A plain `--collect DIR`
   lands everything on this controller; if training happens elsewhere the dataset then crosses
   the network a second time (a 19 GB dataset did exactly that). With `HOST:DIR` the merge and
