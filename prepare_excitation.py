@@ -478,10 +478,10 @@ def _setup(args):
             fixed = _parse_fixed(args.fixed_params)
         if not knob_ranges:
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
-        if is_cm:   # the .cm.json beside the schematic is part of what is measured
+        if is_cm:   # the .acmod beside the schematic is part of what is measured
             oversample = 2 if str(oversample).lower() == "auto" else int(oversample)   # a config says "auto": the onset does not move with the rate, probe at 2x
             backend = CmBackend(schx, oversample=oversample, iterations=args.iterations)
-            identity = Path(schx).read_bytes() + Path(schx).with_suffix(".cm.json").read_bytes()
+            identity = Path(schx).read_bytes() + Path(schx).with_suffix(".acmod").read_bytes()
             cache_extra = (f"backend=cm|os={oversample}|it={args.iterations}|maxv={args.peak_max_v}"
                            f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
                            f"|solver={solver_identity('cm')}") + cache_tag(_capture)

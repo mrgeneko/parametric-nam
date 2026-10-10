@@ -509,11 +509,11 @@ def check_coverage_cm(schx: str, knob_ranges: dict, fixed: dict, oversample: int
                       min_start_v: float = 1e-9, start_v: float = 0.005,
                       corner_workers: int = 1, shard: str = None, emit_onsets: str = None) -> "dict | None":
     """[--backend cm] The same check as check_coverage(), with the onsets measured by the cm_run-compatible
-    renderer (the .cm.json beside the .schx) instead of livespice-cli: the saturation onset is then the one
+    renderer (the .acmod beside the .schx) instead of livespice-cli: the saturation onset is then the one
     of the solver the dataset is rendered with, and the probes cost a fraction of livespice's."""
     from render_backends import _find_cm_run_exe
     backend = CmBackend(schx, oversample=oversample, iterations=iterations)
-    identity = Path(schx).read_bytes() + Path(schx).with_suffix(".cm.json").read_bytes()
+    identity = Path(schx).read_bytes() + Path(schx).with_suffix(".acmod").read_bytes()
     cache_extra = (f"backend=cm|os={oversample}|it={iterations}|maxv={peak_max_v}|minv={min_start_v}"
                    f"|startv={start_v}|solver=cm:{Path(_find_cm_run_exe()).name}") + cache_tag(capture)
     return _check_corners(backend, identity, cache_extra, knob_ranges, fixed, transient_peak,

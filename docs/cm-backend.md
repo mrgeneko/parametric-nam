@@ -2,20 +2,20 @@
 
 # `--backend cm`: a `cm_run`-compatible renderer
 
-An offline, fixed-timestep renderer for `.schx` circuits that have been converted to a `.cm.json`
+An offline, fixed-timestep renderer for `.schx` circuits that have been converted to a `.acmod`
 circuit file. It sits next to `livespice` (same schematic, same knob names, same default speaker) and
 differs in two ways that matter for dataset generation: it is several times faster on tube amps, and
 it uses a **physical** numerics profile instead of LiveSPICE's.
 
 > **Availability.** The renderer this backend drives is not yet publicly released, so `--backend cm` is only usable where
-> a `cm_run`-compatible executable and the matching `.cm.json` circuit files are available. Every other backend is
+> a `cm_run`-compatible executable and the matching `.acmod` circuit files are available. Every other backend is
 > unaffected, and the tests use stub renderers.
 
 ## Setup
 
 * The renderer is any executable that follows the contract below. Point `--cm-run PATH` or `$CM_RUN`
   at it (default: `cm_run` on `PATH`).
-* The circuit is `<stem>.cm.json` **beside the `.schx`**. It records the SHA-256 of the schematic it
+* The circuit is `<stem>.acmod` **beside the `.schx`**. It records the SHA-256 of the schematic it
   was converted from; the backend refuses a file that does not match, at start-up, before any render.
   Convert the schematic again if you edit it.
 * The transient/saturation coverage gate runs for this backend too, with the saturation onsets measured
@@ -39,7 +39,7 @@ agree with livespice's to the sweep's resolution). Config keys: `cm_run`, `cm_le
 ## The renderer contract
 
 ```
-cm_run CIRCUIT.cm.json in.wav out.wav --prepared off --os N --tol-rel 1e-4 --tables off
+cm_run CIRCUIT.acmod in.wav out.wav --prepared off --os N --tol-rel 1e-4 --tables off
        --resampler fir-linear --iterations N [--knob Name=V ...] [--output NAME]
        [--lead-in SECONDS] [--metrics FILE.json] [--progress]
 ```

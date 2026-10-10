@@ -139,9 +139,9 @@ def _build_backend(args):
         knobs = [k.strip() for k in args.knobs.split(",") if k.strip()]
         control_map = parse_schx_controls(args.schx)
         resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
-        if args.backend == "cm":   # the .cm.json beside the schematic is part of what is probed
+        if args.backend == "cm":   # the .acmod beside the schematic is part of what is probed
             backend = CmBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
-            identity = Path(args.schx).read_bytes() + Path(args.schx).with_suffix(".cm.json").read_bytes()
+            identity = Path(args.schx).read_bytes() + Path(args.schx).with_suffix(".acmod").read_bytes()
             cache_extra = (f"backend=cm|os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
                            f"|solver={solver_identity('cm')}") + cache_tag(_capture)
         else:

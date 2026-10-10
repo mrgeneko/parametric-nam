@@ -88,7 +88,7 @@ def main():
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
     schx = Path(cfg["schx"]).expanduser()
-    circuit = str(schx.with_suffix(".cm.json"))
+    circuit = str(schx.with_suffix(".acmod"))
     in_wav = str(args.input or cfg["input"])
     oversample = cfg.get("oversample", 8)
     fixed = cfg.get("fixed", {})

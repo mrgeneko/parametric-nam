@@ -312,7 +312,7 @@ just `preflight.py`/`prepare_excitation.py`), and **`ltspice-deck`** (for circui
 can't converge on, or where LTspice's answer is the stable one). Full comparison, when to
 reach for each, and the real measured tradeoffs are in [`docs/backends.md`](docs/backends.md).
 A fifth, **`cm`**, renders the same `.schx` circuits through a `cm_run`-compatible fixed-timestep
-renderer (several times faster on tube amps, physical numerics, `.cm.json` beside the schematic):
+renderer (several times faster on tube amps, physical numerics, `.acmod` beside the schematic):
 [`docs/cm-backend.md`](docs/cm-backend.md) (the renderer is not yet publicly released).
 
 ---

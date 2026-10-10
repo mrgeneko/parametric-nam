@@ -1006,7 +1006,7 @@ def test_cm_circuit_problem_detects_missing_and_stale(tmp_path):
     schx = tmp_path / "amp.schx"
     schx.write_text("<Schematic/>")
     assert "not found" in g._cm_circuit_problem(str(schx))
-    cm = tmp_path / "amp.cm.json"
+    cm = tmp_path / "amp.acmod"
     cm.write_text(json.dumps({"source": {"sha256": "0" * 64}}))
     assert "STALE" in g._cm_circuit_problem(str(schx))
     cm.write_text(json.dumps({"source": {"sha256": hashlib.sha256(schx.read_bytes()).hexdigest()}}))
@@ -1046,7 +1046,7 @@ def test_cm_render_once_reports_divergence_as_newton_failure(tmp_path, monkeypat
 def test_cm_args_carry_knobs_speaker_lead_in_and_metrics(tmp_path):
     a = g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "Gain=0.5,Mid Range=0.25", "Cab 1",
                    metrics=tmp_path / "m.json", lead_in=6.0)
-    assert a[1] == "amp.cm.json" and a[2:4] == ["in.wav", "out.wav"]
+    assert a[1] == "amp.acmod" and a[2:4] == ["in.wav", "out.wav"]
     assert a[a.index("--os") + 1] == "4" and a[a.index("--iterations") + 1] == "256"
     knobs = [a[i + 1] for i, x in enumerate(a) if x == "--knob"]
     assert knobs == ["Gain=0.5", "Mid Range=0.25"]
@@ -1083,7 +1083,7 @@ def test_cm_probe_backend_builds_the_cm_run_command(tmp_path, monkeypatch):
     b = rb.CmBackend(str(tmp_path / "amp.schx"), oversample=4, lead_in=2.0)
     y = b._render_one({"Gain": 0.5, "Mid Range": 0.25}, "in.wav", str(tmp_path), "t0")
     a = calls[0]
-    assert y is not None and a[0] == "/x/cm_run" and a[1].endswith("amp.cm.json") and a[2] == "in.wav"
+    assert y is not None and a[0] == "/x/cm_run" and a[1].endswith("amp.acmod") and a[2] == "in.wav"
     assert a[a.index("--os") + 1] == "4" and a[a.index("--lead-in") + 1] == "2"
     assert [a[i + 1] for i, x in enumerate(a) if x == "--knob"] == ["Gain=0.5", "Mid Range=0.25"]
 
@@ -1139,7 +1139,7 @@ def test_choose_oversample_cm_walks_the_ladder_and_stops_at_the_first_that_meets
     assert 32 in rendered and 4 not in rendered and 6 not in rendered   # the reference, then nothing past the pick
 
 
-# --- cm verdict derived from <stem>.cm.json -------------------------------------------------
+# --- cm verdict derived from <stem>.acmod -------------------------------------------------
 
 def _cm_check(tmp_path, cm_json=None, sidecar=None, schx_bytes=b"x"):
     import hashlib
@@ -1147,7 +1147,7 @@ def _cm_check(tmp_path, cm_json=None, sidecar=None, schx_bytes=b"x"):
     schx.write_bytes(schx_bytes)
     if cm_json is not None:
         cm_json.setdefault("source", {"sha256": hashlib.sha256(schx_bytes).hexdigest()})
-        (tmp_path / "dev.cm.json").write_text(json.dumps(cm_json))
+        (tmp_path / "dev.acmod").write_text(json.dumps(cm_json))
     if sidecar is not None:
         (tmp_path / "dev.backends.toml").write_text(sidecar)
     err = io.StringIO()
@@ -1233,7 +1233,7 @@ def test_cm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
              {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 3.0e-3},
              {"oversample": 4, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 2.4e-4},
              {"oversample": 1, "tol_rel": 1e-2, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1e-9}]   # the wrong tolerance: ignored
-    (tmp_path / "amp.cm.json").write_text(json.dumps({"quality": {"measured": {"cells": cells}}}))
+    (tmp_path / "amp.acmod").write_text(json.dumps({"quality": {"measured": {"cells": cells}}}))
     monkeypatch.setattr(g, "CM_TABLES", "on")
     assert g._cm_table_floor(str(schx), 6e-3) == 2
     assert g._cm_table_floor(str(schx), 1e-3) == 4
@@ -1241,7 +1241,7 @@ def test_cm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
     # the tables axis is measured only at the live tolerance: cells without tables still set the floor (the Deluxe c12q case)
     cells2 = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 1.5e-2},
               {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 2.3e-3}]
-    (tmp_path / "amp.cm.json").write_text(json.dumps({"quality": {"measured": {"cells": cells2}}}))
+    (tmp_path / "amp.acmod").write_text(json.dumps({"quality": {"measured": {"cells": cells2}}}))
     assert g._cm_table_floor(str(schx), 6e-3) == 2
     assert g._cm_table_floor(str(tmp_path / "none.schx"), 6e-3) == 1
 

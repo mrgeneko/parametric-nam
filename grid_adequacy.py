@@ -344,9 +344,9 @@ class Renderer:
             try:
                 h = hashlib.sha256()
                 h.update(Path(self.schx).read_bytes())
-                if backend == "cm":   # the .cm.json beside the schematic and the renderer's own revision are part of what is measured
+                if backend == "cm":   # the .acmod beside the schematic and the renderer's own revision are part of what is measured
                     from render_backends import cm_solver_identity
-                    h.update(Path(self.schx).with_suffix(".cm.json").read_bytes())
+                    h.update(Path(self.schx).with_suffix(".acmod").read_bytes())
                     h.update(cm_solver_identity().encode())
                 h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|{_cc_cache_tag(self.capture)}"
                         f"{conv_cache_tag(self.conv)}|".encode())

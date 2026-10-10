@@ -104,7 +104,7 @@ LIVESPICE_CLI = _find_livespice_cli()
 def _find_cm_run() -> Path:
     """The `cm_run`-compatible renderer for --backend cm: $CM_RUN, else `cm_run` on PATH.
 
-    The contract (flags and outputs this tool relies on) is: `cm_run CIRCUIT.cm.json in.wav out.wav
+    The contract (flags and outputs this tool relies on) is: `cm_run CIRCUIT.acmod in.wav out.wav
     --prepared off --os N --tol-rel X --tables off --resampler fir-linear --iterations N
     --knob Name=V... [--output NAME] --metrics FILE.json --progress`; it writes a float32 mono wav, prints
     `PROGRESS done/total` lines on stderr and writes a metrics JSON with solves, unconverged, severe,
@@ -132,12 +132,12 @@ CM_TABLES = "on"   # cm_run --tables: tabulated tube characteristics (1.12-1.20x
 
 
 def _cm_circuit_for(schx: str) -> Path:
-    """The circuit file --backend cm renders: the schematic's own stem with .cm.json."""
-    return Path(schx).with_suffix(".cm.json")
+    """The circuit file --backend cm renders: the schematic's own stem with .acmod."""
+    return Path(schx).with_suffix(".acmod")
 
 
 def _cm_circuit_problem(schx: str) -> str:
-    """"" if the .cm.json next to this schematic was converted from exactly this schematic, else why not.
+    """"" if the .acmod next to this schematic was converted from exactly this schematic, else why not.
 
     A stale circuit file would render the OLD circuit and say nothing: it records the schematic's SHA-256
     and that is compared here, at startup, before any render."""
@@ -412,7 +412,7 @@ _VERDICT_KEYS = ("valid", "reason")
 
 
 def _cm_verdict_from_json(schx: Path) -> dict | None:
-    """Derive a cm verdict from <stem>.cm.json (the measured quality table), or None if absent.
+    """Derive a cm verdict from <stem>.acmod (the measured quality table), or None if absent.
 
     Unlike the other backends, libcm's validity IS derivable: cm_tune records per-cell robustness
     (finite, no divergences, no severe unconverged steps). Valid if at least one measured cell is
@@ -422,7 +422,7 @@ def _cm_verdict_from_json(schx: Path) -> dict | None:
     """
     import hashlib
     import json
-    cj = schx.with_suffix(".cm.json")
+    cj = schx.with_suffix(".acmod")
     if not cj.exists():
         return None
     try:
@@ -448,7 +448,7 @@ def _cm_verdict_from_json(schx: Path) -> dict | None:
 
 
 def _check_backend_cm(schx: Path, sidecar: Path, ap) -> None:
-    """cm verdict: an explicit `cm = {...}` in the sidecar wins; else derived from <stem>.cm.json;
+    """cm verdict: an explicit `cm = {...}` in the sidecar wins; else derived from <stem>.acmod;
     else announced as unchecked (libcm imports the .schx directly, so absence is not a refusal)."""
     specs = {}
     if sidecar.exists():
@@ -465,10 +465,10 @@ def _check_backend_cm(schx: Path, sidecar: Path, ap) -> None:
         derived = _cm_verdict_from_json(schx)
         if derived is None:
             print(f"note: no cm verdict for {schx.stem} (no `cm` entry in {sidecar.name}, no "
-                  f"{schx.stem}.cm.json) -- assumed valid.", file=sys.stderr)
+                  f"{schx.stem}.acmod) -- assumed valid.", file=sys.stderr)
             return
         specs = dict(specs, cm=derived)
-        sidecar_name = schx.with_suffix(".cm.json").name
+        sidecar_name = schx.with_suffix(".acmod").name
     else:
         sidecar_name = sidecar.name
     return _apply_backend_verdict(specs, "cm", schx.stem, sidecar_name, ap)

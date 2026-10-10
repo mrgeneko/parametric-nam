@@ -190,14 +190,14 @@ CM_UNCONVERGED_WARN_FRACTION = 1e-5
 
 
 class CmBackend:
-    """Renders via a cm_run-compatible executable (one subprocess per render) from the .cm.json beside the .schx.
+    """Renders via a cm_run-compatible executable (one subprocess per render) from the .acmod beside the .schx.
 
     The coverage probes of --backend cm run through this, so the saturation onsets are measured with the
     renderer the dataset will use. A short silent lead-in (cm_run --lead-in, discarded from the output) lets
     the supply settle before the probe tone, as a cold start would otherwise ring into the first cycles."""
 
     def __init__(self, schx, oversample=2, iterations=256, workers=None, lead_in=2.0):
-        self.circuit = str(Path(schx).with_suffix(".cm.json"))
+        self.circuit = str(Path(schx).with_suffix(".acmod"))
         self.oversample = oversample
         self.iterations = iterations
         self.workers = workers

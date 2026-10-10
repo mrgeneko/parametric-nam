@@ -628,7 +628,7 @@ def build_release(args, fh, timings=None, repeats=None):
     if args.schx and args.schx.exists():
         shutil.copy2(args.schx, release_dir / args.schx.name)
         log(f"  + {args.schx.name}", fh)
-        cmj = args.schx.with_suffix(".cm.json")
+        cmj = args.schx.with_suffix(".acmod")
         if args.backend == "cm" and cmj.exists():   # the circuit file the cm backend renders; without it the bundle cannot be reproduced
             shutil.copy2(cmj, release_dir / cmj.name)
             log(f"  + {cmj.name}", fh)
@@ -719,7 +719,7 @@ def build_release(args, fh, timings=None, repeats=None):
         if _rj.get("name") and _rj.get("name") != "cpp":
             renderer_line = f"\n- Renderer: {_rj.get('name')} {_rj.get('version')} (profile {_rj.get('profile') or 'n/a'})"
             if _rj.get("name") == "cm":
-                renderer_line += f", circuit file `{args.schx.with_suffix('.cm.json').name}`"
+                renderer_line += f", circuit file `{args.schx.with_suffix('.acmod').name}`"
             _o = _rj.get("esr_vs_oracle")
             if _o:
                 _cab = (f", after a {_o['cabinet_hz']:g} Hz cabinet low-pass {_o['esr_cabinet_median']:.2e}"
