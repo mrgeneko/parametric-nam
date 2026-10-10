@@ -73,7 +73,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, _linear_region_top,  # noqa: E402
                                    findpeak_cache_key, cache_findpeak, scratch_dir)
-from render_backends import (CmBackend, LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+from render_backends import (AcmBackend, LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 from knob_classify import classify as _classify_by_name  # noqa: E402
 from prepare_excitation import solver_identity  # noqa: E402
@@ -133,17 +133,17 @@ def spikes(y):
 
 def _build_backend(args):
     _capture = _cc_resolve(args)
-    if args.backend in ("livespice", "cm"):
+    if args.backend in ("livespice", "acm"):
         if not args.schx:
             sys.exit(f"--backend {args.backend} needs --schx")
         knobs = [k.strip() for k in args.knobs.split(",") if k.strip()]
         control_map = parse_schx_controls(args.schx)
         resolve_knobs(knobs, control_map)  # hard-fails on a typo'd knob name
-        if args.backend == "cm":   # the .acmod beside the schematic is part of what is probed
-            backend = CmBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
+        if args.backend == "acm":   # the .acmod beside the schematic is part of what is probed
+            backend = AcmBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
             identity = Path(args.schx).read_bytes() + Path(args.schx).with_suffix(".acmod").read_bytes()
-            cache_extra = (f"backend=cm|os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
-                           f"|solver={solver_identity('cm')}") + cache_tag(_capture)
+            cache_extra = (f"backend=acm|os={args.oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+                           f"|solver={solver_identity('acm')}") + cache_tag(_capture)
         else:
             backend = LiveSpiceBackend(args.schx, oversample=args.oversample, iterations=args.iterations)
             identity = Path(args.schx).read_bytes()
@@ -216,7 +216,7 @@ def resolve_lead_silence(backend, requested):
     0 and only uses a lead-in when asked (an AC-front-end amp needs >= 6 s), the other backends never do."""
     if backend == "ngspice-deck":
         return 3.0 if requested is None else requested
-    if backend in ("livespice", "cm"):
+    if backend in ("livespice", "acm"):
         return requested or 0.0
     return 0.0
 
@@ -224,7 +224,7 @@ def resolve_lead_silence(backend, requested):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", required=True,
-                    choices=["livespice", "cm", "ngspice", "ngspice-deck", "ltspice-deck"])
+                    choices=["livespice", "acm", "ngspice", "ngspice-deck", "ltspice-deck"])
 
     # livespice-only
     ap.add_argument("--schx", help="[livespice] path to .schx file")
@@ -305,7 +305,7 @@ def main():
     ap.add_argument("--no-cache", action="store_true",
                      help="ignore (and overwrite) any cached --find-peak saturation sweep")
     args = ap.parse_args()
-    if args.backend == "cm" and not any(a == "--oversample" or a.startswith("--oversample=") for a in sys.argv[1:]):
+    if args.backend == "acm" and not any(a == "--oversample" or a.startswith("--oversample=") for a in sys.argv[1:]):
         args.oversample = 2   # the probes' saturation behaviour does not move with the rate; livespice's default of 8 would only cost time
 
     knob_kind_override = {}
@@ -523,7 +523,7 @@ def main():
 
     # ---- input-level calibration ----
     print("\n  input calibration:")
-    if args.backend in ("livespice", "cm"):
+    if args.backend in ("livespice", "acm"):
         v0 = _schx_input_v0dbfs(args.schx)
         if args.input_level_dbu is not None:
             exported_ild = float(args.input_level_dbu)

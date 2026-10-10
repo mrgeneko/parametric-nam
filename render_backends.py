@@ -166,34 +166,34 @@ class LiveSpiceBackend:
         return out
 
 
-def _find_cm_run_exe():
-    """$CM_RUN, else `cm_run` on PATH (the same lookup gen_dataset_from_schx.py's --backend cm uses)."""
-    env = os.environ.get("CM_RUN")
+def _find_acm_run_exe():
+    """$ACM_RUN, else `acm_run` on PATH (the same lookup gen_dataset_from_schx.py's --backend acm uses)."""
+    env = os.environ.get("ACM_RUN")
     if env:
         return env
-    return shutil.which("cm_run") or "cm_run"
+    return shutil.which("acm_run") or "acm_run"
 
 
-def cm_solver_identity() -> str:
-    """A fingerprint of the cm renderer (`cm_run --build-info`), for onset caches and shard merges; "cm:unidentified" when it cannot be read."""
+def acm_solver_identity() -> str:
+    """A fingerprint of the acm renderer (`acm_run --build-info`), for onset caches and shard merges; "acm:unidentified" when it cannot be read."""
     try:
-        r = subprocess.run([_find_cm_run_exe(), "--build-info"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([_find_acm_run_exe(), "--build-info"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
-            return "cm:" + r.stdout.strip().splitlines()[0]
+            return "acm:" + r.stdout.strip().splitlines()[0]
     except (OSError, subprocess.SubprocessError):
         pass
-    return "cm:unidentified"
+    return "acm:unidentified"
 
 
-# Same threshold as gen_dataset_from_schx.CM_NEWTON_MAX_FRACTION; probes only warn, the dataset path fails.
-CM_UNCONVERGED_WARN_FRACTION = 1e-5
+# Same threshold as gen_dataset_from_schx.ACM_NEWTON_MAX_FRACTION; probes only warn, the dataset path fails.
+ACM_UNCONVERGED_WARN_FRACTION = 1e-5
 
 
-class CmBackend:
-    """Renders via a cm_run-compatible executable (one subprocess per render) from the .acmod beside the .schx.
+class AcmBackend:
+    """Renders via an acm_run-compatible executable (one subprocess per render) from the .acmod beside the .schx.
 
-    The coverage probes of --backend cm run through this, so the saturation onsets are measured with the
-    renderer the dataset will use. A short silent lead-in (cm_run --lead-in, discarded from the output) lets
+    The coverage probes of --backend acm run through this, so the saturation onsets are measured with the
+    renderer the dataset will use. A short silent lead-in (acm_run --lead-in, discarded from the output) lets
     the supply settle before the probe tone, as a cold start would otherwise ring into the first cycles."""
 
     def __init__(self, schx, oversample=2, iterations=256, workers=None, lead_in=2.0):
@@ -207,7 +207,7 @@ class CmBackend:
 
     def _render_one(self, params, in_wav, scratch, tag):
         out = f"{scratch}/pf_{tag}.wav"
-        args = [_find_cm_run_exe(), self.circuit, in_wav, out, "--prepared", "off", "--os", str(self.oversample),
+        args = [_find_acm_run_exe(), self.circuit, in_wav, out, "--prepared", "off", "--os", str(self.oversample),
                 "--tol-rel", "1e-4", "--tables", "on", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
         if self.lead_in > 0:
             args += ["--lead-in", f"{self.lead_in:g}"]
@@ -217,7 +217,7 @@ class CmBackend:
             args += ["--knob", f"{k}={v}"]
         r = subprocess.run(args, capture_output=True, text=True)
         tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
-        detail = f"  [cm_run: {tail[:200]}]" if tail else ""
+        detail = f"  [acm_run: {tail[:200]}]" if tail else ""
         if r.returncode != 0:
             sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}{detail}\n")
             return None
@@ -234,9 +234,9 @@ class CmBackend:
             elif m.get("dc_converged", 1) == 0:
                 bad = "DC operating point did not converge"
             if bad:
-                sys.stderr.write(f"[{tag}] cm_run render is not trustworthy: {bad}{detail}\n")
+                sys.stderr.write(f"[{tag}] acm_run render is not trustworthy: {bad}{detail}\n")
                 return None
-            if solves and m.get("unconverged", 0) / solves > CM_UNCONVERGED_WARN_FRACTION:
+            if solves and m.get("unconverged", 0) / solves > ACM_UNCONVERGED_WARN_FRACTION:
                 sys.stderr.write(f"[{tag}] WARNING: {m['unconverged']}/{solves} Newton solves unconverged "
                                  f"({100.0 * m['unconverged'] / solves:.4f}%)\n")
         try:

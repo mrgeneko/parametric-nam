@@ -467,7 +467,7 @@ def main() -> None:
     ap.add_argument("--output", type=Path, default=None,
                     help="config.toml path to write (default: <schx stem>.config.toml, or "
                          "<module>.config.toml for ngspice-deck, in the current directory)")
-    ap.add_argument("--backend", choices=["livespice", "cm", "ngspice", "ngspice-deck"], default="livespice",
+    ap.add_argument("--backend", choices=["livespice", "acm", "ngspice", "ngspice-deck"], default="livespice",
                     help="oversample auto-measurement only runs for livespice -- ngspice's "
                          "adaptive timestepping isn't tuned the same way (see "
                          "ngspice/README.md), and ngspice-deck has no supersample+decimate "
@@ -621,10 +621,10 @@ def main() -> None:
         if oversample is None:
             oversample, comment = 8, "COULD NOT MEASURE (see warning above) -- placeholder"
         text = _replace_line(text, "oversample", f"oversample = {oversample}   # {comment}")
-    elif args.backend == "cm":
-        # no measurement here: gen_dataset_from_schx.py --oversample auto picks the rate when it renders (the cm ladder 1/2/3/4/6/8/16
+    elif args.backend == "acm":
+        # no measurement here: gen_dataset_from_schx.py --oversample auto picks the rate when it renders (the acm ladder 1/2/3/4/6/8/16
         # against a 32x reference, target 1e-3); the corner sweeps below probe at 2x, where the saturation onset does not move
-        text = _replace_line(text, "oversample", 'oversample = "auto"   # chosen at render time (cm: 1/2/3/4/6/8/16, truncation target 1e-3)')
+        text = _replace_line(text, "oversample", 'oversample = "auto"   # chosen at render time (acm: 1/2/3/4/6/8/16, truncation target 1e-3)')
     # else: leave the template's placeholder oversample + comment untouched -- ngspice
     # tuning is a different question (see ngspice/README.md), not this tool's job.
 
@@ -662,7 +662,7 @@ def main() -> None:
     print(f"\n  wrote {output}  ([knobs] is a role-aware placeholder -- {axes} points/axis, "
           f"{tot} combinations)")
 
-    _excitation_backends = ("livespice", "cm", "ngspice-deck")
+    _excitation_backends = ("livespice", "acm", "ngspice-deck")
     if args.backend in _excitation_backends and not args.skip_prepare_excitation and not Path(args.input).exists():
         print(f"  WARNING: --input {args.input} not found -- skipping the calibrated-excitation "
               f"build, leaving `input` pointed at the raw path as given.")
@@ -689,7 +689,7 @@ def main() -> None:
                 _onset_args += ["--oversample", str(args.onset_oversample)]
             ok = _prepare_excitation(output, Path(args.input), excitation_wav,
                                      args.sweep_dur_cap, n_knobs=len(names), workers=args.workers,
-                                     backend=("cm" if args.backend == "cm" else "livespice"),
+                                     backend=("acm" if args.backend == "acm" else "livespice"),
                                      extra_args=_onset_args)
         if ok and excitation_wav.exists():
             # prepare_excitation.py already pointed `input` here, and its line carries the

@@ -1,4 +1,4 @@
-"""CmBackend._render_one must not return audio from a render cm_run itself flagged as untrustworthy."""
+"""AcmBackend._render_one must not return audio from a render acm_run itself flagged as untrustworthy."""
 import json
 import stat
 import sys
@@ -30,10 +30,10 @@ sys.exit(m.pop("rc", 0))
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch):
-    exe = tmp_path / "cm_run"
+    exe = tmp_path / "acm_run"
     exe.write_text(FAKE.replace("{py}", sys.executable, 1))
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("CM_RUN", str(exe))
+    monkeypatch.setenv("ACM_RUN", str(exe))
 
     def configure(**kw):
         Path(str(exe) + ".cfg").write_text(json.dumps(kw))
@@ -43,7 +43,7 @@ def fake(tmp_path, monkeypatch):
 
 
 def _render(tmp_path):
-    be = render_backends.CmBackend(tmp_path / "amp.schx")
+    be = render_backends.AcmBackend(tmp_path / "amp.schx")
     return be._render_one({"Gain": 0.5}, str(tmp_path / "in.wav"), str(tmp_path), "t")
 
 

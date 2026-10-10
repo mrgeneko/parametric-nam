@@ -762,7 +762,7 @@ def test_transient_gate_forwards_sweep_start_v_and_min_start_v():
     src = Path(__file__).parent.parent.joinpath("gen_dataset_from_schx.py").read_text()
     assert '"--sweep-start-v"' in src, "gen_dataset_from_schx.py must expose --sweep-start-v"
     assert '"--min-start-v"' in src, "gen_dataset_from_schx.py must expose --min-start-v"
-    m = re.search(r"result = _gate\((?:[^()]|\([^()]*\))*\)", src, re.DOTALL)   # _gate is check_coverage, or check_coverage_cm for --backend cm
+    m = re.search(r"result = _gate\((?:[^()]|\([^()]*\))*\)", src, re.DOTALL)   # _gate is check_coverage, or check_coverage_acm for --backend acm
     assert m, "could not find the coverage-gate call site"
     call = m.group(0)
     assert "min_start_v=args.min_start_v" in call, \
@@ -993,30 +993,30 @@ def test_ls_solver_args_follow_the_trust_region_setting(monkeypatch):
     assert g._ls_solver_args() == []
 
 
-# --------------------------------------------------------------------------- cm backend
+# --------------------------------------------------------------------------- acm backend
 
-def test_cm_rungs_double_oversample_to_32_and_quadruple_iterations_last():
-    rungs = g._rungs("cm", 2, None)
+def test_acm_rungs_double_oversample_to_32_and_quadruple_iterations_last():
+    rungs = g._rungs("acm", 2, None)
     assert [r["oversample"] for r in rungs] == [2, 4, 8, 16, 32]
     assert rungs[-1]["iterations"] == 4 * rungs[0]["iterations"]
 
 
-def test_cm_circuit_problem_detects_missing_and_stale(tmp_path):
+def test_acm_circuit_problem_detects_missing_and_stale(tmp_path):
     import hashlib, json
     schx = tmp_path / "amp.schx"
     schx.write_text("<Schematic/>")
-    assert "not found" in g._cm_circuit_problem(str(schx))
-    cm = tmp_path / "amp.acmod"
-    cm.write_text(json.dumps({"source": {"sha256": "0" * 64}}))
-    assert "STALE" in g._cm_circuit_problem(str(schx))
-    cm.write_text(json.dumps({"source": {"sha256": hashlib.sha256(schx.read_bytes()).hexdigest()}}))
-    assert g._cm_circuit_problem(str(schx)) == ""
+    assert "not found" in g._acm_circuit_problem(str(schx))
+    acm = tmp_path / "amp.acmod"
+    acm.write_text(json.dumps({"source": {"sha256": "0" * 64}}))
+    assert "STALE" in g._acm_circuit_problem(str(schx))
+    acm.write_text(json.dumps({"source": {"sha256": hashlib.sha256(schx.read_bytes()).hexdigest()}}))
+    assert g._acm_circuit_problem(str(schx)) == ""
 
 
-def _stub_cm_run(tmp_path, metrics):
+def _stub_acm_run(tmp_path, metrics):
     """A stand-in renderer: writes a tiny wav and the given metrics JSON, records its argv."""
     import json, sys
-    script = tmp_path / "stub_cm_run.py"
+    script = tmp_path / "stub_acm_run.py"
     script.write_text(
         "import sys, json, wave, struct\n"
         "a = sys.argv\n"
@@ -1028,23 +1028,23 @@ def _stub_cm_run(tmp_path, metrics):
     return script
 
 
-def test_cm_render_once_reports_divergence_as_newton_failure(tmp_path, monkeypatch):
+def test_acm_render_once_reports_divergence_as_newton_failure(tmp_path, monkeypatch):
     import sys
-    stub = _stub_cm_run(tmp_path, dict(solves=100, unconverged=3, severe=1, divergences=2, dc_converged=1))
-    wrapper = tmp_path / "cm_run"
+    stub = _stub_acm_run(tmp_path, dict(solves=100, unconverged=3, severe=1, divergences=2, dc_converged=1))
+    wrapper = tmp_path / "acm_run"
     wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {stub} \"$@\"\n")
     wrapper.chmod(0o755)
-    monkeypatch.setattr(g, "CM_RUN", wrapper)
+    monkeypatch.setattr(g, "ACM_RUN", wrapper)
     (tmp_path / "in.wav").write_bytes(b"")
     g.sig_path(tmp_path, 0).parent.mkdir(parents=True, exist_ok=True)
-    r = g._render_once(0, {}, tmp_path, tmp_path / "in.wav", "cm", schx=str(tmp_path / "amp.schx"),
+    r = g._render_once(0, {}, tmp_path, tmp_path / "in.wav", "acm", schx=str(tmp_path / "amp.schx"),
                        param_map={}, expected_frames=4800, oversample=4, iterations=256)
     assert not r.ok
     assert r.error.startswith("newton:") and g._is_convergence_failure(r.error)
 
 
-def test_cm_args_carry_knobs_speaker_lead_in_and_metrics(tmp_path):
-    a = g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "Gain=0.5,Mid Range=0.25", "Cab 1",
+def test_acm_args_carry_knobs_speaker_lead_in_and_metrics(tmp_path):
+    a = g._acm_args("amp.schx", "in.wav", "out.wav", 4, 256, "Gain=0.5,Mid Range=0.25", "Cab 1",
                    metrics=tmp_path / "m.json", lead_in=6.0)
     assert a[1] == "amp.acmod" and a[2:4] == ["in.wav", "out.wav"]
     assert a[a.index("--os") + 1] == "4" and a[a.index("--iterations") + 1] == "256"
@@ -1054,17 +1054,17 @@ def test_cm_args_carry_knobs_speaker_lead_in_and_metrics(tmp_path):
     assert a[a.index("--lead-in") + 1] == "6" and "--progress" in a and "--metrics" in a
 
 
-def test_cm_args_probe_form_has_no_progress_or_lead_in():
-    a = g._cm_args("amp.schx", "in.wav", "out.wav", 8, 256, "", progress=False)
+def test_acm_args_probe_form_has_no_progress_or_lead_in():
+    a = g._acm_args("amp.schx", "in.wav", "out.wav", 8, 256, "", progress=False)
     assert "--progress" not in a and "--lead-in" not in a and "--knob" not in a and "--output" not in a
 
 
-def test_cm_failure_fraction_default_is_looser_than_livespice():
-    assert g.CM_NEWTON_MAX_FRACTION > g.NEWTON_MAX_FRACTION
+def test_acm_failure_fraction_default_is_looser_than_livespice():
+    assert g.ACM_NEWTON_MAX_FRACTION > g.NEWTON_MAX_FRACTION
     assert g._newton_failure(dict(solves=10_000_000, unconverged=50, severe=0, first=1, last=2), 4) != ""   # 5e-6: over the livespice limit
 
 
-def test_cm_probe_backend_builds_the_cm_run_command(tmp_path, monkeypatch):
+def test_acm_probe_backend_builds_the_acm_run_command(tmp_path, monkeypatch):
     import render_backends as rb
     calls = []
 
@@ -1079,41 +1079,41 @@ def test_cm_probe_backend_builds_the_cm_run_command(tmp_path, monkeypatch):
         return R()
 
     monkeypatch.setattr(rb.subprocess, "run", fake_run)
-    monkeypatch.setenv("CM_RUN", "/x/cm_run")
-    b = rb.CmBackend(str(tmp_path / "amp.schx"), oversample=4, lead_in=2.0)
+    monkeypatch.setenv("ACM_RUN", "/x/acm_run")
+    b = rb.AcmBackend(str(tmp_path / "amp.schx"), oversample=4, lead_in=2.0)
     y = b._render_one({"Gain": 0.5, "Mid Range": 0.25}, "in.wav", str(tmp_path), "t0")
     a = calls[0]
-    assert y is not None and a[0] == "/x/cm_run" and a[1].endswith("amp.acmod") and a[2] == "in.wav"
+    assert y is not None and a[0] == "/x/acm_run" and a[1].endswith("amp.acmod") and a[2] == "in.wav"
     assert a[a.index("--os") + 1] == "4" and a[a.index("--lead-in") + 1] == "2"
     assert [a[i + 1] for i, x in enumerate(a) if x == "--knob"] == ["Gain=0.5", "Mid Range=0.25"]
 
 
-def test_renderer_identity_cm_reads_build_info_and_other_backends_degrade(tmp_path, monkeypatch):
-    script = tmp_path / "cm_run"
-    script.write_text("#!/bin/sh\necho 'libcm abc1234'\n")
+def test_renderer_identity_acm_reads_build_info_and_other_backends_degrade(tmp_path, monkeypatch):
+    script = tmp_path / "acm_run"
+    script.write_text("#!/bin/sh\necho 'libacm abc1234'\n")
     script.chmod(0o755)
-    monkeypatch.setattr(g, "CM_RUN", script)
-    r = g.renderer_identity("cm")
-    assert r["name"] == "cm" and r["version"] == "libcm abc1234" and r["profile"] == "physical" and r["esr_vs_oracle"] is None
-    monkeypatch.setattr(g, "CM_RUN", tmp_path / "missing")
-    assert g.renderer_identity("cm")["version"] == "unidentified"
+    monkeypatch.setattr(g, "ACM_RUN", script)
+    r = g.renderer_identity("acm")
+    assert r["name"] == "acm" and r["version"] == "libacm abc1234" and r["profile"] == "physical" and r["esr_vs_oracle"] is None
+    monkeypatch.setattr(g, "ACM_RUN", tmp_path / "missing")
+    assert g.renderer_identity("acm")["version"] == "unidentified"
     assert g.renderer_identity("cpp") == {"name": "cpp", "version": "unidentified", "profile": None, "esr_vs_oracle": None}
 
 
-def test_cm_retry_ladder_doubles_from_any_start_and_ends_at_32():
-    assert [r["oversample"] for r in g._rungs("cm", 1, None)] == [1, 2, 4, 8, 16, 32]
-    assert [r["oversample"] for r in g._rungs("cm", 3, None)] == [3, 6, 12, 24, 32]
-    assert [r["oversample"] for r in g._rungs("cm", 6, None)] == [6, 12, 24, 32]
+def test_acm_retry_ladder_doubles_from_any_start_and_ends_at_32():
+    assert [r["oversample"] for r in g._rungs("acm", 1, None)] == [1, 2, 4, 8, 16, 32]
+    assert [r["oversample"] for r in g._rungs("acm", 3, None)] == [3, 6, 12, 24, 32]
+    assert [r["oversample"] for r in g._rungs("acm", 6, None)] == [6, 12, 24, 32]
 
 
-def test_cm_auto_ladder_is_the_measured_factors_and_tables_default_on():
-    assert g.CM_AUTO_LADDER == (1, 2, 3, 4, 6, 8, 16)
-    assert g.CM_TABLES == "on"
-    a = g._cm_args("amp.schx", "in.wav", "out.wav", 3, 256, "", progress=False)
+def test_acm_auto_ladder_is_the_measured_factors_and_tables_default_on():
+    assert g.ACM_AUTO_LADDER == (1, 2, 3, 4, 6, 8, 16)
+    assert g.ACM_TABLES == "on"
+    a = g._acm_args("amp.schx", "in.wav", "out.wav", 3, 256, "", progress=False)
     assert a[a.index("--tables") + 1] == "on" and a[a.index("--os") + 1] == "3"
 
 
-def test_choose_oversample_cm_walks_the_ladder_and_stops_at_the_first_that_meets_the_target(tmp_path, monkeypatch):
+def test_choose_oversample_acm_walks_the_ladder_and_stops_at_the_first_that_meets_the_target(tmp_path, monkeypatch):
     import numpy as np, soundfile as sf
     sr = 48000
     x = (0.3 * np.sin(2 * np.pi * 220 * np.arange(sr * 12) / sr)).astype("float32")
@@ -1132,29 +1132,29 @@ def test_choose_oversample_cm_walks_the_ladder_and_stops_at_the_first_that_meets
         return R()
 
     monkeypatch.setattr(g.subprocess, "run", fake_run)
-    monkeypatch.setattr(g, "CM_RUN", tmp_path / "cm_run")
+    monkeypatch.setattr(g, "ACM_RUN", tmp_path / "acm_run")
     got = g.choose_oversample(str(tmp_path / "a.schx"), ["k"], [{"k": 0.1}, {"k": 0.9}], wav, {"k": "K"}, None, None, 6e-3,
-                              probe_s=2.0, n_windows=1, backend="cm", workers=2)
+                              probe_s=2.0, n_windows=1, backend="acm", workers=2)
     assert got == 3                       # 5e-3 <= 6e-3 < 2e-2: the first rate of 1, 2, 3 under the target
     assert 32 in rendered and 4 not in rendered and 6 not in rendered   # the reference, then nothing past the pick
 
 
-# --- cm verdict derived from <stem>.acmod -------------------------------------------------
+# --- acm verdict derived from <stem>.acmod -------------------------------------------------
 
-def _cm_check(tmp_path, cm_json=None, sidecar=None, schx_bytes=b"x"):
+def _acm_check(tmp_path, acm_json=None, sidecar=None, schx_bytes=b"x"):
     import hashlib
     schx = tmp_path / "dev.schx"
     schx.write_bytes(schx_bytes)
-    if cm_json is not None:
-        cm_json.setdefault("source", {"sha256": hashlib.sha256(schx_bytes).hexdigest()})
-        (tmp_path / "dev.acmod").write_text(json.dumps(cm_json))
+    if acm_json is not None:
+        acm_json.setdefault("source", {"sha256": hashlib.sha256(schx_bytes).hexdigest()})
+        (tmp_path / "dev.acmod").write_text(json.dumps(acm_json))
     if sidecar is not None:
         (tmp_path / "dev.backends.toml").write_text(sidecar)
     err = io.StringIO()
     ap = argparse.ArgumentParser()
     with contextlib.redirect_stderr(err):
         try:
-            g.check_backend(schx, "cm", ap)
+            g.check_backend(schx, "acm", ap)
             refused = False
         except SystemExit:
             refused = True
@@ -1165,42 +1165,42 @@ def _cells(*robust):
     return {"quality": {"measured": {"cells": [{"robust": r} for r in robust]}}}
 
 
-def test_cm_is_a_known_backend_key(tmp_path):
-    refused, err = _cm_check(tmp_path, sidecar='cm = { valid = true }\n')
+def test_acm_is_a_known_backend_key(tmp_path):
+    refused, err = _acm_check(tmp_path, sidecar='acm = { valid = true }\n')
     assert not refused and "typo" not in err
 
 
-def test_cm_without_json_or_sidecar_is_assumed_valid_and_says_so(tmp_path):
-    refused, err = _cm_check(tmp_path)
+def test_acm_without_json_or_sidecar_is_assumed_valid_and_says_so(tmp_path):
+    refused, err = _acm_check(tmp_path)
     assert not refused and "assumed valid" in err
 
 
-def test_cm_valid_when_some_measured_cell_is_robust(tmp_path):
-    refused, err = _cm_check(tmp_path, _cells(False, True))
+def test_acm_valid_when_some_measured_cell_is_robust(tmp_path):
+    refused, err = _acm_check(tmp_path, _cells(False, True))
     assert not refused and "1/2 measured cells robust" in err
 
 
-def test_cm_refused_when_no_measured_cell_is_robust(tmp_path):
-    refused, err = _cm_check(tmp_path, _cells(False, False))
+def test_acm_refused_when_no_measured_cell_is_robust(tmp_path):
+    refused, err = _acm_check(tmp_path, _cells(False, False))
     assert refused and "none of the 2 measured cells" in err
 
 
-def test_cm_stale_table_is_flagged(tmp_path):
-    refused, err = _cm_check(tmp_path, dict(_cells(True), source={"sha256": "0" * 64}))
+def test_acm_stale_table_is_flagged(tmp_path):
+    refused, err = _acm_check(tmp_path, dict(_cells(True), source={"sha256": "0" * 64}))
     assert not refused and "STALE" in err
 
 
-def test_cm_sidecar_entry_overrides_the_json(tmp_path):
-    refused, err = _cm_check(tmp_path, _cells(True),
-                             sidecar='cm = { valid = false, reason = "hand-declared" }\n')
+def test_acm_sidecar_entry_overrides_the_json(tmp_path):
+    refused, err = _acm_check(tmp_path, _cells(True),
+                             sidecar='acm = { valid = false, reason = "hand-declared" }\n')
     assert refused and "hand-declared" in err
 
 
-# --- prepared-state start (docs/cm-backend.md, Start-up) -------------------------------------
+# --- prepared-state start (docs/acm-backend.md, Start-up) -------------------------------------
 
-def _fake_cm_run(tmp_path, used):
-    """A cm_run stand-in that writes the output wav and a metrics file saying whether the prepared state was used."""
-    script = tmp_path / "cm_run"
+def _fake_acm_run(tmp_path, used):
+    """An acm_run stand-in that writes the output wav and a metrics file saying whether the prepared state was used."""
+    script = tmp_path / "acm_run"
     script.write_text("#!/bin/sh\n" + 'out=""; m=""; while [ $# -gt 0 ]; do case "$1" in --metrics) m="$2"; shift;; esac; [ -z "$out" ] && [ "${1%.wav}" != "$1" ] && [ -n "$seen_in" ] && out="$1"; [ "${1%.wav}" != "$1" ] && seen_in=1; shift; done\n'
                       + 'cp "$(dirname "$0")/probe_template.wav" "$out" 2>/dev/null || : ; [ -n "$m" ] && printf \'{"prepared_state_used": %d, "solves": 1}\' ' + str(used) + ' > "$m"\nexit 0\n')
     script.chmod(0o755)
@@ -1209,44 +1209,44 @@ def _fake_cm_run(tmp_path, used):
     return script
 
 
-def test_cm_args_prepared_switches_the_start(tmp_path):
-    a = g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "", prepared=True)
+def test_acm_args_prepared_switches_the_start(tmp_path):
+    a = g._acm_args("amp.schx", "in.wav", "out.wav", 4, 256, "", prepared=True)
     assert a[a.index("--prepared") + 1] == "auto"
-    assert g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "")[g._cm_args("amp.schx", "in.wav", "out.wav", 4, 256, "").index("--prepared") + 1] == "off"
+    assert g._acm_args("amp.schx", "in.wav", "out.wav", 4, 256, "")[g._acm_args("amp.schx", "in.wav", "out.wav", 4, 256, "").index("--prepared") + 1] == "off"
 
 
-def test_cm_prepared_state_probe_is_cached_per_circuit(tmp_path, monkeypatch):
+def test_acm_prepared_state_probe_is_cached_per_circuit(tmp_path, monkeypatch):
     for used, expect in ((1, True), (0, False)):
-        monkeypatch.setattr(g, "CM_RUN", _fake_cm_run(tmp_path / str(used), used) if (tmp_path / str(used)).mkdir() is None else None)
-        g._cm_prepared_cache.clear()
+        monkeypatch.setattr(g, "ACM_RUN", _fake_acm_run(tmp_path / str(used), used) if (tmp_path / str(used)).mkdir() is None else None)
+        g._acm_prepared_cache.clear()
         schx = str(tmp_path / ("amp%d.schx" % used))
-        assert g._cm_prepared_state_usable(schx) is expect
+        assert g._acm_prepared_state_usable(schx) is expect
         # cached: a renderer that now says the opposite is not consulted again
-        monkeypatch.setattr(g, "CM_RUN", _fake_cm_run(tmp_path / ("other%d" % used), 1 - used) if (tmp_path / ("other%d" % used)).mkdir() is None else None)
-        assert g._cm_prepared_state_usable(schx) is expect
-    g._cm_prepared_cache.clear()
+        monkeypatch.setattr(g, "ACM_RUN", _fake_acm_run(tmp_path / ("other%d" % used), 1 - used) if (tmp_path / ("other%d" % used)).mkdir() is None else None)
+        assert g._acm_prepared_state_usable(schx) is expect
+    g._acm_prepared_cache.clear()
 
 
-def test_cm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
+def test_acm_table_floor_reads_the_robust_cells(tmp_path, monkeypatch):
     schx = tmp_path / "amp.schx"; schx.write_text("<x/>")
     cells = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1.59},
              {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 3.0e-3},
              {"oversample": 4, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 2.4e-4},
              {"oversample": 1, "tol_rel": 1e-2, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1e-9}]   # the wrong tolerance: ignored
     (tmp_path / "amp.acmod").write_text(json.dumps({"quality": {"measured": {"cells": cells}}}))
-    monkeypatch.setattr(g, "CM_TABLES", "on")
-    assert g._cm_table_floor(str(schx), 6e-3) == 2
-    assert g._cm_table_floor(str(schx), 1e-3) == 4
-    assert g._cm_table_floor(str(schx), 1e-6) == 4          # nothing measured meets the target: the ladder starts at the top measured rate
+    monkeypatch.setattr(g, "ACM_TABLES", "on")
+    assert g._acm_table_floor(str(schx), 6e-3) == 2
+    assert g._acm_table_floor(str(schx), 1e-3) == 4
+    assert g._acm_table_floor(str(schx), 1e-6) == 4          # nothing measured meets the target: the ladder starts at the top measured rate
     # the tables axis is measured only at the live tolerance: cells without tables still set the floor (the Deluxe c12q case)
     cells2 = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 1.5e-2},
               {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": False, "robust": True, "esr": 2.3e-3}]
     (tmp_path / "amp.acmod").write_text(json.dumps({"quality": {"measured": {"cells": cells2}}}))
-    assert g._cm_table_floor(str(schx), 6e-3) == 2
-    assert g._cm_table_floor(str(tmp_path / "none.schx"), 6e-3) == 1
+    assert g._acm_table_floor(str(schx), 6e-3) == 2
+    assert g._acm_table_floor(str(tmp_path / "none.schx"), 6e-3) == 1
 
 
-def test_cm_stats_carry_the_render_cost(tmp_path):
+def test_acm_stats_carry_the_render_cost(tmp_path):
     m = tmp_path / "m.json"; m.write_text(json.dumps({"solves": 10, "wall_seconds": 12.5, "realtime_factor": 4.0}))
-    st = g._cm_stats(m)
+    st = g._acm_stats(m)
     assert st["wall_seconds"] == 12.5 and st["realtime_factor"] == 4.0

@@ -101,67 +101,67 @@ def _find_livespice_cli() -> Path:
 LIVESPICE_CLI = _find_livespice_cli()
 
 
-def _find_cm_run() -> Path:
-    """The `cm_run`-compatible renderer for --backend cm: $CM_RUN, else `cm_run` on PATH.
+def _find_acm_run() -> Path:
+    """The `acm_run`-compatible renderer for --backend acm: $ACM_RUN, else `acm_run` on PATH.
 
-    The contract (flags and outputs this tool relies on) is: `cm_run CIRCUIT.acmod in.wav out.wav
+    The contract (flags and outputs this tool relies on) is: `acm_run CIRCUIT.acmod in.wav out.wav
     --prepared off --os N --tol-rel X --tables off --resampler fir-linear --iterations N
     --knob Name=V... [--output NAME] --metrics FILE.json --progress`; it writes a float32 mono wav, prints
     `PROGRESS done/total` lines on stderr and writes a metrics JSON with solves, unconverged, severe,
     divergences, rescues, rescued, max_iterations and dc_converged."""
-    env = os.environ.get("CM_RUN")
+    env = os.environ.get("ACM_RUN")
     if env:
         return Path(env)
-    found = shutil.which("cm_run")
-    return Path(found) if found else Path("cm_run")
+    found = shutil.which("acm_run")
+    return Path(found) if found else Path("acm_run")
 
 
-CM_RUN = _find_cm_run()
-# Seconds of silence --backend cm runs through the circuit before the input (cm_run --lead-in; discarded from the output, so
+ACM_RUN = _find_acm_run()
+# Seconds of silence --backend acm runs through the circuit before the input (acm_run --lead-in; discarded from the output, so
 # the render stays sample-aligned with the input). A cold start has a settling transient (supply sag, coupling caps): measured on
 # a sag/ac amp, ESR against the settled render 0.37 in the first second, 8e-3 in the second, 2e-7 from 2 s; amps with a slow
-# supply need longer. When the circuit file has a valid prepared (settled) state the render starts from it with CM_LEAD_IN_PREPARED_S
+# supply need longer. When the circuit file has a valid prepared (settled) state the render starts from it with ACM_LEAD_IN_PREPARED_S
 # instead: measured 2026-10-09 on four sag/ac amps against a 20 s lead-in, the 6 s lead-in is within 4e-9 ESR, the prepared state
 # plus 0.5 s within 3e-10 (the prepared state alone 4e-7, from the mains-phase alignment and the resampler history). Whether a
 # file's state is valid is known only to the renderer (the file's hash and measurement version), so it is probed once per circuit
-# (_cm_prepared_state_usable) rather than guessed from the file.
-CM_LEAD_IN_S = 6.0
-CM_LEAD_IN_PREPARED_S = 0.5
-CM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
-CM_TABLES = "on"   # cm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
+# (_acm_prepared_state_usable) rather than guessed from the file.
+ACM_LEAD_IN_S = 6.0
+ACM_LEAD_IN_PREPARED_S = 0.5
+ACM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
+ACM_TABLES = "on"   # acm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
 
 
-def _cm_circuit_for(schx: str) -> Path:
-    """The circuit file --backend cm renders: the schematic's own stem with .acmod."""
+def _acm_circuit_for(schx: str) -> Path:
+    """The circuit file --backend acm renders: the schematic's own stem with .acmod."""
     return Path(schx).with_suffix(".acmod")
 
 
-def _cm_circuit_problem(schx: str) -> str:
+def _acm_circuit_problem(schx: str) -> str:
     """"" if the .acmod next to this schematic was converted from exactly this schematic, else why not.
 
     A stale circuit file would render the OLD circuit and say nothing: it records the schematic's SHA-256
     and that is compared here, at startup, before any render."""
     import hashlib
-    cm = _cm_circuit_for(schx)
-    if not cm.exists():
-        return f"{cm.name} not found next to {Path(schx).name}: convert the schematic first"
+    acm = _acm_circuit_for(schx)
+    if not acm.exists():
+        return f"{acm.name} not found next to {Path(schx).name}: convert the schematic first"
     try:
-        recorded = json.loads(cm.read_text()).get("source", {}).get("sha256", "")
+        recorded = json.loads(acm.read_text()).get("source", {}).get("sha256", "")
     except (OSError, ValueError):
-        return f"{cm.name} is not readable JSON"
+        return f"{acm.name} is not readable JSON"
     actual = hashlib.sha256(Path(schx).read_bytes()).hexdigest()
     if recorded != actual:
-        return (f"{cm.name} is STALE: it was converted from a different version of {Path(schx).name} "
+        return (f"{acm.name} is STALE: it was converted from a different version of {Path(schx).name} "
                 f"(recorded sha256 {recorded[:12] or 'none'}, the schematic is {actual[:12]}); convert it again")
     return ""
 
 
-def _cm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, params: str, speaker: str = None,
+def _acm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, params: str, speaker: str = None,
              metrics=None, progress: bool = True, lead_in: float = 0.0, prepared: bool = False) -> list:
-    """The cm_run command line for one render (see _find_cm_run for the contract). prepared: start from the file's prepared state
-    (cm_run --prepared auto; it falls back to the DC point when the file has none, which is why the caller probes first)."""
-    args = [str(CM_RUN), str(_cm_circuit_for(schx)), str(input_wav), str(out_wav),
-            "--prepared", "auto" if prepared else "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", CM_TABLES,
+    """The acm_run command line for one render (see _find_acm_run for the contract). prepared: start from the file's prepared state
+    (acm_run --prepared auto; it falls back to the DC point when the file has none, which is why the caller probes first)."""
+    args = [str(ACM_RUN), str(_acm_circuit_for(schx)), str(input_wav), str(out_wav),
+            "--prepared", "auto" if prepared else "off", "--os", str(oversample or 4), "--tol-rel", "1e-4", "--tables", ACM_TABLES,
             "--resampler", "fir-linear", "--iterations", str(iterations or 256)]
     if metrics:
         args += ["--metrics", str(metrics)]
@@ -182,13 +182,13 @@ def renderer_identity(backend: str) -> dict:
     """Which renderer produced a dataset, recorded in config.json (the manifest) so a dataset can be traced to a solver revision.
 
     name: the backend; version: its revision string, or "unidentified" when it cannot be read; profile: the numerics profile of
-    the solver, where the backend has one ("physical" for cm). A dataset is only comparable sample-for-sample with another
+    the solver, where the backend has one ("physical" for acm). A dataset is only comparable sample-for-sample with another
     rendered by the same name, version and profile. esr_vs_oracle is null until a validation step fills it (an independent
     renderer's ESR on the same input); the backends here do not compute it themselves."""
     ident = {"name": backend, "version": "unidentified", "profile": None, "esr_vs_oracle": None}
     try:
-        if backend == "cm":
-            r = subprocess.run([str(CM_RUN), "--build-info"], capture_output=True, text=True, timeout=10)
+        if backend == "acm":
+            r = subprocess.run([str(ACM_RUN), "--build-info"], capture_output=True, text=True, timeout=10)
             if r.returncode == 0 and r.stdout.strip():
                 ident["version"] = r.stdout.strip().splitlines()[0]
             ident["profile"] = "physical"
@@ -201,18 +201,18 @@ def renderer_identity(backend: str) -> dict:
     return ident
 
 
-_cm_prepared_cache: dict = {}
-_cm_prepared_lock = threading.Lock()
+_acm_prepared_cache: dict = {}
+_acm_prepared_lock = threading.Lock()
 
 
-def _cm_prepared_state_usable(schx: str) -> bool:
+def _acm_prepared_state_usable(schx: str) -> bool:
     """Does the renderer accept this circuit file's prepared state? Probed once per circuit (a render of a few milliseconds of silence
     with --prepared auto, reading prepared_state_used from the metrics), cached for the run. False on any failure, which just means the
     long lead-in is used."""
-    key = str(_cm_circuit_for(schx))
-    with _cm_prepared_lock:
-        if key in _cm_prepared_cache:
-            return _cm_prepared_cache[key]
+    key = str(_acm_circuit_for(schx))
+    with _acm_prepared_lock:
+        if key in _acm_prepared_cache:
+            return _acm_prepared_cache[key]
         ok = False
         try:
             import tempfile
@@ -221,18 +221,18 @@ def _cm_prepared_state_usable(schx: str) -> bool:
                 import soundfile as sf
                 sf.write(str(probe_in), np.zeros(256, dtype=np.float32), 48000, subtype="FLOAT")
                 metrics = Path(td) / "probe.json"
-                r = subprocess.run(_cm_args(schx, probe_in, Path(td) / "probe_out.wav", 2, 64, "", metrics=metrics, progress=False, prepared=True),
+                r = subprocess.run(_acm_args(schx, probe_in, Path(td) / "probe_out.wav", 2, 64, "", metrics=metrics, progress=False, prepared=True),
                                    capture_output=True, text=True, timeout=600)
                 if r.returncode == 0 and metrics.exists():
                     ok = int(json.loads(metrics.read_text()).get("prepared_state_used", 0)) == 1
         except Exception:
             ok = False
-        _cm_prepared_cache[key] = ok
+        _acm_prepared_cache[key] = ok
         return ok
 
 
-def _cm_stats(metrics_path) -> dict:
-    """cm_run's --metrics file as the stats dict _newton_failure() reads, plus the extras."""
+def _acm_stats(metrics_path) -> dict:
+    """acm_run's --metrics file as the stats dict _newton_failure() reads, plus the extras."""
     j = json.loads(Path(metrics_path).read_text())
     return dict(solves=int(j.get("solves", 0)), unconverged=int(j.get("unconverged", 0)), severe=int(j.get("severe", 0)),
                 first=int(j.get("first_bad_sample", -1)), last=-1, divergences=int(j.get("divergences", 0)),
@@ -242,18 +242,18 @@ def _cm_stats(metrics_path) -> dict:
                 wall_seconds=float(j.get("wall_seconds", -1.0)), realtime_factor=float(j.get("realtime_factor", 0.0)))
 
 
-def _cm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
+def _acm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
     """The lowest oversample the circuit file's own quality table allows at the backend's tolerance: the cheapest ROBUST cell (no divergence, no
     severe unconverged solve, finite) at that tolerance, the default 24-sample filter and this backend's tables setting whose ESR is within
-    `target`. The table is worst case over cm_tune's knob plan and the stress signal, so it is more conservative than the auto probe's sampled
+    `target`. The table is worst case over acm_tune's knob plan and the stress signal, so it is more conservative than the auto probe's sampled
     windows at a few settings: the probe once picked 1x for a pedal whose table reads ESR 1.59 at 1x (the HM-2, 2026-10-09). 1 when the file
     has no usable table (no floor)."""
     try:
-        d = json.loads(_cm_circuit_for(schx).read_text())
+        d = json.loads(_acm_circuit_for(schx).read_text())
         cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
     except (OSError, ValueError):
         return 1
-    # cm_tune measures the tables axis only at the live preset's tolerance, so at this backend's tolerance the cells are usually the exact-equation
+    # acm_tune measures the tables axis only at the live preset's tolerance, so at this backend's tolerance the cells are usually the exact-equation
     # ones; the tables move ESR by 1e-10..6e-6, nothing the floor can see, so any tables setting counts. Found on the Deluxe c12q: with the
     # tables setting required, no cell matched, there was no floor and the probe picked 1x where the table reads 1.5e-2.
     at_tol = [c for c in cells if abs(c.get("tol_rel", 0) - tol_rel) < 1e-12 and c.get("fir_half_length", 24) == 24]
@@ -277,8 +277,8 @@ def check_oracle(backend: str) -> None:
     if backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
         sys.exit(1)
-    if backend == "cm" and not (CM_RUN.exists() or shutil.which(str(CM_RUN))):
-        print(f"ERROR: cm_run not found ({CM_RUN}). Point $CM_RUN at a cm_run-compatible renderer.", file=sys.stderr)
+    if backend == "acm" and not (ACM_RUN.exists() or shutil.which(str(ACM_RUN))):
+        print(f"ERROR: acm_run not found ({ACM_RUN}). Point $ACM_RUN at an acm_run-compatible renderer.", file=sys.stderr)
         sys.exit(1)
     if backend in ("livespice", "ngspice") and not LIVESPICE_CLI.exists():
         env = os.environ.get("LIVESPICE_CLI")
@@ -384,8 +384,8 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     # identical to someone who is not, and a device that genuinely cannot be rendered on the
     # chosen backend renders "successfully" into a wrong dataset.
     sidecar = schx.with_suffix(".backends.toml")
-    if backend == "cm":
-        return _check_backend_cm(schx, sidecar, ap)
+    if backend == "acm":
+        return _check_backend_acm(schx, sidecar, ap)
     if not sidecar.exists():
         print(f"note: no {sidecar.name} beside this .schx -- nothing is checking whether "
               f"{backend!r} can faithfully render it. Write one (see a device repo's "
@@ -407,14 +407,14 @@ def check_backend(schx: Path, backend: str, ap) -> None:
 # Backends that may legitimately appear as a key. Not all are renderable by THIS script
 # (--backend is cpp/livespice/ngspice); ltspice/*-deck verdicts are recorded for the deck
 # tooling, so an unknown key is not by itself an error.
-_KNOWN_BACKENDS = ("cm", "livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
+_KNOWN_BACKENDS = ("acm", "livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
 _VERDICT_KEYS = ("valid", "reason")
 
 
-def _cm_verdict_from_json(schx: Path) -> dict | None:
-    """Derive a cm verdict from <stem>.acmod (the measured quality table), or None if absent.
+def _acm_verdict_from_json(schx: Path) -> dict | None:
+    """Derive a acm verdict from <stem>.acmod (the measured quality table), or None if absent.
 
-    Unlike the other backends, libcm's validity IS derivable: cm_tune records per-cell robustness
+    Unlike the other backends, libacm's validity IS derivable: acm_tune records per-cell robustness
     (finite, no divergences, no severe unconverged steps). Valid if at least one measured cell is
     robust; invalid if cells were measured and none is. A table whose source sha256 no longer
     matches the .schx is reported as stale in the reason (still valid -- the engine imports the
@@ -434,7 +434,7 @@ def _cm_verdict_from_json(schx: Path) -> dict | None:
     sha = (d.get("source") or {}).get("sha256")
     try:
         if sha and sha != hashlib.sha256(schx.read_bytes()).hexdigest():
-            stale = f" {cj.name} is STALE (source sha256 differs from the .schx); re-run cm_tune."
+            stale = f" {cj.name} is STALE (source sha256 differs from the .schx); re-run acm_tune."
     except OSError:
         pass
     if not cells:
@@ -447,31 +447,31 @@ def _cm_verdict_from_json(schx: Path) -> dict | None:
     return {"valid": True, "reason": f"{len(robust)}/{len(cells)} measured cells robust in {cj.name}.{stale}"}
 
 
-def _check_backend_cm(schx: Path, sidecar: Path, ap) -> None:
-    """cm verdict: an explicit `cm = {...}` in the sidecar wins; else derived from <stem>.acmod;
-    else announced as unchecked (libcm imports the .schx directly, so absence is not a refusal)."""
+def _check_backend_acm(schx: Path, sidecar: Path, ap) -> None:
+    """acm verdict: an explicit `acm = {...}` in the sidecar wins; else derived from <stem>.acmod;
+    else announced as unchecked (libacm imports the .schx directly, so absence is not a refusal)."""
     specs = {}
     if sidecar.exists():
         try:
             import tomllib
             specs = tomllib.loads(sidecar.read_text())
         except Exception as e:
-            print(f"note: {sidecar.name} failed to parse ({e}); ignoring it for the cm verdict.",
+            print(f"note: {sidecar.name} failed to parse ({e}); ignoring it for the acm verdict.",
                   file=sys.stderr)
             specs = {}
         else:
             _lint_backend_sidecar(specs, sidecar.name)
-    if not specs.get("cm"):
-        derived = _cm_verdict_from_json(schx)
+    if not specs.get("acm"):
+        derived = _acm_verdict_from_json(schx)
         if derived is None:
-            print(f"note: no cm verdict for {schx.stem} (no `cm` entry in {sidecar.name}, no "
+            print(f"note: no acm verdict for {schx.stem} (no `acm` entry in {sidecar.name}, no "
                   f"{schx.stem}.acmod) -- assumed valid.", file=sys.stderr)
             return
-        specs = dict(specs, cm=derived)
+        specs = dict(specs, acm=derived)
         sidecar_name = schx.with_suffix(".acmod").name
     else:
         sidecar_name = sidecar.name
-    return _apply_backend_verdict(specs, "cm", schx.stem, sidecar_name, ap)
+    return _apply_backend_verdict(specs, "acm", schx.stem, sidecar_name, ap)
 
 
 def _lint_backend_sidecar(specs: dict, name: str) -> None:
@@ -1110,7 +1110,7 @@ _CONVERGENCE_FAILURE = re.compile(
 # helping (see _render_with_ladder). --newton-check warn|off restores the old behaviour.
 _NEWTON_STATS = re.compile(
     r"newton: solves=(\d+) unconverged=(\d+) \(([\d.]+)%\) severe=(\d+) first_sample=(-?\d+) last_sample=(-?\d+)")
-CM_NEWTON_MAX_FRACTION = 1e-5  # --backend cm default
+ACM_NEWTON_MAX_FRACTION = 1e-5  # --backend acm default
 NEWTON_MAX_FRACTION = 1e-6     # unconverged / solves above this fails the render
 NEWTON_CHECK = "fail"          # off | warn | fail
 # Per-iteration Newton step limit in volts, passed to livespice_cli --trust-region (0 = off, the default). A step whose
@@ -1172,8 +1172,8 @@ def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> li
     converged-looking answer that is 5.8e-03 wrong. That is not a crash; it is worse, because
     nothing reports it. (The C++ emitter now measures the cap per circuit.)
     """
-    if backend == "cm":
-        # cm_run's solver already has a line search, a damped rescue pass and junction limiting, so the ladder
+    if backend == "acm":
+        # acm_run's solver already has a line search, a damped rescue pass and junction limiting, so the ladder
         # is only oversample (doubling from the start value, which may be 1, 3 or 6, up to 32x), with 4x the iterations on the last rung.
         rungs, o = [], oversample or 4
         while True:
@@ -1388,7 +1388,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # guaranteed to -- and a hopeless combination used to burn timeout_s x n_rungs
         # (hours) before failing. ngspice is exempt: its rungs change method/damping at
         # roughly equal solver cost, so a retry there can genuinely win.
-        if "timeout" in r.error.lower() and backend in ("livespice", "cpp", "cm"):
+        if "timeout" in r.error.lower() and backend in ("livespice", "cpp", "acm"):
             r.error = f"{r.error} [not escalating: higher rungs are strictly slower]"
             return r
         if i + 1 < len(rungs):
@@ -1647,13 +1647,13 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             # a converged-LOOKING answer that is 5.8e-03 wrong, silently. Not a crash: worse.
             if iterations:
                 args += ["--iterations", str(iterations)]
-        elif backend == "cm":
+        elif backend == "acm":
             swept = fmt_params(params, param_map)
             all_params = f"{fixed_params},{swept}" if fixed_params else swept
-            cm_metrics = out_wav.with_suffix(".cm_metrics.json")
-            prepared = CM_LEAD_IN_S > 0 and _cm_prepared_state_usable(schx)   # --cm-lead-in 0 means a cold start, as before
-            args = _cm_args(schx, input_wav, out_wav, oversample, iterations, all_params, speaker,
-                            metrics=cm_metrics, lead_in=CM_LEAD_IN_PREPARED_S if prepared else CM_LEAD_IN_S, prepared=prepared)
+            acm_metrics = out_wav.with_suffix(".acm_metrics.json")
+            prepared = ACM_LEAD_IN_S > 0 and _acm_prepared_state_usable(schx)   # --acm-lead-in 0 means a cold start, as before
+            args = _acm_args(schx, input_wav, out_wav, oversample, iterations, all_params, speaker,
+                            metrics=acm_metrics, lead_in=ACM_LEAD_IN_PREPARED_S if prepared else ACM_LEAD_IN_S, prepared=prepared)
         else:
             return Result(idx, error=f"unknown backend: {backend}")
 
@@ -1669,7 +1669,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # against a FIXED budget they were guaranteed to fail -- against a stall detector they
         # are not). TOTAL_CEILING stays as a backstop for the one case a stall detector cannot
         # see: a live-lock that keeps emitting chunks forever.
-        use_stall = (backend in ("livespice", "cpp", "cm")) and "--progress" in args
+        use_stall = (backend in ("livespice", "cpp", "acm")) and "--progress" in args
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with _procs_lock:
             _active_procs.add(proc)
@@ -1691,14 +1691,14 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             # threads it onto the Result below.
             warned = _oracle_warnings(stderr)
             nstats = _parse_newton_stats(stderr) if backend == "livespice" else None
-            if backend == "cm":
+            if backend == "acm":
                 try:
-                    nstats = _cm_stats(cm_metrics)
+                    nstats = _acm_stats(acm_metrics)
                 except (OSError, ValueError) as e:
-                    return Result(idx, error=f"cm_run wrote no usable metrics file: {e}")
+                    return Result(idx, error=f"acm_run wrote no usable metrics file: {e}")
                 finally:
                     try:
-                        cm_metrics.unlink()
+                        acm_metrics.unlink()
                     except OSError:
                         pass
                 if nstats["divergences"] or not nstats["dc_converged"]:
@@ -1707,7 +1707,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                                             + f" at oversample {oversample}"))
                     _r.newton_unconverged = max(nstats["unconverged"], nstats["divergences"])
                     return _r
-                warned = "" if not (nstats["unconverged"] or nstats["rescues"]) else (f"cm: unconverged={nstats['unconverged']} severe={nstats['severe']} rescued={nstats['rescued']}/{nstats['rescues']} "
+                warned = "" if not (nstats["unconverged"] or nstats["rescues"]) else (f"acm: unconverged={nstats['unconverged']} severe={nstats['severe']} rescued={nstats['rescued']}/{nstats['rescues']} "
                           f"max_iterations={nstats['max_iterations']}")
             if nstats and NEWTON_CHECK != "off":
                 _nf = _newton_failure(nstats, oversample)
@@ -1718,7 +1718,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
                 if _nf:
                     warned = (_nf + " | " + warned)[:300]
             dsp = proc_t = -1.0
-            if backend == "cm" and nstats:   # cm_run's metrics: render seconds and the DSP load as 100 / realtime factor
+            if backend == "acm" and nstats:   # acm_run's metrics: render seconds and the DSP load as 100 / realtime factor
                 proc_t = nstats.get("wall_seconds", -1.0)
                 dsp = 100.0 / nstats["realtime_factor"] if nstats.get("realtime_factor", 0) > 0 else -1.0
             for line in stdout.splitlines():
@@ -2197,8 +2197,8 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
     """
     import tempfile
 
-    if backend == "cm":
-        # cm renders are cheap, and 4 x 2 s windows are too sparse for a calibrated excitation: its error lives in the loud, high-frequency
+    if backend == "acm":
+        # acm renders are cheap, and 4 x 2 s windows are too sparse for a calibrated excitation: its error lives in the loud, high-frequency
         # chirps and the hot sweep passages. Measured on the Deluxe (sag ac) with its sized excitation, truncation at 1x: 5.3e-4 from 4 windows
         # (pick: 1x), 1.5e-2 from 8, 1.7e-2 from 16 and 1.4e-2 from 32 x 1 s (pick: 2x); the full 40 s of the actual dataset showed 1.9e-2 at 1x
         # for a random combination. So at least 16 windows (32 s of probe) for this backend.
@@ -2330,8 +2330,8 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
                     print(f"    probe render FAILED at oversample={os_}, "
                           f"{', '.join(f'{k}={x:g}' for k, x in sorted(p.items()))}: "
                           f"{getattr(fail, 'error', 'no output')}", file=sys.stderr)
-            elif backend == "cm":
-                r = subprocess.run(_cm_args(schx, clip, w, os_, iterations, allp, speaker, progress=False),
+            elif backend == "acm":
+                r = subprocess.run(_acm_args(schx, clip, w, os_, iterations, allp, speaker, progress=False),
                                    capture_output=True, text=True)
                 if r.returncode == 0 and w.exists():
                     d, _ = sf.read(str(w))
@@ -2394,11 +2394,11 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
         prewarm([ref_os])          # the expensive ones, all up front
 
         prev_d, prev_os = None, None
-        # cm: the factors cm_tune measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
-        floor_os = _cm_table_floor(schx, target) if backend == "cm" else 1
+        # acm: the factors acm_tune measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
+        floor_os = _acm_table_floor(schx, target) if backend == "acm" else 1
         if floor_os > 1:
-            print(f"  cm: the circuit file's quality table allows no rate below {floor_os}x within ESR {target:g} (robust cells at tolerance 1e-4); starting the ladder there")
-        cands = [o for o in CM_AUTO_LADDER if floor_os <= o < ref_os] if backend == "cm" else [2 ** k for k in range(1, 12) if 2 ** k < ref_os]
+            print(f"  acm: the circuit file's quality table allows no rate below {floor_os}x within ESR {target:g} (robust cells at tolerance 1e-4); starting the ladder there")
+        cands = [o for o in ACM_AUTO_LADDER if floor_os <= o < ref_os] if backend == "acm" else [2 ** k for k in range(1, 12) if 2 ** k < ref_os]
         for os_ in cands:
             prewarm([os_])
             # Pool across windows (whole-file ESR estimate), take the WORST knob setting --
@@ -2850,7 +2850,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
-    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, CM_RUN, CM_LEAD_IN_S, CM_TABLES
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, ACM_RUN, ACM_LEAD_IN_S, ACM_TABLES
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2863,15 +2863,15 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "cm"], default="cpp")
-    ap.add_argument("--cm-tables", choices=["on", "off"], default=None,
-                    help="--backend cm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="cpp")
+    ap.add_argument("--acm-tables", choices=["on", "off"], default=None,
+                    help="--backend acm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
                          "the exact equations; exact equations are used outside a table's range). off = the exact equations throughout")
-    ap.add_argument("--cm-lead-in", type=float, default=None, metavar="S",
-                    help="--backend cm: seconds of silence run through the circuit before the input so the render starts settled "
+    ap.add_argument("--acm-lead-in", type=float, default=None, metavar="S",
+                    help="--backend acm: seconds of silence run through the circuit before the input so the render starts settled "
                          "(discarded from the output; default 6, 0 = start cold like livespice)")
-    ap.add_argument("--cm-run", type=Path, default=None,
-                    help="cm_run-compatible renderer for --backend cm (default: $CM_RUN, then cm_run on PATH)")
+    ap.add_argument("--acm-run", type=Path, default=None,
+                    help="acm_run-compatible renderer for --backend acm (default: $ACM_RUN, then acm_run on PATH)")
     ap.add_argument("--no-retry", action="store_true",
                     help="Do NOT escalate solver settings when a combination fails to converge. "
                          "By default a failed render is retried with a stiffer solve (more Newton "
@@ -3082,7 +3082,7 @@ def main():
                          "with any severe unconverged solve, or an unconverged fraction above --newton-max-fraction, "
                          "fails and the ladder escalates it; warn: record it in `warnings` and keep the render; off: ignore.")
     ap.add_argument("--newton-max-fraction", type=float, default=None, metavar="F",
-                    help="unconverged / solves above which a render fails under --newton-check fail (default 1e-6; 1e-5 for --backend cm, whose solver rescues and limits its own hard steps: a fleet-wide count over 127 circuits showed isolated unconverged solves up to ~3e-6 that a higher oversample did not remove)")
+                    help="unconverged / solves above which a render fails under --newton-check fail (default 1e-6; 1e-5 for --backend acm, whose solver rescues and limits its own hard steps: a fleet-wide count over 127 circuits showed isolated unconverged solves up to ~3e-6 that a higher oversample did not remove)")
     ap.add_argument("--oversample", default="2",
                     help="livespice_cli oversampling (default 2), or 'auto' to MEASURE it. "
                          "oversample is a DISCRETISATION choice and it has an error -- BDF2's "
@@ -3098,7 +3098,7 @@ def main():
                          "measure_truncation.py.")
     ap.add_argument("--trunc-target", type=float, default=None,
                     help="With --oversample auto: the truncation ESR to get under (default 1e-3 for every backend; "
-                         "with --backend cm the ladder is 1/2/3/4/6/8/16). "
+                         "with --backend acm the ladder is 1/2/3/4/6/8/16). "
                          "Rule of thumb: ~10x BELOW the model ESR you are chasing, so the target is "
                          "not the limiting factor. A model cannot be more right than its target.")
     ap.add_argument("--timeout-mult", type=float, default=1.0,
@@ -3149,16 +3149,16 @@ def main():
     ap.add_argument("--seed",    type=int,  default=0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-    if args.cm_run:
-        CM_RUN = args.cm_run
-    if args.cm_lead_in is not None:
-        CM_LEAD_IN_S = max(0.0, args.cm_lead_in)
-    if args.cm_tables is not None:
-        CM_TABLES = args.cm_tables
+    if args.acm_run:
+        ACM_RUN = args.acm_run
+    if args.acm_lead_in is not None:
+        ACM_LEAD_IN_S = max(0.0, args.acm_lead_in)
+    if args.acm_tables is not None:
+        ACM_TABLES = args.acm_tables
     if args.trunc_target is None:
-        args.trunc_target = 1e-3   # the same target for every backend (cm was 6e-3 from 2026-10-08 to 2026-10-09)
+        args.trunc_target = 1e-3   # the same target for every backend (acm was 6e-3 from 2026-10-08 to 2026-10-09)
     NEWTON_CHECK = args.newton_check
-    NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (CM_NEWTON_MAX_FRACTION if args.backend == "cm" else NEWTON_MAX_FRACTION)
+    NEWTON_MAX_FRACTION = args.newton_max_fraction if args.newton_max_fraction is not None else (ACM_NEWTON_MAX_FRACTION if args.backend == "acm" else NEWTON_MAX_FRACTION)
     TRUST_REGION_V = max(0.0, args.trust_region)
 
     if args.list:
@@ -3173,14 +3173,14 @@ def main():
     param_map = None
     schx = None
 
-    if args.backend in ("livespice", "ngspice", "cm"):
+    if args.backend in ("livespice", "ngspice", "acm"):
         if not args.schx:
             ap.error(f"--schx is required for --backend {args.backend}")
         if not args.schx.exists():
             ap.error(f"schx not found: {args.schx}")
         schx = str(args.schx)
-        if args.backend == "cm":
-            _why = _cm_circuit_problem(schx)
+        if args.backend == "acm":
+            _why = _acm_circuit_problem(schx)
             if _why:
                 ap.error(_why)
         check_backend(args.schx, args.backend, ap)
@@ -3334,7 +3334,7 @@ def main():
             ap.error("--oversample auto does not apply to --backend ngspice-deck: there is no "
                      "supersample+decimate step in this path (unlike the schx-translated ngspice "
                      "backend) for it to measure. Use --maxstep to control solver fidelity.")
-        if args.backend in ("livespice", "cm"):
+        if args.backend in ("livespice", "acm"):
             args.oversample = choose_oversample(
                 schx, knobs, combos, in_wav, param_map, args.fixed_params,
                 args.speaker, args.trunc_target, backend=args.backend,
@@ -3414,10 +3414,10 @@ def main():
     # runaway there, found only after a full ~16h training run. Only supported for the
     # livespice backend (preflight.py's find_saturation_point is livespice_cli-only).
     # ------------------------------------------------------------------
-    # --backend cm runs the same gate, with the onsets measured by the same cm_run-compatible renderer as the dataset
-    # (check_coverage_cm), on a few corners at a time.
-    if not args.skip_transient_check and args.backend in ("livespice", "cm") and not args.random:
-        from check_transient_coverage import (check_coverage, check_coverage_cm, _transient_peak_from_recipe,
+    # --backend acm runs the same gate, with the onsets measured by the same acm_run-compatible renderer as the dataset
+    # (check_coverage_acm), on a few corners at a time.
+    if not args.skip_transient_check and args.backend in ("livespice", "acm") and not args.random:
+        from check_transient_coverage import (check_coverage, check_coverage_acm, _transient_peak_from_recipe,
                                               interior_sample_budget as _interior_budget)
         transient_peak = args.transient_peak
         if transient_peak is None:
@@ -3444,8 +3444,8 @@ def main():
         # SAME capture chain the render below will use: this gate compares each corner's
         # saturation onset against the excitation's transient peak, and an onset measured on
         # the raw node is not the onset of the signal that actually becomes the target.
-        _gate = check_coverage_cm if args.backend == "cm" else check_coverage
-        _gate_extra = dict(corner_workers=4) if args.backend == "cm" else {}
+        _gate = check_coverage_acm if args.backend == "acm" else check_coverage
+        _gate_extra = dict(corner_workers=4) if args.backend == "acm" else {}
         result = _gate(schx, values_per_knob, fixed_kv,
                        args.oversample, transient_peak, margin=args.transient_margin,
                        sample_grid=sample_grid, capture=_capture_cfg(args),

@@ -704,7 +704,7 @@ Four things that are easy to get wrong:
   normally gitignored, so `--sync-file` it, **and `--sync-file` its `.recipe.json` too**; the two
   must land next to each other. When the input has no recipe (a clip cut for a test, say), pass
   `-- --transient-peak V` after the separator, or `-- --skip-transient-check` to render
-  unchecked. This is the same for every backend, `cm` included. A skipped check is not a
+  unchecked. This is the same for every backend, `acm` included. A skipped check is not a
   verified one: use it for tests, not for a dataset you will train on.
 - **`--collect HOST:DIR` — collect where the dataset will be trained.** A plain `--collect DIR`
   lands everything on this controller; if training happens elsewhere the dataset then crosses

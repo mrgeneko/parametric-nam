@@ -1720,6 +1720,6 @@ oversample = 8
 
 def test_version_check_exports_the_workers_env_first():
     import distribute_pull as dp
-    cmd = dp.version_check_command("/r", "cm", "CM_RUN=/w/cm_run")
-    assert cmd.startswith("export CM_RUN=/w/cm_run && cd /r && ")
-    assert dp.version_check_command("/r", "cm").startswith("cd /r && ")
+    cmd = dp.version_check_command("/r", "acm", "ACM_RUN=/w/acm_run")
+    assert cmd.startswith("export ACM_RUN=/w/acm_run && cd /r && ")
+    assert dp.version_check_command("/r", "acm").startswith("cd /r && ")

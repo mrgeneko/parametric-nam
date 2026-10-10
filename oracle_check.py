@@ -18,9 +18,9 @@ cabinet removes, so the figure to read against an audibility threshold is the ca
    "combinations": [idx, ...], "date": ...}
 
 Oracles: `livespice` (livespice-cli). A dataset rendered by livespice compared with livespice would measure nothing, so that is
-refused. What the number means: the ESR between two renderers' answers for the same circuit, knobs and input -- for the cm
+refused. What the number means: the ESR between two renderers' answers for the same circuit, knobs and input -- for the acm
 backend against livespice, mostly the difference between the two resamplers (livespice averages each output period, a boxcar with
-high-frequency droop and weak alias rejection; the cm renderer uses a linear-phase FIR) plus the two truncation errors, which is
+high-frequency droop and weak alias rejection; the acm renderer uses a linear-phase FIR) plus the two truncation errors, which is
 the figure to read against the audibility threshold the dataset is generated for.
 """
 import argparse

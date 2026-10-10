@@ -70,7 +70,7 @@ PYTHON = sys.executable
 
 # Config keys that change what the gated tools MEASURE. Anything not listed (training
 # hyper-parameters, output paths, patience, ...) can change without invalidating a gate.
-SIZING_KEYS = ("schx", "backend", "oversample", "iterations", "cm_tables", "cm_lead_in", "trust_region", "newton_check", "conv", "method", "maxstep",
+SIZING_KEYS = ("schx", "backend", "oversample", "iterations", "acm_tables", "acm_lead_in", "trust_region", "newton_check", "conv", "method", "maxstep",
                "pedal_dir", "module", "probe_node", "capture_hp_hz", "capture_order",
                "capture_chain", "no_capture_chain", "out_scale", "lead_silence_s", "circuit",
                "knobs", "ranges", "fixed_params")
@@ -78,8 +78,8 @@ SIZING_KEYS = ("schx", "backend", "oversample", "iterations", "cm_tables", "cm_l
 CHECK_KEYS = ("knob_kind", "input_level_dbu")
 FILE_KEYS = ("schx",)      # hashed by content rather than by path
 
-TRANSIENT_BACKENDS = ("livespice", "cm", "ngspice-deck")
-PREFLIGHT_BACKENDS = ("livespice", "cm", "ngspice-deck")
+TRANSIENT_BACKENDS = ("livespice", "acm", "ngspice-deck")
+PREFLIGHT_BACKENDS = ("livespice", "acm", "ngspice-deck")
 
 
 class GateError(Exception):
@@ -295,7 +295,7 @@ def preflight_command(cfg: dict) -> "tuple[list[str] | None, str]":
         return None, f"preflight.py has no mode for backend {b!r}"
     if not inp:
         return None, "config has no `input`"
-    if b in ("livespice", "cm"):
+    if b in ("livespice", "acm"):
         if not cfg.get("schx"):
             return None, f"{b} preflight needs `schx`"
         cmd = [PYTHON, str(HERE / "preflight.py"), "--backend", b,

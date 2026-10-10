@@ -556,9 +556,9 @@ def reproduce_command(args, repeats=None, have_config=False):
     if getattr(args, "trust_region", 0.0): c.append(f'    --trust-region {args.trust_region:g} \\')
     if getattr(args, "newton_check", "fail") != "fail": c.append(f'    --newton-check {args.newton_check} \\')
     if args.trunc_target is not None: c.append(f'    --trunc-target {args.trunc_target} \\')
-    if getattr(args, "cm_run", None): c.append(f'    --cm-run "{portable(args.cm_run)}" \\')
-    if getattr(args, "cm_lead_in", None) is not None: c.append(f'    --cm-lead-in {args.cm_lead_in:g} \\')
-    if getattr(args, "cm_tables", None): c.append(f'    --cm-tables {args.cm_tables} \\')
+    if getattr(args, "acm_run", None): c.append(f'    --acm-run "{portable(args.acm_run)}" \\')
+    if getattr(args, "acm_lead_in", None) is not None: c.append(f'    --acm-lead-in {args.acm_lead_in:g} \\')
+    if getattr(args, "acm_tables", None): c.append(f'    --acm-tables {args.acm_tables} \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
     if getattr(args, "koren", False): c.append('    --koren \\')
@@ -629,7 +629,7 @@ def build_release(args, fh, timings=None, repeats=None):
         shutil.copy2(args.schx, release_dir / args.schx.name)
         log(f"  + {args.schx.name}", fh)
         cmj = args.schx.with_suffix(".acmod")
-        if args.backend == "cm" and cmj.exists():   # the circuit file the cm backend renders; without it the bundle cannot be reproduced
+        if args.backend == "acm" and cmj.exists():   # the circuit file the acm backend renders; without it the bundle cannot be reproduced
             shutil.copy2(cmj, release_dir / cmj.name)
             log(f"  + {cmj.name}", fh)
     metrics = args.checkpoint_dir / "metrics.csv"
@@ -718,7 +718,7 @@ def build_release(args, fh, timings=None, repeats=None):
         _rj = json.loads((args.dataset_dir / "config.json").read_text()).get("renderer") or {}
         if _rj.get("name") and _rj.get("name") != "cpp":
             renderer_line = f"\n- Renderer: {_rj.get('name')} {_rj.get('version')} (profile {_rj.get('profile') or 'n/a'})"
-            if _rj.get("name") == "cm":
+            if _rj.get("name") == "acm":
                 renderer_line += f", circuit file `{args.schx.with_suffix('.acmod').name}`"
             _o = _rj.get("esr_vs_oracle")
             if _o:
@@ -971,7 +971,7 @@ def main():
 
     # --- generation (gen_dataset_from_schx.py) ---
     g = ap.add_argument_group("generation")
-    g.add_argument("--backend",      choices=["cpp", "livespice", "cm", "ngspice", "ngspice-deck"], default="livespice")
+    g.add_argument("--backend",      choices=["cpp", "livespice", "acm", "ngspice", "ngspice-deck"], default="livespice")
     g.add_argument("--koren",        action="store_true",
                    help="ngspice: Koren triode model (softer, for stiff amps)")
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
@@ -1015,13 +1015,13 @@ def main():
     g.add_argument("--oracle-check", type=int, default=0, dest="oracle_check", metavar="N",
                    help="after combining, re-render N combinations of the dataset with an independent renderer (livespice-cli) and record the "
                         "ESR in the dataset's config.json (renderer.esr_vs_oracle); see oracle_check.py. 0 = off (default).")
-    g.add_argument("--cm-run", type=Path, default=None, dest="cm_run", metavar="PATH",
-                   help="cm: the cm_run-compatible renderer (default: $CM_RUN, then cm_run on PATH). Forwarded to gen_dataset_from_schx.py "
-                        "--cm-run and exported as $CM_RUN for the preflight and coverage steps; settable per device as `cm_run` in a config.")
-    g.add_argument("--cm-lead-in", type=float, default=None, dest="cm_lead_in", metavar="S",
-                   help="cm: seconds of silence run through the circuit before the input (default 6, 0 = cold start); settable as `cm_lead_in`.")
-    g.add_argument("--cm-tables", choices=["on", "off"], default=None, dest="cm_tables",
-                   help="cm: tabulated tube characteristics (default on); settable as `cm_tables`.")
+    g.add_argument("--acm-run", type=Path, default=None, dest="acm_run", metavar="PATH",
+                   help="acm: the acm_run-compatible renderer (default: $ACM_RUN, then acm_run on PATH). Forwarded to gen_dataset_from_schx.py "
+                        "--acm-run and exported as $ACM_RUN for the preflight and coverage steps; settable per device as `acm_run` in a config.")
+    g.add_argument("--acm-lead-in", type=float, default=None, dest="acm_lead_in", metavar="S",
+                   help="acm: seconds of silence run through the circuit before the input (default 6, 0 = cold start); settable as `acm_lead_in`.")
+    g.add_argument("--acm-tables", choices=["on", "off"], default=None, dest="acm_tables",
+                   help="acm: tabulated tube characteristics (default on); settable as `acm_tables`.")
     g.add_argument("--trust-region", type=float, default=0.0, dest="trust_region", metavar="V",
                    help="livespice: limit each Newton step to a norm of V volts (default 0 = off). Circuit-specific; forwarded to "
                         "gen_dataset_from_schx.py --trust-region; settable per device as `trust_region` in a config.")
@@ -1382,10 +1382,10 @@ def main():
         # any of them, not after the first render fails deep into one -- confirmed
         # that's a raw subprocess FileNotFoundError with no useful message otherwise.
         if run_generate:
-            if args.backend == "cm" and getattr(args, "cm_run", None):
-                os.environ["CM_RUN"] = str(args.cm_run)   # the preflight, coverage and sizing steps find the renderer the same way
+            if args.backend == "acm" and getattr(args, "acm_run", None):
+                os.environ["ACM_RUN"] = str(args.acm_run)   # the preflight, coverage and sizing steps find the renderer the same way
                 import gen_dataset_from_schx as _gen
-                _gen.CM_RUN = args.cm_run                 # and check_oracle below, which reads the module's own copy
+                _gen.ACM_RUN = args.acm_run                 # and check_oracle below, which reads the module's own copy
             check_oracle(args.backend)
 
         # ------------------------------------------------------------------
@@ -1443,7 +1443,7 @@ def main():
         # kind of thing that renders and trains "successfully" and produces a plausible-looking but
         # wrong model, discovered only much later (see preflight.py's own docstring).
         # ------------------------------------------------------------------
-        if (run_generate and args.config and args.backend in ("livespice", "cm") and args.schx
+        if (run_generate and args.config and args.backend in ("livespice", "acm") and args.schx
                 and args.input and not args.skip_preflight_check):
             section("STEP 2 / 5 — Preflight", fh)
             log("Checking that every knob is alive and moves the right direction, and that the "
@@ -1541,9 +1541,9 @@ def main():
                 if getattr(args, "trust_region", 0.0): gen_cmd += ["--trust-region", f"{args.trust_region:g}"]
                 if getattr(args, "newton_check", "fail") != "fail": gen_cmd += ["--newton-check", args.newton_check]
                 if args.trunc_target is not None: gen_cmd += ["--trunc-target", args.trunc_target]
-                if getattr(args, "cm_run", None): gen_cmd += ["--cm-run", args.cm_run]
-                if getattr(args, "cm_lead_in", None) is not None: gen_cmd += ["--cm-lead-in", f"{args.cm_lead_in:g}"]
-                if getattr(args, "cm_tables", None): gen_cmd += ["--cm-tables", args.cm_tables]
+                if getattr(args, "acm_run", None): gen_cmd += ["--acm-run", args.acm_run]
+                if getattr(args, "acm_lead_in", None) is not None: gen_cmd += ["--acm-lead-in", f"{args.acm_lead_in:g}"]
+                if getattr(args, "acm_tables", None): gen_cmd += ["--acm-tables", args.acm_tables]
                 if args.random:        gen_cmd += ["--random",       args.random]
                 if args.no_anchors:    gen_cmd += ["--no-anchors"]
                 if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]

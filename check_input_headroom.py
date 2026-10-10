@@ -103,11 +103,11 @@ def main() -> int:
     inp = os.path.expanduser(cfg["input"])
     knobs = ",".join(cfg["knobs"].keys())
     fixed = ",".join(f"{k}={v}" for k, v in (cfg.get("fixed") or {}).items())
-    backend = "cm" if cfg.get("backend") == "cm" else "livespice"   # the probes run on the backend the dataset will use
+    backend = "acm" if cfg.get("backend") == "acm" else "livespice"   # the probes run on the backend the dataset will use
     oversample = args.oversample
     if oversample is None:
-        ov = cfg.get("oversample", 2 if backend == "cm" else 8)
-        oversample = (2 if backend == "cm" else 8) if str(ov).strip().lower() == "auto" else int(ov)   # 'auto' is chosen at render time; the saturation ceiling does not move with the rate
+        ov = cfg.get("oversample", 2 if backend == "acm" else 8)
+        oversample = (2 if backend == "acm" else 8) if str(ov).strip().lower() == "auto" else int(ov)   # 'auto' is chosen at render time; the saturation ceiling does not move with the rate
 
     print(f"Checking whether {Path(inp).name} reaches {Path(schx).name}'s own saturation ceiling "
           f"(knobs at default 0.5 -- see this tool's docstring for what that does and doesn't tell you)\n")

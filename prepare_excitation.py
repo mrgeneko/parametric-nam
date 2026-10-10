@@ -62,7 +62,7 @@ from capture_chain import (add_cli_args as _cc_add_cli_args, resolve as _cc_reso
                            cache_tag)
 from find_saturation_point import (find_saturation_point, findpeak_cache_key,  # noqa: E402
                                     cache_findpeak, scratch_dir, _linear_region_top)
-from render_backends import (CmBackend, LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
+from render_backends import (AcmBackend, LiveSpiceBackend, NgspiceBackend, LtspiceBackend,  # noqa: E402
                              NgspiceSchxBackend, parse_conv, conv_cache_tag)
 
 
@@ -107,9 +107,9 @@ def solver_identity(backend_name: str) -> str:
     Returns a marker rather than raising when the revision cannot be read, so the merge
     REFUSES rather than crashing mid-render after hours of work.
     """
-    if backend_name == "cm":
-        from render_backends import cm_solver_identity
-        return cm_solver_identity()
+    if backend_name == "acm":
+        from render_backends import acm_solver_identity
+        return acm_solver_identity()
     if backend_name != "livespice":
         return f"{backend_name}:unidentified"
     import subprocess
@@ -460,31 +460,31 @@ def _setup(args):
     # branch re-resolves once its config is loaded. Initialising to None instead would
     # silently DISABLE the chain on the deck backends, which never load a config.
     _capture = _cc_resolve(args)
-    if args.backend in ("livespice", "cm"):
-        is_cm = args.backend == "cm"
+    if args.backend in ("livespice", "acm"):
+        is_acm = args.backend == "acm"
         if args.config:
             cfg = load_config(Path(args.config))
             _capture = _cc_resolve(args, cfg)
             schx = str(cfg["schx"])
-            oversample = args.oversample or cfg.get("oversample", 2 if is_cm else 8)
+            oversample = args.oversample or cfg.get("oversample", 2 if is_acm else 8)
             knob_ranges = _parse_ranges(cfg.get("ranges", []))
             fixed = _parse_fixed(cfg.get("fixed_params"))
         else:
             if not args.schx or not args.range:
                 sys.exit(f"--backend {args.backend} needs --config, or --schx + --range")
             schx = args.schx
-            oversample = args.oversample or (2 if is_cm else 8)
+            oversample = args.oversample or (2 if is_acm else 8)
             knob_ranges = _parse_ranges(args.range)
             fixed = _parse_fixed(args.fixed_params)
         if not knob_ranges:
             sys.exit("no [knobs]/--range entries -- nothing to check corners over")
-        if is_cm:   # the .acmod beside the schematic is part of what is measured
+        if is_acm:   # the .acmod beside the schematic is part of what is measured
             oversample = 2 if str(oversample).lower() == "auto" else int(oversample)   # a config says "auto": the onset does not move with the rate, probe at 2x
-            backend = CmBackend(schx, oversample=oversample, iterations=args.iterations)
+            backend = AcmBackend(schx, oversample=oversample, iterations=args.iterations)
             identity = Path(schx).read_bytes() + Path(schx).with_suffix(".acmod").read_bytes()
-            cache_extra = (f"backend=cm|os={oversample}|it={args.iterations}|maxv={args.peak_max_v}"
+            cache_extra = (f"backend=acm|os={oversample}|it={args.iterations}|maxv={args.peak_max_v}"
                            f"|minv={args.min_start_v}|startv={args.sweep_start_v}"
-                           f"|solver={solver_identity('cm')}") + cache_tag(_capture)
+                           f"|solver={solver_identity('acm')}") + cache_tag(_capture)
         else:
             backend = LiveSpiceBackend(schx, oversample=oversample, iterations=args.iterations)
             identity = Path(schx).read_bytes()
@@ -581,7 +581,7 @@ def _setup(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", required=True,
-                    choices=["livespice", "cm", "ngspice", "ngspice-deck", "ltspice-deck"])
+                    choices=["livespice", "acm", "ngspice", "ngspice-deck", "ltspice-deck"])
 
     # livespice
     ap.add_argument("--config", help="[livespice] per-circuit TOML (same as run_pipeline.py --config)")

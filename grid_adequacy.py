@@ -96,7 +96,7 @@ import numpy as np
 import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_dataset_from_schx import (LIVESPICE_CLI, _cm_args, _run_ngspice,
+from gen_dataset_from_schx import (LIVESPICE_CLI, _acm_args, _run_ngspice,
                                     check_oracle, write_probe_clip)
 from shard import select as _shard_select
 
@@ -340,14 +340,14 @@ class Renderer:
         # audio of every probe clip. Only for the .schx-based backends -- a deck backend's
         # answer depends on generator module state this cannot summarise, and a cache that is
         # wrong is worse than no cache.
-        if self._disk_cache is not None and backend in ("livespice", "cm", "ngspice") and self.schx:
+        if self._disk_cache is not None and backend in ("livespice", "acm", "ngspice") and self.schx:
             try:
                 h = hashlib.sha256()
                 h.update(Path(self.schx).read_bytes())
-                if backend == "cm":   # the .acmod beside the schematic and the renderer's own revision are part of what is measured
-                    from render_backends import cm_solver_identity
+                if backend == "acm":   # the .acmod beside the schematic and the renderer's own revision are part of what is measured
+                    from render_backends import acm_solver_identity
                     h.update(Path(self.schx).with_suffix(".acmod").read_bytes())
-                    h.update(cm_solver_identity().encode())
+                    h.update(acm_solver_identity().encode())
                 h.update(f"|{backend}|{self.os_}|{self.it}|{self.fixed}|{_cc_cache_tag(self.capture)}"
                         f"{conv_cache_tag(self.conv)}|".encode())
                 for c in self.clips:
@@ -512,8 +512,8 @@ class Renderer:
                     self._note_fail(str(getattr(fail, 'error', 'no output')))
                     out.append(None)
                 continue
-            if self.backend == "cm":
-                r = subprocess.run(_cm_args(str(self.schx), clip, w, self.os_, self.it, allp, progress=False),
+            if self.backend == "acm":
+                r = subprocess.run(_acm_args(str(self.schx), clip, w, self.os_, self.it, allp, progress=False),
                                    capture_output=True, text=True)
             else:
                 r = subprocess.run(

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Solver stability of a cm device across its knob grid, on the excitation the dataset will render.
+"""Solver stability of a acm device across its knob grid, on the excitation the dataset will render.
 
-cm has no spike detector or retry ladder (stability_sweep.py is livespice-only). Its solver
-reports divergences and unconverged Newton solves through cm_run --metrics. The dataset
-generator and CmBackend both gate on them; this gives the full per-corner picture up front.
-It renders the same corners prepare_excitation.py sizes against, with CmBackend's settings
+acm has no spike detector or retry ladder (stability_sweep.py is livespice-only). Its solver
+reports divergences and unconverged Newton solves through acm_run --metrics. The dataset
+generator and AcmBackend both gate on them; this gives the full per-corner picture up front.
+It renders the same corners prepare_excitation.py sizes against, with AcmBackend's settings
 (--prepared off, 2 s lead-in; the dataset generator uses a prepared state when one is usable,
 which settles the same supply), and reports per corner:
 
@@ -13,7 +13,7 @@ which settles the same supply), and reports per corner:
 
 Exit status is 1 on any FAIL, so a generation script can gate on it.
 
-  python cm_stability.py --config path/to/device/config.toml [--input excitation.wav] [--workers 4] [-o report.json]
+  python acm_stability.py --config path/to/device/config.toml [--input excitation.wav] [--workers 4] [-o report.json]
 """
 import argparse
 import concurrent.futures as cf
@@ -29,13 +29,13 @@ import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_transient_coverage import _corners, _sample_interior, resolve_sample_grid  # noqa: E402
-from render_backends import _find_cm_run_exe  # noqa: E402
+from render_backends import _find_acm_run_exe  # noqa: E402
 
 
 def render_corner(circuit, in_wav, scratch, idx, params, oversample, iterations, lead_in):
     out = os.path.join(scratch, f"c{idx}.wav")
     metrics = os.path.join(scratch, f"c{idx}.json")
-    args = [_find_cm_run_exe(), circuit, in_wav, out, "--prepared", "off", "--os", str(oversample),
+    args = [_find_acm_run_exe(), circuit, in_wav, out, "--prepared", "off", "--os", str(oversample),
             "--tol-rel", "1e-4", "--tables", "on", "--resampler", "fir-linear", "--iterations", str(iterations),
             "--metrics", metrics]
     if lead_in > 0:
@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--input", type=Path, help="excitation to render (default: the config's input)")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--iterations", type=int, default=256)
-    ap.add_argument("--lead-in", type=float, default=2.0, help="as CmBackend's default")
+    ap.add_argument("--lead-in", type=float, default=2.0, help="as AcmBackend's default")
     ap.add_argument("--max-unconverged", type=float, default=1e-4)
     ap.add_argument("-o", "--output", type=Path)
     args = ap.parse_args()
@@ -98,7 +98,7 @@ def main():
     corners = _sample_interior(knob_ranges, corners, resolve_sample_grid(None, knob_ranges))
     print(f"{len(corners)} corners, oversample {oversample}, input {in_wav}")
 
-    scratch = tempfile.mkdtemp(prefix="cm_stability_")
+    scratch = tempfile.mkdtemp(prefix="acm_stability_")
     jobs = []
     for i, (label, c) in enumerate(corners):
         params = dict(fixed)

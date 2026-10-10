@@ -501,7 +501,7 @@ def version_check_command(worker_dir: str, backend: "str | None", env: str = "")
     something this check needs to discover the hard way.
 
     `env` is the worker's own ENV field ("VAR=value"), exported first exactly as the render command does: without it the
-    probe cannot see a $CM_RUN / $DOTNET_ROOT that the worker only gets through that field, and reports the solver as
+    probe cannot see a $ACM_RUN / $DOTNET_ROOT that the worker only gets through that field, and reports the solver as
     unidentified for a worker that would render correctly."""
     pre = f"export {env} && " if env else ""
     return (f"{pre}cd {worker_dir} && git rev-parse HEAD && "
@@ -620,12 +620,12 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
         out += ["--fixed-params", str(cfg["fixed_params"])]
     if cfg.get("oversample") is not None:
         out += ["--oversample", str(cfg["oversample"])]
-    # cm backend: the worker finds its own cm_run ($CM_RUN, then PATH: the controller's path means nothing there), so only the
+    # acm backend: the worker finds its own acm_run ($ACM_RUN, then PATH: the controller's path means nothing there), so only the
     # settings that change what is rendered are forwarded
-    if cfg.get("cm_lead_in") is not None:
-        out += ["--cm-lead-in", str(cfg["cm_lead_in"])]
-    if cfg.get("cm_tables"):
-        out += ["--cm-tables", str(cfg["cm_tables"])]
+    if cfg.get("acm_lead_in") is not None:
+        out += ["--acm-lead-in", str(cfg["acm_lead_in"])]
+    if cfg.get("acm_tables"):
+        out += ["--acm-tables", str(cfg["acm_tables"])]
     if cfg.get("trunc_target") is not None:
         out += ["--trunc-target", str(cfg["trunc_target"])]
     # Device-model overrides (a real datasheet-fitted transistor's bjt_vaf/bjt_rb/...) --

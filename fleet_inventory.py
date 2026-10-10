@@ -146,12 +146,12 @@ def _which(run, host, prog: str) -> bool:
     return r.returncode == 0 and r.stdout.strip() != ""
 
 
-def _cm_runs(run, host) -> bool:
-    """True if `cm_run` is on the login shell's PATH and actually executes (`--build-info` exits 0).
-    Mirrors gen_dataset_from_schx._find_cm_run's PATH branch; its $CM_RUN branch is skipped remotely
+def _acm_runs(run, host) -> bool:
+    """True if `acm_run` is on the login shell's PATH and actually executes (`--build-info` exits 0).
+    Mirrors gen_dataset_from_schx._find_acm_run's PATH branch; its $ACM_RUN branch is skipped remotely
     for the same reason as $LIVESPICE_CLI. Running it, not just finding it, catches a binary built
     for another architecture or a missing shared library."""
-    r = run(host, ["sh", "-lc", "cm_run --build-info"])
+    r = run(host, ["sh", "-lc", "acm_run --build-info"])
     return r.returncode == 0
 
 
@@ -173,8 +173,8 @@ def probe_backends(run, host, repo: "str | None") -> "list[str]":
     backends = []
     if repo and any(_test(run, host, f"{repo}/{suf}") for suf in LIVESPICE_CLI_SUFFIXES):
         backends += ["livespice", "ngspice-schx"]   # one oracle serves both, see prepare_excitation.py
-    if _cm_runs(run, host):
-        backends.append("cm")
+    if _acm_runs(run, host):
+        backends.append("acm")
     if _which(run, host, "ngspice"):
         backends.append("ngspice-deck")
     if any(_test(run, host, c) for c in LTSPICE_BIN_CANDIDATES):
