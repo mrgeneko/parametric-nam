@@ -29,6 +29,7 @@ CONTRACT a backend implements (two methods, nothing else):
 Adding a third backend (e.g. LTspice) means writing one class implementing these two methods,
 not another ~300-line copy of preflight.py's checks.
 """
+import json
 import os
 import shutil
 import signal
@@ -184,6 +185,10 @@ def cm_solver_identity() -> str:
     return "cm:unidentified"
 
 
+# Same threshold as gen_dataset_from_schx.CM_NEWTON_MAX_FRACTION; probes only warn, the dataset path fails.
+CM_UNCONVERGED_WARN_FRACTION = 1e-5
+
+
 class CmBackend:
     """Renders via a cm_run-compatible executable (one subprocess per render) from the .cm.json beside the .schx.
 
@@ -206,15 +211,39 @@ class CmBackend:
                 "--tol-rel", "1e-4", "--tables", "on", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
         if self.lead_in > 0:
             args += ["--lead-in", f"{self.lead_in:g}"]
+        metrics = f"{scratch}/pf_{tag}.metrics.json"
+        args += ["--metrics", metrics]
         for k, v in params.items():
             args += ["--knob", f"{k}={v}"]
         r = subprocess.run(args, capture_output=True, text=True)
+        tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
+        detail = f"  [cm_run: {tail[:200]}]" if tail else ""
+        if r.returncode != 0:
+            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}{detail}\n")
+            return None
+        try:
+            with open(metrics) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            m = None
+        if m is not None:
+            solves = m.get("solves", 0)
+            bad = None
+            if m.get("divergences", 0) > 0:
+                bad = f"{m['divergences']} divergence(s), first at sample {m.get('first_bad_sample')}"
+            elif m.get("dc_converged", 1) == 0:
+                bad = "DC operating point did not converge"
+            if bad:
+                sys.stderr.write(f"[{tag}] cm_run render is not trustworthy: {bad}{detail}\n")
+                return None
+            if solves and m.get("unconverged", 0) / solves > CM_UNCONVERGED_WARN_FRACTION:
+                sys.stderr.write(f"[{tag}] WARNING: {m['unconverged']}/{solves} Newton solves unconverged "
+                                 f"({100.0 * m['unconverged'] / solves:.4f}%)\n")
         try:
             y, _ = sf.read(out, dtype="float32")
             return y[:, 0] if y.ndim > 1 else y
         except Exception:
-            tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
-            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}" + (f"  [cm_run: {tail[:200]}]" if tail else "") + "\n")
+            sys.stderr.write(f"[{tag}] {describe_subprocess_failure(r)}{detail}\n")
             return None
 
     render_many = LiveSpiceBackend.render_many
