@@ -301,6 +301,14 @@ def main():
                           "match the keyword heuristic (an unrecognized name gets NEITHER a "
                           "direction check NOR --eq-check-drive-level's EQ-swamp protection, "
                           "silently -- the least scrutiny, not the most).")
+    ap.add_argument("--baseline-map", choices=("auto", "on", "off"), default="auto",
+                     help="judge each knob's direction over several baselines of the OTHER knobs (knob_map.py) instead of the single "
+                          "all-0.5 baseline: a knob that works backwards only when another path dominates is reported as an "
+                          "INTERACTION warning, not a failure; a baseline where the probe clips is skipped; a tone knob whose whole "
+                          "effect sits inside the first or last tenth of its travel is flagged. auto = on for the acm backend (fast), "
+                          "off elsewhere (a few hundred short renders).")
+    ap.add_argument("--map-workers", type=int, default=4, help="concurrent renders for --baseline-map")
+    ap.add_argument("--map-baselines", type=int, default=6, help="pseudo-random corner baselines for --baseline-map (plus the all-0.5 one)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--no-cache", action="store_true",
                      help="ignore (and overwrite) any cached --find-peak saturation sweep")
@@ -520,6 +528,38 @@ def main():
         if sp > 0:
             warn.append(f"{knob}: {sp} sample-spike(s) in probe renders")
         report["knobs"][knob] = rec
+
+    # ---- multi-baseline direction map (knob_map.py): replaces the single-baseline direction verdicts ----
+    if args.baseline_map == "on" or (args.baseline_map == "auto" and args.backend == "acm"):
+        from knob_map import direction_map
+        print("\n  baseline map (each knob 0.2 vs 0.8 over several settings of the others; clipping baselines skipped):", flush=True)
+        mapped = direction_map(backend, knobs, classify, fixed, scratch, lead_n=lead_n, workers=args.map_workers,
+                               n_random=args.map_baselines)
+        def _strip(knob):
+            hard_fail[:] = [f for f in hard_fail if not (f.startswith(f"{knob}: REVERSED") or f.startswith(f"{knob}: DEAD"))]
+            warn[:] = [w for w in warn if not (w.startswith(f"{knob}: direction inconclusive") or w.startswith(f"{knob}: LEVEL-DEPENDENT")
+                                                 or w.startswith(f"{knob}: responds") or w.startswith(f"{knob}: direction OK but"))]
+        for knob, m in mapped.items():
+            _strip(knob)
+            v, kind = m["verdict"], m["kind"]
+            tail = f"ok {m['ok']} reversed {m['reversed']} flat {m['flat']} of {m['usable']} usable" + \
+                   (f", {m['skipped_nonlinear']} skipped (clipping or input-limited)" if m["skipped_nonlinear"] else "")
+            deltas = ", ".join(f"{b['delta_db']:+.1f}" for b in m["per_baseline"])
+            print(f"  {knob:12} {v:12} {m['label']}: {tail}\n  {'':12} per-baseline dB change: {deltas}")
+            if v == "REVERSED":
+                hard_fail.append(f"{knob}: REVERSED at every baseline that moves ({m['label']}; {tail})")
+            elif v == "DEAD":
+                (warn if kind == "drive" else hard_fail).append(f"{knob}: DEAD over every usable baseline ({m['label']}; {tail})")
+            elif v == "INTERACTION":
+                warn.append(f"{knob}: INTERACTION -- moves the right way at some settings of the other knobs and the wrong way at others "
+                            f"({m['label']}; {tail}; per-baseline dB: {deltas}). A property of the circuit if it matches the schematic.")
+            elif v == "UNTESTED":
+                warn.append(f"{knob}: UNTESTED -- no baseline stayed linear ({m['skipped_nonlinear']} skipped, {m['render_failed']} failed)")
+            if m.get("travel_concentrated"):
+                warn.append(f"{knob}: TRAVEL -- {m['travel_first_tenth']:.0%} of the {m['label']} change falls in the first tenth of the knob, "
+                            f"{m['travel_last_tenth']:.0%} in the last tenth (levels at 0/.1/.25/.5/.75/.9/1: {m['travel_db']} dB). "
+                            f"Most of the knob does almost nothing: check the pot taper and which end the wiper is tied to.")
+            report["knobs"].setdefault(knob, {})["baseline_map"] = m
 
     # ---- input-level calibration ----
     print("\n  input calibration:")
