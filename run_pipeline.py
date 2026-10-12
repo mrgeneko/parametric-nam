@@ -990,6 +990,13 @@ def main():
     g.add_argument("--schx",         type=Path, help="Path to .schx (livespice, ngspice; optional "
                    "metadata-only for ngspice-deck -- see gen_dataset_from_schx.py's --schx help)")
     g.add_argument("--circuit",      help="Circuit name (cpp)")
+    g.add_argument("--gear-make",    default="", help="Gear manufacturer, written into the exported .nam's metadata "
+                   "(forwarded to gen_dataset_from_schx.py; falls back to the circuit name).")
+    g.add_argument("--gear-model",   default="", help="Gear model name, written into the exported .nam's metadata "
+                   "(forwarded to gen_dataset_from_schx.py; falls back to the circuit name).")
+    g.add_argument("--gear-type",    default="", help="Kind of gear, written into the exported .nam's metadata -- "
+                   "'pedal', 'amp', 'amp_cab', 'preamp'. Forwarded to gen_dataset_from_schx.py, which "
+                   "defaults to 'amp' when it is empty, so set it for every pedal (config: gear_type = \"pedal\").")
     g.add_argument("--pedal-dir",    type=Path,
                    help="ngspice-deck: directory containing --module, added to sys.path. Same "
                         "convention as preflight.py/render_ngspice_deck.py --backend ngspice-deck, "
@@ -1515,6 +1522,9 @@ def main():
                 ]
                 if args.schx:          gen_cmd += ["--schx",         args.schx]
                 if args.circuit:       gen_cmd += ["--circuit",      args.circuit]
+                if args.gear_make:     gen_cmd += ["--gear-make",    args.gear_make]
+                if args.gear_model:    gen_cmd += ["--gear-model",   args.gear_model]
+                if args.gear_type:     gen_cmd += ["--gear-type",    args.gear_type]
                 if args.pedal_dir:     gen_cmd += ["--pedal-dir",    args.pedal_dir]
                 if args.module:        gen_cmd += ["--module",       args.module]
                 if args.probe_node != "OUT": gen_cmd += ["--probe-node", args.probe_node]

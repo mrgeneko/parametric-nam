@@ -244,6 +244,7 @@ Any CLI flag overrides the config (config is loaded as argparse defaults). The t
 | `[knob-kind]` | `--knob-kind` | `drive`/`hi`/`lo`/`mid`/`rms` — drives the sensitivity and preflight checks |
 | `[knob-boost]` | `--knob-boost` | per-knob conditioning gain |
 | `widths = [3,4,8]` | `--widths` | the model tiers to train |
+| `gear_type = "pedal"` | `--gear-type` | the `.nam` metadata's gear kind (`pedal`, `amp`, `amp_cab`, `preamp`); **defaults to `amp`**, so set it for every pedal. `gear_make` / `gear_model` work the same and default to the circuit name. Top-level keys: put them before the first `[table]` |
 
 A control in none of these is left at its `.schx` default.
 

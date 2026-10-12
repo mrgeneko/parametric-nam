@@ -15,6 +15,13 @@ input      = "examples/T3K-sweep-v3.wav"   # NOT bundled -- download it first, s
                                        # transient attacks, not just steady tones.
 backend    = "livespice"
 
+# Written into the exported .nam's metadata. gear_type defaults to "amp" when left out, which
+# is wrong for a pedal -- set it ("pedal", "amp", "amp_cab", "preamp"). gear_make / gear_model
+# default to the circuit name.
+gear_type  = "pedal"
+# gear_make  = "Manufacturer"
+# gear_model = "Model"
+
 # MEASURED, not guessed -- see measure_truncation.py (README: Scripts). The argparse
 # default (2) is too low for most real circuits; this is a reasonable starting point.
 oversample = 8
