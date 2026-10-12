@@ -917,7 +917,7 @@ class ParamDataset(torch.utils.data.Dataset):
             config.json      — must contain a "knobs" list
     """
     def __init__(self, dataset_dir: str, crop_len: int = 48000, repeats: int = 1,
-                 mmap: bool = False):
+                 mmap: bool = False, holdout_frac: float = 0.0):
         self.dir = Path(dataset_dir)
         with open(self.dir / "config.json") as f:
             self.config = json.load(f)
@@ -926,6 +926,7 @@ class ParamDataset(torch.utils.data.Dataset):
         self.num_params = len(self.param_names)
         self.crop_len = crop_len
         self.repeats = repeats
+        self.holdout_frac = float(holdout_frac)
 
         # Load input sweep AT ITS NATIVE LEVEL -- no RMS rescaling.
         #
@@ -987,6 +988,7 @@ class ParamDataset(torch.utils.data.Dataset):
             for i, r in enumerate(rows)
         ]
 
+        self._build_holdout()
         self._check_output_diversity()
 
     def _check_output_diversity(self) -> None:
@@ -1017,6 +1019,54 @@ class ParamDataset(torch.utils.data.Dataset):
         combo_idx, _ = self.samples[real_idx]
         return min(len(self.inp), self.outputs[combo_idx].shape[0])
 
+    HOLDOUT_BLOCKS = 8
+
+    def _build_holdout(self):
+        """Reserve ~holdout_frac of the recording as HOLDOUT_BLOCKS equal blocks spread evenly
+        through the source-sweep segment of a build_excitation.py excitation. The lead silence,
+        pads and the appended chirps/bursts are never held out: the chirps are what teach the
+        model where the output stops increasing. Training crops are drawn only from the gaps
+        between blocks, so no training crop overlaps a validation window."""
+        sig_len = int(min(len(self.inp), self.outputs.shape[1]))
+        self.holdout_blocks = []
+        if self.holdout_frac > 0:
+            region = (0, sig_len)
+            br = (self.config.get("input") or {}).get("build_recipe")
+            if br and br.get("source") and br.get("args"):
+                sr = int(br["source"].get("samplerate", 48000))
+                r0 = int(round(float(br["args"].get("lead_silence_s") or 0) * sr))
+                n = int(br["source"]["frames"])
+                if br["args"].get("sweep_dur"):
+                    n = min(n, int(sr * float(br["args"]["sweep_dur"])))
+                region = (r0, min(r0 + n, sig_len))
+            else:
+                print("  WARNING: dataset has no build_recipe, so holdout blocks span the WHOLE "
+                      "recording and may include chirps; pass --holdout-frac 0 to disable.",
+                      file=sys.stderr)
+            nb = self.HOLDOUT_BLOCKS
+            blk = int(sig_len * self.holdout_frac) // nb
+            slice_len = (region[1] - region[0]) // nb
+            if blk < self.crop_len or blk > slice_len:
+                raise ValueError(
+                    f"--holdout-frac {self.holdout_frac} gives {nb} blocks of {blk} samples, "
+                    f"which must fit between crop_len {self.crop_len} and the {slice_len}-sample "
+                    f"slices of the source-sweep region {region}")
+            for i in range(nb):
+                lo = region[0] + i * slice_len + (slice_len - blk) // 2
+                self.holdout_blocks.append((lo, lo + blk))
+        gaps, pos = [], 0
+        for lo, hi in self.holdout_blocks:
+            gaps.append((pos, lo))
+            pos = hi
+        gaps.append((pos, sig_len))
+        self._train_gaps = [(a, b) for a, b in gaps if b - a > self.crop_len]
+        self._train_cum = np.cumsum([b - a - self.crop_len for a, b in self._train_gaps])
+
+    def _draw_train_start(self) -> int:
+        r = np.random.randint(0, int(self._train_cum[-1]))
+        g = int(np.searchsorted(self._train_cum, r, side="right"))
+        return self._train_gaps[g][0] + r - (int(self._train_cum[g - 1]) if g else 0)
+
     def item_at(self, real_idx: int, start):
         """One (input, target, params) crop for combo `real_idx`. `start=None` draws a RANDOM
         crop (the historical behaviour, used for training); an int pins the window, which is
@@ -1029,7 +1079,7 @@ class ParamDataset(torch.utils.data.Dataset):
         sig_len = min(len(inp), out_row.shape[0])
         if sig_len > self.crop_len:
             if start is None:
-                start = np.random.randint(0, sig_len - self.crop_len)
+                start = self._draw_train_start()
             start = min(int(start), sig_len - self.crop_len)
             inp = inp[start:start + self.crop_len]
             out = out_row[start:start + self.crop_len].astype(np.float32)
@@ -1072,14 +1122,18 @@ class FixedWindowVal(torch.utils.data.Dataset):
         self.current_pass = int(k) % self.passes
 
     def window_start(self, real_idx: int, k: int):
-        sig_len = self.dataset.sig_len_for(real_idx)
-        span = sig_len - self.dataset.crop_len
+        ds = self.dataset
+        span = ds.sig_len_for(real_idx) - ds.crop_len
         if span <= 0:
             return 0
         key = (real_idx, k)
         if key not in self._starts:
             rng = np.random.default_rng([self.seed, int(real_idx), int(k)])
-            self._starts[key] = int(rng.integers(0, span))
+            if ds.holdout_blocks:
+                b_lo, b_hi = ds.holdout_blocks[int(rng.integers(0, len(ds.holdout_blocks)))]
+                self._starts[key] = b_lo + int(rng.integers(0, b_hi - b_lo - ds.crop_len))
+            else:
+                self._starts[key] = int(rng.integers(0, span))
         return self._starts[key]
 
     def __len__(self):
@@ -2198,6 +2252,11 @@ def main():
                          "pure multiplier with no meaning of its own, so there is rarely a "
                          "reason to set it; its old default of 1 produced an EMPTY val split "
                          "and self-stopping runs that had barely trained.")
+    ap.add_argument("--holdout-frac", type=float, default=0.1,
+                    help="Fraction of each combo's recording reserved for validation, never "
+                         "trained on (default: %(default)s). Held out as 8 evenly spaced blocks "
+                         "inside the source-sweep segment of a build_excitation.py excitation; "
+                         "the appended chirps/bursts are never held out. 0 disables.")
     ap.add_argument("--val-split", type=float, default=0.05,
                     help="Fraction of samples for validation (default: %(default)s). Was 0.1; "
                          "val here does not measure interpolation anyway (the same knob settings "
@@ -2515,7 +2574,7 @@ def main():
     # so the two disagreed (Mesa Orange was handed 6 and trained at 20). Now nothing derives it.
     print(f"\nLoading dataset from {args.dataset} ...", file=sys.stderr)
     dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=1,
-                           mmap=args.mmap)
+                           mmap=args.mmap, holdout_frac=args.holdout_frac)
     n_combos = len(dataset.samples)
     floor = math.ceil(1 / args.val_split) if args.val_split > 0 else 1
     if args.repeats is None:
@@ -2551,9 +2610,9 @@ def main():
         val_indices = [train_indices.pop()]
     n_train, n_val = len(train_indices), len(val_indices)
     train_ds = torch.utils.data.Subset(dataset, train_indices)
-    if args.fixed_val_windows:
+    if args.fixed_val_windows or dataset.holdout_frac > 0:
         val_ds = FixedWindowVal(dataset, val_indices, seed=args.seed, passes=args.val_passes)
-        print(f"  --fixed-val-windows: {len(val_ds)} val sample(s) x {val_ds.passes} fixed window(s) "
+        print(f"  val windows: {len(val_ds)} val sample(s) x {val_ds.passes} fixed window(s) "
               f"(seed {args.seed}) scored identically every epoch; "
               f"{len({i % n_combos for i in val_indices})}/{n_combos} knob combos covered",
               file=sys.stderr)
