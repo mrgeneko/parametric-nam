@@ -87,7 +87,7 @@ The probe estimates the whole-signal ESR of the sampled windows, which is what a
 tuning tables report the worst case over a set of knob settings, so they may ask for a rate or two more.
 
 **The file's quality table is a floor (2026-10-09).** The probe samples a few windows at a few knob settings; the file's
-`quality.measured.cells` are worst case over `acm_tune`'s knob plan and the stress signal. The ladder therefore starts at the
+`quality.measured.cells` are worst case over `acm_quality`'s knob plan and the stress signal. The ladder therefore starts at the
 cheapest robust cell (tolerance 1e-4, the default filter, this backend's tables setting) whose ESR is within `--trunc-target`,
 and never below it. Found on the HM-2: the probe picked 1x, where the table reads ESR 1.59.
 
@@ -108,7 +108,7 @@ circuit's declared mains phase, whichever way the render starts (this is why a r
 a cycle "late"; the output stays aligned with the input).
 
 **Prepared state (2026-10-09).** When the circuit file carries a prepared (settled) state the renderer accepts (its
-`acm_prepare` output for this netlist and measurement version), the render starts from it with a **0.5 s** lead-in
+`acm_settle` output for this netlist and measurement version), the render starts from it with a **0.5 s** lead-in
 instead of the 6 s. Measured on four sag/ac amps (Deluxe, JCM800 power amp, AC30, Twin; three knob settings each; 10 s of
 T3K at 4x) against a 20 s lead-in: the 6 s lead-in is within 4e-9 ESR, 2 s within 1.5e-4, the prepared state alone within
 4e-7 (the first second 1.4e-6), the prepared state plus 0.5 s within 3e-10 everywhere. Whether a file's state is valid is

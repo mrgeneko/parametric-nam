@@ -245,7 +245,7 @@ def _acm_stats(metrics_path) -> dict:
 def _acm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
     """The lowest oversample the circuit file's own quality table allows at the backend's tolerance: the cheapest ROBUST cell (no divergence, no
     severe unconverged solve, finite) at that tolerance, the default 24-sample filter and this backend's tables setting whose ESR is within
-    `target`. The table is worst case over acm_tune's knob plan and the stress signal, so it is more conservative than the auto probe's sampled
+    `target`. The table is worst case over acm_quality's knob plan and the stress signal, so it is more conservative than the auto probe's sampled
     windows at a few settings: the probe once picked 1x for a pedal whose table reads ESR 1.59 at 1x (the HM-2, 2026-10-09). 1 when the file
     has no usable table (no floor)."""
     try:
@@ -253,7 +253,7 @@ def _acm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
         cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
     except (OSError, ValueError):
         return 1
-    # acm_tune measures the tables axis only at the live preset's tolerance, so at this backend's tolerance the cells are usually the exact-equation
+    # acm_quality measures the tables axis only at the live preset's tolerance, so at this backend's tolerance the cells are usually the exact-equation
     # ones; the tables move ESR by 1e-10..6e-6, nothing the floor can see, so any tables setting counts. Found on the Deluxe c12q: with the
     # tables setting required, no cell matched, there was no floor and the probe picked 1x where the table reads 1.5e-2.
     at_tol = [c for c in cells if abs(c.get("tol_rel", 0) - tol_rel) < 1e-12 and c.get("fir_half_length", 24) == 24]
@@ -414,7 +414,7 @@ _VERDICT_KEYS = ("valid", "reason")
 def _acm_verdict_from_json(schx: Path) -> dict | None:
     """Derive a acm verdict from <stem>.acmod (the measured quality table), or None if absent.
 
-    Unlike the other backends, libacm's validity IS derivable: acm_tune records per-cell robustness
+    Unlike the other backends, libacm's validity IS derivable: acm_quality records per-cell robustness
     (finite, no divergences, no severe unconverged steps). Valid if at least one measured cell is
     robust; invalid if cells were measured and none is. A table whose source sha256 no longer
     matches the .schx is reported as stale in the reason (still valid -- the engine imports the
@@ -434,7 +434,7 @@ def _acm_verdict_from_json(schx: Path) -> dict | None:
     sha = (d.get("source") or {}).get("sha256")
     try:
         if sha and sha != hashlib.sha256(schx.read_bytes()).hexdigest():
-            stale = f" {cj.name} is STALE (source sha256 differs from the .schx); re-run acm_tune."
+            stale = f" {cj.name} is STALE (source sha256 differs from the .schx); re-run acm_quality."
     except OSError:
         pass
     if not cells:
@@ -2394,7 +2394,7 @@ def choose_oversample(schx: str, knobs: list, combos: list, input_wav: Path,
         prewarm([ref_os])          # the expensive ones, all up front
 
         prev_d, prev_os = None, None
-        # acm: the factors acm_tune measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
+        # acm: the factors acm_quality measures, cheapest first (1, 2, 3, 4, 6, 8, 16); the others double from 2
         floor_os = _acm_table_floor(schx, target) if backend == "acm" else 1
         if floor_os > 1:
             print(f"  acm: the circuit file's quality table allows no rate below {floor_os}x within ESR {target:g} (robust cells at tolerance 1e-4); starting the ladder there")
