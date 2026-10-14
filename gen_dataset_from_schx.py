@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build a parametric training dataset by simulating a .schx circuit across a knob-combination
-grid, one WAV per combination (parallel batch processor for LiveSPICE/ngspice/cppspice harnesses).
+grid, one WAV per combination (parallel batch processor for LiveSPICE/ngspice/cpp harnesses).
 
 livespice backend (no code changes needed for new circuits):
     python gen_dataset_from_schx.py --backend livespice \\
@@ -12,9 +12,9 @@ livespice backend (no code changes needed for new circuits):
     # List all pots in a schx (omit --knobs):
     python gen_dataset_from_schx.py --backend livespice --schx circuit.schx
 
-cppspice backend (--knobs is required -- the harness has its own schematic registry this script
+cpp backend (--knobs is required -- the harness has its own schematic registry this script
 cannot see, so there is no default knob list to fall back to):
-    python gen_dataset_from_schx.py --backend cppspice --circuit myamp_preamp \\
+    python gen_dataset_from_schx.py --backend cpp --circuit myamp_preamp \\
         --knobs gain,bass,middle,treble,volume \\
         --input sweep.wav --output ./training_data
 
@@ -274,7 +274,7 @@ def check_oracle(backend: str) -> None:
 
     Callers: gen_dataset_from_schx.py's own generation path, run_pipeline.py (once, up
     front, covering every step that will need the oracle), grid_adequacy.py."""
-    if backend == "cppspice" and not HARNESS.exists():
+    if backend == "cpp" and not HARNESS.exists():
         print(f"Harness not found at {HARNESS}. Build it first.", file=sys.stderr)
         sys.exit(1)
     if backend == "acm" and not (ACM_RUN.exists() or shutil.which(str(ACM_RUN))):
@@ -405,9 +405,9 @@ def check_backend(schx: Path, backend: str, ap) -> None:
 
 
 # Backends that may legitimately appear as a key. Not all are renderable by THIS script
-# (--backend is cppspice/livespice/ngspice); ltspice/*-deck verdicts are recorded for the deck
+# (--backend is cpp/livespice/ngspice); ltspice/*-deck verdicts are recorded for the deck
 # tooling, so an unknown key is not by itself an error.
-_KNOWN_BACKENDS = ("acm", "livespice", "cppspice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
+_KNOWN_BACKENDS = ("acm", "livespice", "cpp", "ngspice", "ngspice-deck", "ltspice", "ltspice-deck")
 _VERDICT_KEYS = ("valid", "reason")
 
 
@@ -620,13 +620,13 @@ def resolve_knobs(knob_keys: List[str], control_map: dict) -> dict:
 # utils
 # ---------------------------------------------------------------------------
 
-def list_circuits(backend="cppspice"):
-    """--list prints the circuits built into the cppspice harness; the other backends take a .schx via --schx."""
-    if backend != "cppspice":
-        print(f"--list shows the circuits built into the cppspice harness; with --backend {backend} pass the circuit as --schx FILE.schx "
-              f"(--backend cppspice --list to see the harness's own).", file=sys.stderr)
+def list_circuits(backend="cpp"):
+    """--list prints the circuits built into the cpp harness; the other backends take a .schx via --schx."""
+    if backend != "cpp":
+        print(f"--list shows the circuits built into the cpp harness; with --backend {backend} pass the circuit as --schx FILE.schx "
+              f"(--backend cpp --list to see the harness's own).", file=sys.stderr)
         sys.exit(2)
-    check_oracle("cppspice")
+    check_oracle("cpp")
     subprocess.run([str(HARNESS), "--list"])
 
 
@@ -1305,7 +1305,7 @@ def _rungs(backend: str, oversample: int, ng: dict, iterations: int = 256) -> li
 
         return out
 
-    if backend == "cppspice":
+    if backend == "cpp":
         os_ = oversample or 2
         return [dict(oversample=os_), dict(oversample=os_ * 2), dict(oversample=os_ * 4)]
 
@@ -1394,7 +1394,7 @@ def process_one(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # guaranteed to -- and a hopeless combination used to burn timeout_s x n_rungs
         # (hours) before failing. ngspice is exempt: its rungs change method/damping at
         # roughly equal solver cost, so a retry there can genuinely win.
-        if "timeout" in r.error.lower() and backend in ("livespice", "cppspice", "acm"):
+        if "timeout" in r.error.lower() and backend in ("livespice", "cpp", "acm"):
             r.error = f"{r.error} [not escalating: higher rungs are strictly slower]"
             return r
         if i + 1 < len(rungs):
@@ -1631,7 +1631,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
             return err or _finalize_wav(idx, path, out_wav, expected_frames, max_crest,
                                         warmup_s=warmup_s, rail_rms=rail_rms, capture=capture)
 
-        if backend == "cppspice":
+        if backend == "cpp":
             args = [str(HARNESS), "--input", str(input_wav), "--output", str(out_wav),
                     "--circuit", circuit, "--params", fmt_params(params)]
         elif backend == "livespice":
@@ -1675,7 +1675,7 @@ def _render_once(idx: int, params: dict, out_dir: Path, input_wav: Path,
         # against a FIXED budget they were guaranteed to fail -- against a stall detector they
         # are not). TOTAL_CEILING stays as a backstop for the one case a stall detector cannot
         # see: a live-lock that keeps emitting chunks forever.
-        use_stall = (backend in ("livespice", "cppspice", "acm")) and "--progress" in args
+        use_stall = (backend in ("livespice", "cpp", "acm")) and "--progress" in args
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with _procs_lock:
             _active_procs.add(proc)
@@ -2861,7 +2861,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument("--list",    action="store_true", help="list cppspice circuits")
+    ap.add_argument("--list",    action="store_true", help="list cpp circuits")
     ap.add_argument("--combine", type=Path,           help="combine sharded .npy files")
     ap.add_argument("--output-peak", type=float, default=DEFAULT_OUTPUT_PEAK,
                     help=f"--combine: normalize the loudest combination to this peak (default "
@@ -2869,8 +2869,7 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cppspice", "livespice", "ngspice", "ngspice-deck", "acm"], default="livespice",
-                    type=lambda b: "cppspice" if b == "cpp" else b)   # "cpp" is the earlier name of cppspice, still accepted
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="livespice")
     ap.add_argument("--acm-tables", choices=["on", "off"], default=None,
                     help="--backend acm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
                          "the exact equations; exact equations are used outside a table's range). off = the exact equations throughout")
@@ -2928,11 +2927,11 @@ def main():
                                "KNOB_NAMES exactly (case-sensitive) -- no second name mapping, "
                                "same reasoning as check_backend()'s sidecar-only design: a name "
                                "translated through two places is a name that can silently drift. "
-                               "cppspice: required -- the harness has its own schematic registry this "
+                               "cpp: required -- the harness has its own schematic registry this "
                                "script cannot see, so there is nothing to default to.")
 
-    # cppspice backend
-    ap.add_argument("--circuit", help="circuit name (cppspice)")
+    # cpp backend
+    ap.add_argument("--circuit", help="circuit name (cpp)")
 
     # ngspice-deck backend (hand-written gen_<device>_ngspice.py deck, not the generic
     # schx-to-ngspice translation -- see render_ngspice_deck.py/preflight.py --backend
@@ -3260,11 +3259,11 @@ def main():
             schx = str(args.schx)
             check_backend(args.schx, args.backend, ap)
 
-    else:  # cppspice
+    else:  # cpp
         if not args.circuit:
-            ap.error("--circuit is required for --backend cppspice")
+            ap.error("--circuit is required for --backend cpp")
         if not args.knobs:
-            ap.error("--knobs is required for --backend cppspice (the harness has its own schematic "
+            ap.error("--knobs is required for --backend cpp (the harness has its own schematic "
                      "registry this script cannot see, so there is no default knob list)")
         knobs = [k.strip() for k in args.knobs.split(",")]
         circuit_label = args.circuit
@@ -3333,8 +3332,8 @@ def main():
     # the target it is fitted to. See choose_oversample() and internal engineering notes.
     _auto_os = str(args.oversample).strip().lower() == "auto"
     if _auto_os:
-        if args.backend == "cppspice":
-            ap.error("--oversample auto does not apply to --backend cppspice: the emitted C++ inherits "
+        if args.backend == "cpp":
+            ap.error("--oversample auto does not apply to --backend cpp: the emitted C++ inherits "
                      "whatever oversample it was BUILT with. Re-emit it, or measure on the "
                      "livespice/ngspice backend and rebuild.")
         if args.backend == "ngspice-deck":

@@ -154,12 +154,12 @@ def test_ngspice_rungs_none_base_treated_as_empty():
 # --------------------------------------------------------------------------- _rungs: cpp / unknown
 
 def test_cpp_rungs_escalate_oversample_only():
-    rungs = g._rungs("cppspice", oversample=2, ng=None)
+    rungs = g._rungs("cpp", oversample=2, ng=None)
     assert rungs == [{"oversample": 2}, {"oversample": 4}, {"oversample": 8}]
 
 
 def test_cpp_rungs_default_oversample_when_falsy():
-    assert g._rungs("cppspice", oversample=0, ng=None)[0]["oversample"] == 2
+    assert g._rungs("cpp", oversample=0, ng=None)[0]["oversample"] == 2
 
 
 def test_unknown_backend_yields_a_single_empty_rung():
@@ -251,7 +251,7 @@ def test_process_one_does_not_escalate_a_timeout_on_livespice(tmp_path, monkeypa
     monkeypatch.setattr(g, "_render_once", fake_render_once)
     r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "livespice")
     assert not r.ok
-    assert len(attempts) == 1, "livespice/cppspice timeouts must not escalate -- higher rungs are strictly slower"
+    assert len(attempts) == 1, "livespice/cpp timeouts must not escalate -- higher rungs are strictly slower"
     assert "not escalating" in r.error
 
 
@@ -263,7 +263,7 @@ def test_process_one_does_not_escalate_a_timeout_on_cpp_either(tmp_path, monkeyp
         return _result(idx, error="timeout after 1200s")
 
     monkeypatch.setattr(g, "_render_once", fake_render_once)
-    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "cppspice")
+    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "cpp")
     assert not r.ok
     assert len(attempts) == 1
 
@@ -290,7 +290,7 @@ def test_process_one_exhausts_all_rungs_and_annotates_the_final_error(tmp_path, 
         return _result(idx, error="Circuit.SimulationDiverged")
 
     monkeypatch.setattr(g, "_render_once", fake_render_once)
-    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "cppspice")  # cppspice: 3 rungs, cheap to exhaust
+    r = g.process_one(0, {}, tmp_path, tmp_path / "in.wav", "cpp")  # cpp: 3 rungs, cheap to exhaust
     assert not r.ok
     assert "exhausted 3 convergence rungs" in r.error
 
@@ -544,7 +544,7 @@ def test_a_valid_value_that_is_neither_bool_nor_partial_is_flagged(tmp_path):
 
 
 def test_a_backend_this_script_cannot_render_is_not_a_typo(tmp_path):
-    # ltspice verdicts are recorded for the deck tooling; --backend here is cppspice/livespice/
+    # ltspice verdicts are recorded for the deck tooling; --backend here is cpp/livespice/
     # ngspice. An unknown key must not be flagged unless it LOOKS like a known one.
     out = _run(_sidecar(tmp_path, 'ltspice = { valid = true, reason = "shipping backend" }\n'))
     assert "WARNING" not in out
@@ -1097,7 +1097,7 @@ def test_renderer_identity_acm_reads_build_info_and_other_backends_degrade(tmp_p
     assert r["name"] == "acm" and r["version"] == "libacm abc1234" and r["profile"] == "physical" and r["esr_vs_oracle"] is None
     monkeypatch.setattr(g, "ACM_RUN", tmp_path / "missing")
     assert g.renderer_identity("acm")["version"] == "unidentified"
-    assert g.renderer_identity("cppspice") == {"name": "cppspice", "version": "unidentified", "profile": None, "esr_vs_oracle": None}
+    assert g.renderer_identity("cpp") == {"name": "cpp", "version": "unidentified", "profile": None, "esr_vs_oracle": None}
 
 
 def test_acm_retry_ladder_doubles_from_any_start_and_ends_at_32():

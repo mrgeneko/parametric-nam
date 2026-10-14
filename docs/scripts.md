@@ -609,7 +609,7 @@ device files in a sibling directory of the repo and this is automatic; the tool 
 path is too far outside to travel.
 
 > Before this existed, the sharded path took eleven hand-written renderer flags. The Mesa RED
-> launch omitted `--backend` — whose default was then `cpp` (now named cppspice), now `livespice` — and all four workers quarantined in
+> launch omitted `--backend` — whose default was then `cpp`, now `livespice` — and all four workers quarantined in
 > under a second.
 
 > **`distribute_gen.sh` is deprecated.** `distribute_pull.py` replaces it,

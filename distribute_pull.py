@@ -506,7 +506,7 @@ def version_check_command(worker_dir: str, backend: "str | None", env: str = "")
     pre = f"export {env} && " if env else ""
     return (f"{pre}cd {worker_dir} && git rev-parse HEAD && "
            f"./.venv/bin/python3 -c \"from prepare_excitation import solver_identity; "
-           f"print(solver_identity({(backend or 'cppspice')!r}))\"")
+           f"print(solver_identity({(backend or 'cpp')!r}))\"")
 
 
 def parse_version_check_output(stdout: str) -> "tuple[str, str] | tuple[None, None]":
@@ -586,7 +586,7 @@ def gen_args_from_config(config_path: Path, repo_root: Path) -> "list[str]":
     scheduler took eleven hand-written flags instead, so rendering the same device on one
     machine and across four used two different descriptions of it that nothing reconciled.
     Retyping them is not a theoretical hazard: the Mesa RED launch (2026-09-05) omitted
-    --backend, which then defaulted to `cpp` (now cppspice), and every worker quarantined in under a second.
+    --backend, which defaults to `cpp`, and every worker quarantined in under a second.
     load_config() is run_pipeline's own loader, so the two paths cannot drift.
 
     PATHS ARE MADE RELATIVE to the repo root -- see _relpath_or_warn.

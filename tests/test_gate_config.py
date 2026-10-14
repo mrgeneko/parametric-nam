@@ -178,7 +178,7 @@ class TestCommands:
         assert cmd[cmd.index("--probe-node") + 1] == "OUT"
         assert cmd[cmd.index("--maxstep") + 1] == str(3e-6)
 
-    @pytest.mark.parametrize("backend", ["ngspice", "cppspice", "cpp", "ltspice-deck"])
+    @pytest.mark.parametrize("backend", ["ngspice", "cpp", "ltspice-deck"])
     def test_backends_without_a_mode_skip_with_reason(self, tmp_path, backend):
         cfg, *_ = make_cfg(tmp_path, backend=backend)
         c = gc.load_config(cfg)

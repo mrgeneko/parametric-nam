@@ -29,7 +29,7 @@ Run automatically by `run_pipeline.py` for every generation unless skipped. All 
 | Step | Tool | Backend scope | On failure |
 |---|---|---|---|
 | STEP 1 | `check_input_headroom.py` | any | **Warns, continues.** A low ratio can be a real gap or a genuine high-headroom device — this is a prompt to check the grid's own hottest corner, not a verdict. |
-| STEP 2 | `preflight.py` | **livespice only** — no mode exists for the schx-translated `ngspice` backend or `cppspice` | **Aborts.** A dead or reversed knob renders and trains "successfully" and produces a plausible but wrong model. |
+| STEP 2 | `preflight.py` | **livespice only** — no mode exists for the schx-translated `ngspice` backend or `cpp` | **Aborts.** A dead or reversed knob renders and trains "successfully" and produces a plausible but wrong model. |
 | *(inside STEP 3)* | `check_transient_coverage.py` | livespice only | **Aborts.** Called directly by `gen_dataset_from_schx.py` itself, not a separate `run_pipeline.py` step — see its own transient-check block. Forwarded flags: `--skip-transient-check`/`--transient-peak`/`--transient-margin`. |
 
 Skip flags: `--skip-headroom-check`, `--skip-preflight-check`,
