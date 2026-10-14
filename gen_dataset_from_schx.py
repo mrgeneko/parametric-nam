@@ -620,7 +620,13 @@ def resolve_knobs(knob_keys: List[str], control_map: dict) -> dict:
 # utils
 # ---------------------------------------------------------------------------
 
-def list_circuits():
+def list_circuits(backend="cpp"):
+    """--list prints the circuits built into the cpp harness; the other backends take a .schx via --schx."""
+    if backend != "cpp":
+        print(f"--list shows the circuits built into the cpp harness; with --backend {backend} pass the circuit as --schx FILE.schx "
+              f"(--backend cpp --list to see the harness's own).", file=sys.stderr)
+        sys.exit(2)
+    check_oracle("cpp")
     subprocess.run([str(HARNESS), "--list"])
 
 
@@ -2863,7 +2869,7 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="cpp")
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="livespice")
     ap.add_argument("--acm-tables", choices=["on", "off"], default=None,
                     help="--backend acm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
                          "the exact equations; exact equations are used outside a table's range). off = the exact equations throughout")
@@ -3162,7 +3168,7 @@ def main():
     TRUST_REGION_V = max(0.0, args.trust_region)
 
     if args.list:
-        return list_circuits()
+        return list_circuits(args.backend)
     if args.combine:
         return combine(args.combine, output_peak=args.output_peak,
                        normalize=not args.no_output_normalize)
