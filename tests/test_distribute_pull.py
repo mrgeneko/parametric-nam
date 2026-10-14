@@ -286,7 +286,7 @@ class TestGenArgsFromConfig:
 
     run_pipeline.py has taken --config for a long time; this scheduler took eleven
     hand-written renderer flags instead. Retyping them is not a theoretical hazard: the Mesa
-    RED launch (2026-09-05) omitted --backend, whose default is `cpp`, and all four workers
+    RED launch (2026-09-05) omitted --backend, whose default was then `cpp` (now cppspice), and all four workers
     quarantined in under a second.
     """
 
@@ -313,7 +313,7 @@ Presence = 0.5
 
     def test_backend_is_included(self, tmp_path):
         """The specific flag whose omission quarantined a whole fleet: gen_dataset's
-        --backend defaults to `cpp`, which then demands --circuit and dies instantly."""
+        --backend then defaulted to `cpp` (now cppspice), which demands --circuit and dies instantly."""
         a = dp.gen_args_from_config(self._cfg(tmp_path), tmp_path / "repo")
         assert "--backend" in a and a[a.index("--backend") + 1] == "livespice"
 
@@ -1200,7 +1200,7 @@ class TestVersionCheckCommand:
         assert "solver_identity('livespice')" in cmd
 
     def test_missing_backend_defaults_to_cpp(self):
-        assert "solver_identity('cpp')" in dp.version_check_command("/r", None)
+        assert "solver_identity('cppspice')" in dp.version_check_command("/r", None)
 
 
 class TestParseVersionCheckOutput:
@@ -1435,7 +1435,7 @@ class TestDeriveItemCount:
         assert dp.derive_item_count(gen_args, items_override=99) == 99
 
     def test_items_override_used_when_no_range_present(self):
-        assert dp.derive_item_count(["--backend", "cpp"], items_override=10) == 10
+        assert dp.derive_item_count(["--backend", "cppspice"], items_override=10) == 10
 
     def test_no_range_and_no_override_raises_loudly_rather_than_guessing(self):
         with pytest.raises(ValueError, match="could not derive"):

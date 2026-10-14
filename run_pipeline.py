@@ -716,7 +716,7 @@ def build_release(args, fh, timings=None, repeats=None):
     renderer_line = ""
     try:
         _rj = json.loads((args.dataset_dir / "config.json").read_text()).get("renderer") or {}
-        if _rj.get("name") and _rj.get("name") != "cpp":
+        if _rj.get("name") and _rj.get("name") not in ("cpp", "cppspice"):
             renderer_line = f"\n- Renderer: {_rj.get('name')} {_rj.get('version')} (profile {_rj.get('profile') or 'n/a'})"
             if _rj.get("name") == "acm":
                 renderer_line += f", circuit file `{args.schx.with_suffix('.acmod').name}`"
@@ -748,7 +748,7 @@ Full per-epoch ESR history: `metrics.csv`.
 - Python {py}, PyTorch {tv} (HIP {hip})
 - Repo `parametric-nam` @ {repo_rev}
 - Schematic repo @ {schx_repo_rev}
-- Schematic: `{args.schx.name if args.schx else '(cpp backend)'}`{renderer_line}
+- Schematic: `{args.schx.name if args.schx else '(cppspice backend)'}`{renderer_line}
 - Input: `{args.input}`
 
 ## Dataset
@@ -971,7 +971,8 @@ def main():
 
     # --- generation (gen_dataset_from_schx.py) ---
     g = ap.add_argument_group("generation")
-    g.add_argument("--backend",      choices=["cpp", "livespice", "acm", "ngspice", "ngspice-deck"], default="livespice")
+    g.add_argument("--backend",      choices=["cppspice", "livespice", "acm", "ngspice", "ngspice-deck"], default="livespice",
+                   type=lambda b: "cppspice" if b == "cpp" else b)   # "cpp" is the earlier name of cppspice, still accepted
     g.add_argument("--koren",        action="store_true",
                    help="ngspice: Koren triode model (softer, for stiff amps)")
     g.add_argument("--ot-damp",      default="47k", help="ngspice: OT plate-to-plate damper R")
@@ -989,7 +990,7 @@ def main():
                         "(fixes near-Nyquist solver non-convergence). Auto-set per-circuit if omitted.")
     g.add_argument("--schx",         type=Path, help="Path to .schx (livespice, ngspice; optional "
                    "metadata-only for ngspice-deck -- see gen_dataset_from_schx.py's --schx help)")
-    g.add_argument("--circuit",      help="Circuit name (cpp)")
+    g.add_argument("--circuit",      help="Circuit name (cppspice)")
     g.add_argument("--gear-make",    default="", help="Gear manufacturer, written into the exported .nam's metadata "
                    "(forwarded to gen_dataset_from_schx.py; falls back to the circuit name).")
     g.add_argument("--gear-model",   default="", help="Gear model name, written into the exported .nam's metadata "
@@ -1213,7 +1214,7 @@ def main():
                         "check) when a knob is dead, moves the wrong way, or the input-level "
                         "calibration is implausible -- see preflight.py. Only runs for "
                         "--backend livespice today: preflight.py has no mode for the schx-translated "
-                        "ngspice path or the cpp backend, so this step is a silent no-op for those.")
+                        "ngspice path or the cppspice backend, so this step is a silent no-op for those.")
     g.add_argument("--film-reference", type=Path, default=None,
                    help="a reference WAV, distinct from the training excitation, used ONLY for the "
                         "post-training FiLM/LeakyReLU runaway scan (scan_film_runaway.py) run right "
@@ -1443,7 +1444,7 @@ def main():
         #
         # preflight.py has a mode for --backend livespice and, now that this pipeline can drive
         # the hand-written-deck path too (see STEP 3 below), for ngspice-deck as well -- there is
-        # no mode for the schx-translated "ngspice" backend or for "cpp", so this step is a no-op
+        # no mode for the schx-translated "ngspice" backend or for "cppspice", so this step is a no-op
         # for those today rather than a bad approximation of one.
         #
         # ABORTS on failure, same as the grid check above: a dead or reversed knob is exactly the
