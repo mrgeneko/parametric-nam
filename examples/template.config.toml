@@ -7,7 +7,7 @@
 #       --dataset-dir /tmp/ds --nam-output /tmp/model.param.nam \
 #       --checkpoint-dir /tmp/ckpt
 
-schx       = "path/to/your-circuit.schx"   # e.g. from LiveSPICE-Amp-Collection, or your own
+schx       = "path/to/your-circuit.schx"   # a LiveSPICE circuit, yours or one you have the rights to use
 
 input      = "examples/T3K-sweep-v3.wav"   # NOT bundled -- download it first, see README
                                        # sweep/DI. A good one covers the top of the band

@@ -16,7 +16,7 @@ Two ways to build the same underlying dataset:
   `"MyAmp G2, B5, M5, T5.nam"` → `Gain=0.2, Bass=0.5, Mids=0.5, Treble=0.5` (comma-separated
   `PrefixDigit` tokens, digit → value/10) — see `gen_dataset_from_captures.py` in
   [`docs/scripts.md`](docs/scripts.md) for the full naming convention and how to override it.
-- **From a `.schx`** (e.g. an amp or pedal from `LiveSPICE-Amp-Collection`) — simulates the
+- **From a `.schx`** (e.g. an amp or pedal drawn in LiveSPICE) — simulates the
   circuit across a sweep of knob settings, no real hardware needed.
 
 Either path feeds the same pipeline: train a FiLM-conditioned WaveNet on the paired audio, and
@@ -94,7 +94,7 @@ export LIVESPICE_CLI=/path/to/livespice-cli/publish/livespice_cli
 Then follow **[`docs/new-circuit-walkthrough.md`](docs/new-circuit-walkthrough.md)** — six
 steps from a `.schx` you have never trained to a finished `.param.nam` (one of them
 optional), with the reasoning for each. All you need on top of the above is a `.schx`: your
-own, one from `LiveSPICE-Amp-Collection`, or the **bundled
+own, one from any LiveSPICE circuit library, or the **bundled
 `examples/large_muffin/large_muffin.schx`** if you would rather practise on a known circuit
 first (see `large_muffin.md` for its notes).
 
@@ -567,7 +567,6 @@ ngspice where they are optional.
 
 ## Related Repos
 
-- `LiveSPICE-Amp-Collection` — `.schx` circuit library
 - [`livespice-cli`](https://github.com/mrgeneko/livespice-cli) — the oracle (`livespice_cli`), public
 - [`NeuralAmpModelerCore`](https://github.com/mrgeneko/NeuralAmpModelerCore) — our fork,
   public. Adds the `"ParametricWaveNet"` architecture + live knob support on top of Steven
