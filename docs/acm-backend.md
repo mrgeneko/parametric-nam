@@ -50,6 +50,22 @@ them, as it does for `livespice`), and writes a metrics JSON with `solves`, `unc
 Knobs are `--knob Name=V` with V in 0..1 (the taper is in the circuit file); a switch group is one
 knob whose value is the position index.
 
+## Emitted solver tables (optional)
+
+A renderer that supports `--tables-lib FILE` can load precompiled solver kernels ("emitted tables") for a circuit. They are matched to a
+circuit by its solver structure, not by file name, so one library built from the whole table set serves every circuit that has a table and
+the others run the generic kernels with the same results. Tables made the renderer 1.3 to 1.4x faster on the circuits measured, with output
+within the solver tolerance (a pedal at its saved knobs was bit-identical).
+
+```
+python run_pipeline.py --backend acm --acm-emitted-lib /path/to/tables.dylib ...   # or $ACM_EMITTED_LIB; `acm_emitted_lib` in a config
+```
+
+The path is a library file or a directory of `*.dylib` / `*.so` files. When it is set and the renderer knows `--tables-lib`, every render adds
+`--fold-switches --tables-lib ...` (the tables are planned with switches folded into wires); the sizing, coverage and preflight probes use the
+same variable. A renderer without `--tables-lib` ignores the setting. Fleet workers read their own `$ACM_EMITTED_LIB`, as they do `$ACM_RUN`.
+`acm_run` reports `emitted: N of M solves on a table` on stderr, so a library that does not match a circuit shows as 0.
+
 ## What fails a render, and the ladder
 
 * **Divergence** (a solve that blew up) or a **start-up DC point that did not converge**: the render

@@ -112,3 +112,47 @@ def test_oracle_check_records_into_the_manifest_and_refuses_the_same_renderer(tm
     (tmp_path / "config.json").write_text(json.dumps(cfg))
     with pytest.raises(SystemExit):
         oracle_check.main()
+
+
+def _fake_acm_run(tmp_path, usage):
+    script = tmp_path / "acm_run"
+    script.write_text(f"#!/bin/sh\necho '{usage}' >&2\nexit 2\n"); script.chmod(0o755)
+    return script
+
+
+def test_emitted_tables_are_loaded_only_when_the_renderer_supports_them(tmp_path, monkeypatch):
+    import render_backends
+    render_backends._acm_emitted_support.clear()
+    lib = tmp_path / "tables.dylib"; lib.write_bytes(b"x")
+    old = _fake_acm_run(tmp_path, "usage: acm_run circuit in out [options]")
+    assert render_backends.acm_emitted_args(old, lib) == []
+    new = tmp_path / "new"; new.mkdir()
+    new_exe = _fake_acm_run(new, "usage: acm_run ... --tables-lib FILE ...")
+    assert render_backends.acm_emitted_args(new_exe, lib) == ["--fold-switches", "--tables-lib", str(lib)]
+
+
+def test_emitted_tables_take_a_directory_or_the_environment_and_are_off_without_either(tmp_path, monkeypatch):
+    import render_backends
+    render_backends._acm_emitted_support.clear()
+    exe = _fake_acm_run(tmp_path, "usage: --tables-lib FILE")
+    d = tmp_path / "libs"; d.mkdir()
+    (d / "a.dylib").write_bytes(b"x"); (d / "b.so").write_bytes(b"x"); (d / "notes.txt").write_text("x")
+    monkeypatch.delenv("ACM_EMITTED_LIB", raising=False)
+    assert render_backends.acm_emitted_args(exe) == []
+    monkeypatch.setenv("ACM_EMITTED_LIB", str(d))
+    got = render_backends.acm_emitted_args(exe)
+    assert got[0] == "--fold-switches" and got.count("--tables-lib") == 2 and str(d / "a.dylib") in got and str(d / "b.so") in got
+    monkeypatch.setenv("ACM_EMITTED_LIB", str(tmp_path / "missing"))
+    assert render_backends.acm_emitted_args(exe) == []
+
+
+def test_render_command_carries_the_tables(tmp_path, monkeypatch):
+    import gen_dataset_from_schx as g, render_backends
+    render_backends._acm_emitted_support.clear()
+    exe = _fake_acm_run(tmp_path, "usage: --tables-lib FILE")
+    lib = tmp_path / "t.dylib"; lib.write_bytes(b"x")
+    monkeypatch.setattr(g, "ACM_RUN", exe); monkeypatch.setattr(g, "ACM_EMITTED_LIB", str(lib))
+    cmd = g._acm_args("/x/amp.schx", "in.wav", "out.wav", 2, 256, "Gain=0.5")
+    assert cmd[cmd.index("--tables-lib") + 1] == str(lib) and "--fold-switches" in cmd
+    monkeypatch.setattr(g, "ACM_EMITTED_LIB", None); monkeypatch.delenv("ACM_EMITTED_LIB", raising=False)
+    assert "--tables-lib" not in g._acm_args("/x/amp.schx", "in.wav", "out.wav", 2, 256, "Gain=0.5")

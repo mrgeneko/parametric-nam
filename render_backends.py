@@ -174,6 +174,38 @@ def _find_acm_run_exe():
     return shutil.which("acm_run") or "acm_run"
 
 
+_acm_emitted_support: dict = {}
+
+
+def acm_emitted_args(exe=None, lib=None) -> list:
+    """The acm_run arguments that load emitted solver tables, or [] when none apply.
+
+    The tables are straight-line solver kernels the renderer matches to a circuit by its solver structure (not by name), so one
+    library built from a whole table set serves every circuit that has a table; a circuit without one runs the generic kernels
+    with the same results, and so does a renderer that does not know `--tables-lib`. `lib` is a library file or a directory of
+    libraries (*.dylib, *.so); default $ACM_EMITTED_LIB. Switches are folded into wires, which is how the tables are planned."""
+    lib = lib or os.environ.get("ACM_EMITTED_LIB")
+    if not lib:
+        return []
+    exe = str(exe or _find_acm_run_exe())
+    if exe not in _acm_emitted_support:
+        try:   # acm_run prints its usage when run without arguments
+            r = subprocess.run([exe], capture_output=True, text=True, timeout=10)
+            _acm_emitted_support[exe] = "--tables-lib" in (r.stdout + r.stderr)
+        except (OSError, subprocess.SubprocessError):
+            _acm_emitted_support[exe] = False
+    if not _acm_emitted_support[exe]:
+        return []
+    p = Path(lib)
+    libs = sorted(p.glob("*.dylib")) + sorted(p.glob("*.so")) if p.is_dir() else ([p] if p.exists() else [])
+    if not libs:
+        return []
+    out = ["--fold-switches"]
+    for f in libs:
+        out += ["--tables-lib", str(f)]
+    return out
+
+
 def acm_solver_identity() -> str:
     """A fingerprint of the acm renderer (`acm_run --build-info`), for onset caches and shard merges; "acm:unidentified" when it cannot be read."""
     try:
@@ -196,12 +228,13 @@ class AcmBackend:
     renderer the dataset will use. A short silent lead-in (acm_run --lead-in, discarded from the output) lets
     the supply settle before the probe tone, as a cold start would otherwise ring into the first cycles."""
 
-    def __init__(self, schx, oversample=2, iterations=256, workers=None, lead_in=2.0):
+    def __init__(self, schx, oversample=2, iterations=256, workers=None, lead_in=2.0, emitted_lib=None):
         self.circuit = str(Path(schx).with_suffix(".acmod"))
         self.oversample = oversample
         self.iterations = iterations
         self.workers = workers
         self.lead_in = lead_in
+        self.emitted_lib = emitted_lib
 
     prepare_input = LiveSpiceBackend.prepare_input
 
@@ -211,6 +244,7 @@ class AcmBackend:
                 "--tol-rel", "1e-4", "--tables", "on", "--resampler", "fir-linear", "--iterations", str(self.iterations)]
         if self.lead_in > 0:
             args += ["--lead-in", f"{self.lead_in:g}"]
+        args += acm_emitted_args(lib=self.emitted_lib)
         metrics = f"{scratch}/pf_{tag}.metrics.json"
         args += ["--metrics", metrics]
         for k, v in params.items():

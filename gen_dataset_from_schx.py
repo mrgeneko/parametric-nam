@@ -128,6 +128,7 @@ ACM_RUN = _find_acm_run()
 ACM_LEAD_IN_S = 6.0
 ACM_LEAD_IN_PREPARED_S = 0.5
 ACM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
+ACM_EMITTED_LIB = None   # --acm-emitted-lib (default $ACM_EMITTED_LIB): emitted solver tables for acm_run, used where a circuit has one (see render_backends.acm_emitted_args)
 ACM_TABLES = "on"   # acm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
 
 
@@ -175,6 +176,8 @@ def _acm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, p
             args += ["--knob", f"{k}={v}"]
     if speaker:
         args += ["--output", speaker]
+    from render_backends import acm_emitted_args
+    args += acm_emitted_args(ACM_RUN, ACM_EMITTED_LIB)
     return args
 
 
@@ -2856,7 +2859,7 @@ def acquire_generation_lock(out_dir: Path):
 
 
 def main():
-    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, ACM_RUN, ACM_LEAD_IN_S, ACM_TABLES
+    global TRUST_REGION_V, NEWTON_CHECK, NEWTON_MAX_FRACTION, ACM_RUN, ACM_LEAD_IN_S, ACM_TABLES, ACM_EMITTED_LIB
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -2876,6 +2879,10 @@ def main():
     ap.add_argument("--acm-lead-in", type=float, default=None, metavar="S",
                     help="--backend acm: seconds of silence run through the circuit before the input so the render starts settled "
                          "(discarded from the output; default 6, 0 = start cold like livespice)")
+    ap.add_argument("--acm-emitted-lib", type=Path, default=None, metavar="PATH",
+                    help="--backend acm: a shared library (or a directory of them) of emitted solver tables for acm_run (default: $ACM_EMITTED_LIB). "
+                         "A circuit whose solver structure has a table solves 1.3-1.4x faster with output within the solver tolerance; "
+                         "other circuits, and a renderer without --tables-lib, run as before")
     ap.add_argument("--acm-run", type=Path, default=None,
                     help="acm_run-compatible renderer for --backend acm (default: $ACM_RUN, then acm_run on PATH)")
     ap.add_argument("--no-retry", action="store_true",
@@ -3161,6 +3168,8 @@ def main():
         ACM_LEAD_IN_S = max(0.0, args.acm_lead_in)
     if args.acm_tables is not None:
         ACM_TABLES = args.acm_tables
+    if args.acm_emitted_lib:
+        ACM_EMITTED_LIB = str(args.acm_emitted_lib)
     if args.trunc_target is None:
         args.trunc_target = 1e-3   # the same target for every backend (acm was 6e-3 from 2026-10-08 to 2026-10-09)
     NEWTON_CHECK = args.newton_check

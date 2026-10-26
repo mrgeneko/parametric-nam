@@ -559,6 +559,7 @@ def reproduce_command(args, repeats=None, have_config=False):
     if getattr(args, "acm_run", None): c.append(f'    --acm-run "{portable(args.acm_run)}" \\')
     if getattr(args, "acm_lead_in", None) is not None: c.append(f'    --acm-lead-in {args.acm_lead_in:g} \\')
     if getattr(args, "acm_tables", None): c.append(f'    --acm-tables {args.acm_tables} \\')
+    if getattr(args, "acm_emitted_lib", None): c.append(f'    --acm-emitted-lib "{portable(args.acm_emitted_lib)}" \\')
     if args.random:        c.append(f'    --random {args.random} \\')
     if args.no_anchors:    c.append('    --no-anchors \\')
     if getattr(args, "koren", False): c.append('    --koren \\')
@@ -1029,6 +1030,10 @@ def main():
                    help="acm: seconds of silence run through the circuit before the input (default 6, 0 = cold start); settable as `acm_lead_in`.")
     g.add_argument("--acm-tables", choices=["on", "off"], default=None, dest="acm_tables",
                    help="acm: tabulated tube characteristics (default on); settable as `acm_tables`.")
+    g.add_argument("--acm-emitted-lib", type=Path, default=None, dest="acm_emitted_lib", metavar="PATH",
+                   help="acm: a shared library (or directory of them) of emitted solver tables for acm_run (default: $ACM_EMITTED_LIB). Circuits "
+                        "with a matching table render 1.3-1.4x faster; others, and renderers without --tables-lib, run as before. Forwarded to "
+                        "gen_dataset_from_schx.py and exported as $ACM_EMITTED_LIB for the probe steps; settable as `acm_emitted_lib`. Fleet workers use their own $ACM_EMITTED_LIB.")
     g.add_argument("--trust-region", type=float, default=0.0, dest="trust_region", metavar="V",
                    help="livespice: limit each Newton step to a norm of V volts (default 0 = off). Circuit-specific; forwarded to "
                         "gen_dataset_from_schx.py --trust-region; settable per device as `trust_region` in a config.")
@@ -1393,6 +1398,8 @@ def main():
                 os.environ["ACM_RUN"] = str(args.acm_run)   # the preflight, coverage and sizing steps find the renderer the same way
                 import gen_dataset_from_schx as _gen
                 _gen.ACM_RUN = args.acm_run                 # and check_oracle below, which reads the module's own copy
+            if args.backend == "acm" and getattr(args, "acm_emitted_lib", None):
+                os.environ["ACM_EMITTED_LIB"] = str(args.acm_emitted_lib)   # the preflight, coverage and sizing probes load the same tables
             check_oracle(args.backend)
 
         # ------------------------------------------------------------------
@@ -1554,6 +1561,7 @@ def main():
                 if getattr(args, "acm_run", None): gen_cmd += ["--acm-run", args.acm_run]
                 if getattr(args, "acm_lead_in", None) is not None: gen_cmd += ["--acm-lead-in", f"{args.acm_lead_in:g}"]
                 if getattr(args, "acm_tables", None): gen_cmd += ["--acm-tables", args.acm_tables]
+                if getattr(args, "acm_emitted_lib", None): gen_cmd += ["--acm-emitted-lib", args.acm_emitted_lib]
                 if args.random:        gen_cmd += ["--random",       args.random]
                 if args.no_anchors:    gen_cmd += ["--no-anchors"]
                 if args.max_crest != 50.0: gen_cmd += ["--max-crest", args.max_crest]
