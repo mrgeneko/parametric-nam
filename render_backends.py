@@ -219,6 +219,9 @@ def acm_solver_identity() -> str:
 
 # Same threshold as gen_dataset_from_schx.ACM_NEWTON_MAX_FRACTION; probes only warn, the dataset path fails.
 ACM_UNCONVERGED_WARN_FRACTION = 1e-5
+# A render with a severe unconverged solve, or more unconverged solves than the fraction above, is refused
+# (the sample is dropped) instead of returned. ACM_ALLOW_UNCONVERGED=1 restores the old warn-and-keep behaviour.
+ACM_ALLOW_UNCONVERGED = os.environ.get("ACM_ALLOW_UNCONVERGED", "") == "1"
 
 
 class AcmBackend:
@@ -267,6 +270,11 @@ class AcmBackend:
                 bad = f"{m['divergences']} divergence(s), first at sample {m.get('first_bad_sample')}"
             elif m.get("dc_converged", 1) == 0:
                 bad = "DC operating point did not converge"
+            elif not ACM_ALLOW_UNCONVERGED and m.get("severe", 0) > 0:
+                bad = f"{m['severe']} severe unconverged solve(s), first at sample {m.get('first_bad_sample')}"
+            elif not ACM_ALLOW_UNCONVERGED and solves and m.get("unconverged", 0) / solves > ACM_UNCONVERGED_WARN_FRACTION:
+                bad = (f"{m['unconverged']}/{solves} Newton solves unconverged "
+                       f"({100.0 * m['unconverged'] / solves:.4f}%), first at sample {m.get('first_bad_sample')}")
             if bad:
                 sys.stderr.write(f"[{tag}] acm_run render is not trustworthy: {bad}{detail}\n")
                 return None

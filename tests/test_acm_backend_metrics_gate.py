@@ -59,7 +59,25 @@ def test_untrustworthy_render_is_rejected(fake, tmp_path, capsys, bad):
     assert "[t]" in capsys.readouterr().err
 
 
-def test_unconverged_fraction_warns_but_returns_audio(fake, tmp_path, capsys):
+def test_unconverged_fraction_is_rejected(fake, tmp_path, capsys):
     fake(unconverged=100)
+    assert _render(tmp_path) is None
+    assert "unconverged" in capsys.readouterr().err
+
+
+def test_severe_solve_is_rejected(fake, tmp_path, capsys):
+    fake(severe=1, first_bad_sample=500)
+    assert _render(tmp_path) is None
+    assert "severe" in capsys.readouterr().err
+
+
+def test_few_unconverged_solves_pass(fake, tmp_path):
+    fake(unconverged=5)   # 5e-6 of 1e6 solves, under the 1e-5 limit
+    assert _render(tmp_path) is not None
+
+
+def test_allow_unconverged_keeps_audio_and_warns(fake, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(render_backends, "ACM_ALLOW_UNCONVERGED", True)
+    fake(unconverged=100, severe=1)
     assert _render(tmp_path) is not None
     assert "unconverged" in capsys.readouterr().err
