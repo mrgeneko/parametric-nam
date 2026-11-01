@@ -129,6 +129,7 @@ ACM_LEAD_IN_S = 6.0
 ACM_LEAD_IN_PREPARED_S = 0.5
 ACM_AUTO_LADDER = (1, 2, 3, 4, 6, 8, 16)   # --oversample auto tries these, cheapest first, against a 32x reference
 ACM_EMITTED_LIB = None   # --acm-emitted-lib (default $ACM_EMITTED_LIB): emitted solver tables for acm_run, used where a circuit has one (see render_backends.acm_emitted_args)
+ACM_STEPS = {}   # --backend acm: circuit parameter name -> (N positions, grid already holds indices), for knobs marked --steps. acm_run takes a switch's position INDEX (0..N-1) as its value, not a 0..1 fraction
 ACM_TABLES = "on"   # acm_run --tables: tabulated tube characteristics (1.12-1.20x faster on the fleet's tube amps, output within ESR 4e-6 of the exact equations)
 
 
@@ -157,6 +158,29 @@ def _acm_circuit_problem(schx: str) -> str:
     return ""
 
 
+def acm_switch_value(v: float, n: int, indices: bool = False) -> float:
+    """The position index acm_run wants for a stepped knob value. Normally the value is a fraction along the switch (3 positions:
+    0, 0.5, 1 -> 0, 1, 2), the form the trained model sees. indices: the knob's whole grid is already position indices (it holds
+    a value above 1, as 0, 1, 2 does); then the value is only range-checked."""
+    x = v if indices else v * (n - 1)
+    i = round(x)
+    if not 0 <= i < n or abs(x - i) > 1e-6:
+        raise ValueError(f"stepped value {v:g} is not a position of a {n}-position switch")
+    return float(i)
+
+
+def _acm_stepped_params(params: str) -> str:
+    """params (Name=value,...) with the stepped names' values turned into position indices (see acm_switch_value)."""
+    if not ACM_STEPS:
+        return params
+    out = []
+    for kv in filter(None, params.split(",")):
+        k, _, v = kv.partition("=")
+        n, idx = ACM_STEPS.get(k, (0, False))
+        out.append(f"{k}={acm_switch_value(float(v), n, idx):g}" if n and v else kv)
+    return ",".join(out)
+
+
 def _acm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, params: str, speaker: str = None,
              metrics=None, progress: bool = True, lead_in: float = 0.0, prepared: bool = False) -> list:
     """The acm_run command line for one render (see _find_acm_run for the contract). prepared: start from the file's prepared state
@@ -170,7 +194,7 @@ def _acm_args(schx: str, input_wav, out_wav, oversample: int, iterations: int, p
         args += ["--progress"]
     if lead_in > 0:
         args += ["--lead-in", f"{lead_in:g}"]
-    for kv in filter(None, params.split(",")):
+    for kv in filter(None, _acm_stepped_params(params).split(",")):
         if "=" in kv:
             k, v = kv.split("=", 1)
             args += ["--knob", f"{k}={v}"]
@@ -3014,7 +3038,9 @@ def main():
                     help="mark a knob as a discrete N-position switch (e.g. --steps a_sym=2). "
                          "Recorded in config.json and exported as a 'steps' hint in the .nam so "
                          "the host renders a stepped control and quantizes to N positions. Set "
-                         "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). Repeatable.")
+                         "--range to the matching values (2 -> 0,1 ; 3 -> 0,0.5,1). With --backend acm "
+                         "the fractions are converted to position indices (3 -> 0,1,2); a grid with a value above 1 "
+                         "is taken as indices already. Repeatable.")
     ap.add_argument("--fixed-params", help="fixed k=v,... passed to every livespice_cli call (e.g. Rock=1)")
     ap.add_argument("--knob-kind", default=None,
                     help="NAME=kind,... (kind: 'tone' or 'level') for the post-generation knob "
@@ -3332,6 +3358,12 @@ def main():
         if n < 2:
             ap.error(f"--steps count must be >= 2 (got: {n})")
         steps_map[kname] = n
+    ACM_STEPS.clear()
+    for kname, n in steps_map.items():
+        tgt = (param_map or {}).get(kname, kname)
+        idx = any(c.get(kname, 0) > 1.0 for c in combos)
+        for t in (tgt if isinstance(tgt, (list, tuple)) else [tgt]):
+            ACM_STEPS[t] = (n, idx)
 
     wav_info = sf.info(str(in_wav))
     audio_frames = wav_info.frames

@@ -156,3 +156,26 @@ def test_render_command_carries_the_tables(tmp_path, monkeypatch):
     assert cmd[cmd.index("--tables-lib") + 1] == str(lib) and "--fold-switches" in cmd
     monkeypatch.setattr(g, "ACM_EMITTED_LIB", None); monkeypatch.delenv("ACM_EMITTED_LIB", raising=False)
     assert "--tables-lib" not in g._acm_args("/x/amp.schx", "in.wav", "out.wav", 2, 256, "Gain=0.5")
+
+
+def test_acm_stepped_knobs_become_position_indices():
+    import gen_dataset_from_schx as g
+    assert [g.acm_switch_value(v, 3) for v in (0, 0.5, 1)] == [0.0, 1.0, 2.0]
+    assert [g.acm_switch_value(v, 2) for v in (0, 1)] == [0.0, 1.0]
+    assert [g.acm_switch_value(v, 3, True) for v in (0, 1, 2)] == [0.0, 1.0, 2.0]
+    with pytest.raises(ValueError):
+        g.acm_switch_value(0.3, 3)
+    with pytest.raises(ValueError):
+        g.acm_switch_value(3, 3, True)
+
+
+def test_acm_args_convert_only_stepped_names():
+    import gen_dataset_from_schx as g
+    g.ACM_STEPS.clear()
+    try:
+        g.ACM_STEPS["Mode"] = (3, False)
+        a = g._acm_args("x.schx", "i.wav", "o.wav", 4, 64, "Mode=0.5,Gain=0.5", progress=False)
+        knobs = [a[i + 1] for i, t in enumerate(a) if t == "--knob"]
+        assert knobs == ["Mode=1", "Gain=0.5"]
+    finally:
+        g.ACM_STEPS.clear()
