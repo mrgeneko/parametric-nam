@@ -2872,7 +2872,7 @@ def main():
                          f"loudness is preserved. Keeps a full amp's raw rail voltage out of the data.")
     ap.add_argument("--no-output-normalize", action="store_true",
                     help="--combine: write the raw render levels instead of normalizing (debug only).")
-    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="livespice")
+    ap.add_argument("--backend", choices=["cpp", "livespice", "ngspice", "ngspice-deck", "acm"], default="acm")
     ap.add_argument("--acm-tables", choices=["on", "off"], default=None,
                     help="--backend acm: tabulated tube characteristics (default on: 1.12-1.20x faster on tube amps, output within ESR 4e-6 of "
                          "the exact equations; exact equations are used outside a table's range). off = the exact equations throughout")
