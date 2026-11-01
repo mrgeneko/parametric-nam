@@ -305,7 +305,7 @@ and `bake_nam.py` relate on the way from a checkpoint to a published `.nam` — 
 
 ## Backends
 
-Four simulation backends: **`livespice`** (real-time-capable, `.schx`-native),
+Four simulation backends: **`livespice`** (default, real-time-capable, `.schx`-native),
 **`ngspice`** (offline, adaptive-timestep, for stiff/high-gain circuits translated from a
 `.schx`), **`ngspice-deck`** (for a device with no `.schx` at all — a hand-written ngspice
 netlist module, driven straight through `run_pipeline.py`/`gen_dataset_from_schx.py` now, not

@@ -13,7 +13,7 @@ python scaffold_config.py --schx path/to/circuit.schx
 Discovers the circuit's real controls (ganged pots collapsed to one, same logic
 `gen_dataset_from_schx.py --schx X` with no `--knobs` uses to list them) and writes a
 `config.toml` with a `[knobs]` entry per control, copying the rest of
-`examples/template.config.toml` verbatim. For the `livespice` backend it also
+`examples/template.config.toml` verbatim. For the `livespice` backend (default) it also
 *measures* a starting `oversample` — runs `measure_truncation.py`'s own candidate sweep
 and prints the same kind of table, but doesn't pick a value out of it automatically: a
 "stalled" candidate in that table can mean a render problem, not convergence, and the

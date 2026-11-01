@@ -26,8 +26,8 @@ knob sweeps are *relative* (dB vs centre) and cannot see a circuit that is unifo
    spends its time clipping against its rails, a model that cannot saturate is not approximately
    right — it is unbounded.
 
-**LiveSPICE** (`--backend livespice`) — real-time-capable, `.schx`-native,
-reference tube models, uniform audio-rate output, never aborts. Formerly the default for
+**LiveSPICE** (`--backend livespice`, default) — real-time-capable, `.schx`-native,
+reference tube models, uniform audio-rate output, never aborts. The right default for
 essentially everything. But read "never aborts" as a *risk*, not only a feature: its
 `IdealOpAmp` has no supply rails and cannot saturate, so a circuit whose dominant nonlinearity
 is op-amp clipping renders happily and wrongly. Measured on one real pedal: **228x full
