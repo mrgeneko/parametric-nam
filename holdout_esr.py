@@ -112,7 +112,13 @@ def main():
     ds = ParamDataset(str(args.dataset), crop_len=48000, mmap=True)
     names = ds.param_names
     dev = resolve_device(args.device)
-    model = SlimmableParametricA2(num_params=len(names), widths=widths).to(dev)
+    ad = ck.get("args_dict", {})
+    # Same structural args checkpoint_infer.load_model recovers -- without them a
+    # --cond-hidden / --lora-rank / --spectral-norm checkpoint fails load_state_dict.
+    model = SlimmableParametricA2(num_params=len(names), widths=widths,
+                                  spectral_norm=ad.get("spectral_norm", False),
+                                  lora_rank=ad.get("lora_rank", 0),
+                                  cond_hidden=ad.get("cond_hidden", 0)).to(dev)
     model.load_state_dict(ck["model"])
     model.eval()
 

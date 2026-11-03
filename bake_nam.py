@@ -35,16 +35,21 @@ import argparse
 import json
 from pathlib import Path
 
-from param_train import ParametricA2, check_parametric_schema
+from param_train import ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_COND
 import nam_standard
 
 EMBED_KEY = "embedded_parametric"
 
 
 def _submodels(nam: dict, source: str = ".param.nam"):
-    """Per-submodel (channels, num_params, param_metas, weights) for a ParametricWaveNet
-    or SlimmableContainer .param.nam. check_parametric_schema rejects legacy
-    residual/untagged models, so anything we return here is a supported skip model.
+    """Per-submodel (channels, num_params, param_metas, weights, build_kw) for a
+    ParametricWaveNet or SlimmableContainer .param.nam. check_parametric_schema rejects
+    legacy residual/untagged models, so anything we return here is a supported skip model.
+
+    build_kw carries the structural extras (lora_rank, cond_hidden) ParametricA2 needs to
+    consume the flat weight list correctly -- this reader reconstructs them from the
+    parametric block, which is why it accepts schema_version up to
+    K_PARAM_SCHEMA_VERSION_COND where nam_infer.py (which doesn't) still stops at 1.
     """
     entries = ([s["model"] for s in nam["config"]["submodels"]]
                if nam.get("architecture") == "SlimmableContainer" else [nam])
@@ -52,11 +57,15 @@ def _submodels(nam: dict, source: str = ".param.nam"):
     for m in entries:
         cfg = m["config"]
         par = cfg.get("parametric", {}) or {}
-        check_parametric_schema(par, source=source)
+        check_parametric_schema(par, source=source, max_version=K_PARAM_SCHEMA_VERSION_COND)
         metas = par.get("parameters", [])
+        build_kw = {
+            "lora_rank": int((par.get("lora") or {}).get("rank", 0)),
+            "cond_hidden": int((par.get("cond_encoder") or {}).get("hidden", 0)),
+        }
         out.append((int(cfg["layers"]),
                     int(par.get("condition_size", len(metas))),
-                    metas, m["weights"]))
+                    metas, m["weights"], build_kw))
     return out
 
 
@@ -128,10 +137,10 @@ def main():
     match = next((s for s in subs if s[0] == target), None)
     if match is None:
         ap.error(f"width {target} not found; available: {widths}")
-    channels, num_params, metas, weights = match
+    channels, num_params, metas, weights, build_kw = match
     names = [m["name"] for m in metas]
 
-    a2 = ParametricA2(channels=channels, num_params=num_params)
+    a2 = ParametricA2(channels=channels, num_params=num_params, **build_kw)
     a2.load_weights(weights)
 
     kv = dict(x.split("=", 1) for x in a.params.split(",") if "=" in x)

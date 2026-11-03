@@ -910,6 +910,9 @@ def build_train_cmd(args, dataset_dir, epochs, steps_per_epoch_arg):
     if args.clip_norm != 1.0:    train_cmd += ["--clip-norm", args.clip_norm]
     if args.spectral_norm:       train_cmd.append("--spectral-norm")
     if args.lora_rank:           train_cmd += ["--lora-rank", str(args.lora_rank)]
+    # getattr: tests build args as a bare namespace; absent means off, same as 0.
+    if getattr(args, "cond_hidden", 0):
+        train_cmd += ["--cond-hidden", str(args.cond_hidden)]
     return train_cmd
 
 
@@ -1271,6 +1274,11 @@ def main():
                         "l1x1, alongside FiLM. DISABLED 2026-08-27 -- has not paid off on "
                         "shipped ESR; see the README's 'LoRA-style knob conditioning' status "
                         "note. Set PARAMETRIC_NAM_ALLOW_LORA=1 to override for an ablation.")
+    g.add_argument("--cond-hidden",    type=int,   default=0,
+                   help="PROTOTYPE: hidden units of the knob-conditioning encoder MLP placed "
+                        "before every FiLM layer (0 = off, today's affine FiLM). Exports as "
+                        "parametric schema_version 3, which no plugin reads yet. Forwarded to "
+                        "param_train.py; also settable as `cond-hidden = N` in --config.")
 
     # Load --config (if any) into defaults BEFORE parsing, so CLI flags override it.
     _pre = argparse.ArgumentParser(add_help=False)

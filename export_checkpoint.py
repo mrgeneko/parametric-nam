@@ -97,6 +97,15 @@ def detect_lora_rank(state) -> int:
     return 0
 
 
+def detect_cond_hidden(state) -> int:
+    """--cond-hidden, recovered structurally like detect_lora_rank: the encoder's first
+    Linear is "...cond_enc.net.0.weight" with shape (hidden, num_params). 0 if absent."""
+    for k, v in state.items():
+        if k.endswith("cond_enc.net.0.weight"):
+            return v.shape[0]
+    return 0
+
+
 def require_tier_agreement(per_tier: dict, what: str):
     """--compose's tiers must all agree on a model-wide setting (spectral_norm presence,
     LoRA rank, ...) -- these aren't per-tier knobs, so a mismatch means the checkpoints
@@ -142,6 +151,9 @@ def main():
         sn_per_tier = {t: detect_spectral_norm(s) for t, s in loaded.items()}
         lora_per_tier = {t: detect_lora_rank(s) for t, s in loaded.items()}
         lora_rank = require_tier_agreement(lora_per_tier, "LoRA rank")
+        # cond_hidden changes every FiLM layer's input width, so like LoRA rank it must agree.
+        cond_hidden = require_tier_agreement(
+            {t: detect_cond_hidden(s) for t, s in loaded.items()}, "cond_hidden")
         # MIXED spectral_norm IS NOW LEGITIMATE (2026-09-17), where it previously raised.
         # The motivating case is the standard one-tier fix: a FiLM runaway is isolated to ONE
         # tier, that tier is retrained with --spectral-norm, and the clean tier must be carried
@@ -155,7 +167,7 @@ def main():
         mixed_sn = 0 < len(sn_tiers) < len(sn_per_tier)
         model = SlimmableParametricA2(ds.num_params, widths=widths,
                                       spectral_norm=(not mixed_sn) and all(sn_per_tier.values()),
-                                      lora_rank=lora_rank)
+                                      lora_rank=lora_rank, cond_hidden=cond_hidden)
         if mixed_sn:
             plain = sorted(t for t, v in sn_per_tier.items() if not v)
             model.enable_spectral_norm(skip_tiers=plain)
@@ -181,13 +193,16 @@ def main():
         state = ck[args.state]
         spectral_norm = detect_spectral_norm(state)
         lora_rank = detect_lora_rank(state)
+        cond_hidden = detect_cond_hidden(state)
         if any(k.startswith("lite.") for k in state):
             model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
-                                          spectral_norm=spectral_norm, lora_rank=lora_rank)
+                                          spectral_norm=spectral_norm, lora_rank=lora_rank,
+                                          cond_hidden=cond_hidden)
         else:
             ch = next(v.shape[0] for k, v in state.items()
                      if k.endswith("conv.parametrizations.weight.original") or k.endswith("conv.weight"))
-            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm, lora_rank=lora_rank)
+            model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm, lora_rank=lora_rank,
+                                 cond_hidden=cond_hidden)
         model.load_state_dict(state)
         provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
                       f"best_esr={ck.get('best_esr')}")

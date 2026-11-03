@@ -167,7 +167,9 @@ def test_schema_guard_rejects_a_newer_schema(tmp_path):
     """A file from a future build must fail loudly, not be silently misread."""
     src = _make_parametric_file(tmp_path / "m.param.nam")
     d = json.loads(src.read_text())
-    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION + 1
+    # bake_nam reconstructs lora_rank/cond_hidden itself, so it accepts up to the
+    # cond-encoder schema; "newer" means one past THAT, not past the FiLM-only base.
+    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_COND + 1
     src.write_text(json.dumps(d))
     r = _bake_raw(src, tmp_path / "o.nam")
     assert r.returncode != 0

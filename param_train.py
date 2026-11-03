@@ -104,9 +104,19 @@ K_PARAM_SCHEMA_VERSION = 1
 # an unmodified reader correctly (loudly) rejects a schema_version=2 file as newer than it
 # understands -- see check_parametric_schema.
 K_PARAM_SCHEMA_VERSION_LORA = 2
+#   3 = adds a knob-conditioning ENCODER (see the CondEncoder class) in front of every FiLM
+#       layer: cond = [knobs, tanh(MLP(knobs))], so gamma/beta are no longer affine in knob
+#       position. ONLY exported when cond_hidden>0; its weights sit FIRST in the flat weight
+#       list (control path before audio path), declared under config.parametric.cond_encoder.
+#       PROTOTYPE (2026-11-03): no C++ reader yet -- the fork rejects it loudly, as it should.
+K_PARAM_SCHEMA_VERSION_COND = 3
+# Hidden layers in the encoder MLP (num_params -> hidden -> hidden). Fixed for the prototype
+# so the export declares one shape; recorded in the .nam so a reader can refuse anything else.
+K_COND_DEPTH = 2
 
 
-def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
+def check_parametric_schema(par: dict, source: str = ".param.nam",
+                            max_version: int = K_PARAM_SCHEMA_VERSION) -> int:
     """Reject any model we cannot faithfully run. SKIP-ONLY.
 
     Two hard failures, never a guess — guessing a head silently produces wrong audio:
@@ -116,10 +126,10 @@ def check_parametric_schema(par: dict, source: str = ".param.nam") -> int:
         so we refuse rather than run them.
     """
     v = int(par.get("schema_version", 0))
-    if v > K_PARAM_SCHEMA_VERSION:
+    if v > max_version:
         raise SystemExit(
             f"{source}: parametric schema_version {v} is newer than this build supports "
-            f"(max {K_PARAM_SCHEMA_VERSION}). Upgrade parametric-nam — proceeding would "
+            f"(max {max_version}). Upgrade parametric-nam — proceeding would "
             f"silently misread the model and produce wrong audio.")
     head_mode = par.get("head_mode", "residual")
     if head_mode != "skip":
@@ -241,6 +251,59 @@ class LoRA(nn.Module):
         return self.delta(x, cond)
 
 
+class CondEncoder(nn.Module):
+    """Knob-conditioning encoder: params -> [params, tanh(MLP(params))].
+
+    Every FiLM layer is nn.Linear(cond_dim, 2*channels) on whatever `cond` it is handed.
+    Without this, cond IS the raw knob vector, so every gamma/beta in the stack is an
+    AFFINE function of knob position -- but the circuit's response to a knob is anything
+    but (audio-taper pots, a diode clipper's threshold, a power stage saturating past
+    0.75). The backbone has to absorb all of that curvature. Measured on the JCM900 2100
+    (3 knobs, 343 combos, 2026-11-03): per-combo ESR flat from 0.1 to 0.5 on every knob,
+    then rising 1.5-2x to 1.0. LoRA widened the AUDIO path per layer but its A/B were
+    also linear in the raw knobs, so the knob map stayed affine -- consistent with it not
+    helping.
+
+    This runs ONCE per parameter change, not per sample: the plugin evaluates a tiny MLP
+    in the control path and hands the existing per-layer FiLM the same gamma/beta vectors
+    it consumes today. The audio inner loop is untouched.
+
+    CONCAT, not replace: the raw knobs stay as the first num_params columns of cond, so
+    (a) the affine path FiLM has today is still there verbatim, the MLP only ADDS features,
+    and (b) --knob-boost's per-knob column hooks still address the right columns. The MLP's
+    final tanh bounds the added features to [-1, 1], a direct guard against the FiLM/
+    LeakyReLU runaway that a richer knob map could otherwise feed (LoRA made that ~7x worse).
+
+    forward() is the ONE place this is computed -- ParametricA2.cond() (training/inference)
+    and nam_standard.fold_film()/fold_lora() (baking) all go through it, same single-source
+    discipline as FiLM.gamma_beta() and LoRA.delta().
+    """
+    def __init__(self, num_params: int, hidden: int, depth: int = K_COND_DEPTH):
+        super().__init__()
+        self.num_params = num_params
+        self.hidden = hidden
+        self.depth = depth
+        layers = []
+        d = num_params
+        for i in range(depth):
+            layers.append(nn.Linear(d, hidden))
+            layers.append(nn.SiLU() if i < depth - 1 else nn.Tanh())
+            d = hidden
+        self.net = nn.Sequential(*layers)
+
+    @property
+    def out_dim(self) -> int:
+        return self.num_params + self.hidden
+
+    @property
+    def linears(self) -> list:
+        """The Linear stages in forward order -- the export/load weight order."""
+        return [m for m in self.net if isinstance(m, nn.Linear)]
+
+    def forward(self, params: torch.Tensor) -> torch.Tensor:
+        return torch.cat([params, self.net(params)], dim=-1)
+
+
 def parse_knob_boost(spec: str) -> dict[str, float]:
     """Parse '--knob-boost' syntax: 'NAME=mult,NAME2=mult2,...' -> {NAME: mult}."""
     boosts: dict[str, float] = {}
@@ -260,9 +323,12 @@ def register_knob_boost_hooks(model: nn.Module, param_names: list[str],
     """Scale the backward-pass gradient flowing into specific knobs' FiLM
     conditioning columns, in every FiLM layer of the model.
 
-    FiLM.net is nn.Linear(num_params, 2*channels): its weight matrix has one
+    FiLM.net is nn.Linear(cond_dim, 2*channels): its weight matrix has one
     INPUT column per knob (column i is entirely and only responsible for knob
-    param_names[i]'s contribution to that layer's gamma/beta). Registering a
+    param_names[i]'s contribution to that layer's gamma/beta). With --cond-hidden the
+    raw knobs are still columns 0..num_params-1 (CondEncoder CONCATs, it doesn't replace),
+    so the hook still lands on the right column; the encoder's own columns, which mix
+    every knob, are left alone. Registering a
     gradient hook on that column lets one knob's conditioning pathway learn
     faster without touching the loss function (which stays an honest,
     unweighted measure of fit quality) or any other knob's learning rate --
@@ -436,17 +502,24 @@ class ParametricA2(nn.Module):
     for parametric knob control.
     """
     def __init__(self, channels: int, num_params: int, spectral_norm: bool = False,
-                lora_rank: int = 0):
+                lora_rank: int = 0, cond_hidden: int = 0):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
         self.lora_rank = lora_rank
+        self.cond_hidden = cond_hidden
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
         # anything to strip -- see internal engineering notes ("A2").
         self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
+        # Built BEFORE rechannel/layers so its RNG draws land first, in the same position
+        # its weights take in the export order (control path first). Per-tier, not shared
+        # across a SlimmableParametricA2: each tier exports as a self-contained submodel.
+        self.cond_enc = (CondEncoder(num_params, cond_hidden)
+                         if (num_params > 0 and cond_hidden > 0) else None)
+        cond_dim = self.cond_enc.out_dim if self.cond_enc is not None else num_params
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
-            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], num_params, lora_rank=lora_rank)
+            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], cond_dim, lora_rank=lora_rank)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -474,14 +547,22 @@ class ParametricA2(nn.Module):
             layer.enable_spectral_norm()
         self.spectral_norm = True
 
+    def cond(self, params: torch.Tensor) -> torch.Tensor:
+        """The conditioning vector every FiLM/LoRA layer sees for raw knob vector `params`:
+        the encoder's output when one exists, else `params` itself. The ONE entry point --
+        forward() here and the folds in nam_standard.py all call it, so no caller can hand a
+        FiLM layer raw knobs that it was trained to see encoded."""
+        return self.cond_enc(params) if self.cond_enc is not None else params
+
     def forward(self, audio: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         x = self.rechannel(audio)
         inp_audio = audio
+        cond = self.cond(params)
         # SKIP head: reads the SUM of every layer's post-activation — the standard WaveNet
         # skip connections that NAM, a2_fast and every stock plugin compute.
         skip = None
         for layer in self.layers:
-            x, post_act = layer(x, inp_audio, params)
+            x, post_act = layer(x, inp_audio, cond)
             skip = post_act if skip is None else skip + post_act
         head_in = skip
         # Causal: left-pad K-1 so output[n] reads only [n-(K-1), n] — no lookahead.
@@ -495,6 +576,9 @@ class ParametricA2(nn.Module):
     def weight_count(self) -> int:
         """Total flat float count for .nam export matching C++ order."""
         total = 0
+        if self.cond_enc is not None:
+            for lin in self.cond_enc.linears:
+                total += lin.weight.numel() + lin.bias.numel()
         total += self.rechannel.weight.numel()
         for layer in self.layers:
             total += layer.conv.weight.numel()
@@ -518,6 +602,12 @@ class ParametricA2(nn.Module):
     def _export_weight_block(self) -> list[float]:
         """C++ weight order — Conv layers: out_ch→in_ch→tap (r-major)."""
         w = []
+        # Control path first: encoder Linears in forward order, each weight (out, in)
+        # row-major then bias -- the same per-Linear convention FiLM.net uses below.
+        if self.cond_enc is not None:
+            for lin in self.cond_enc.linears:
+                w.extend(lin.weight.detach().flatten().tolist())
+                w.extend(lin.bias.detach().flatten().tolist())
         w.extend(self.rechannel.weight.detach().flatten().tolist())
         for layer in self.layers:
             w.extend(layer.conv.weight.detach().flatten().tolist())
@@ -540,8 +630,17 @@ class ParametricA2(nn.Module):
 
     def _load_weight_block(self, it):
         """Consume flat iterator in C++ order, populate weights in-place."""
+        if self.cond_enc is not None:
+            for lin in self.cond_enc.linears:
+                lin.weight.data.copy_(
+                    torch.tensor([next(it) for _ in range(lin.weight.numel())]).view_as(lin.weight))
+                lin.bias.data.copy_(
+                    torch.tensor([next(it) for _ in range(lin.bias.numel())]).view_as(lin.bias))
         self.rechannel.weight.data.copy_(
             torch.tensor([next(it) for _ in range(self.channels)]).view_as(self.rechannel.weight))
+        # FiLM/LoRA input width is the ENCODED cond width (num_params + cond_hidden when an
+        # encoder exists), not num_params -- read it off the module rather than assuming.
+        cond_dim = self.cond_enc.out_dim if self.cond_enc is not None else self.num_params
         for layer in self.layers:
             C = self.channels
             K = layer.conv.weight.shape[-1]
@@ -556,13 +655,13 @@ class ParametricA2(nn.Module):
             layer.l1x1.bias.data.copy_(
                 torch.tensor([next(it) for _ in range(C)]).view_as(layer.l1x1.bias))
             if layer.film is not None:
-                np_ = self.num_params
+                np_ = cond_dim
                 layer.film.net.weight.data.copy_(
                     torch.tensor([next(it) for _ in range(2 * C * np_)]).view_as(layer.film.net.weight))
                 layer.film.net.bias.data.copy_(
                     torch.tensor([next(it) for _ in range(2 * C)]).view_as(layer.film.net.bias))
             if layer.lora is not None:
-                np_ = self.num_params
+                np_ = cond_dim
                 R = layer.lora.rank
                 layer.lora.net_A.weight.data.copy_(
                     torch.tensor([next(it) for _ in range(C * R * np_)]).view_as(layer.lora.net_A.weight))
@@ -604,8 +703,11 @@ class ParametricA2(nn.Module):
         """
         if not self.spectral_norm:
             return self
-        baked = ParametricA2(self.channels, self.num_params, spectral_norm=False)
+        baked = ParametricA2(self.channels, self.num_params, spectral_norm=False,
+                             cond_hidden=self.cond_hidden)
         with torch.no_grad():
+            if self.cond_enc is not None:
+                baked.cond_enc.load_state_dict(self.cond_enc.state_dict())
             baked.rechannel.weight.copy_(self.rechannel.weight)
             baked.head.weight.copy_(self.head.weight)
             baked.head.bias.copy_(self.head.bias)
@@ -681,14 +783,24 @@ class ParametricA2(nn.Module):
                 entry["steps"] = steps
             param_defs.append(entry)
         has_lora = self.lora_rank > 0
+        has_cond = self.cond_enc is not None
+        if has_cond:
+            schema_version = K_PARAM_SCHEMA_VERSION_COND
+        elif has_lora:
+            schema_version = K_PARAM_SCHEMA_VERSION_LORA
+        else:
+            schema_version = K_PARAM_SCHEMA_VERSION
         parametric_config = {
             # "type" used to be write-only (exported, read by nothing) -- NeuralAmpModelerCore's
             # fast-path dispatch (a2_fast.cpp's is_parametric_a2_shape()) now reads it to decide
             # whether a model is safe for the hand-optimized fast path ("film" only) or must fall
             # through to the slower but LoRA-aware generic path ("film+lora"). Absent/"film"
             # defaults to fast-path-eligible, so every pre-existing export is unaffected.
-            "type": "film+lora" if has_lora else "film",
-            "schema_version": K_PARAM_SCHEMA_VERSION_LORA if has_lora else K_PARAM_SCHEMA_VERSION,
+            # "+cond" is appended whenever an encoder exists: a2_fast's is_parametric_a2_shape()
+            # only fast-paths exactly "film", so an encoder model falls to the generic path,
+            # which (until a reader exists) rejects schema_version 3 loudly.
+            "type": ("film+lora" if has_lora else "film") + ("+cond" if has_cond else ""),
+            "schema_version": schema_version,
             "condition_size": self.num_params,
             # Always "skip" — the one head we support. Declared so readers can REJECT
             # legacy residual/untagged models instead of silently playing garbage.
@@ -701,6 +813,18 @@ class ParametricA2(nn.Module):
             # class docstring). Per-layer ranks aren't supported yet; if that changes, this
             # becomes a list, not a scalar, and needs another schema_version bump.
             parametric_config["lora"] = {"rank": self.lora_rank}
+        if has_cond:
+            # Enough for a reader to rebuild the control-path MLP exactly and to REFUSE a
+            # shape it doesn't implement, rather than guess. Weights are the first
+            # sum(out*in + out) floats of the flat list, in forward order.
+            parametric_config["cond_encoder"] = {
+                "hidden": self.cond_enc.hidden,
+                "depth": self.cond_enc.depth,
+                "hidden_activation": "silu",
+                "output_activation": "tanh",
+                "output": "concat",           # cond = [params, mlp(params)]
+                "cond_size": self.cond_enc.out_dim,
+            }
         layer_config = {
             "layers": self.channels,
             "head_scale": self.head_scale.item(),
@@ -772,16 +896,19 @@ class SlimmableParametricA2(nn.Module):
     pass `--widths 3,8` to reproduce the original 2-tier convention exactly.
     """
     def __init__(self, num_params: int, widths=None, spectral_norm: bool = False,
-                lora_rank: int = 0):
+                lora_rank: int = 0, cond_hidden: int = 0):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
+        self.cond_hidden = cond_hidden
         # spectral_norm is DELIBERATELY NOT passed here (always False per-tier) -- see below.
         # lora_rank, unlike spectral_norm, IS passed straight through per-tier at construction
         # time: LoRA's net_A/net_B are freshly constructed modules (like conv/mixin/film),
         # not a later wrap of an already-existing module, so they carry none of spectral_norm's
         # RNG-draw-order sensitivity -- no deferred enable_lora() call needed.
-        kw = dict(spectral_norm=False, lora_rank=lora_rank)
+        # cond_hidden likewise: CondEncoder is a fresh module built inside each tier's
+        # constructor, so it has no deferred-enable step either.
+        kw = dict(spectral_norm=False, lora_rank=lora_rank, cond_hidden=cond_hidden)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` regardless of the actual widths chosen -- a 2-tier model
         # stays structurally compatible with old 2-tier checkpoints for resume /
@@ -1727,7 +1854,10 @@ def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
         # corrupting every downstream layer. Not caught by a hard error (load_weights doesn't
         # validate weight count) -- silently produces a real but wrong forward pass, which is
         # exactly what surfaced as a large-but-finite round-trip WARN instead of a crash.
-        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank)
+        # cond_hidden for the same reason: without it m2 has no encoder, so the encoder's
+        # leading weights would be consumed as rechannel/conv weights and every FiLM
+        # layer would be built num_params wide instead of num_params + cond_hidden.
+        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank, cond_hidden=src.cond_hidden)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():
@@ -2385,6 +2515,17 @@ def main():
                          "this lets the knob genuinely change what l1x1 computes -- aimed at "
                          "the >3-knob ESR ceiling FiLM alone can't lift regardless of "
                          "training time.")
+    ap.add_argument("--cond-hidden", type=int, default=0,
+                    help="PROTOTYPE. Put a small MLP (this many hidden units, 2 layers, "
+                         "SiLU then tanh) between the knob vector and every FiLM layer, so "
+                         "gamma/beta can be nonlinear in knob position: cond = [knobs, "
+                         "tanh(mlp(knobs))]. Today's FiLM is a single Linear on the raw knobs, "
+                         "so every gamma/beta is AFFINE in knob position; measured per-combo ESR "
+                         "rises 1.5-2x toward the top of each knob (JCM900 2100, 2026-11-03), "
+                         "the shape that limit predicts. Runs once per parameter change, not "
+                         "per sample. Exports as parametric schema_version 3, which NO plugin "
+                         "reads yet -- the .param.nam is for Python-side evaluation "
+                         "(per_combo_esr.py, bake_nam.py) only. 0 = off (default).")
     ap.add_argument("--per-tier-clip", action="store_true",
                     help="Slimmable only: clip_grad_norm_ EACH tier's own parameters "
                          "separately (each to --clip-norm) instead of one joint call over "
@@ -2692,10 +2833,12 @@ def main():
     # only needs to ADAPT, not relearn the whole function.
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
                                   spectral_norm=(args.spectral_norm and args.init_from is None),
-                                  lora_rank=args.lora_rank)
+                                  lora_rank=args.lora_rank, cond_hidden=args.cond_hidden)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
-    print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params", file=sys.stderr)
+    print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params"
+          + (f", cond encoder {num_params}->{args.cond_hidden}x{K_COND_DEPTH} (cond width "
+             f"{num_params + args.cond_hidden})" if args.cond_hidden else ""), file=sys.stderr)
     model.to(device)
 
     # --freeze-tiers labels, parsed HERE (before --init-from's enable_spectral_norm() call
@@ -2777,8 +2920,11 @@ def main():
     # FiLM (knob-conditioning) params get a higher LR — their gradient signal is
     # small (knob effects are subtle vs the overall signal), so at the shared LR
     # they under-learn and the knob goes near-dead.
-    film_params = [p for n, p in model.named_parameters() if ".film." in n and p.requires_grad]
-    other_params = [p for n, p in model.named_parameters() if ".film." not in n and p.requires_grad]
+    # The cond encoder is conditioning path too (it only ever feeds FiLM/LoRA), so it
+    # rides in the same boosted group.
+    is_cond = lambda n: ".film." in n or ".cond_enc." in n
+    film_params = [p for n, p in model.named_parameters() if is_cond(n) and p.requires_grad]
+    other_params = [p for n, p in model.named_parameters() if not is_cond(n) and p.requires_grad]
     groups = [{"params": other_params, "lr": args.lr}]
     if film_params:   # empty for a non-parametric (0-knob) static capture
         groups.append({"params": film_params, "lr": args.lr * args.film_lr_mult})

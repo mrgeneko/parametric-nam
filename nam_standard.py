@@ -48,10 +48,14 @@ def fold_film(model: ParametricA2, params) -> ParametricA2:
     m = copy.deepcopy(model).eval()
     if m.num_params == 0:
         return m
-    cond = torch.as_tensor(params, dtype=torch.float32).view(1, -1)
-    if cond.shape[1] != m.num_params:
-        raise ValueError(f"expected {m.num_params} params, got {cond.shape[1]}")
+    knobs = torch.as_tensor(params, dtype=torch.float32).view(1, -1)
+    if knobs.shape[1] != m.num_params:
+        raise ValueError(f"expected {m.num_params} params, got {knobs.shape[1]}")
     with torch.no_grad():
+        # Through ParametricA2.cond(), never the raw knobs: a --cond-hidden model's FiLM
+        # layers were trained on the ENCODED vector, and gamma_beta() on raw knobs would
+        # be a shape error at best and silently wrong gamma/beta at worst.
+        cond = m.cond(knobs)
         for layer in m.layers:
             if layer.film is None:
                 continue
@@ -68,6 +72,10 @@ def fold_film(model: ParametricA2, params) -> ParametricA2:
             layer.conv.bias.mul_(gamma).add_(beta)
             layer.mixin.weight.mul_(g)
             layer.film = None
+    # The encoder has nothing left to feed once FiLM is folded (fold_lora, if it runs after
+    # this, is told the knobs are gone by num_params == 0 and skips its own cond lookup).
+    m.cond_enc = None
+    m.cond_hidden = 0
     m.num_params = 0
     return m
 
@@ -92,10 +100,11 @@ def fold_lora(model: ParametricA2, params) -> ParametricA2:
     m = copy.deepcopy(model).eval()
     if m.lora_rank == 0:
         return m
-    cond = torch.as_tensor(params, dtype=torch.float32).view(1, -1)
-    if cond.shape[1] != m.num_params:
-        raise ValueError(f"expected {m.num_params} params, got {cond.shape[1]}")
+    knobs = torch.as_tensor(params, dtype=torch.float32).view(1, -1)
+    if knobs.shape[1] != m.num_params:
+        raise ValueError(f"expected {m.num_params} params, got {knobs.shape[1]}")
     with torch.no_grad():
+        cond = m.cond(knobs)   # encoded when a CondEncoder exists -- see fold_film()
         for layer in m.layers:
             if layer.lora is None:
                 continue
