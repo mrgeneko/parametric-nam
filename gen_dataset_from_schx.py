@@ -362,7 +362,9 @@ def _sigterm_handler(*_):
 
 
 atexit.register(_kill_active_procs)
-signal.signal(signal.SIGTERM, _sigterm_handler)
+# render_backends imports this module back; when that first happens on a worker thread (the acm oversample prewarm), signal.signal raises ValueError.
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -634,12 +636,14 @@ def resolve_knobs(knob_keys: List[str], control_map: dict) -> dict:
     """Map user-supplied knob names → exact schx component Names.
     Matching is case-insensitive and ignores extra spaces/hyphens."""
     resolved = {}
+    # parse_schx_controls keeps hyphens in its keys; the user side is normalised below, so normalise the map the same way (a control like "RV4-B Ch1 Gain" never matched otherwise)
+    lookup = {re.sub(r'_+', '_', key.replace("-", "_")): ctrl for key, ctrl in control_map.items()}
     for k in knob_keys:
         normalized = re.sub(r'_+', '_', k.strip().lower().replace(" ", "_").replace("-", "_"))
-        if normalized not in control_map:
+        if normalized not in lookup:
             available = ", ".join(sorted(control_map.keys()))
             raise SystemExit(f"Knob '{k}' not found in schx.\nAvailable: {available}")
-        resolved[k] = control_map[normalized]
+        resolved[k] = lookup[normalized]
     return resolved
 
 
