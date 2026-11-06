@@ -54,7 +54,7 @@ import torch
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from param_train import ParametricA2
+from param_train import ParametricA2, parametric_ctor_kwargs
 from run_pipeline import load_config
 from gen_dataset_from_schx import grid_combinations
 
@@ -74,12 +74,11 @@ def load_all_submodels(nam_path: str):
         param_metas = parametric["parameters"]
         param_names = [p["name"] for p in param_metas]
         weights = sub["model"]["weights"]
-        # LoRA-enabled export (schema_version 2, "type":"film+lora") declares its rank
-        # directly in the config -- no state-dict detection needed the way
-        # export_checkpoint.py's detect_lora_rank() has to do for a training checkpoint.
-        # Every pre-LoRA export has no "lora" key at all -> rank 0, unchanged behavior.
-        lora_rank = parametric.get("lora", {}).get("rank", 0)
-        model = ParametricA2(channels=channels, num_params=len(param_names), lora_rank=lora_rank)
+        # LoRA rank, cond-encoder width and the FiLM gamma/beta bound are all declared in the
+        # parametric block; parametric_ctor_kwargs reads them in one place for every reader.
+        # Absent keys mean the plain model, so every older export is unchanged.
+        model = ParametricA2(channels=channels, num_params=len(param_names),
+                             **parametric_ctor_kwargs(parametric))
         expected = model.weight_count()
         if len(weights) != expected:
             raise SystemExit(f"{nam_path}: weight count mismatch ({len(weights)} vs {expected}) "

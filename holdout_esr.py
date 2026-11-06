@@ -80,6 +80,23 @@ def _trained_keys_from_dataset(ds_dir: Path, names: list) -> set:
     return {_key(r, names) for r in rows}
 
 
+def _scale_ratio(trained_dir: Path, holdout_dir: Path):
+    """trained output_scale / held-out output_scale, or None when either config.json lacks it.
+    Multiplying the held-out targets by this puts them on the scale the model was trained to
+    produce (both datasets are peak-normalized independently by --combine)."""
+    import json
+    scales = []
+    for d in (trained_dir, holdout_dir):
+        try:
+            s = json.loads((Path(d) / "config.json").read_text()).get("output_scale")
+        except (OSError, ValueError):
+            return None
+        if not s:
+            return None
+        scales.append(float(s))
+    return scales[0] / scales[1]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -107,7 +124,11 @@ def main():
     if isinstance(widths, str):
         widths = [int(x) for x in widths.split(",")]
     if not widths:
-        raise SystemExit(f"{args.checkpoint} has no widths in args_dict -- cannot rebuild the model")
+        # A run launched without --widths saves widths=None (param_train's default [4, 8]
+        # is applied inside the model, never written back to args). Every such checkpoint
+        # was refused here until 2026-11-04; the state dict says what the widths are.
+        from export_checkpoint import infer_widths
+        widths = infer_widths(ck.get("model") or ck.get("best_state"))
 
     ds = ParamDataset(str(args.dataset), crop_len=48000, mmap=True)
     names = ds.param_names
@@ -118,13 +139,26 @@ def main():
     model = SlimmableParametricA2(num_params=len(names), widths=widths,
                                   spectral_norm=ad.get("spectral_norm", False),
                                   lora_rank=ad.get("lora_rank", 0),
-                                  cond_hidden=ad.get("cond_hidden", 0)).to(dev)
+                                  cond_hidden=ad.get("cond_hidden", 0),
+                                  gamma_bound=ad.get("gamma_bound", 0.0),
+                                  beta_bound=ad.get("beta_bound", 0.0)).to(dev)
     model.load_state_dict(ck["model"])
     model.eval()
 
+    outputs = ds.outputs
     if args.trained_dataset:
         trained = _trained_keys_from_dataset(args.trained_dataset, names)
         how = f"--trained-dataset {args.trained_dataset} ({len(trained)} combinations)"
+        # --combine normalizes each dataset to ITS OWN global peak (config.json output_scale).
+        # A held-out grid rendered separately lands on a different scale from the one the
+        # model was trained to produce, and ESR charges that constant gain error to every
+        # cell (2.8% on the JCM900 off-grid set, 2026-11-04 -- a floor of ~0.0008 ESR, a
+        # noticeable slice of a 0.011 score). Put the held-out targets on the trained scale.
+        ratio = _scale_ratio(args.trained_dataset, args.dataset)
+        if ratio is not None and abs(ratio - 1.0) > 1e-6:
+            print(f"output_scale: held-out targets x {ratio:.6f} to match the trained dataset's "
+                  f"normalization", file=sys.stderr)
+            outputs = np.asarray(ds.outputs, dtype=np.float32) * np.float32(ratio)
     else:
         vals = {round(float(v), ROUND) for v in args.trained_values.split(",")}
         trained = None                      # classified per row below
@@ -138,7 +172,7 @@ def main():
     for sub, lbl in zip(model.submodels, model.tier_labels()):
         if args.tier and lbl != args.tier:
             continue
-        res = compute_per_combo_esr(sub, ds.inp, ds.outputs, ds.samples, names, dev)
+        res = compute_per_combo_esr(sub, ds.inp, outputs, ds.samples, names, dev)
         tr, held = [], []
         for r in res:
             k = _key(r, names)

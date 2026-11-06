@@ -33,7 +33,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from param_train import ParametricA2, check_parametric_schema
+from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_BOUND,
+                         parametric_ctor_kwargs)
 
 
 def load_parametric(nam_path: Path, width: int | None = None):
@@ -46,7 +47,8 @@ def load_parametric(nam_path: Path, width: int | None = None):
     m = entries[-1]                       # widest tier by default
     cfg = m["config"]
     par = cfg["parametric"]
-    check_parametric_schema(par, source=str(nam_path))
+    # Up to the cond-encoder schema: the structural extras are reconstructed below.
+    check_parametric_schema(par, source=str(nam_path), max_version=K_PARAM_SCHEMA_VERSION_BOUND)
     # Python is SKIP-ONLY since "skip-only: remove the residual head from the Python side"
     # (19b9f57), which dropped head_mode from ParametricA2's signature. This tool kept passing
     # it and has raised TypeError on every invocation since -- unnoticed because it needs a
@@ -59,7 +61,7 @@ def load_parametric(nam_path: Path, width: int | None = None):
             f"       An A/B against it would compare two different architectures and the\n"
             f"       correlation would be meaningless. Re-export from a current checkpoint.")
     names = [p["name"] for p in par["parameters"]]
-    model = ParametricA2(int(cfg["layers"]), len(names))
+    model = ParametricA2(int(cfg["layers"]), len(names), **parametric_ctor_kwargs(par))
     model.load_weights(m["weights"])
     model.eval()
     return model, names, head_mode

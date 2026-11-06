@@ -169,7 +169,7 @@ def test_schema_guard_rejects_a_newer_schema(tmp_path):
     d = json.loads(src.read_text())
     # bake_nam reconstructs lora_rank/cond_hidden itself, so it accepts up to the
     # cond-encoder schema; "newer" means one past THAT, not past the FiLM-only base.
-    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_COND + 1
+    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_BOUND + 1
     src.write_text(json.dumps(d))
     r = _bake_raw(src, tmp_path / "o.nam")
     assert r.returncode != 0

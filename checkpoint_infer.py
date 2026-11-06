@@ -48,15 +48,19 @@ def load_model(checkpoint_path: str):
     # automatically (the whole argparse namespace is saved verbatim), no extra plumbing.
     lora_rank = args_dict.get("lora_rank", 0)
     cond_hidden = args_dict.get("cond_hidden", 0)   # --cond-hidden, same free recovery
+    gamma_bound = args_dict.get("gamma_bound", 0.0)  # --gamma-bound / --beta-bound likewise
+    beta_bound = args_dict.get("beta_bound", 0.0)
     if slimmable:
         model = SlimmableParametricA2(num_params=num_params, widths=args_dict.get("widths"),
                                       spectral_norm=spectral_norm, lora_rank=lora_rank,
-                                      cond_hidden=cond_hidden)
+                                      cond_hidden=cond_hidden, gamma_bound=gamma_bound,
+                                      beta_bound=beta_bound)
     else:
         channels = args_dict.get("channels", 8)
         model = ParametricA2(num_params=num_params, channels=channels,
                              spectral_norm=spectral_norm, lora_rank=lora_rank,
-                             cond_hidden=cond_hidden)
+                             cond_hidden=cond_hidden, gamma_bound=gamma_bound,
+                             beta_bound=beta_bound)
 
     state = ckpt.get("model") or ckpt.get("best_state")
     model.load_state_dict(state)

@@ -108,6 +108,40 @@ def test_infer_rejects_a_legacy_model(tmp_path, mode):
     assert not out.exists()
 
 
+def test_infer_runs_a_cond_encoder_model(tmp_path):
+    """A --cond-hidden export (schema_version 3, "type":"film+cond") must load and render.
+    Until 2026-11-04 nam_infer.py checked the schema at the FiLM-only max and rebuilt a plain
+    ParametricA2, so every encoder model was refused -- and had it not been, the flat weight
+    list would have mismatched. The reader now reconstructs cond_hidden from the parametric
+    block the way bake_nam.py does."""
+    names = ["SUSTAIN", "TONE"]
+    m = ParametricA2(3, 2, cond_hidden=4)
+    d = m.export_nam({"param_names": names, "bounds": {n: [0.0, 1.0] for n in names}},
+                     {"version": "0.7.0"}, 48000)
+    assert d["config"]["parametric"]["schema_version"] == param_train.K_PARAM_SCHEMA_VERSION_COND
+    model = tmp_path / "m.param.nam"
+    model.write_text(json.dumps(d))
+    wav = _tiny_wav(tmp_path / "in.wav")
+    r = _run_infer(model, wav, tmp_path / "out.wav", "SUSTAIN=0.5,TONE=0.5")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "out.wav").exists()
+
+
+def test_infer_still_rejects_a_schema_past_the_newest_known(tmp_path):
+    """Raising the reader's ceiling to the newest schema must not turn off the guard:
+    one past THAT is still refused, not misread."""
+    model = _skip_model_file(tmp_path / "m.param.nam", num_params=1)
+    d = json.loads(model.read_text())
+    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_BOUND + 1
+    model.write_text(json.dumps(d))
+    wav = _tiny_wav(tmp_path / "in.wav")
+    out = tmp_path / "out.wav"
+    r = _run_infer(model, wav, out, "SUSTAIN=0.5")
+    assert r.returncode != 0
+    assert "schema_version" in (r.stdout + r.stderr)
+    assert not out.exists()
+
+
 def test_infer_can_drive_a_multi_knob_model(tmp_path):
     """Was a KNOWN GAP (nam_infer.py, formerly infer.py, exposed only a single --gain2
     value and couldn't drive more than one knob) -- fixed by --params, matching
@@ -415,3 +449,26 @@ def test_resolve_device_auto_hard_fails_when_no_gpu_is_available(monkeypatch):
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     with pytest.raises(SystemExit, match="--device cpu"):
         param_train.resolve_device("auto")
+
+
+def test_infer_runs_a_bounded_film_model_and_applies_the_bound(tmp_path):
+    """A --gamma-bound export (schema_version 4) must load AND be rendered with the bound.
+    Rebuilding it unbounded would be silently wrong audio: the weights were trained under the
+    tanh, so applying the raw linear output changes every layer's gain."""
+    names = ["SUSTAIN", "TONE"]
+    torch.manual_seed(0)
+    m = ParametricA2(3, 2, cond_hidden=4, gamma_bound=2.0, beta_bound=1.5)
+    with torch.no_grad():                      # push raw gamma/beta far outside the bound
+        for layer in m.layers:
+            layer.film.net.weight.mul_(40.0)
+    d = m.export_nam({"param_names": names, "bounds": {n: [0.0, 1.0] for n in names}},
+                     {"version": "0.7.0"}, 48000)
+    par = d["config"]["parametric"]
+    assert par["schema_version"] == param_train.K_PARAM_SCHEMA_VERSION_BOUND
+    assert par["film_bound"] == {"gamma": 2.0, "beta": 1.5}
+    assert param_train.parametric_ctor_kwargs(par)["gamma_bound"] == 2.0
+    model = tmp_path / "m.param.nam"
+    model.write_text(json.dumps(d))
+    wav = _tiny_wav(tmp_path / "in.wav")
+    r = _run_infer(model, wav, tmp_path / "out.wav", "SUSTAIN=0.5,TONE=0.5")
+    assert r.returncode == 0, r.stdout + r.stderr

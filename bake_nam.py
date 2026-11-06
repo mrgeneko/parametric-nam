@@ -35,7 +35,8 @@ import argparse
 import json
 from pathlib import Path
 
-from param_train import ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_COND
+from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_BOUND,
+                         parametric_ctor_kwargs)
 import nam_standard
 
 EMBED_KEY = "embedded_parametric"
@@ -49,7 +50,7 @@ def _submodels(nam: dict, source: str = ".param.nam"):
     build_kw carries the structural extras (lora_rank, cond_hidden) ParametricA2 needs to
     consume the flat weight list correctly -- this reader reconstructs them from the
     parametric block, which is why it accepts schema_version up to
-    K_PARAM_SCHEMA_VERSION_COND where nam_infer.py (which doesn't) still stops at 1.
+    K_PARAM_SCHEMA_VERSION_BOUND where nam_infer.py (which doesn't) still stops at 1.
     """
     entries = ([s["model"] for s in nam["config"]["submodels"]]
                if nam.get("architecture") == "SlimmableContainer" else [nam])
@@ -57,11 +58,10 @@ def _submodels(nam: dict, source: str = ".param.nam"):
     for m in entries:
         cfg = m["config"]
         par = cfg.get("parametric", {}) or {}
-        check_parametric_schema(par, source=source, max_version=K_PARAM_SCHEMA_VERSION_COND)
+        check_parametric_schema(par, source=source, max_version=K_PARAM_SCHEMA_VERSION_BOUND)
         metas = par.get("parameters", [])
         build_kw = {
-            "lora_rank": int((par.get("lora") or {}).get("rank", 0)),
-            "cond_hidden": int((par.get("cond_encoder") or {}).get("hidden", 0)),
+            **parametric_ctor_kwargs(par),
         }
         out.append((int(cfg["layers"]),
                     int(par.get("condition_size", len(metas))),

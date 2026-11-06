@@ -106,6 +106,23 @@ def detect_cond_hidden(state) -> int:
     return 0
 
 
+def _bounds(args, *args_dicts):
+    """(gamma_bound, beta_bound) for the model being exported: the CLI override if given, else
+    what the checkpoint(s) were trained with. A bound is a forward-pass setting, not a weight, so
+    it is invisible to structural detection -- exporting without it would silently apply the raw
+    unbounded gamma to weights trained under the bound. --compose tiers must agree."""
+    out = []
+    for flag, key in ((args.gamma_bound, "gamma_bound"), (args.beta_bound, "beta_bound")):
+        if flag is not None:
+            out.append(float(flag)); continue
+        vals = {float(d.get(key, 0.0) or 0.0) for d in args_dicts}
+        if len(vals) > 1:
+            raise SystemExit(f"--compose checkpoints disagree on {key} ({sorted(vals)}) -- "
+                             f"can't mix tiers trained with different FiLM bounds")
+        out.append(vals.pop() if vals else 0.0)
+    return tuple(out)
+
+
 def require_tier_agreement(per_tier: dict, what: str):
     """--compose's tiers must all agree on a model-wide setting (spectral_norm presence,
     LoRA rank, ...) -- these aren't per-tier knobs, so a mismatch means the checkpoints
@@ -121,6 +138,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, help="single-checkpoint mode")
+    ap.add_argument("--gamma-bound", type=float, default=None,
+                    help="FiLM gamma ceiling G the checkpoint was trained with. A bound is not in "
+                         "the state dict, so by default it is read from the checkpoint's own "
+                         "args_dict; pass this to override (e.g. to export an unbounded-trained "
+                         "checkpoint WITH a bound applied, which changes its output).")
+    ap.add_argument("--beta-bound", type=float, default=None, help="likewise for beta (--beta-bound)")
     ap.add_argument("--compose", type=str, default=None,
                     help="composite mode: 'tier=ckpt.pt,...' (e.g. "
                          "'full=best.pt,lite=latest.pt'); every tier must be covered")
@@ -165,9 +188,11 @@ def main():
         # ranks genuinely cannot be spliced into one container.
         sn_tiers = sorted(t for t, v in sn_per_tier.items() if v)
         mixed_sn = 0 < len(sn_tiers) < len(sn_per_tier)
+        gb, bb = _bounds(args, *(raw[t].get("args_dict") or {} for t in sorted(raw)))
         model = SlimmableParametricA2(ds.num_params, widths=widths,
                                       spectral_norm=(not mixed_sn) and all(sn_per_tier.values()),
-                                      lora_rank=lora_rank, cond_hidden=cond_hidden)
+                                      lora_rank=lora_rank, cond_hidden=cond_hidden,
+                                      gamma_bound=gb, beta_bound=bb)
         if mixed_sn:
             plain = sorted(t for t, v in sn_per_tier.items() if not v)
             model.enable_spectral_norm(skip_tiers=plain)
@@ -194,15 +219,16 @@ def main():
         spectral_norm = detect_spectral_norm(state)
         lora_rank = detect_lora_rank(state)
         cond_hidden = detect_cond_hidden(state)
+        gb, bb = _bounds(args, ck.get("args_dict") or {})
         if any(k.startswith("lite.") for k in state):
             model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
                                           spectral_norm=spectral_norm, lora_rank=lora_rank,
-                                          cond_hidden=cond_hidden)
+                                          cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb)
         else:
             ch = next(v.shape[0] for k, v in state.items()
                      if k.endswith("conv.parametrizations.weight.original") or k.endswith("conv.weight"))
             model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm, lora_rank=lora_rank,
-                                 cond_hidden=cond_hidden)
+                                 cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb)
         model.load_state_dict(state)
         provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
                       f"best_esr={ck.get('best_esr')}")

@@ -14,10 +14,10 @@ from scan_film_runaway import load_all_submodels
 from param_train import SlimmableParametricA2
 
 
-def _write_nam(tmp_path, lora_rank, widths=(4, 8), num_params=2, seed=0):
+def _write_nam(tmp_path, lora_rank, widths=(4, 8), num_params=2, seed=0, cond_hidden=0):
     torch.manual_seed(seed)
     model = SlimmableParametricA2(num_params=num_params, widths=list(widths),
-                                  lora_rank=lora_rank).eval()
+                                  lora_rank=lora_rank, cond_hidden=cond_hidden).eval()
     for p in model.parameters():
         p.data = p.data + 0.05 * torch.randn_like(p)
     config = {"param_names": [f"knob{i}" for i in range(num_params)]}
@@ -51,6 +51,29 @@ def test_load_all_submodels_lora_matches_live_model(tmp_path):
     to the model that was actually exported, same bar as the export/round-trip tests."""
     path, original = _write_nam(tmp_path, lora_rank=3)
     submodels = load_all_submodels(str(path))
+
+    x = torch.randn(1, 1, 4096)
+    cond = torch.tensor([[0.2, 0.9]])
+    with torch.no_grad():
+        y_original = original(x, cond)
+    for (model, _, _), y_src in zip(submodels, y_original):
+        with torch.no_grad():
+            y_loaded = model(x, cond)
+        torch.testing.assert_close(y_loaded, y_src, atol=0.0, rtol=0.0)
+
+
+def test_load_all_submodels_cond_encoder_matches_live_model(tmp_path):
+    """Same regression shape as LoRA, one schema later: a --cond-hidden export
+    (schema_version 3, "type":"film+cond") carries extra encoder weights at the head of the
+    flat list, so a plain-FiLM reconstruction fails the weight count and the safety sweep
+    can't run on exactly the models the conditioning work produces. The hidden width is
+    declared under config.parametric.cond_encoder and must be read back, and the rebuilt
+    model must be bit-identical to the exported one."""
+    path, original = _write_nam(tmp_path, lora_rank=0, cond_hidden=5)
+    submodels = load_all_submodels(str(path))
+    assert [ch for _, _, ch in submodels] == [4, 8]
+    for model, _, _ in submodels:
+        assert model.cond_enc is not None and model.cond_hidden == 5
 
     x = torch.randn(1, 1, 4096)
     cond = torch.tensor([[0.2, 0.9]])

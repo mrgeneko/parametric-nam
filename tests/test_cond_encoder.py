@@ -135,3 +135,55 @@ def test_spectral_norm_bake_keeps_encoder():
     p = torch.tensor([[0.6, 0.2]])
     with torch.no_grad():
         torch.testing.assert_close(m(x, p), baked(x, p), atol=1e-6, rtol=1e-6)
+
+
+def test_film_bound_keeps_gamma_and_beta_inside_the_ceiling():
+    from param_train import FiLM
+    torch.manual_seed(0)
+    f = FiLM(4, 3, gamma_bound=3.0, beta_bound=2.0)
+    with torch.no_grad():
+        f.net.weight.mul_(100.0)               # raw outputs in the hundreds
+    g, b = f.gamma_beta(torch.randn(64, 3))
+    assert float(g.max()) < 1.0 + 3.0 + 1e-6 and float(g.min()) > 1.0 - 3.0 - 1e-6
+    assert float(b.abs().max()) < 2.0 + 1e-6
+
+
+def test_film_bound_is_the_identity_near_unit_gamma_and_zero_beta():
+    from param_train import FiLM
+    f = FiLM(4, 3)
+    fb = FiLM(4, 3, gamma_bound=8.0, beta_bound=8.0)
+    fb.load_state_dict(f.state_dict())
+    c = torch.rand(16, 3) * 0.2
+    (g0, b0), (g1, b1) = f.gamma_beta(c), fb.gamma_beta(c)
+    assert torch.allclose(g0, g1, atol=5e-3) and torch.allclose(b0, b1, atol=5e-3)
+
+
+def test_unbounded_default_is_bit_identical_to_before():
+    from param_train import FiLM
+    torch.manual_seed(1)
+    f = FiLM(4, 3)
+    c = torch.randn(8, 3)
+    raw = f.net(c).chunk(2, dim=-1)
+    g, b = f.gamma_beta(c)
+    assert torch.equal(g, raw[0]) and torch.equal(b, raw[1])
+
+
+def test_bounded_model_round_trips_through_export_and_fold():
+    """export -> load_weights -> same forward, and fold_film bakes the BOUNDED gamma."""
+    import nam_standard
+    torch.manual_seed(2)
+    m = ParametricA2(3, 2, cond_hidden=4, gamma_bound=1.5, beta_bound=1.0).eval()
+    with torch.no_grad():
+        for layer in m.layers:
+            layer.film.net.weight.mul_(30.0)
+    d = m.export_nam({"param_names": ["a", "b"], "bounds": {"a": [0, 1], "b": [0, 1]}},
+                     {"version": "0.7.0"}, 48000)
+    par = d["config"]["parametric"]
+    m2 = ParametricA2(3, 2, **__import__("param_train").parametric_ctor_kwargs(par))
+    m2.load_weights(d["weights"]); m2.eval()
+    x = torch.randn(1, 1, 2000) * 0.3
+    p = torch.tensor([[0.3, 0.8]])
+    with torch.no_grad():
+        assert torch.allclose(m(x, p), m2(x, p), atol=1e-5)
+        folded = nam_standard.fold_film(m, [0.3, 0.8])
+        assert torch.allclose(m(x, p), folded(x, torch.zeros(1, 0)), atol=1e-4)

@@ -53,3 +53,33 @@ def test_value_classification_requires_EVERY_knob_on_a_trained_value():
     interior = (0.25, 0.5, 0.25)          # one axis off-grid -> held out
     assert all(v in vals for v in trained)
     assert not all(v in vals for v in interior)
+
+
+def test_scale_ratio_puts_held_out_targets_on_the_trained_scale(tmp_path):
+    """--combine peak-normalizes each dataset on its own, so a held-out grid rendered separately
+    sits on a different output_scale from the trained one; scoring it raw charges that constant
+    gain error to every cell (2.8% on the JCM900 off-grid set, 2026-11-04). The ratio is
+    trained / held-out, and None when either side lacks the field so old datasets still score."""
+    import json
+    tr, ho = tmp_path / "tr", tmp_path / "ho"
+    tr.mkdir(); ho.mkdir()
+    (tr / "config.json").write_text(json.dumps({"output_scale": 0.0063}))
+    (ho / "config.json").write_text(json.dumps({"output_scale": 0.0065}))
+    assert he._scale_ratio(tr, ho) == pytest.approx(0.0063 / 0.0065)
+    (ho / "config.json").write_text(json.dumps({}))
+    assert he._scale_ratio(tr, ho) is None
+    assert he._scale_ratio(tr, tmp_path / "missing") is None
+
+
+def test_widths_fall_back_to_the_state_dict_when_args_dict_has_none(tmp_path):
+    """A run launched without --widths saves widths=None in args_dict (the [4, 8] default is
+    applied inside the model). holdout_esr.py refused every such checkpoint ("has no widths in
+    args_dict") until 2026-11-04, including the JCM900 runs it was written for; export_checkpoint's
+    infer_widths reads them off the state dict instead."""
+    import torch
+    from param_train import SlimmableParametricA2
+    from export_checkpoint import infer_widths
+    m = SlimmableParametricA2(num_params=3)          # default widths, as a no---widths run saves
+    assert infer_widths(m.state_dict()) == [4, 8]
+    m12 = SlimmableParametricA2(num_params=3, widths=[4, 12])
+    assert infer_widths(m12.state_dict()) == [4, 12]

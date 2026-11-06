@@ -110,6 +110,13 @@ K_PARAM_SCHEMA_VERSION_LORA = 2
 #       list (control path before audio path), declared under config.parametric.cond_encoder.
 #       PROTOTYPE (2026-11-03): no C++ reader yet -- the fork rejects it loudly, as it should.
 K_PARAM_SCHEMA_VERSION_COND = 3
+#   4 = adds a BOUND on FiLM's gamma and/or beta (declared under config.parametric.film_bound):
+#       gamma = 1 + G*tanh((raw - 1)/G), beta = B*tanh(raw/B). Computed at CONTROL rate from the
+#       knobs, so it costs nothing per sample, but a reader that ignores it would apply the raw
+#       unbounded gamma and produce wrong audio -- hence a version bump, not an optional key.
+#       ONLY exported when gamma_bound>0 or beta_bound>0 (2026-11-04: the lite tier of the
+#       encoder run reached |gamma| 26 and ran away on a loud transient; see scan_film_runaway.py).
+K_PARAM_SCHEMA_VERSION_BOUND = 4
 # Hidden layers in the encoder MLP (num_params -> hidden -> hidden). Fixed for the prototype
 # so the export declares one shape; recorded in the .nam so a reader can refuse anything else.
 K_COND_DEPTH = 2
@@ -139,6 +146,19 @@ def check_parametric_schema(par: dict, source: str = ".param.nam",
             f"weights would produce garbage under a skip head, so it is rejected rather than "
             f"run. Retrain it, or re-download a current model.")
     return v
+
+def parametric_ctor_kwargs(par: dict) -> dict:
+    """ParametricA2 constructor kwargs recoverable from an exported config["parametric"] block.
+    One place for every reader (nam_infer, ab_realtime_playback, scan_film_runaway) to rebuild a
+    model's STRUCTURE, so a new export feature cannot be added to some readers and forgotten in
+    others -- the failure mode that left three readers rejecting or misbuilding the encoder
+    models until 2026-11-04."""
+    fb = par.get("film_bound") or {}
+    return dict(lora_rank=int((par.get("lora") or {}).get("rank", 0)),
+                cond_hidden=int((par.get("cond_encoder") or {}).get("hidden", 0)),
+                gamma_bound=float(fb.get("gamma", 0.0)),
+                beta_bound=float(fb.get("beta", 0.0)))
+
 
 # Gradient steps per epoch when `repeats` is derived. 50 is a round restatement of what the
 # fleet already ran: every config used --target-steps 25000, which through run_pipeline's
@@ -182,8 +202,14 @@ class FiLM(nn.Module):
     is exactly the kind of two-place divergence worth avoiding, so both now share this
     method instead.
     """
-    def __init__(self, channels: int, cond_dim: int):
+    def __init__(self, channels: int, cond_dim: int, gamma_bound: float = 0.0,
+                 beta_bound: float = 0.0):
         super().__init__()
+        # 0 = unbounded (every pre-2026-11-04 model). >0 = soft ceiling: gamma stays inside
+        # (1-G, 1+G) and beta inside (-B, B), with slope 1 through the identity point so a
+        # small-modulation model is numerically unchanged by it.
+        self.gamma_bound = float(gamma_bound)
+        self.beta_bound = float(beta_bound)
         self.net = nn.Linear(cond_dim, 2 * channels)
         # Small NON-zero weight so the knob modulates from step 0. A pure-zero init
         # leaves FiLM at identity for ALL cond, and it then under-learns subtle /
@@ -197,6 +223,10 @@ class FiLM(nn.Module):
     def gamma_beta(self, cond: torch.Tensor):
         params = self.net(cond)
         gamma, beta = params.chunk(2, dim=-1)
+        if self.gamma_bound > 0:
+            gamma = 1.0 + self.gamma_bound * torch.tanh((gamma - 1.0) / self.gamma_bound)
+        if self.beta_bound > 0:
+            beta = self.beta_bound * torch.tanh(beta / self.beta_bound)
         return gamma, beta
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
@@ -392,7 +422,7 @@ class A2Layer(nn.Module):
     an accidental initialization-lottery difference in side-by-side comparisons.
     """
     def __init__(self, channels: int, kernel_size: int, dilation: int, cond_dim: int,
-                lora_rank: int = 0):
+                lora_rank: int = 0, gamma_bound: float = 0.0, beta_bound: float = 0.0):
         super().__init__()
         # EXPLICIT causal left-pad, not Conv1d(padding=...) + crop. The old form padded
         # BOTH sides (Conv1d has no one-sided padding), computed `pad` extra trailing
@@ -409,7 +439,8 @@ class A2Layer(nn.Module):
         self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation)
         self.mixin = nn.Conv1d(1, channels, 1, bias=False)
         self.l1x1 = nn.Conv1d(channels, channels, 1)
-        self.film = FiLM(channels, cond_dim) if cond_dim > 0 else None
+        self.film = (FiLM(channels, cond_dim, gamma_bound, beta_bound)
+                     if cond_dim > 0 else None)
         # Independently toggleable from film -- a layer can have neither, either, or
         # both active. See LoRA's own docstring for why this is additive to l1x1
         # specifically, not a replacement for FiLM's own (earlier, pre-activation) role.
@@ -502,12 +533,15 @@ class ParametricA2(nn.Module):
     for parametric knob control.
     """
     def __init__(self, channels: int, num_params: int, spectral_norm: bool = False,
-                lora_rank: int = 0, cond_hidden: int = 0):
+                lora_rank: int = 0, cond_hidden: int = 0, gamma_bound: float = 0.0,
+                beta_bound: float = 0.0):
         super().__init__()
         self.channels = channels
         self.num_params = num_params
         self.lora_rank = lora_rank
         self.cond_hidden = cond_hidden
+        self.gamma_bound = float(gamma_bound)
+        self.beta_bound = float(beta_bound)
         # Recorded so export_nam()'s _bake_spectral_norm() knows whether there's
         # anything to strip -- see internal engineering notes ("A2").
         self.spectral_norm = False   # set True by enable_spectral_norm() below, if requested
@@ -519,7 +553,8 @@ class ParametricA2(nn.Module):
         cond_dim = self.cond_enc.out_dim if self.cond_enc is not None else num_params
         self.rechannel = nn.Conv1d(1, channels, 1, bias=False)
         self.layers = nn.ModuleList([
-            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], cond_dim, lora_rank=lora_rank)
+            A2Layer(channels, K_KERNEL_SIZES[i], K_DILATIONS[i], cond_dim, lora_rank=lora_rank,
+                    gamma_bound=gamma_bound, beta_bound=beta_bound)
             for i in range(K_NUM_LAYERS)
         ])
         # CAUSAL head: no built-in padding; we left-pad K-1 in forward(). A centered
@@ -704,7 +739,8 @@ class ParametricA2(nn.Module):
         if not self.spectral_norm:
             return self
         baked = ParametricA2(self.channels, self.num_params, spectral_norm=False,
-                             cond_hidden=self.cond_hidden)
+                             cond_hidden=self.cond_hidden, gamma_bound=self.gamma_bound,
+                             beta_bound=self.beta_bound)
         with torch.no_grad():
             if self.cond_enc is not None:
                 baked.cond_enc.load_state_dict(self.cond_enc.state_dict())
@@ -784,7 +820,10 @@ class ParametricA2(nn.Module):
             param_defs.append(entry)
         has_lora = self.lora_rank > 0
         has_cond = self.cond_enc is not None
-        if has_cond:
+        has_bound = self.gamma_bound > 0 or self.beta_bound > 0
+        if has_bound:
+            schema_version = K_PARAM_SCHEMA_VERSION_BOUND
+        elif has_cond:
             schema_version = K_PARAM_SCHEMA_VERSION_COND
         elif has_lora:
             schema_version = K_PARAM_SCHEMA_VERSION_LORA
@@ -799,7 +838,8 @@ class ParametricA2(nn.Module):
             # "+cond" is appended whenever an encoder exists: a2_fast's is_parametric_a2_shape()
             # only fast-paths exactly "film", so an encoder model falls to the generic path,
             # which (until a reader exists) rejects schema_version 3 loudly.
-            "type": ("film+lora" if has_lora else "film") + ("+cond" if has_cond else ""),
+            "type": ("film+lora" if has_lora else "film") + ("+cond" if has_cond else "")
+                    + ("+bound" if has_bound else ""),
             "schema_version": schema_version,
             "condition_size": self.num_params,
             # Always "skip" — the one head we support. Declared so readers can REJECT
@@ -824,6 +864,11 @@ class ParametricA2(nn.Module):
                 "output_activation": "tanh",
                 "output": "concat",           # cond = [params, mlp(params)]
                 "cond_size": self.cond_enc.out_dim,
+            }
+        if has_bound:
+            parametric_config["film_bound"] = {
+                "gamma": self.gamma_bound,    # gamma = 1 + G*tanh((raw-1)/G); 0 = unbounded
+                "beta": self.beta_bound,      # beta  = B*tanh(raw/B);         0 = unbounded
             }
         layer_config = {
             "layers": self.channels,
@@ -896,11 +941,14 @@ class SlimmableParametricA2(nn.Module):
     pass `--widths 3,8` to reproduce the original 2-tier convention exactly.
     """
     def __init__(self, num_params: int, widths=None, spectral_norm: bool = False,
-                lora_rank: int = 0, cond_hidden: int = 0):
+                lora_rank: int = 0, cond_hidden: int = 0, gamma_bound: float = 0.0,
+                beta_bound: float = 0.0):
         super().__init__()
         self.widths = parse_widths(widths)
         self.num_params = num_params
         self.cond_hidden = cond_hidden
+        self.gamma_bound = float(gamma_bound)
+        self.beta_bound = float(beta_bound)
         # spectral_norm is DELIBERATELY NOT passed here (always False per-tier) -- see below.
         # lora_rank, unlike spectral_norm, IS passed straight through per-tier at construction
         # time: LoRA's net_A/net_B are freshly constructed modules (like conv/mixin/film),
@@ -908,7 +956,8 @@ class SlimmableParametricA2(nn.Module):
         # RNG-draw-order sensitivity -- no deferred enable_lora() call needed.
         # cond_hidden likewise: CondEncoder is a fresh module built inside each tier's
         # constructor, so it has no deferred-enable step either.
-        kw = dict(spectral_norm=False, lora_rank=lora_rank, cond_hidden=cond_hidden)
+        kw = dict(spectral_norm=False, lora_rank=lora_rank, cond_hidden=cond_hidden,
+                  gamma_bound=gamma_bound, beta_bound=beta_bound)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` regardless of the actual widths chosen -- a 2-tier model
         # stays structurally compatible with old 2-tier checkpoints for resume /
@@ -1857,7 +1906,8 @@ def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
         # cond_hidden for the same reason: without it m2 has no encoder, so the encoder's
         # leading weights would be consumed as rechannel/conv weights and every FiLM
         # layer would be built num_params wide instead of num_params + cond_hidden.
-        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank, cond_hidden=src.cond_hidden)
+        m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank, cond_hidden=src.cond_hidden,
+                          gamma_bound=src.gamma_bound, beta_bound=src.beta_bound)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():
@@ -2515,6 +2565,16 @@ def main():
                          "this lets the knob genuinely change what l1x1 computes -- aimed at "
                          "the >3-knob ESR ceiling FiLM alone can't lift regardless of "
                          "training time.")
+    ap.add_argument("--gamma-bound", type=float, default=0.0,
+                    help="Soft ceiling G on every FiLM layer's gamma: gamma = 1 + G*tanh((raw-1)/G), "
+                         "so |gamma - 1| < G whatever the knobs or encoder say. 0 = unbounded "
+                         "(default; every earlier model). Motivated by a lite-tier runaway on a "
+                         "loud transient at the encoder run's hottest corner, where gamma reached "
+                         "26 and nothing in the model or loss bounded it. Exports as schema 4.")
+    ap.add_argument("--beta-bound", type=float, default=0.0,
+                    help="Soft ceiling B on every FiLM layer's beta: beta = B*tanh(raw/B). 0 = "
+                         "unbounded. Same motivation as --gamma-bound; the same run reached "
+                         "|beta| 32.")
     ap.add_argument("--cond-hidden", type=int, default=0,
                     help="PROTOTYPE. Put a small MLP (this many hidden units, 2 layers, "
                          "SiLU then tanh) between the knob vector and every FiLM layer, so "
@@ -2833,7 +2893,8 @@ def main():
     # only needs to ADAPT, not relearn the whole function.
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
                                   spectral_norm=(args.spectral_norm and args.init_from is None),
-                                  lora_rank=args.lora_rank, cond_hidden=args.cond_hidden)
+                                  lora_rank=args.lora_rank, cond_hidden=args.cond_hidden,
+                                  gamma_bound=args.gamma_bound, beta_bound=args.beta_bound)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params"
