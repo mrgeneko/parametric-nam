@@ -106,6 +106,17 @@ def detect_cond_hidden(state) -> int:
     return 0
 
 
+def _limits(*args_dicts):
+    """(knee, ceiling) of the output limiter the checkpoint(s) were trained with. Like the FiLM
+    bound it is a forward-pass setting, invisible to structural detection; --compose tiers must
+    agree. No CLI override: the knee is data-derived at training time, not a choice to re-make."""
+    vals = {(float(d.get("output_limit_knee", 0.0) or 0.0), float(d.get("output_limit_ceiling", 0.0) or 0.0))
+            for d in args_dicts}
+    if len(vals) > 1:
+        raise SystemExit(f"--compose checkpoints disagree on the output limiter ({sorted(vals)})")
+    return vals.pop() if vals else (0.0, 0.0)
+
+
 def _bounds(args, *args_dicts):
     """(gamma_bound, beta_bound) for the model being exported: the CLI override if given, else
     what the checkpoint(s) were trained with. A bound is a forward-pass setting, not a weight, so
@@ -189,10 +200,12 @@ def main():
         sn_tiers = sorted(t for t, v in sn_per_tier.items() if v)
         mixed_sn = 0 < len(sn_tiers) < len(sn_per_tier)
         gb, bb = _bounds(args, *(raw[t].get("args_dict") or {} for t in sorted(raw)))
+        lim = _limits(*(raw[t].get("args_dict") or {} for t in sorted(raw)))
         model = SlimmableParametricA2(ds.num_params, widths=widths,
                                       spectral_norm=(not mixed_sn) and all(sn_per_tier.values()),
                                       lora_rank=lora_rank, cond_hidden=cond_hidden,
-                                      gamma_bound=gb, beta_bound=bb)
+                                      gamma_bound=gb, beta_bound=bb,
+                                      out_knee=lim[0], out_ceiling=lim[1])
         if mixed_sn:
             plain = sorted(t for t, v in sn_per_tier.items() if not v)
             model.enable_spectral_norm(skip_tiers=plain)
@@ -220,15 +233,18 @@ def main():
         lora_rank = detect_lora_rank(state)
         cond_hidden = detect_cond_hidden(state)
         gb, bb = _bounds(args, ck.get("args_dict") or {})
+        lim = _limits(ck.get("args_dict") or {})
         if any(k.startswith("lite.") for k in state):
             model = SlimmableParametricA2(ds.num_params, widths=infer_widths(state),
                                           spectral_norm=spectral_norm, lora_rank=lora_rank,
-                                          cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb)
+                                          cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb,
+                                          out_knee=lim[0], out_ceiling=lim[1])
         else:
             ch = next(v.shape[0] for k, v in state.items()
                      if k.endswith("conv.parametrizations.weight.original") or k.endswith("conv.weight"))
             model = ParametricA2(ch, ds.num_params, spectral_norm=spectral_norm, lora_rank=lora_rank,
-                                 cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb)
+                                 cond_hidden=cond_hidden, gamma_bound=gb, beta_bound=bb,
+                                 out_knee=lim[0], out_ceiling=lim[1])
         model.load_state_dict(state)
         provenance = (f"state={args.state}, epoch={ck.get('epoch')}, "
                       f"best_esr={ck.get('best_esr')}")

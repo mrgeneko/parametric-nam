@@ -117,6 +117,14 @@ K_PARAM_SCHEMA_VERSION_COND = 3
 #       ONLY exported when gamma_bound>0 or beta_bound>0 (2026-11-04: the lite tier of the
 #       encoder run reached |gamma| 26 and ran away on a loud transient; see scan_film_runaway.py).
 K_PARAM_SCHEMA_VERSION_BOUND = 4
+#   5 = adds an OUTPUT LIMITER (config.parametric.output_limit {"knee": k, "ceiling": L}), the last
+#       op after the head: y' = y for |y| <= k, else sign(y)*(k + (L-k)*tanh((|y|-k)/(L-k))).
+#       Identity (slope 1, continuous) up to the knee, so audio inside the trained range is
+#       untouched; |y'| < L whatever the network does. Per-sample but a handful of flops on ONE
+#       value, and a reader that ignores it would pass a runaway straight through -- hence a
+#       version bump. knee comes from the TRAINING DATA's own peak (the circuit's rail, or a
+#       recording's loudest sample), never a spec sheet. ONLY exported when ceiling > 0.
+K_PARAM_SCHEMA_VERSION_LIMIT = 5
 # Hidden layers in the encoder MLP (num_params -> hidden -> hidden). Fixed for the prototype
 # so the export declares one shape; recorded in the .nam so a reader can refuse anything else.
 K_COND_DEPTH = 2
@@ -157,7 +165,27 @@ def parametric_ctor_kwargs(par: dict) -> dict:
     return dict(lora_rank=int((par.get("lora") or {}).get("rank", 0)),
                 cond_hidden=int((par.get("cond_encoder") or {}).get("hidden", 0)),
                 gamma_bound=float(fb.get("gamma", 0.0)),
-                beta_bound=float(fb.get("beta", 0.0)))
+                beta_bound=float(fb.get("beta", 0.0)),
+                out_knee=float((par.get("output_limit") or {}).get("knee", 0.0)),
+                out_ceiling=float((par.get("output_limit") or {}).get("ceiling", 0.0)))
+
+
+def soft_limit(y: torch.Tensor, knee: float, ceiling: float, ste: bool = False) -> torch.Tensor:
+    """Identity for |y| <= knee; above it a tanh knee that saturates at `ceiling`. Slope is 1 at
+    the knee (C1), so nothing inside the trained range moves. ceiling <= 0 disables.
+
+    ste=True (training only): the FORWARD value is the exact limiter, but the BACKWARD pass treats
+    it as the identity. A true tanh knee has ~zero gradient far above the knee, and a freshly
+    initialised tier whose raw output lands there (the full tier on 2 V training audio averaged
+    |y| = 2.2 against a 0.9 knee; summed gradient 0.005 vs 324 for the lite tier) can never learn
+    its way back -- Run F's full tier sat at ESR 267.3314 from epoch 1. With the straight-through
+    gradient the loss still pulls an over-range raw output down toward the target."""
+    if ceiling <= 0:
+        return y
+    span = ceiling - knee
+    a = y.abs()
+    out = torch.sign(y) * (a.clamp(max=knee) + span * torch.tanh((a - knee).clamp(min=0.0) / span))
+    return y + (out - y).detach() if ste else out
 
 
 # Gradient steps per epoch when `repeats` is derived. 50 is a round restatement of what the
@@ -534,8 +562,12 @@ class ParametricA2(nn.Module):
     """
     def __init__(self, channels: int, num_params: int, spectral_norm: bool = False,
                 lora_rank: int = 0, cond_hidden: int = 0, gamma_bound: float = 0.0,
-                beta_bound: float = 0.0):
+                beta_bound: float = 0.0, out_knee: float = 0.0, out_ceiling: float = 0.0):
         super().__init__()
+        if out_ceiling > 0 and not out_ceiling > out_knee > 0:
+            raise ValueError(f"output limiter needs 0 < knee < ceiling, got {out_knee}, {out_ceiling}")
+        self.out_knee = float(out_knee)
+        self.out_ceiling = float(out_ceiling)
         self.channels = channels
         self.num_params = num_params
         self.lora_rank = lora_rank
@@ -606,7 +638,7 @@ class ParametricA2(nn.Module):
         head_in = F.pad(head_in, (K_HEAD_KERNEL - 1, 0))
         x = self.head(head_in)
         x = x * self.head_scale
-        return x
+        return soft_limit(x, self.out_knee, self.out_ceiling, ste=self.training)
 
     def weight_count(self) -> int:
         """Total flat float count for .nam export matching C++ order."""
@@ -740,7 +772,8 @@ class ParametricA2(nn.Module):
             return self
         baked = ParametricA2(self.channels, self.num_params, spectral_norm=False,
                              cond_hidden=self.cond_hidden, gamma_bound=self.gamma_bound,
-                             beta_bound=self.beta_bound)
+                             beta_bound=self.beta_bound, out_knee=self.out_knee,
+                             out_ceiling=self.out_ceiling)
         with torch.no_grad():
             if self.cond_enc is not None:
                 baked.cond_enc.load_state_dict(self.cond_enc.state_dict())
@@ -821,7 +854,10 @@ class ParametricA2(nn.Module):
         has_lora = self.lora_rank > 0
         has_cond = self.cond_enc is not None
         has_bound = self.gamma_bound > 0 or self.beta_bound > 0
-        if has_bound:
+        has_limit = self.out_ceiling > 0
+        if has_limit:
+            schema_version = K_PARAM_SCHEMA_VERSION_LIMIT
+        elif has_bound:
             schema_version = K_PARAM_SCHEMA_VERSION_BOUND
         elif has_cond:
             schema_version = K_PARAM_SCHEMA_VERSION_COND
@@ -839,7 +875,7 @@ class ParametricA2(nn.Module):
             # only fast-paths exactly "film", so an encoder model falls to the generic path,
             # which (until a reader exists) rejects schema_version 3 loudly.
             "type": ("film+lora" if has_lora else "film") + ("+cond" if has_cond else "")
-                    + ("+bound" if has_bound else ""),
+                    + ("+bound" if has_bound else "") + ("+limit" if has_limit else ""),
             "schema_version": schema_version,
             "condition_size": self.num_params,
             # Always "skip" — the one head we support. Declared so readers can REJECT
@@ -869,6 +905,11 @@ class ParametricA2(nn.Module):
             parametric_config["film_bound"] = {
                 "gamma": self.gamma_bound,    # gamma = 1 + G*tanh((raw-1)/G); 0 = unbounded
                 "beta": self.beta_bound,      # beta  = B*tanh(raw/B);         0 = unbounded
+            }
+        if has_limit:
+            parametric_config["output_limit"] = {
+                "knee": self.out_knee,         # identity for |y| <= knee
+                "ceiling": self.out_ceiling,   # |y| < ceiling always; tanh knee between
             }
         layer_config = {
             "layers": self.channels,
@@ -942,8 +983,10 @@ class SlimmableParametricA2(nn.Module):
     """
     def __init__(self, num_params: int, widths=None, spectral_norm: bool = False,
                 lora_rank: int = 0, cond_hidden: int = 0, gamma_bound: float = 0.0,
-                beta_bound: float = 0.0):
+                beta_bound: float = 0.0, out_knee: float = 0.0, out_ceiling: float = 0.0):
         super().__init__()
+        self.out_knee = float(out_knee)
+        self.out_ceiling = float(out_ceiling)
         self.widths = parse_widths(widths)
         self.num_params = num_params
         self.cond_hidden = cond_hidden
@@ -957,7 +1000,8 @@ class SlimmableParametricA2(nn.Module):
         # cond_hidden likewise: CondEncoder is a fresh module built inside each tier's
         # constructor, so it has no deferred-enable step either.
         kw = dict(spectral_norm=False, lora_rank=lora_rank, cond_hidden=cond_hidden,
-                  gamma_bound=gamma_bound, beta_bound=beta_bound)
+                  gamma_bound=gamma_bound, beta_bound=beta_bound, out_knee=out_knee,
+                  out_ceiling=out_ceiling)
         # Endpoints keep the attribute names `lite`/`full` so state-dict keys stay
         # `lite.*` / `full.*` regardless of the actual widths chosen -- a 2-tier model
         # stays structurally compatible with old 2-tier checkpoints for resume /
@@ -1907,7 +1951,8 @@ def verify_export_round_trip(nam_data: dict, model, num_params: int, device,
         # leading weights would be consumed as rechannel/conv weights and every FiLM
         # layer would be built num_params wide instead of num_params + cond_hidden.
         m2 = ParametricA2(ch, num_params, lora_rank=src.lora_rank, cond_hidden=src.cond_hidden,
-                          gamma_bound=src.gamma_bound, beta_bound=src.beta_bound)
+                          gamma_bound=src.gamma_bound, beta_bound=src.beta_bound,
+                          out_knee=src.out_knee, out_ceiling=src.out_ceiling)
         m2.load_weights(sm_data["model"]["weights"])
         m2.to(device)
         with torch.no_grad():
@@ -2575,6 +2620,15 @@ def main():
                     help="Soft ceiling B on every FiLM layer's beta: beta = B*tanh(raw/B). 0 = "
                          "unbounded. Same motivation as --gamma-bound; the same run reached "
                          "|beta| 32.")
+    ap.add_argument("--output-limit", type=float, default=0.0, metavar="MARGIN",
+                    help="Append a soft output limiter that is the identity up to the training "
+                         "data's own peak and saturates at peak*(1+MARGIN) (e.g. 0.1). The peak is "
+                         "the dataset's output_peak_target (every --combine normalizes the global "
+                         "peak to it), i.e. the circuit's rail or a recording's loudest sample -- "
+                         "never a spec sheet, so it works for hardware captures. Trained THROUGH, "
+                         "so the network learns around it. Bounds the output only; hidden-"
+                         "activation runaway still needs loud training data. Exports as schema 5. "
+                         "0 = off (default).")
     ap.add_argument("--cond-hidden", type=int, default=0,
                     help="PROTOTYPE. Put a small MLP (this many hidden units, 2 layers, "
                          "SiLU then tanh) between the knob vector and every FiLM layer, so "
@@ -2777,6 +2831,18 @@ def main():
     dataset = ParamDataset(str(args.dataset), crop_len=args.crop_len, repeats=1,
                            mmap=args.mmap, holdout_frac=args.holdout_frac)
     n_combos = len(dataset.samples)
+    # Output limiter: knee = the dataset's own peak, resolved HERE so it is saved in args_dict and
+    # every later reader (checkpoint_infer, export_checkpoint, holdout_esr) rebuilds the same model.
+    args.output_limit_knee = args.output_limit_ceiling = 0.0
+    if args.output_limit > 0:
+        try:
+            peak = float(json.loads((Path(args.dataset) / "config.json").read_text())["output_peak_target"])
+        except (OSError, ValueError, KeyError):
+            peak = float(np.abs(np.asarray(dataset.outputs[:, ::64])).max())   # strided scan, ~exact peak
+        args.output_limit_knee = peak
+        args.output_limit_ceiling = peak * (1.0 + args.output_limit)
+        print(f"Output limiter: identity to {peak:.4f}, ceiling {args.output_limit_ceiling:.4f} "
+              f"(margin {args.output_limit:g})", file=sys.stderr)
     floor = math.ceil(1 / args.val_split) if args.val_split > 0 else 1
     if args.repeats is None:
         args.repeats = floor
@@ -2894,7 +2960,8 @@ def main():
     model = SlimmableParametricA2(num_params, widths=parse_widths(args.widths),
                                   spectral_norm=(args.spectral_norm and args.init_from is None),
                                   lora_rank=args.lora_rank, cond_hidden=args.cond_hidden,
-                                  gamma_bound=args.gamma_bound, beta_bound=args.beta_bound)
+                                  gamma_bound=args.gamma_bound, beta_bound=args.beta_bound,
+                                  out_knee=args.output_limit_knee, out_ceiling=args.output_limit_ceiling)
     desc = ", ".join(f"w{w}({m.weight_count()}w)"
                      for w, m in zip(model.widths, model.submodels))
     print(f"\nModel: SlimmableParametricA2  [{desc}], {num_params} params"

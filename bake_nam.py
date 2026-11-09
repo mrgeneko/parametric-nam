@@ -35,7 +35,7 @@ import argparse
 import json
 from pathlib import Path
 
-from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_BOUND,
+from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_LIMIT,
                          parametric_ctor_kwargs)
 import nam_standard
 
@@ -50,7 +50,7 @@ def _submodels(nam: dict, source: str = ".param.nam"):
     build_kw carries the structural extras (lora_rank, cond_hidden) ParametricA2 needs to
     consume the flat weight list correctly -- this reader reconstructs them from the
     parametric block, which is why it accepts schema_version up to
-    K_PARAM_SCHEMA_VERSION_BOUND where nam_infer.py (which doesn't) still stops at 1.
+    K_PARAM_SCHEMA_VERSION_LIMIT where nam_infer.py (which doesn't) still stops at 1.
     """
     entries = ([s["model"] for s in nam["config"]["submodels"]]
                if nam.get("architecture") == "SlimmableContainer" else [nam])
@@ -58,7 +58,7 @@ def _submodels(nam: dict, source: str = ".param.nam"):
     for m in entries:
         cfg = m["config"]
         par = cfg.get("parametric", {}) or {}
-        check_parametric_schema(par, source=source, max_version=K_PARAM_SCHEMA_VERSION_BOUND)
+        check_parametric_schema(par, source=source, max_version=K_PARAM_SCHEMA_VERSION_LIMIT)
         metas = par.get("parameters", [])
         build_kw = {
             **parametric_ctor_kwargs(par),

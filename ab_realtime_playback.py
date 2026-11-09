@@ -33,7 +33,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_BOUND,
+from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_LIMIT,
                          parametric_ctor_kwargs)
 
 
@@ -48,7 +48,7 @@ def load_parametric(nam_path: Path, width: int | None = None):
     cfg = m["config"]
     par = cfg["parametric"]
     # Up to the cond-encoder schema: the structural extras are reconstructed below.
-    check_parametric_schema(par, source=str(nam_path), max_version=K_PARAM_SCHEMA_VERSION_BOUND)
+    check_parametric_schema(par, source=str(nam_path), max_version=K_PARAM_SCHEMA_VERSION_LIMIT)
     # Python is SKIP-ONLY since "skip-only: remove the residual head from the Python side"
     # (19b9f57), which dropped head_mode from ParametricA2's signature. This tool kept passing
     # it and has raised TypeError on every invocation since -- unnoticed because it needs a

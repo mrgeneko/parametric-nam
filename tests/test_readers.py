@@ -132,7 +132,7 @@ def test_infer_still_rejects_a_schema_past_the_newest_known(tmp_path):
     one past THAT is still refused, not misread."""
     model = _skip_model_file(tmp_path / "m.param.nam", num_params=1)
     d = json.loads(model.read_text())
-    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_BOUND + 1
+    d["config"]["parametric"]["schema_version"] = param_train.K_PARAM_SCHEMA_VERSION_LIMIT + 1
     model.write_text(json.dumps(d))
     wav = _tiny_wav(tmp_path / "in.wav")
     out = tmp_path / "out.wav"

@@ -154,6 +154,11 @@ def _wavenet_dict(a2: ParametricA2) -> dict:
     """architecture/config/weights for a STATIC A2 (num_params must be 0)."""
     if a2.num_params != 0:
         raise ValueError("fold FiLM first (use fold_film / pass params=)")
+    if getattr(a2, "out_ceiling", 0.0) > 0:
+        import warnings
+        warnings.warn("this model was trained with an output limiter (--output-limit); a stock NAM "
+                      "file has no slot for it, so the baked export is UNLIMITED and can exceed the "
+                      "trained ceiling on inputs louder than the training data.", stacklevel=2)
     return {
         "architecture": "WaveNet",
         "config": _wavenet_config(a2.channels, a2.head_scale.item()),

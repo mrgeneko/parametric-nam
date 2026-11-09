@@ -141,7 +141,9 @@ def main():
                                   lora_rank=ad.get("lora_rank", 0),
                                   cond_hidden=ad.get("cond_hidden", 0),
                                   gamma_bound=ad.get("gamma_bound", 0.0),
-                                  beta_bound=ad.get("beta_bound", 0.0)).to(dev)
+                                  beta_bound=ad.get("beta_bound", 0.0),
+                                  out_knee=ad.get("output_limit_knee", 0.0),
+                                  out_ceiling=ad.get("output_limit_ceiling", 0.0)).to(dev)
     model.load_state_dict(ck["model"])
     model.eval()
 

@@ -50,17 +50,20 @@ def load_model(checkpoint_path: str):
     cond_hidden = args_dict.get("cond_hidden", 0)   # --cond-hidden, same free recovery
     gamma_bound = args_dict.get("gamma_bound", 0.0)  # --gamma-bound / --beta-bound likewise
     beta_bound = args_dict.get("beta_bound", 0.0)
+    out_knee = args_dict.get("output_limit_knee", 0.0)       # --output-limit, resolved to numbers
+    out_ceiling = args_dict.get("output_limit_ceiling", 0.0)
     if slimmable:
         model = SlimmableParametricA2(num_params=num_params, widths=args_dict.get("widths"),
                                       spectral_norm=spectral_norm, lora_rank=lora_rank,
                                       cond_hidden=cond_hidden, gamma_bound=gamma_bound,
-                                      beta_bound=beta_bound)
+                                      beta_bound=beta_bound, out_knee=out_knee,
+                                      out_ceiling=out_ceiling)
     else:
         channels = args_dict.get("channels", 8)
         model = ParametricA2(num_params=num_params, channels=channels,
                              spectral_norm=spectral_norm, lora_rank=lora_rank,
                              cond_hidden=cond_hidden, gamma_bound=gamma_bound,
-                             beta_bound=beta_bound)
+                             beta_bound=beta_bound, out_knee=out_knee, out_ceiling=out_ceiling)
 
     state = ckpt.get("model") or ckpt.get("best_state")
     model.load_state_dict(state)

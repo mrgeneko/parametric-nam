@@ -23,7 +23,7 @@ import soundfile as sf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_BOUND,
+from param_train import (ParametricA2, check_parametric_schema, K_PARAM_SCHEMA_VERSION_LIMIT,
                          parametric_ctor_kwargs)
 
 CHUNK = 131072  # process in chunks to avoid MPS memory pressure
@@ -54,7 +54,7 @@ def load_model(nam_path: str, device: torch.device, quality: str = "full"):
     # Rejects legacy/residual models. Accepts up to the cond-encoder schema because the
     # structural extras (LoRA rank, encoder hidden width) are reconstructed from the
     # parametric block right here, the same way bake_nam.py does.
-    check_parametric_schema(par, source=str(nam_path), max_version=K_PARAM_SCHEMA_VERSION_BOUND)
+    check_parametric_schema(par, source=str(nam_path), max_version=K_PARAM_SCHEMA_VERSION_LIMIT)
     num_params = par["condition_size"]
     model = ParametricA2(channels, num_params, **parametric_ctor_kwargs(par))
     model.load_weights(model_data["weights"])
