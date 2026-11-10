@@ -92,6 +92,40 @@ applies, narrowing the grid's swept range, adding an explicit loss weight on
 transient/peak error, or excluding that exact corner combination and documenting it as an
 unsupported setting remain the fallback levers.
 
+### Update (2026-11): input level, the output limiter, and lite-tier training divergence
+
+Measured on the JCM900 conditioning-encoder experiment (`--cond-hidden 32`, 343 combinations,
+w4 + w8 tiers). Runaway depends on **input level** as well as knob corner: a model trained on
+an excitation peaking near 1.0 V stayed bounded at that level and blew up past it (lite tier
+at 1.4 V and 2.0 V: peaks of 3e5 V and up against about 129 V from the real circuit; the
+full tier failed only at 2.0 V). Scan with `scan_film_runaway.py --input-level`, and compare
+against the real circuit at that level rather than only against the model's own median.
+
+- **`--gamma-bound G --beta-bound B`** (export schema 4): bounds the FiLM scale and shift
+  with a trained tanh; it has to be trained in, since a post-hoc bound destroys the lite tier.
+- **`--output-limit MARGIN`** (export schema 5): a soft limiter after the head, identity up
+  to the dataset's own output peak and saturating at peak x (1 + MARGIN), so it needs no
+  rail spec. It bounds the **output only**: hidden-activation runaway still needs loud
+  training data. On its own (no loud data) it gave a good full tier but a lite tier pinned
+  at the ceiling (ESR 2 to 2.7 against the real circuit). With chirps to 2.0 V and bursts at
+  1.4 to 2.0 V in the excitation as well, both tiers tracked the real circuit. A
+  straight-through gradient is used in training only; without it the full tier froze at
+  ESR 267 because the tanh passes almost no gradient far above the knee.
+- **A "clean" scan means little on a limited model.** The 8x-median test cannot fire on an
+  output that is capped, so a runaway lite tier reads clean with a max of exactly the
+  ceiling. Check the max against the ceiling and compare with the real circuit.
+- **Training can diverge in the lite tier** of a limiter run (one of two seeds, twice: epoch
+  1512, then epoch 1806 on a resume from the epoch-1465 checkpoint with a new random stream;
+  learning rate 1.3e-4 and 8.7e-5, no restart involved). The weights stay finite; the lite
+  tier's activations explode (pre-limiter output near 3e22) and its gradient norm goes
+  infinite. The joint `--clip-norm` (default 1.0, one norm over every tier) then leaves the
+  **full tier frozen** to eight digits for the rest of the run, so the remaining epochs are
+  wasted. Watch `val_esr_w4` in `metrics.csv`: a jump to 0.2 or more means stop and use the
+  best checkpoints. `--per-tier-clip` stops one tier's norm from setting the other's step.
+- **Resuming from `best_lite.pt` or `best.pt` fails** at the next composite export
+  (`best_state[lbl]` is `None` for the other tier). Graft the other tier's best state in
+  from a `latest.pt` first.
+
 ---
 
 ## Known issue: excitation needs a silent lead-in (cold-start settling transient)
