@@ -10,7 +10,7 @@ Usage:
   python param_train.py --dataset /path/to/dataset --output model.param.nam
 """
 
-import argparse, csv, datetime, faulthandler, json, math, os, signal, sys, time, warnings
+import argparse, copy, csv, datetime, faulthandler, json, math, os, signal, sys, time, warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1584,7 +1584,7 @@ class ParamLoss(nn.Module):
 
 def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
                 epoch: int = 0, total_epochs: int = 0, log_interval: int = 10,
-                amp_dtype=None, scaler=None, per_tier_clip=False):
+                amp_dtype=None, scaler=None, per_tier_clip=False, guard_stats=None):
     """One epoch. Two deliberate structural choices, both numerically identical to
     the naive form:
 
@@ -1667,12 +1667,23 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
             step_loss = loss.detach()
         if scaler is not None:
             scaler.unscale_(optimizer)   # so clip_grad_norm_ sees true gradients
-        if clip_norm > 0:
+        # --skip-nonfinite-grad (guard_stats is a dict): clip_grad_norm_ returns the pre-clip
+        # norm, so a non-finite one is visible here. Such a step is DROPPED (no optimizer
+        # step), not clipped: an infinite norm scales every gradient by zero, which leaves
+        # every tier with a no-op update, and Adam's momentum would still move the weights.
+        # Costs one host sync per step, only when the guard is on.
+        max_norm = clip_norm if clip_norm > 0 else float("inf")
+        if clip_norm > 0 or guard_stats is not None:
             if per_tier_clip and slimmable:
-                for m in model.submodels:
-                    torch.nn.utils.clip_grad_norm_(m.parameters(), clip_norm)
+                norms = [torch.nn.utils.clip_grad_norm_(m.parameters(), max_norm)
+                         for m in model.submodels]
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                norms = [torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)]
+            if guard_stats is not None and not bool(torch.isfinite(torch.stack(norms)).all()):
+                guard_stats["skipped"] = guard_stats.get("skipped", 0) + 1
+                optimizer.zero_grad()
+                _watchdog_disarm()     # step_loss is not added: a non-finite one would poison the epoch mean
+                continue
         if scaler is not None:
             scaler.step(optimizer)
             scaler.update()
@@ -1689,6 +1700,79 @@ def train_epoch(model, loader, optimizer, criterion, device, clip_norm=1.0,
             window_start = step + 1
         _watchdog_disarm()
     return total_loss.item() / len(loader)
+
+
+class DivergenceGuard:
+    """--rollback-factor: restore the last healthy weights when a tier's validation ESR jumps.
+
+    Seed 43 of the JCM900 limiter run lost its lite tier twice (epochs 1512 and 1806): the
+    ESR went 0.035 -> 0.07 -> 0.19 -> 200+ and never came back, and the joint gradient clip
+    then froze the full tier for the rest of the run. A rollback keeps the epochs that
+    were still good. A tier is DIVERGED when its val ESR is non-finite or exceeds
+    `factor` x its own best so far; HEALTHY when every tier is within HEALTHY_RATIO x its
+    best. A snapshot (model + optimizer, host copies) is refreshed every `every` epochs, but
+    only while healthy. Each rollback scales the learning rate by `lr_scale` (the cosine
+    scheduler works from the live group lr, so the cut persists), and at most
+    `max_rollbacks` are taken, after which the run continues as before."""
+    HEALTHY_RATIO = 1.5
+
+    def __init__(self, factor, lr_scale=0.5, every=25, max_rollbacks=5):
+        self.factor, self.lr_scale = float(factor), float(lr_scale)
+        self.every, self.max_rollbacks = int(every), int(max_rollbacks)
+        self.snap, self.snap_epoch, self.rollbacks = None, None, 0
+
+    @property
+    def enabled(self):
+        return self.factor > 0
+
+    def diverged(self, esr_by, best_esr):
+        if not self.enabled:
+            return []
+        out = []
+        for lbl, e in esr_by.items():
+            b = best_esr.get(lbl)
+            if not math.isfinite(e) or (b is not None and math.isfinite(b) and e > self.factor * b):
+                out.append(lbl)
+        return out
+
+    def healthy(self, esr_by, best_esr):
+        return all(math.isfinite(e) and (not math.isfinite(best_esr.get(l, float("inf")))
+                                         or e <= self.HEALTHY_RATIO * best_esr[l])
+                   for l, e in esr_by.items())
+
+    def maybe_snapshot(self, epoch, model, optimizer, esr_by, best_esr):
+        if not self.enabled or not self.healthy(esr_by, best_esr):
+            return False
+        if self.snap is not None and epoch - self.snap_epoch < self.every:
+            return False
+        self.snap = {"model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                     "opt": copy.deepcopy(_opt_state_cpu(optimizer))}
+        self.snap_epoch = epoch
+        return True
+
+    def can_rollback(self):
+        return self.enabled and self.snap is not None and self.rollbacks < self.max_rollbacks
+
+    def rollback(self, model, optimizer):
+        """Restore the snapshot and cut the learning rate. Returns the epoch it was taken at."""
+        model.load_state_dict(self.snap["model"])
+        optimizer.load_state_dict(copy.deepcopy(self.snap["opt"]))
+        dev = next(model.parameters()).device
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(dev)
+        self.rollbacks += 1
+        for g in optimizer.param_groups:
+            g["lr"] *= self.lr_scale
+        return self.snap_epoch
+
+
+def _opt_state_cpu(optimizer):
+    sd = optimizer.state_dict()
+    st = {k: {kk: (vv.detach().cpu().clone() if isinstance(vv, torch.Tensor) else vv)
+              for kk, vv in v.items()} for k, v in sd["state"].items()}
+    return {"state": st, "param_groups": copy.deepcopy(sd["param_groups"])}
 
 
 def validate(model, loader, criterion, device, val_passes: int = 1):
@@ -2655,6 +2739,25 @@ def main():
     ap.add_argument("--clip-norm", type=float, default=1.0,
                     help="Gradient clip norm, joint or per-tier depending on --per-tier-clip "
                          "(default: %(default)s)")
+    ap.add_argument("--skip-nonfinite-grad", action="store_true",
+                    help="Drop (do not apply) any optimizer step whose pre-clip gradient norm is "
+                         "NaN/inf, and count them. Off by default: costs one host sync per step. "
+                         "A clip cannot repair an infinite norm -- it scales every gradient to "
+                         "zero, so the step is a no-op for every tier (see --rollback-factor).")
+    ap.add_argument("--rollback-factor", type=float, default=0.0,
+                    help="Divergence guard (0 = off). When a tier's validation ESR is non-finite "
+                         "or exceeds this multiple of its own best so far, restore the last "
+                         "healthy snapshot (model + optimizer) and cut the learning rate by "
+                         "--rollback-lr-scale. Added after the lite tier of a --output-limit "
+                         "run collapsed (ESR 0.035 -> 200+) and the joint clip froze the full "
+                         "tier for the remaining epochs. Try 5.")
+    ap.add_argument("--rollback-lr-scale", type=float, default=0.5,
+                    help="Learning-rate multiplier applied at each rollback (default: %(default)s)")
+    ap.add_argument("--rollback-every", type=int, default=25,
+                    help="Refresh the healthy snapshot every N epochs while every tier is within "
+                         "1.5x its best (default: %(default)s)")
+    ap.add_argument("--max-rollbacks", type=int, default=5,
+                    help="Stop rolling back after this many (default: %(default)s)")
     ap.add_argument("--skip-param-sensitivity", action="store_true",
                     help="Skip the parameter sensitivity check after training (runs by default)")
     ap.add_argument("--skip-per-combo-esr", action="store_true",
@@ -3213,6 +3316,9 @@ def main():
     t0 = time.time()
     epoch = start_epoch - 1
     completed = 0
+    guard = DivergenceGuard(args.rollback_factor, args.rollback_lr_scale,
+                            args.rollback_every, args.max_rollbacks)
+    guard_stats = {} if args.skip_nonfinite_grad else None
     # SGDR cycle-aware auto-stop bookkeeping (open-ended mode, --stale-cycles).
     cycle_improved = False
     stale_cycles = 0
@@ -3228,7 +3334,10 @@ def main():
                                  clip_norm=args.clip_norm,
                                  epoch=epoch, total_epochs=args.epochs, log_interval=10,
                                  amp_dtype=amp_dtype, scaler=scaler,
-                                 per_tier_clip=args.per_tier_clip)
+                                 per_tier_clip=args.per_tier_clip, guard_stats=guard_stats)
+        if guard_stats and guard_stats.get("skipped"):
+            print(f"  [guard] epoch {epoch}: {guard_stats['skipped']} non-finite-gradient "
+                  f"step(s) dropped so far", file=sys.stderr, flush=True)
         # Drain the MPS async queue between train (batch=args.batch_size) and val
         # (batch=len(val_ds)%batch_size or smaller) -- two distinct batch shapes back
         # to back, every epoch, with no sync between them. Matches a documented class
@@ -3252,6 +3361,20 @@ def main():
                   f"{args.restart_lr_floor:g} after {_early_restart[0]} of {_early_restart[1]:.0f} "
                   f"cycle epochs", file=sys.stderr, flush=True)
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
+        if guard.enabled:
+            _bad = guard.diverged(esr_by, best_esr)
+            if _bad and guard.can_rollback():
+                _back = guard.rollback(model, optimizer)
+                print(f"  [rollback {guard.rollbacks}/{guard.max_rollbacks}] epoch {epoch}: "
+                      + ", ".join(f"{l} val ESR {esr_by[l]:.4g} vs best {best_esr[l]:.4g}" for l in _bad)
+                      + f"; restored the epoch-{_back} weights, lr x{guard.lr_scale:g}",
+                      file=sys.stderr, flush=True)
+            elif _bad:
+                print(f"  [rollback] epoch {epoch}: {_bad} diverged but no rollback is left "
+                      f"(snapshot {guard.snap is not None}, used {guard.rollbacks}/"
+                      f"{guard.max_rollbacks})", file=sys.stderr, flush=True)
+            else:
+                guard.maybe_snapshot(epoch, model, optimizer, esr_by, best_esr)
 
         # --- per-tier best-checkpointing: each width's optimum lands at a
         #     different epoch, so snapshot each independently. The widest tier
