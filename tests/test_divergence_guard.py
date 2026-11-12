@@ -134,3 +134,63 @@ def test_rollbacks_are_capped():
 
 def test_no_rollback_without_a_snapshot():
     assert not DivergenceGuard(5.0).can_rollback()
+
+
+# --- patience and learning-rate recovery -------------------------------------------------
+
+BEST = {"lite": 0.03, "full": 0.01}
+SPIKE = {"lite": 0.3, "full": 0.01}
+OK = {"lite": 0.03, "full": 0.01}
+
+
+def test_patience_ignores_a_one_epoch_spike():
+    g = DivergenceGuard(5.0, patience=2)
+    assert g.should_rollback(SPIKE, BEST) == (["lite"], False)
+    assert g.should_rollback(OK, BEST) == ([], False)                   # streak reset
+    assert g.should_rollback(SPIKE, BEST) == (["lite"], False)          # starts over
+
+
+def test_patience_rolls_back_on_consecutive_bad_epochs():
+    g = DivergenceGuard(5.0, patience=2)
+    assert not g.should_rollback(SPIKE, BEST)[1]
+    assert g.should_rollback(SPIKE, BEST) == (["lite"], True)
+
+
+def test_nonfinite_esr_rolls_back_immediately_whatever_the_patience():
+    g = DivergenceGuard(5.0, patience=5)
+    assert g.should_rollback({"lite": float("nan"), "full": 0.01}, BEST) == (["lite"], True)
+
+
+def test_default_patience_is_one():
+    assert DivergenceGuard(5.0).should_rollback(SPIKE, BEST)[1]
+
+
+def test_rollback_resets_the_streak():
+    g = DivergenceGuard(5.0, patience=2)
+    m, opt = _setup(); g.maybe_snapshot(1, m, opt, OK, BEST)
+    g.should_rollback(SPIKE, BEST); g.should_rollback(SPIKE, BEST); g.rollback(m, opt)
+    assert g.bad_streak == 0 and g.cuts == 1
+
+
+def test_lr_recovers_one_cut_after_enough_clean_epochs():
+    g = DivergenceGuard(5.0, lr_scale=0.5, recover_after=3)
+    m, opt = _setup(); g.maybe_snapshot(1, m, opt, OK, BEST); g.rollback(m, opt)
+    lr = opt.param_groups[0]["lr"]
+    assert not g.maybe_recover_lr(opt) and not g.maybe_recover_lr(opt)
+    assert g.maybe_recover_lr(opt)
+    assert opt.param_groups[0]["lr"] == lr * 2 and g.cuts == 0
+    assert not g.maybe_recover_lr(opt)                                   # nothing left to undo
+
+
+def test_a_bad_epoch_restarts_the_recovery_count():
+    g = DivergenceGuard(5.0, lr_scale=0.5, recover_after=2, patience=3)
+    m, opt = _setup(); g.maybe_snapshot(1, m, opt, OK, BEST); g.rollback(m, opt)
+    g.maybe_recover_lr(opt)
+    g.should_rollback(SPIKE, BEST)                                       # clean count back to 0
+    assert not g.maybe_recover_lr(opt) and g.maybe_recover_lr(opt)
+
+
+def test_recovery_off_by_default():
+    g = DivergenceGuard(5.0)
+    m, opt = _setup(); g.maybe_snapshot(1, m, opt, OK, BEST); g.rollback(m, opt)
+    assert not any(g.maybe_recover_lr(opt) for _ in range(500))

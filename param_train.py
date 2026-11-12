@@ -1716,10 +1716,12 @@ class DivergenceGuard:
     `max_rollbacks` are taken, after which the run continues as before."""
     HEALTHY_RATIO = 1.5
 
-    def __init__(self, factor, lr_scale=0.5, every=25, max_rollbacks=5):
+    def __init__(self, factor, lr_scale=0.5, every=25, max_rollbacks=5, patience=1, recover_after=0):
         self.factor, self.lr_scale = float(factor), float(lr_scale)
         self.every, self.max_rollbacks = int(every), int(max_rollbacks)
+        self.patience, self.recover_after = max(1, int(patience)), int(recover_after)
         self.snap, self.snap_epoch, self.rollbacks = None, None, 0
+        self.bad_streak, self.cuts, self.clean_epochs = 0, 0, 0
 
     @property
     def enabled(self):
@@ -1750,6 +1752,36 @@ class DivergenceGuard:
         self.snap_epoch = epoch
         return True
 
+    def should_rollback(self, esr_by, best_esr):
+        """(diverged tiers, trigger). A NON-FINITE ESR triggers at once; a jump beyond
+        factor x best must persist for `patience` consecutive epochs, so a one-epoch
+        validation spike is ignored (seed 43's epoch-1056 spike lasted one epoch and may
+        have been noise, yet cost 14 epochs and half the learning rate for the rest of the
+        run). The F2 collapse stayed above the threshold from epoch 1513 on."""
+        bad = self.diverged(esr_by, best_esr)
+        if not bad:
+            self.bad_streak = 0
+            return bad, False
+        self.clean_epochs = 0
+        self.bad_streak += 1
+        immediate = any(not math.isfinite(esr_by[l]) for l in bad)
+        return bad, immediate or self.bad_streak >= self.patience
+
+    def maybe_recover_lr(self, optimizer):
+        """Undo ONE learning-rate cut after `recover_after` consecutive epochs with no
+        divergence signal (0 = never). Call once per epoch when nothing diverged. Returns
+        True when a cut was undone."""
+        if not self.enabled or self.recover_after <= 0 or self.cuts <= 0:
+            return False
+        self.clean_epochs += 1
+        if self.clean_epochs < self.recover_after:
+            return False
+        for g in optimizer.param_groups:
+            g["lr"] /= self.lr_scale
+        self.cuts -= 1
+        self.clean_epochs = 0
+        return True
+
     def can_rollback(self):
         return self.enabled and self.snap is not None and self.rollbacks < self.max_rollbacks
 
@@ -1763,6 +1795,8 @@ class DivergenceGuard:
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(dev)
         self.rollbacks += 1
+        self.cuts += 1
+        self.bad_streak, self.clean_epochs = 0, 0
         for g in optimizer.param_groups:
             g["lr"] *= self.lr_scale
         return self.snap_epoch
@@ -2756,6 +2790,13 @@ def main():
     ap.add_argument("--rollback-every", type=int, default=25,
                     help="Refresh the healthy snapshot every N epochs while every tier is within "
                          "1.5x its best (default: %(default)s)")
+    ap.add_argument("--rollback-patience", type=int, default=1,
+                    help="Consecutive epochs a tier must stay beyond --rollback-factor x its best "
+                         "before a rollback (default: %(default)s; a NaN/inf ESR always rolls "
+                         "back at once). 2 ignores a one-epoch validation spike.")
+    ap.add_argument("--rollback-lr-recover", type=int, default=0,
+                    help="Undo one rollback learning-rate cut after this many consecutive epochs "
+                         "with no divergence signal (default 0 = a cut is permanent).")
     ap.add_argument("--max-rollbacks", type=int, default=5,
                     help="Stop rolling back after this many (default: %(default)s)")
     ap.add_argument("--skip-param-sensitivity", action="store_true",
@@ -3317,7 +3358,9 @@ def main():
     epoch = start_epoch - 1
     completed = 0
     guard = DivergenceGuard(args.rollback_factor, args.rollback_lr_scale,
-                            args.rollback_every, args.max_rollbacks)
+                            args.rollback_every, args.max_rollbacks,
+                            patience=args.rollback_patience,
+                            recover_after=args.rollback_lr_recover)
     guard_stats = {} if args.skip_nonfinite_grad else None
     # SGDR cycle-aware auto-stop bookkeeping (open-ended mode, --stale-cycles).
     cycle_improved = False
@@ -3362,19 +3405,27 @@ def main():
                   f"cycle epochs", file=sys.stderr, flush=True)
         esr_by = dict(zip(labels, esr_list))     # label -> this-epoch val ESR
         if guard.enabled:
-            _bad = guard.diverged(esr_by, best_esr)
-            if _bad and guard.can_rollback():
+            _bad, _trigger = guard.should_rollback(esr_by, best_esr)
+            if _trigger and guard.can_rollback():
                 _back = guard.rollback(model, optimizer)
                 print(f"  [rollback {guard.rollbacks}/{guard.max_rollbacks}] epoch {epoch}: "
                       + ", ".join(f"{l} val ESR {esr_by[l]:.4g} vs best {best_esr[l]:.4g}" for l in _bad)
                       + f"; restored the epoch-{_back} weights, lr x{guard.lr_scale:g}",
                       file=sys.stderr, flush=True)
-            elif _bad:
+            elif _trigger:
                 print(f"  [rollback] epoch {epoch}: {_bad} diverged but no rollback is left "
                       f"(snapshot {guard.snap is not None}, used {guard.rollbacks}/"
                       f"{guard.max_rollbacks})", file=sys.stderr, flush=True)
+            elif _bad:
+                print(f"  [rollback] epoch {epoch}: {_bad} beyond {guard.factor:g}x best "
+                      f"({guard.bad_streak}/{guard.patience} epochs); waiting",
+                      file=sys.stderr, flush=True)
             else:
                 guard.maybe_snapshot(epoch, model, optimizer, esr_by, best_esr)
+                if guard.maybe_recover_lr(optimizer):
+                    print(f"  [rollback] epoch {epoch}: {guard.recover_after} clean epochs; "
+                          f"learning rate restored by x{1 / guard.lr_scale:g} "
+                          f"({guard.cuts} cut(s) left)", file=sys.stderr, flush=True)
 
         # --- per-tier best-checkpointing: each width's optimum lands at a
         #     different epoch, so snapshot each independently. The widest tier
