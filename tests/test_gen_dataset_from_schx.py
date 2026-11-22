@@ -1221,13 +1221,24 @@ def test_choose_oversample_acm_walks_the_ladder_and_stops_at_the_first_that_meet
 
 # --- acm verdict derived from <stem>.acmod -------------------------------------------------
 
-def _acm_check(tmp_path, acm_json=None, sidecar=None, schx_bytes=b"x"):
+def _v2_of(flat):
+    """A minimal synthetic version 2 circuit file holding the flat members `flat`: quality under
+    `derived`, source under `provenance`, everything else (none here) in `extra`."""
+    doc = {"format": "audio-circuit-modeler.circuit", "version": 2, "name": "Example Amp",
+           "circuit": {"devices": []}}
+    for k, v in flat.items():
+        sec = {"quality": "derived", "source": "provenance"}.get(k, "extra")
+        doc.setdefault(sec, {})[k] = v
+    return doc
+
+
+def _acm_check(tmp_path, acm_json=None, sidecar=None, schx_bytes=b"x", layout="v1"):
     import hashlib
     schx = tmp_path / "dev.schx"
     schx.write_bytes(schx_bytes)
     if acm_json is not None:
         acm_json.setdefault("source", {"sha256": hashlib.sha256(schx_bytes).hexdigest()})
-        (tmp_path / "dev.acmod").write_text(json.dumps(acm_json))
+        (tmp_path / "dev.acmod").write_text(json.dumps(_v2_of(acm_json) if layout == "v2" else acm_json))
     if sidecar is not None:
         (tmp_path / "dev.backends.toml").write_text(sidecar)
     err = io.StringIO()
@@ -1274,6 +1285,39 @@ def test_acm_sidecar_entry_overrides_the_json(tmp_path):
     refused, err = _acm_check(tmp_path, _cells(True),
                              sidecar='acm = { valid = false, reason = "hand-declared" }\n')
     assert refused and "hand-declared" in err
+
+
+# The same expectations against a version 2 file (quality under derived, source under provenance).
+
+@pytest.mark.parametrize("layout", ["v1", "v2"])
+def test_acm_verdicts_are_the_same_in_both_layouts(tmp_path, layout):
+    refused, err = _acm_check(tmp_path / "a", _cells(False, True), layout=layout) if (tmp_path / "a").mkdir() is None else None
+    assert not refused and "1/2 measured cells robust" in err and "STALE" not in err
+    (tmp_path / "b").mkdir()
+    refused, err = _acm_check(tmp_path / "b", _cells(False, False), layout=layout)
+    assert refused and "none of the 2 measured cells" in err
+    (tmp_path / "c").mkdir()
+    refused, err = _acm_check(tmp_path / "c", dict(_cells(True), source={"sha256": "0" * 64}), layout=layout)
+    assert not refused and "STALE" in err
+    (tmp_path / "d").mkdir()
+    refused, err = _acm_check(tmp_path / "d", {}, layout=layout)
+    assert not refused and "no measured cells" in err
+
+
+@pytest.mark.parametrize("layout", ["v1", "v2"])
+def test_acm_circuit_problem_and_table_floor_read_both_layouts(tmp_path, layout, monkeypatch):
+    import hashlib
+    schx = tmp_path / "amp.schx"; schx.write_bytes(b"x")
+    cells = [{"oversample": 1, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 1.59},
+             {"oversample": 2, "tol_rel": 1e-4, "fir_half_length": 24, "tables": True, "robust": True, "esr": 3.0e-3}]
+    flat = {"quality": {"measured": {"cells": cells}}, "source": {"sha256": "0" * 64}}
+    (tmp_path / "amp.acmod").write_text(json.dumps(_v2_of(flat) if layout == "v2" else flat))
+    assert "STALE" in g._acm_circuit_problem(str(schx))
+    flat["source"]["sha256"] = hashlib.sha256(b"x").hexdigest()
+    (tmp_path / "amp.acmod").write_text(json.dumps(_v2_of(flat) if layout == "v2" else flat))
+    assert g._acm_circuit_problem(str(schx)) == ""
+    monkeypatch.setattr(g, "ACM_TABLES", "on")
+    assert g._acm_table_floor(str(schx), 6e-3) == 2
 
 
 # --- prepared-state start (docs/acm-backend.md, Start-up) -------------------------------------

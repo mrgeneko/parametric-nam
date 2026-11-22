@@ -148,8 +148,9 @@ def _acm_circuit_problem(schx: str) -> str:
     if not acm.exists():
         return f"{acm.name} not found next to {Path(schx).name}: convert the schematic first"
     try:
-        recorded = json.loads(acm.read_text()).get("source", {}).get("sha256", "")
-    except (OSError, ValueError):
+        from backend_verdicts import flat_view
+        recorded = (flat_view(json.loads(acm.read_text())).get("source") or {}).get("sha256", "")
+    except (OSError, ValueError, AttributeError):
         return f"{acm.name} is not readable JSON"
     actual = hashlib.sha256(Path(schx).read_bytes()).hexdigest()
     if recorded != actual:
@@ -276,7 +277,8 @@ def _acm_table_floor(schx: str, target: float, tol_rel: float = 1e-4) -> int:
     windows at a few settings: the probe once picked 1x for a pedal whose table reads ESR 1.59 at 1x (the HM-2, 2026-10-09). 1 when the file
     has no usable table (no floor)."""
     try:
-        d = json.loads(_acm_circuit_for(schx).read_text())
+        from backend_verdicts import flat_view
+        d = flat_view(json.loads(_acm_circuit_for(schx).read_text()))
         cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []
     except (OSError, ValueError):
         return 1
@@ -455,7 +457,8 @@ def _acm_verdict_from_json(schx: Path) -> dict | None:
     if not cj.exists():
         return None
     try:
-        d = json.loads(cj.read_text())
+        from backend_verdicts import flat_view
+        d = flat_view(json.loads(cj.read_text()))
     except Exception as e:
         return {"valid": "partial", "reason": f"{cj.name} failed to parse ({e}); no measured verdict."}
     cells = (d.get("quality") or {}).get("measured", {}).get("cells") or []

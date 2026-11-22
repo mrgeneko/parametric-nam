@@ -167,3 +167,25 @@ def set_backend_validity_text(text: str, value: dict) -> str:
     if json.loads(new) != expect:
         raise ValueError("targeted edit did not reproduce the intended document")
     return new
+
+
+# ---- reading a circuit file of either layout ------------------------------------------------
+
+_FLAT_SECTIONS = ("circuit", "derived", "playback", "provenance", "extra")
+
+
+def flat_view(doc):
+    """The flat (version 1 style) dict of a parsed circuit file. A version 1 file passes through.
+    For a version 2 file the members of its `circuit`, `derived` (quality, prepared, ...),
+    `playback`, `provenance` (source, backend) and `extra` sections are lifted to the top level,
+    beside the header members; `controls` is not expanded (nothing here reads it)."""
+    if not isinstance(doc, dict) or doc.get("version") != 2:
+        return doc
+    flat = {k: v for k, v in doc.items() if k not in _FLAT_SECTIONS and k != "controls"}
+    for sec in _FLAT_SECTIONS:
+        body = doc.get(sec)
+        if isinstance(body, dict):
+            for k, v in body.items():
+                flat.setdefault(k, v)
+    flat["version"] = 1
+    return flat
