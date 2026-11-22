@@ -417,7 +417,7 @@ Deliberately outside it: content-keyed caches in `~/.cache/parametric-nam/`
 | Model plateaus above target no matter how long you train | `grid_adequacy.py` — the grid, not the training |
 | A knob does nothing in the trained model | `preflight.py` — likely a misclassified or genuinely dead control |
 | Corners fail transient coverage | step 4 — the excitation was sized against a different grid |
-| Backend diverges mid-render | the `.backends.toml` sidecar; try another backend |
+| Backend diverges mid-render | the recorded backend verdicts (`.backends.toml` sidecar or the circuit file's `backend_validity`); try another backend |
 | Renders are unexpectedly slow to re-verify | check the cache is not being invalidated — an edited `.schx` or rebuilt excitation invalidates it *correctly* |
 
 More devices hit a **capacity** ceiling than a training-time one once more than three knobs

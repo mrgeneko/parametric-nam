@@ -71,7 +71,7 @@ def _find_livespice_cli() -> Path:
     as an opt-in model switch that is bit-identical by default (Pentode.Model: PlateScaled, the
     original equation, unless a schematic sets Model="Koren"). A schematic that opts in is only
     valid on a livespice_cli built with that switch; an older build ignores the attribute and
-    renders it wrongly, so the sidecar says "partial" until every render machine has rebuilt.
+    renders it wrongly, so the recorded verdict says "partial" until every render machine has rebuilt.
 
     What keeps this an oracle is independence from the thing under test, not an unmodified solver:
     the C++ emitter is tested against it, and it is never built from the emitter's own
@@ -377,7 +377,7 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     """Refuse a backend that cannot faithfully render this device.
 
     Which backends work is a fact about the SIMULATOR, not the circuit, so it cannot be derived from
-    a .schx. It is declared in parametric-devices/backends.toml and enforced here. A device with no entry
+    a .schx. It is declared in the circuit's verdicts (a `<stem>.backends.toml` sidecar or the circuit file's `backend_validity` member) and enforced here. A device with no entry
     is assumed valid -- absence of evidence, not a claim.
 
     Two kinds of failure, and they deserve different treatment:
@@ -402,14 +402,14 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     # the `backend_validity` member of <stem>.acmod beside it (see backend_verdicts.py). Same pattern as the excitation's
     # <stem>.recipe.json -- found by deriving the path from the file we were handed, so there
     # is no registry to locate, no env var to know about, and no device slug or filename to
-    # match. A sidecar travels WITH the schematic when it is copied, and works identically for
+    # match. The verdicts travel WITH the schematic when it is copied, and work identically for
     # a circuit this project has never seen: write one next to your own .schx and this fires.
     #
     # The devices.toml fallback is GONE (2026-09-04). It reached a verdict through two name
     # indirections -- slug -> registry entry -> .schx filename -- which a bring-your-own-circuit
     # user could never satisfy and a rename broke silently, and it required knowing to set
     # PARAMETRIC_DEVICES, which nobody would. Every verdict it used to serve now lives in a
-    # sidecar; keeping a second lookup path would only let the two drift.
+    # sidecar (or the circuit file); keeping a further lookup path would only let the two drift.
     #
     # ABSENCE IS ANNOUNCED, not silent. A safety check that says nothing when it is doing
     # nothing is worse than no check: someone who believes they are protected gets output
@@ -2960,7 +2960,7 @@ def main():
                                "to list all pots in the schx. ngspice-deck: omit to list "
                                "--module's KNOB_NAMES; the names given here must match "
                                "KNOB_NAMES exactly (case-sensitive) -- no second name mapping, "
-                               "same reasoning as check_backend()'s sidecar-only design: a name "
+                               "same reasoning as check_backend()'s derive-it-from-the-file design: a name "
                                "translated through two places is a name that can silently drift. "
                                "cpp: required -- the harness has its own schematic registry this "
                                "script cannot see, so there is nothing to default to.")

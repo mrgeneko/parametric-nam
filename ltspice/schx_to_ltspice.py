@@ -73,7 +73,7 @@ unchanged) and --koren triodes (eliminates the "Heightened Def Con" gmin-steppin
 the initial .op search, same wall-clock, but the mid-transient spikes persist regardless). This
 points at the same category of instability already documented for THIS circuit's global NFB
 loop / undamped Mid Range LC resonance / ideal-transformer LF behavior in
-Ampeg SVT Power Amp.backends.toml (ngspice's own translation of the same math is likewise only
+Example Amp.backends.toml (or the circuit file's `backend_validity` member) (ngspice's own translation of the same math is likewise only
 "partial" there) rather than a defect specific to this LTspice port -- the B-source math is
 shared. Do not trust an LTspice render of Ampeg SVT Full.schx for anything real until this is
 root-caused; the smaller-circuit validation above supports trusting the TRANSLATOR (the syntax

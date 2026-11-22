@@ -536,8 +536,9 @@ def _setup(args):
     if args.backend == "ngspice":
         # Same schx/--config convention as livespice -- this is the GENERIC schx-translated
         # path (ngspice/schx_to_ngspice.py via NgspiceSchxBackend), for a circuit whose .schx
-        # exists but whose LiveSPICE render diverges under real signal (e.g. Arbiter Fuzz
-        # Face's tight DC-coupled feedback loop -- see its own .md/.backends.toml). Not to be
+        # exists but whose LiveSPICE render diverges under real signal (e.g. a fuzz pedal with a
+        # tight DC-coupled feedback loop -- see its recorded backend verdicts, a .backends.toml
+        # or the circuit file's `backend_validity`). Not to be
         # confused with ngspice-deck, which is for a device with NO .schx counterpart at all.
         if args.config:
             cfg = load_config(Path(args.config))

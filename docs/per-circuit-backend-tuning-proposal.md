@@ -9,7 +9,7 @@
 `NgspiceSchxBackend` hardcoded `ot_damp="47k"`, `ot_snub="10n"` for every circuit until
 2026-09-21, tuned for the EVH 5150's OT (238:1 into 8 Ω). Fixing the Ampeg SVT power amp's
 `ngspice` LF bug required a different pair of values (`ot_damp=220k, ot_snub=10n`, for its 400:1
-into 4 Ω OT) — see `parametric-devices/amps/Ampeg SVT Power Amp.backends.toml`. That value is
+into 4 Ω OT) — see the verdicts for that circuit (`Example Amp.backends.toml` or the circuit file's `backend_validity` member). That value is
 real, measured, and committed. It is also **inert**: nothing reads it back out.
 
 `render_backends.py`'s `self.conv` dict is a raw passthrough — `preflight.py`, `grid_adequacy.py`,
@@ -27,12 +27,12 @@ of fictitious elements `schx_to_ngspice.py`'s `CenterTapTransformer` translation
 numerically stabilize its own ideal-ampere-turns (VCVS/CCCS) transformer model. LiveSPICE never
 uses them at all; they are `ngspice`-translation-specific. Storing them in the `.schx` would
 misrepresent them as part of the amp. This data is **per-circuit AND per-backend** — exactly the
-shape `<Device>.backends.toml` already has (`backend.ngspice` / `backend.livespice` as separate
+shape the circuit's verdicts (`<Device>.backends.toml`, or `backend_validity` in the circuit file) already have (`backend.ngspice` / `backend.livespice` as separate
 tables), and exactly the shape the `.schx` does not.
 
 ## Proposed shape
 
-Add a `conv` key to each backend's existing table in the sidecar, same `key=val,...` string
+Add a `conv` key to each backend's existing table in the verdicts (sidecar or circuit file), same `key=val,...` string
 `--conv` already parses — no new grammar:
 
 ```toml
@@ -46,7 +46,7 @@ backends, not two.
 
 ### Propagation
 
-`gen_registry.py` already copies `valid`/`reason` from each sidecar into `devices.toml` per
+`gen_registry.py` already copies `valid`/`reason` from each sidecar (or circuit-file member) into `devices.toml` per
 backend (the same code path last session's `"partial"`-collapse bug lived in — being touched
 carefully already). Add `conv` to that same copy. Mechanical, no new logic shape.
 
@@ -54,23 +54,23 @@ carefully already). Add `conv` to that same copy. Mechanical, no new logic shape
 
 `preflight.py`, `grid_adequacy.py`, `gen_dataset_from_schx.py`, and `run_pipeline.py` each already
 know the `.schx` path and backend name when they construct a `render_backends.py` backend object.
-Locating the sidecar needs no new plumbing — same basename, `.backends.toml` suffix, already sits
+Locating the verdicts needs no new plumbing — same basename, `.backends.toml` suffix (or the `.acmod` beside it), already sits
 next to the `.schx`.
 
 Precedence, merged **key by key**, not all-or-nothing:
 
 1. `--conv` key explicitly passed by the caller — wins, always.
-2. Otherwise, that key's value from the circuit's own sidecar `conv` string, if present.
+2. Otherwise, that key's value from the circuit's own `conv` string (sidecar or circuit file), if present.
 3. Otherwise, the backend's hardcoded global default (`47k`/`10n` today).
 
-So `--conv "ot_snub=22n"` against the SVT would still pick up its sidecar's `ot_damp=220k`, while
+So `--conv "ot_snub=22n"` against the SVT would still pick up its recorded `ot_damp=220k`, while
 overriding just `ot_snub` for that one run. The merge belongs in one place —
 `render_backends.py`, where `self.conv`/`self.ng_base` are already assembled — so all four call
 sites inherit it for free rather than reimplementing the lookup four times.
 
 ### Backward compatibility
 
-A circuit with no `conv` key in its sidecar renders exactly as it does today. This is additive:
+A circuit with no `conv` key in its verdicts renders exactly as it does today. This is additive:
 existing behavior for every circuit other than the SVT (which currently has no automatic
 `ngspice` render-fix at all) is unchanged.
 
@@ -79,7 +79,7 @@ existing behavior for every circuit other than the SVT (which currently has no a
 This does not attempt to fix the SVT's remaining `ngspice` LF issue — a ~60–64 V floor at 40 Hz
 against a 49.1 V physical ceiling, unmoved by `ot_damp`/`ot_snub`/`Lm` tuning, suspected to be an
 LF-specific limitation of the ideal-transformer (VCVS/CCCS) translation itself rather than
-anything a tuning default can reach (see the same `backends.toml` entry). That's a separate,
+anything a tuning default can reach (see the same verdict entry). That's a separate,
 harder, not-yet-root-caused problem. This proposal only makes the tuning that *does* exist
 actually take effect automatically instead of living as inert prose.
 

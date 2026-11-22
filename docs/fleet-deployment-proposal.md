@@ -124,7 +124,7 @@ its timeout, and the machine produced nothing for 7.5 hours while looking busy.
 box is useful for pedals, not for a full amp at oversample 8" — which is a true and useful
 thing to say about a machine, and is not the same as "broken".
 
-This is orthogonal to the per-device `<stem>.backends.toml` sidecars: those record which
+This is orthogonal to the per-device backend verdicts (`<stem>.backends.toml` sidecars or the circuit file's `backend_validity` member): those record which
 backend a **circuit** needs; this records which backends a **host** can run. A job needs the
 intersection of the two.
 

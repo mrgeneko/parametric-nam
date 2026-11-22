@@ -291,7 +291,7 @@ def centertap_lines(nm, c, t, comps, conv, ot_damp, ot_snub):
         # real LF rolloff. Diagnosed on the Ampeg SVT power amp (2026-09-22):
         # ngspice's LF output sits ~60-64V rms at 40Hz against a 49.1V physical
         # ceiling, unmoved by ot_damp/ot_snub calibration or by scaling Lm
-        # 60->480mH (see Ampeg SVT Power Amp.backends.toml).
+        # 60->480mH (see that circuit's recorded verdicts: Example Amp.backends.toml or the circuit file's `backend_validity`).
         #
         # Fix: replace the ideal E/F pair with genuine mutual inductance.
         # Reuse the EXISTING shunt Inductor across PA-PC (found below, not
