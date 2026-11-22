@@ -396,7 +396,8 @@ def check_backend(schx: Path, backend: str, ap) -> None:
               APPROXIMATION of the pedal on every backend, and why the schematic itself is worth
               distrusting.)
     """
-    # SIDECAR ONLY: <stem>.backends.toml beside the .schx. Same pattern as the excitation's
+    # Verdicts come from <stem>.backends.toml beside the .schx (wins when present) or else from
+    # the `backend_validity` member of <stem>.acmod beside it (see backend_verdicts.py). Same pattern as the excitation's
     # <stem>.recipe.json -- found by deriving the path from the file we were handed, so there
     # is no registry to locate, no env var to know about, and no device slug or filename to
     # match. A sidecar travels WITH the schematic when it is copied, and works identically for
@@ -412,25 +413,24 @@ def check_backend(schx: Path, backend: str, ap) -> None:
     # nothing is worse than no check: someone who believes they are protected gets output
     # identical to someone who is not, and a device that genuinely cannot be rendered on the
     # chosen backend renders "successfully" into a wrong dataset.
-    sidecar = schx.with_suffix(".backends.toml")
+    from backend_verdicts import read_backend_verdicts
     if backend == "acm":
-        return _check_backend_acm(schx, sidecar, ap)
-    if not sidecar.exists():
-        print(f"note: no {sidecar.name} beside this .schx -- nothing is checking whether "
-              f"{backend!r} can faithfully render it. Write one (see a device repo's "
-              f"docs/backend-validity.md) if you have characterised a backend for this "
-              f"circuit.", file=sys.stderr)
+        return _check_backend_acm(schx, ap)
+    spec_all, source, err = read_backend_verdicts(schx)
+    if source is None:
+        print(f"note: no {schx.stem}.backends.toml beside this .schx and no `backend_validity` "
+              f"member in {schx.stem}.acmod -- nothing is checking whether "
+              f"{backend!r} can faithfully render it. Record verdicts in one of them (see a "
+              f"device repo's docs/backend-validity.md) if you have characterised a backend "
+              f"for this circuit.", file=sys.stderr)
         return
-    try:
-        import tomllib
-        spec_all = tomllib.loads(sidecar.read_text())
-    except Exception as e:
-        print(f"note: backend-validity gate INACTIVE -- {sidecar.name} exists but failed to "
-              f"parse ({e}). Nothing is checking whether {backend!r} suits this circuit.",
+    if spec_all is None:
+        print(f"note: backend-validity gate INACTIVE -- {source} exists but {err}. "
+              f"Nothing is checking whether {backend!r} suits this circuit.",
               file=sys.stderr)
         return
-    _lint_backend_sidecar(spec_all, sidecar.name)
-    return _apply_backend_verdict(spec_all, backend, schx.stem, sidecar.name, ap)
+    _lint_backend_sidecar(spec_all, source)
+    return _apply_backend_verdict(spec_all, backend, schx.stem, source, ap)
 
 
 # Backends that may legitimately appear as a key. Not all are renderable by THIS script
@@ -476,31 +476,28 @@ def _acm_verdict_from_json(schx: Path) -> dict | None:
     return {"valid": True, "reason": f"{len(robust)}/{len(cells)} measured cells robust in {cj.name}.{stale}"}
 
 
-def _check_backend_acm(schx: Path, sidecar: Path, ap) -> None:
-    """acm verdict: an explicit `acm = {...}` in the sidecar wins; else derived from <stem>.acmod;
-    else announced as unchecked (libacm imports the .schx directly, so absence is not a refusal)."""
-    specs = {}
-    if sidecar.exists():
-        try:
-            import tomllib
-            specs = tomllib.loads(sidecar.read_text())
-        except Exception as e:
-            print(f"note: {sidecar.name} failed to parse ({e}); ignoring it for the acm verdict.",
-                  file=sys.stderr)
-            specs = {}
-        else:
-            _lint_backend_sidecar(specs, sidecar.name)
+def _check_backend_acm(schx: Path, ap) -> None:
+    """acm verdict: an explicit `acm = {...}` in the sidecar or the circuit file's
+    `backend_validity` wins; else derived from <stem>.acmod; else announced as unchecked
+    (libacm imports the .schx directly, so absence is not a refusal)."""
+    from backend_verdicts import read_backend_verdicts
+    specs, source, err = read_backend_verdicts(schx)
+    if specs is None:
+        specs = {}
+        if source is not None:
+            print(f"note: {source} {err}; ignoring it for the acm verdict.", file=sys.stderr)
+    else:
+        _lint_backend_sidecar(specs, source)
     if not specs.get("acm"):
         derived = _acm_verdict_from_json(schx)
         if derived is None:
-            print(f"note: no acm verdict for {schx.stem} (no `acm` entry in {sidecar.name}, no "
-                  f"{schx.stem}.acmod) -- assumed valid.", file=sys.stderr)
+            print(f"note: no acm verdict for {schx.stem} (no `acm` entry in "
+                  f"{source or schx.stem + '.backends.toml'}, no {schx.stem}.acmod) -- assumed valid.",
+                  file=sys.stderr)
             return
         specs = dict(specs, acm=derived)
-        sidecar_name = schx.with_suffix(".acmod").name
-    else:
-        sidecar_name = sidecar.name
-    return _apply_backend_verdict(specs, "acm", schx.stem, sidecar_name, ap)
+        source = schx.with_suffix(".acmod").name
+    return _apply_backend_verdict(specs, "acm", schx.stem, source, ap)
 
 
 def _lint_backend_sidecar(specs: dict, name: str) -> None:
