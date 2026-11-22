@@ -241,8 +241,50 @@ def _sidecar_stub(schx: Path, backend: str, err: str) -> str:
             f'record which backend DOES work and why.""" }}\n')
 
 
-def _report_divergence(schx: Path, backend: str, err: str, write: bool) -> None:
+def _validity_entry(backend: str, err: str) -> dict:
+    """The verdict a measured divergence justifies, as it is stored in `backend_validity`."""
+    one_line = " ".join(err.split())[:400]
+    return {"valid": False,
+            "reason": f"DIVERGES during scaffold_config.py oversample measurement: {one_line}. "
+                      f"Measured, not asserted. Confirm it is not a resolution artefact, then "
+                      f"record which backend DOES work and why."}
+
+
+def _merged_validity(circuit_file: Path, backend: str, err: str) -> dict:
+    """The whole `backend_validity` member after adding this verdict (existing entries kept)."""
+    import json
+    from backend_verdicts import member_from_doc
+    present, cur = member_from_doc(json.loads(circuit_file.read_text(encoding="utf-8")))
+    merged = dict(cur) if present and isinstance(cur, dict) else {}
+    merged[backend] = _validity_entry(backend, err)
+    return merged
+
+
+def _write_validity(circuit_file: Path, merged: dict) -> None:
+    """Replace the one member in place: targeted text edit, temp file in the same directory,
+    then rename. Everything else in the file is byte-for-byte unchanged."""
+    import shutil
+    from backend_verdicts import set_backend_validity_text
+    text = circuit_file.read_bytes().decode("utf-8")
+    new = set_backend_validity_text(text, merged)
+    fd, tmp = tempfile.mkstemp(dir=circuit_file.parent, prefix=circuit_file.name + ".", suffix=".tmp")
+    try:
+        with _os.fdopen(fd, "wb") as f:
+            f.write(new.encode("utf-8"))
+        shutil.copymode(circuit_file, tmp)
+        _os.replace(tmp, circuit_file)
+    except BaseException:
+        if _os.path.exists(tmp):
+            _os.unlink(tmp)
+        raise
+
+
+def _report_divergence(schx: Path, backend: str, err: str, write: bool,
+                       write_validity: bool = False) -> None:
+    import json
+    from backend_verdicts import acmod_path, member_from_doc
     sidecar = schx.with_suffix(".backends.toml")
+    circuit_file = acmod_path(schx)
     print(f"\n  {backend} DIVERGED on {schx.name} during oversample measurement:")
     print(f"      {' '.join(err.split())[:160]}")
     print(f"  That is a LOUD backend failure -- the circuit did not converge, and no oversample")
@@ -250,12 +292,39 @@ def _report_divergence(schx: Path, backend: str, err: str, write: bool) -> None:
     print(f"  crashes.")
     if sidecar.exists():
         print(f"  {sidecar.name} already exists -- left untouched.")
-    elif write:
+        return
+    if write:
         sidecar.write_text(_sidecar_stub(schx, backend, err))
         print(f"  Wrote {sidecar.name} recording it. REVIEW IT before committing.")
-    else:
-        print(f"  Re-run with --write-backend-sidecar to record it in {sidecar.name}, or pass")
-        print(f"  --backend ngspice if you already know which backend holds this circuit.")
+        return
+    if circuit_file.exists():
+        try:
+            _present, cur = member_from_doc(json.loads(circuit_file.read_text(encoding="utf-8")))
+        except Exception as e:
+            print(f"  {circuit_file.name} could not be read ({e}) -- nothing recorded.")
+            return
+        if isinstance(cur, dict) and backend in cur:
+            print(f"  {circuit_file.name} already has a {backend!r} verdict in backend_validity "
+                  f"-- left untouched.")
+            return
+        merged = _merged_validity(circuit_file, backend, err)
+        where = "extra.backend_validity" if json.loads(circuit_file.read_text(
+            encoding="utf-8")).get("version") == 2 else "backend_validity"
+        if write_validity:
+            try:
+                _write_validity(circuit_file, merged)
+            except ValueError as e:
+                print(f"  Could not update {circuit_file.name} safely ({e}) -- file untouched.")
+                return
+            print(f"  Updated {where} in {circuit_file.name} (nothing else changed). REVIEW IT "
+                  f"before committing.")
+        else:
+            print(f"  Verdict to record in {circuit_file.name}, member {where} "
+                  f"(re-run with --write-backend-validity to add it, or edit by hand):")
+            print(json.dumps(merged, indent=1, ensure_ascii=False))
+        return
+    print(f"  Re-run with --write-backend-sidecar to record it in {sidecar.name}, or pass")
+    print(f"  --backend ngspice if you already know which backend holds this circuit.")
 
 
 def _measure_oversample(schx: Path, knobs: list, input_wav: Path, candidates: tuple,
@@ -491,6 +560,12 @@ def main() -> None:
                          "verdict is a measurement -- the scaffold just watched the circuit fail "
                          "-- so it does not need to be hand-written. Review before committing: a "
                          "divergence can be a probe artefact rather than a model instability.")
+    ap.add_argument("--write-backend-validity", action="store_true",
+                    help="like --write-backend-sidecar, but for a project that keeps verdicts in "
+                         "the circuit file (<stem>.acmod beside the .schx): add the verdict to its "
+                         "`backend_validity` member (inside `extra` for a version 2 file). Without "
+                         "this flag the circuit file is never written; the exact JSON is printed "
+                         "instead. Only that one member changes; every other byte is kept.")
     ap.add_argument("--grid-points", type=int, default=DEFAULT_GRID_POINTS,
                     help=f"placeholder points per knob (default {DEFAULT_GRID_POINTS}), spread "
                          "evenly across that knob's role-aware range as a BASELINE (see "
@@ -616,7 +691,8 @@ def main() -> None:
             # point -- prepare_excitation's corner sweep especially -- renders through the same
             # backend, so continuing would burn a lot of time producing a config for a grid of
             # crashes.
-            _report_divergence(args.schx, args.backend, str(e), args.write_backend_sidecar)
+            _report_divergence(args.schx, args.backend, str(e), args.write_backend_sidecar,
+                               args.write_backend_validity)
             sys.exit(2)
         if oversample is None:
             oversample, comment = 8, "COULD NOT MEASURE (see warning above) -- placeholder"

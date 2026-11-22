@@ -83,3 +83,87 @@ def load_backend_verdicts(schx: Path) -> tuple[dict | None, str | None]:
     """(spec | None, source_name): the verdicts for this circuit and where they came from."""
     spec, name, _err = read_backend_verdicts(schx)
     return spec, name
+
+
+# ---- recording a verdict in the circuit file (targeted text edit, nothing else touched) ------
+
+_dec = json.JSONDecoder()
+_WS = " \t\r\n"
+
+
+def _skip_ws(t: str, i: int) -> int:
+    while i < len(t) and t[i] in _WS:
+        i += 1
+    return i
+
+
+def _members(t: str, start: int) -> list[tuple[str, int, int, int]]:
+    """For the JSON object whose '{' is at t[start]: [(key, key_start, value_start, value_end)]."""
+    from json.decoder import scanstring
+    assert t[start] == "{"
+    i, out = _skip_ws(t, start + 1), []
+    while t[i] != "}":
+        k0 = i
+        key, i = scanstring(t, i + 1, True)
+        i = _skip_ws(t, i)
+        assert t[i] == ":"
+        v0 = _skip_ws(t, i + 1)
+        _, v1 = _dec.raw_decode(t, v0)
+        out.append((key, k0, v0, v1))
+        i = _skip_ws(t, v1)
+        if t[i] == ",":
+            i = _skip_ws(t, i + 1)
+    return out
+
+
+def _end_of_object(t: str, start: int) -> int:
+    return _dec.raw_decode(t, start)[1] - 1  # index of the closing '}'
+
+
+def _set_path(t: str, obj_start: int, path: list[str], value) -> str:
+    key, rest = path[0], path[1:]
+    mem = _members(t, obj_start)
+    new_val = json.dumps(value if not rest else _nest(rest, value), ensure_ascii=False)
+    for k, k0, v0, v1 in mem:
+        if k == key:
+            if rest and t[v0] == "{":
+                return _set_path(t, v0, rest, value)
+            return t[:v0] + new_val + t[v1:]
+    close = _end_of_object(t, obj_start)
+    item = f"{json.dumps(key)}: {new_val}"
+    if not mem:
+        return t[:close] + item + t[close:]
+    last_k0, last_v1 = mem[-1][1], mem[-1][3]
+    j = last_k0
+    while j > 0 and t[j - 1] in _WS:  # the whitespace the last member sits after
+        j -= 1
+    lead = t[j:last_k0]
+    return t[:last_v1] + "," + lead + item + t[last_v1:]
+
+
+def _nest(path: list[str], value):
+    for k in reversed(path):
+        value = {k: value}
+    return value
+
+
+def set_backend_validity_text(text: str, value: dict) -> str:
+    """`text` (a v1 or v2 circuit file) with its backend_validity member set to `value`, every
+    other byte unchanged. Raises ValueError rather than return a file that differs in any other
+    way (checked by re-parsing)."""
+    doc = json.loads(text)
+    if not isinstance(doc, dict):
+        raise ValueError("circuit file is not a JSON object")
+    path = ["extra", MEMBER] if doc.get("version") == 2 else [MEMBER]
+    if doc.get("version") == 2 and "extra" in doc and not isinstance(doc["extra"], dict):
+        raise ValueError("`extra` is not an object")
+    start = _skip_ws(text, 0)
+    new = _set_path(text, start, path, value)
+    expect = json.loads(text)
+    if len(path) == 2:
+        expect.setdefault("extra", {})[MEMBER] = value
+    else:
+        expect[MEMBER] = value
+    if json.loads(new) != expect:
+        raise ValueError("targeted edit did not reproduce the intended document")
+    return new
