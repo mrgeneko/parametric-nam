@@ -496,6 +496,86 @@ def test_partial_is_not_recommended_as_valid_when_another_backend_blocks(tmp_pat
     assert "PARTIAL" in ap.errors[0]
 
 
+# ---- verdicts carried by the circuit file (<stem>.acmod, member backend_validity) ------------
+
+def _circuit_file(tmp_path, doc, schx="Mine.schx"):
+    p = tmp_path / schx
+    p.write_text("<Schematic/>")
+    p.with_suffix(".acmod").write_text(json.dumps(doc))
+    return p
+
+
+_INVALID = {"livespice": {"valid": False, "reason": "diverges in the file"}}
+
+
+def test_verdict_read_from_v2_extra(tmp_path):
+    ap = _FakeAp()
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {"backend_validity": _INVALID}})
+    with pytest.raises(SystemExit):
+        _run(schx, ap=ap)
+    assert "diverges in the file" in ap.errors[0]
+    assert "Mine.acmod (backend_validity)" in ap.errors[0]
+    assert "Mine.backends.toml" not in ap.errors[0]
+
+
+def test_verdict_read_from_v1_flat_member(tmp_path):
+    ap = _FakeAp()
+    schx = _circuit_file(tmp_path, {"version": 1, "backend_validity": _INVALID})
+    with pytest.raises(SystemExit):
+        _run(schx, ap=ap)
+    assert "diverges in the file" in ap.errors[0]
+
+
+def test_v2_ignores_a_top_level_member_outside_extra(tmp_path):
+    schx = _circuit_file(tmp_path, {"version": 2, "backend_validity": _INVALID})
+    assert "nothing is checking" in _run(schx).lower()
+
+
+def test_file_valid_true_passes_with_a_note_naming_the_file(tmp_path):
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {"backend_validity": {
+        "livespice": {"valid": True, "reason": "converges"}}}})
+    out = _run(schx)
+    assert out.startswith("note") and "converges" in out
+
+
+def test_file_partial_warns_but_proceeds(tmp_path):
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {"backend_validity": {
+        "livespice": {"valid": "partial", "reason": "unphysical <100Hz"}}}})
+    out = _run(schx)
+    assert out.startswith("WARNING") and "PARTIAL" in out
+
+
+def test_sidecar_wins_over_the_circuit_file(tmp_path):
+    schx = _sidecar(tmp_path, 'livespice = { valid = true, reason = "sidecar says fine" }\n')
+    schx.with_suffix(".acmod").write_text(json.dumps(
+        {"version": 2, "extra": {"backend_validity": _INVALID}}))
+    out = _run(schx)           # would raise SystemExit if the file's verdict were used
+    assert "sidecar says fine" in out
+
+
+@pytest.mark.parametrize("member", ["text", ["a"], {"livespice": "bad"}, {"livespice": None}])
+def test_malformed_member_announces_inactive(tmp_path, member):
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {"backend_validity": member}})
+    out = _run(schx)
+    assert "INACTIVE" in out and "Mine.acmod (backend_validity)" in out
+
+
+def test_missing_sidecar_and_member_announces_absence_naming_both(tmp_path):
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {}})
+    out = _run(schx)
+    assert "nothing is checking" in out.lower()
+    assert "backends.toml" in out and "backend_validity" in out
+
+
+def test_acm_backend_uses_an_explicit_verdict_from_the_file(tmp_path):
+    schx = _circuit_file(tmp_path, {"version": 2, "extra": {"backend_validity": {
+        "acm": {"valid": False, "reason": "file says no"}}}})
+    ap = _FakeAp()
+    with pytest.raises(SystemExit):
+        _run(schx, backend="acm", ap=ap)
+    assert "file says no" in ap.errors[0]
+
+
 # ---- the sidecar's whole point --------------------------------------------------------------
 
 def test_works_with_no_registry_and_a_circuit_nobody_has_seen(tmp_path, monkeypatch):

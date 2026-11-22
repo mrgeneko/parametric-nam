@@ -40,6 +40,13 @@ registry to locate and no environment variable to know about, and it works for a
 project has never seen. `gen_dataset_from_schx.py` enforces it and refuses a backend declared
 invalid. `valid` is `true`, `false`, or `"partial"` (usable with known limits: warns, does not
 block).
+The verdicts can instead live in the circuit file `<stem>.acmod` beside the `.schx`, as a
+`backend_validity` member of the same shape (`{"<backend>": {"valid": ..., "reason": "..."}}`):
+at the top level of a version 1 file, inside the top-level `extra` object of a version 2 file.
+The sidecar is read first and wins when both exist; a malformed member announces that the gate
+is inactive, just as a malformed sidecar does. `scaffold_config.py` prints the member to record
+when a backend diverges and, with `--write-backend-validity`, adds it to the file (only that
+member changes).
 
 **ngspice** (`--backend ngspice`, experimental) — an offline real-SPICE backend with
 adaptive timestepping, for the handful of **stiff / very-high-gain** circuits (e.g. a

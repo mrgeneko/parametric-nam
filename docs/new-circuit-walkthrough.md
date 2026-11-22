@@ -82,6 +82,9 @@ Does four things you would otherwise do by hand:
 measuring oversample. That verdict is a measurement — the scaffold just watched the circuit
 fail — so it should not be hand-written. A circuit whose backend cannot converge is better
 discovered here than four hours into a render.
+If the circuit has a `<stem>.acmod` beside it instead, the scaffold prints the JSON to add as
+its `backend_validity` member (inside `extra` for a version 2 file); `--write-backend-validity`
+adds it for you, changing only that member.
 
 ## 2. Review the config — the step you cannot skip
 

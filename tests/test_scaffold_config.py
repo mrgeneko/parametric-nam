@@ -294,3 +294,82 @@ def test_generated_sidecar_is_accepted_by_the_gate_that_will_read_it(tmp_path):
             g.check_backend(schx, "livespice", ap)
     assert "CANNOT be rendered faithfully" in ap.errors[0]
     assert "WARNING" not in err.getvalue(), "the generated file must lint clean"
+
+
+# ---- recording a divergence in the circuit file (backend_validity member) ----------------------
+
+_V2_TEXT = ('{\n "format": "audio-circuit-modeler.circuit",\n "version": 2,\n'
+            ' "name": "P \\u00e9",\n "circuit": {"devices": [1, 2]},\n'
+            ' "extra": {\n  "public_name": "x"\n },\n "tail": 1.50\n}\n')
+
+
+def _diverged(tmp_path, text=_V2_TEXT, **flags):
+    schx = tmp_path / "P.schx"
+    schx.write_text("<Schematic/>")
+    cf = schx.with_suffix(".acmod")
+    cf.write_bytes(text.encode("utf-8"))
+    sc._report_divergence(schx, "livespice", "Circuit.SimulationDiverged near t=2.65s", False, **flags)
+    return cf
+
+
+def test_divergence_reports_json_and_leaves_the_circuit_file_alone(tmp_path, capsys):
+    cf = _diverged(tmp_path)
+    out = capsys.readouterr().out
+    assert cf.read_bytes().decode() == _V2_TEXT
+    assert "extra.backend_validity" in out and "--write-backend-validity" in out
+    assert '"valid": false' in out and "SimulationDiverged" in out
+
+
+def test_write_backend_validity_changes_only_that_member(tmp_path):
+    import json
+    cf = _diverged(tmp_path, write_validity=True)
+    new = cf.read_bytes().decode()
+    bv = json.loads(new)["extra"]["backend_validity"]
+    assert bv["livespice"]["valid"] is False and "SimulationDiverged" in bv["livespice"]["reason"]
+    # Removing the added member text gives back the original bytes exactly.
+    added = new.index(',\n  "backend_validity"')
+    end = new.index("\n }", added)
+    assert new[:added] + new[end:] == _V2_TEXT
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_write_backend_validity_v1_flat_and_keeps_other_entries(tmp_path):
+    import json
+    text = ('{"version": 1, "name": "P",\n "backend_validity": {"ngspice": {"valid": true}},\n'
+            ' "z": [1, 2]}')
+    cf = _diverged(tmp_path, text=text, write_validity=True)
+    d = json.loads(cf.read_text())
+    assert d["backend_validity"]["ngspice"] == {"valid": True}
+    assert d["backend_validity"]["livespice"]["valid"] is False
+    assert d["z"] == [1, 2] and d["name"] == "P"
+
+
+def test_write_backend_validity_does_not_replace_an_existing_verdict(tmp_path, capsys):
+    text = '{"version": 2, "extra": {"backend_validity": {"livespice": {"valid": true}}}}'
+    cf = _diverged(tmp_path, text=text, write_validity=True)
+    assert cf.read_text() == text and "left untouched" in capsys.readouterr().out
+
+
+def test_sidecar_present_beats_the_circuit_file_in_the_report(tmp_path, capsys):
+    schx = tmp_path / "P.schx"
+    schx.write_text("<Schematic/>")
+    schx.with_suffix(".backends.toml").write_text("")
+    cf = schx.with_suffix(".acmod")
+    cf.write_text(_V2_TEXT)
+    sc._report_divergence(schx, "livespice", "diverged", False, write_validity=True)
+    assert cf.read_text() == _V2_TEXT
+
+
+def test_written_member_is_enforced_by_the_gate(tmp_path):
+    import contextlib, io
+    import gen_dataset_from_schx as g
+    cf = _diverged(tmp_path, write_validity=True)
+
+    class _Ap:
+        errors = []
+        def error(self, m): self.errors.append(m); raise SystemExit(2)
+
+    ap, err = _Ap(), io.StringIO()
+    with pytest.raises(SystemExit), contextlib.redirect_stderr(err):
+        g.check_backend(cf.with_suffix(".schx"), "livespice", ap)
+    assert "CANNOT be rendered faithfully" in ap.errors[0] and "WARNING" not in err.getvalue()
